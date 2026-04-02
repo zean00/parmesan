@@ -1,0 +1,60 @@
+id: ecommerce-returns
+version: v1
+composition_mode: strict
+no_match: I need to hand this to a specialist because I do not have an approved response for this case yet.
+observations:
+  - id: refund_status_request
+    when: customer asks for refund status
+    mcp:
+      server: payments
+      tool: get_refund_status
+guidelines:
+  - id: damaged_item_triage
+    when: customer reports a damaged item
+    then: ask for a photo before promising a refund
+    mcp:
+      server: claims
+      tool: inspect_damage
+relationships:
+  - source: damaged_item_triage
+    kind: dependency
+    target: refund_status_request
+journeys:
+  - id: return_damaged_item
+    when:
+      - customer wants to return a damaged item
+    guidelines:
+      - id: reassure_customer
+        when: customer sounds upset
+        then: reassure them that you will help resolve the damaged item
+    templates:
+      - id: ask-photo-template
+        mode: strict
+        text: Please send a clear photo of the damaged item so I can review the next step.
+    states:
+      - id: ask_for_photo
+        type: RequestMediaNode
+        instruction: Ask the customer for a photo of the damaged item.
+        mode: strict
+        next:
+          - inspect_photo
+      - id: inspect_photo
+        type: ToolNode
+        mcp:
+          server: claims
+          tool: inspect_damage
+        next:
+          - offer_resolution
+      - id: offer_resolution
+        type: MessageNode
+        instruction: Explain the next resolution step based on the inspection.
+templates:
+  - id: refund-approved
+    mode: strict
+    text: Your refund has been approved and will be processed shortly.
+tool_policies:
+  - id: claims-tools
+    tool_ids:
+      - claims.inspect_damage
+      - payments.get_refund_status
+    exposure: policy-gated

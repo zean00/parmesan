@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package parmesan.v1;
+
+option go_package = "github.com/sahal/parmesan/proto/parmesan/v1;parmesanv1";
+
+message RunTurnRequest {
+  string session_id = 1;
+  string event_id = 2;
+}
+
+message RunTurnResponse {
+  string execution_id = 1;
+  string status = 2;
+}
+
+service RuntimeService {
+  rpc RunTurn(RunTurnRequest) returns (RunTurnResponse);
+}
