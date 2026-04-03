@@ -272,6 +272,103 @@ func TestResolveRestartsJourneyFromRootForNewPurpose(t *testing.T) {
 	}
 }
 
+func TestResolveKeepsGuidelineWhenJourneyDependencyUsesJourneyPrefix(t *testing.T) {
+	now := time.Now().UTC()
+	view, err := Resolve(
+		[]session.Event{{
+			ID:        "evt_1",
+			SessionID: "sess_1",
+			Source:    "customer",
+			Kind:      "message",
+			CreatedAt: now,
+			Content:   []session.ContentPart{{Type: "text", Text: "I want to book a flight from Tel Aviv to JFK and I'm 19."}},
+		}},
+		[]policy.Bundle{{
+			ID:      "bundle_1",
+			Version: "v1",
+			Guidelines: []policy.Guideline{
+				{
+					ID:   "under_21",
+					When: "customer wants to book a flight and the traveler is under 21",
+					Then: "inform the customer that only economy class is available",
+				},
+				{
+					ID:   "age_21_or_older",
+					When: "customer wants to book a flight and the traveler is 21 or older",
+					Then: "tell the customer they may choose between economy and business class",
+				},
+			},
+			Journeys: []policy.Journey{{
+				ID:   "Book Flight",
+				When: []string{"book a flight"},
+				States: []policy.JourneyNode{
+					{ID: "ask_origin", Type: "message", Next: []string{"ask_destination"}},
+					{ID: "ask_destination", Type: "message"},
+				},
+			}},
+			Relationships: []policy.Relationship{
+				{Kind: "dependency", Source: "under_21", Target: "journey:Book Flight"},
+				{Kind: "dependency", Source: "age_21_or_older", Target: "journey:Book Flight"},
+				{Kind: "priority", Source: "under_21", Target: "age_21_or_older"},
+			},
+		}},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if view.ActiveJourney == nil || view.ActiveJourney.ID != "Book Flight" {
+		t.Fatalf("active journey = %#v, want Book Flight", view.ActiveJourney)
+	}
+	if !containsGuideline(view.MatchedGuidelines, "under_21") {
+		t.Fatalf("matched guidelines = %#v, want under_21", view.MatchedGuidelines)
+	}
+	if containsGuideline(view.MatchedGuidelines, "age_21_or_older") {
+		t.Fatalf("matched guidelines = %#v, do not want age_21_or_older", view.MatchedGuidelines)
+	}
+	if !containsSuppressedGuideline(view.SuppressedGuidelines, "age_21_or_older") {
+		t.Fatalf("suppressed guidelines = %#v, want age_21_or_older", view.SuppressedGuidelines)
+	}
+}
+
+func TestResolveSuppressesWeakerSiblingGuidelinesDuringDisambiguation(t *testing.T) {
+	now := time.Now().UTC()
+	view, err := Resolve(
+		[]session.Event{{
+			ID:        "evt_1",
+			SessionID: "sess_1",
+			Source:    "customer",
+			Kind:      "message",
+			CreatedAt: now,
+			Content:   []session.ContentPart{{Type: "text", Text: "I lost my card"}},
+		}},
+		[]policy.Bundle{{
+			ID:      "bundle_1",
+			Version: "v1",
+			Guidelines: []policy.Guideline{
+				{ID: "report_lost", When: "the customer wants to report a card lost", Then: "report card lost"},
+				{ID: "lock_card", When: "the customer wants to lock their card", Then: "do locking"},
+				{ID: "replacement_card", When: "the customer requests a replacement card", Then: "order them a new card"},
+			},
+		}},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if !containsGuideline(view.MatchedGuidelines, "report_lost") {
+		t.Fatalf("matched guidelines = %#v, want report_lost", view.MatchedGuidelines)
+	}
+	if containsGuideline(view.MatchedGuidelines, "lock_card") || containsGuideline(view.MatchedGuidelines, "replacement_card") {
+		t.Fatalf("matched guidelines = %#v, do not want weaker sibling card actions", view.MatchedGuidelines)
+	}
+	if !containsSuppressedGuideline(view.SuppressedGuidelines, "lock_card") || !containsSuppressedGuideline(view.SuppressedGuidelines, "replacement_card") {
+		t.Fatalf("suppressed guidelines = %#v, want lock_card and replacement_card", view.SuppressedGuidelines)
+	}
+}
+
 func TestResolveChoosesBestJourneyFollowUp(t *testing.T) {
 	now := time.Now().UTC()
 	view, err := Resolve(
@@ -962,6 +1059,83 @@ func TestVerifyDraftUsesResponseAnalysisTemplate(t *testing.T) {
 	}
 }
 
+func TestVerifyDraftAllowsStrictJourneyInstructionFallback(t *testing.T) {
+	view := ResolvedView{
+		CompositionMode: "strict",
+		ActiveJourneyState: &policy.JourneyNode{
+			ID:          "ask_origin",
+			Instruction: "From where are you looking to fly?",
+		},
+	}
+	got := VerifyDraft(view, "Something else", nil)
+	if got.Status != "revise" || got.Replacement != "From where are you looking to fly?" {
+		t.Fatalf("VerifyDraft() = %#v, want strict journey instruction replacement", got)
+	}
+}
+
+func TestExtractMentionedAgeRequiresExplicitAgeContext(t *testing.T) {
+	cases := []struct {
+		text string
+		want int
+		ok   bool
+	}{
+		{text: "I'm 19 if that affects anything.", want: 19, ok: true},
+		{text: "Age 21 and over only.", want: 21, ok: true},
+		{text: "Main Street 1234", want: 0, ok: false},
+		{text: "flight 18 leaves tomorrow", want: 0, ok: false},
+		{text: "return on 12.10", want: 0, ok: false},
+	}
+	for _, tc := range cases {
+		got, ok := extractMentionedAge(tc.text)
+		if ok != tc.ok || got != tc.want {
+			t.Fatalf("extractMentionedAge(%q) = (%d,%t), want (%d,%t)", tc.text, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestResolveDoesNotSkipJourneyStepsFromGenericFixtureHeuristics(t *testing.T) {
+	now := time.Now().UTC()
+	view, err := Resolve(
+		[]session.Event{{
+			ID:        "evt_1",
+			SessionID: "sess_1",
+			Source:    "customer",
+			Kind:      "message",
+			CreatedAt: now,
+			Content:   []session.ContentPart{{Type: "text", Text: "I want to book a flight from Main Street 1234 to JFK on 12.10"}},
+		}},
+		[]policy.Bundle{{
+			ID:      "bundle_1",
+			Version: "v1",
+			Journeys: []policy.Journey{{
+				ID:   "Book Flight",
+				When: []string{"book a flight"},
+				States: []policy.JourneyNode{
+					{ID: "ask_origin", Type: "message", Next: []string{"ask_destination"}},
+					{ID: "ask_destination", Type: "message", Next: []string{"ask_dates"}},
+					{ID: "ask_dates", Type: "message", Next: []string{"ask_class"}},
+				},
+			}},
+		}},
+		[]journey.Instance{{
+			ID:        "journey_1",
+			SessionID: "sess_1",
+			JourneyID: "Book Flight",
+			StateID:   "ask_origin",
+			Path:      []string{"ask_origin"},
+			Status:    journey.StatusActive,
+			UpdatedAt: now,
+		}},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if view.JourneyDecision.Action == "advance" && view.JourneyDecision.NextState != "ask_destination" {
+		t.Fatalf("journey decision = %#v, want no heuristic skip beyond immediate next state", view.JourneyDecision)
+	}
+}
+
 func TestResolveWithRouterSupportsResponseAnalysisARQ(t *testing.T) {
 	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1022,4 +1196,22 @@ func TestResolveWithRouterSupportsResponseAnalysisARQ(t *testing.T) {
 	if view.CompositionMode != "strict" {
 		t.Fatalf("composition mode = %s, want strict after response analysis", view.CompositionMode)
 	}
+}
+
+func containsGuideline(items []policy.Guideline, id string) bool {
+	for _, item := range items {
+		if item.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSuppressedGuideline(items []SuppressedGuideline, id string) bool {
+	for _, item := range items {
+		if item.ID == id {
+			return true
+		}
+	}
+	return false
 }

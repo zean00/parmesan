@@ -163,7 +163,7 @@ func (genericStrategy) CreateMatchingBatches(state *matchingState, items []polic
 			return nil
 		}),
 		makeBatch("relationship_resolution", "generic", promptVersion("relationship_resolution"), func(_ context.Context, state *matchingState) error {
-			state.matchedGuidelines, state.suppressedGuidelines, state.disambiguationPrompt = resolveRelationships(state.bundle, state.matchedObservations, state.guidelineMatches, state.matchedGuidelines, state.activeJourney)
+			state.matchedGuidelines, state.suppressedGuidelines, state.disambiguationPrompt = resolveRelationships(state.bundle, state.context, state.matchedObservations, state.guidelineMatches, state.matchedGuidelines, state.activeJourney)
 			return nil
 		}),
 		makeBatch("disambiguation", "generic", promptVersion("disambiguation"), func(ctx context.Context, state *matchingState) error {

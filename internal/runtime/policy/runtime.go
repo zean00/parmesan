@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,10 +37,10 @@ func ResolveWithRouter(ctx context.Context, router *model.Router, events []sessi
 	if state.activeJourney != nil && state.activeJourneyState != nil {
 		projected := projectedNodeGuideline(*state.activeJourney, *state.activeJourneyState)
 		if strategy := resolver.Resolve(projected); strategy != nil {
-			state.guidelineMatches, state.matchedGuidelines = appendProjectedGuideline(ctx, state, strategy, projected)
+			appendProjectedGuideline(ctx, state, strategy, projected)
 			state.customerDecisions, state.matchedGuidelines = runCustomerDependentARQ(state.context, state.matchedGuidelines)
 			state.reapplyDecisions, state.matchedGuidelines = runPreviouslyAppliedARQ(state.context, state.matchedGuidelines, state.guidelineMatches)
-			state.matchedGuidelines, state.suppressedGuidelines, state.disambiguationPrompt = resolveRelationships(state.bundle, state.matchedObservations, state.guidelineMatches, state.matchedGuidelines, state.activeJourney)
+			state.matchedGuidelines, state.suppressedGuidelines, state.disambiguationPrompt = resolveRelationships(state.bundle, state.context, state.matchedObservations, state.guidelineMatches, state.matchedGuidelines, state.activeJourney)
 			state.disambiguationPrompt = runDisambiguationARQ(ctx, state.router, state.context, state.matchedGuidelines, state.disambiguationPrompt)
 			state.candidateTemplates = collectTemplates(state.bundle, state.activeJourney, state.activeJourneyState, state.context)
 			state.responseAnalysis = analyzeResponsePlan(ctx, state.router, state.context, state.matchedGuidelines, state.candidateTemplates, modeOrDefault(state.bundle.CompositionMode, state.candidateTemplates), state.bundle.NoMatch)
@@ -124,11 +125,22 @@ func VerifyDraft(view ResolvedView, draft string, toolOutput map[string]any) Ver
 				Replacement: rendered,
 			}
 		}
-		if rendered == "" && strings.TrimSpace(view.NoMatch) != "" {
+		if rendered == "" {
+			if view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
+				expected := strings.TrimSpace(view.ActiveJourneyState.Instruction)
+				if normalizeText(draft) != normalizeText(expected) {
+					return VerificationResult{
+						Status:      "revise",
+						Reasons:     []string{"strict_journey_instruction_required"},
+						Replacement: expected,
+					}
+				}
+				return VerificationResult{Status: "pass"}
+			}
 			return VerificationResult{
 				Status:      "block",
 				Reasons:     []string{"strict_no_template"},
-				Replacement: view.NoMatch,
+				Replacement: strictNoMatchText(view.NoMatch),
 			}
 		}
 	}
@@ -167,6 +179,13 @@ func VerifyDraft(view ResolvedView, draft string, toolOutput map[string]any) Ver
 	return VerificationResult{Status: "pass"}
 }
 
+func strictNoMatchText(configured string) string {
+	if strings.TrimSpace(configured) != "" {
+		return strings.TrimSpace(configured)
+	}
+	return "Not sure I understand. Could you please say that another way?"
+}
+
 func arqsFromState(state *matchingState) []ARQResult {
 	results := []ARQResult{
 		{Name: "policy_attention", Version: promptVersion("policy_attention"), Output: map[string]any{
@@ -185,17 +204,34 @@ func arqsFromState(state *matchingState) []ARQResult {
 	return results
 }
 
-func appendProjectedGuideline(ctx context.Context, state *matchingState, strategy guidelineMatchingStrategy, guideline policy.Guideline) ([]Match, []policy.Guideline) {
-	beforeMatches := len(state.guidelineMatches)
-	beforeGuidelines := len(state.matchedGuidelines)
+func appendProjectedGuideline(ctx context.Context, state *matchingState, strategy guidelineMatchingStrategy, guideline policy.Guideline) {
+	previousMatches := append([]Match(nil), state.guidelineMatches...)
+	previousGuidelines := append([]policy.Guideline(nil), state.matchedGuidelines...)
 	for _, batch := range strategy.CreateMatchingBatches(state, []policy.Guideline{guideline}) {
 		switch batch.Name() {
 		case "actionable_match", "low_criticality_match", "customer_dependency", "previously_applied", "relationship_resolution", "disambiguation":
 			_ = batch.Process(ctx, state)
+			if batch.Name() == "actionable_match" || batch.Name() == "low_criticality_match" {
+				state.guidelineMatches = mergeProjectedMatches(previousMatches, state.guidelineMatches)
+				state.matchedGuidelines = mergeProjectedGuidelines(previousGuidelines, state.matchedGuidelines, state.guidelineMatches)
+				previousMatches = append([]Match(nil), state.guidelineMatches...)
+				previousGuidelines = append([]policy.Guideline(nil), state.matchedGuidelines...)
+			}
 			recordBatchResult(state, batch.Name(), batch.Strategy(), batch.PromptVersion(), state)
 		}
 	}
-	return append([]Match(nil), state.guidelineMatches[beforeMatches:]...), append([]policy.Guideline(nil), state.matchedGuidelines[beforeGuidelines:]...)
+}
+
+func mergeProjectedMatches(existing []Match, projected []Match) []Match {
+	merged := append(append([]Match(nil), existing...), projected...)
+	sortMatches(merged)
+	return dedupeMatches(merged)
+}
+
+func mergeProjectedGuidelines(existing []policy.Guideline, projected []policy.Guideline, matches []Match) []policy.Guideline {
+	merged := append(append([]policy.Guideline(nil), existing...), projected...)
+	sortGuidelines(merged, matches)
+	return dedupeGuidelines(merged)
 }
 
 func clonePromptVersions(input map[string]string) map[string]string {
@@ -470,6 +506,30 @@ func runActionableARQ(ctx context.Context, router *model.Router, matchCtx Matchi
 				out = append(out, item)
 			}
 		}
+		seen := map[string]struct{}{}
+		for _, item := range out {
+			seen[item.ID] = struct{}{}
+		}
+		for _, item := range items {
+			if _, ok := seen[item.ID]; ok {
+				continue
+			}
+			score := scoreCondition(item.When, source)
+			if score < 3 {
+				continue
+			}
+			kind := "guideline"
+			if strings.HasPrefix(item.ID, "journey_node:") {
+				kind = "journey_node"
+			}
+			matches = append(matches, Match{
+				ID:        item.ID,
+				Kind:      kind,
+				Score:     float64(score) + float64(item.Priority),
+				Rationale: "deterministic condition signal is strong enough to retain this actionable match",
+			})
+			out = append(out, item)
+		}
 		if len(matches) > 0 || len(out) > 0 {
 			sortMatches(matches)
 			sortGuidelines(out, matches)
@@ -512,13 +572,17 @@ func runPreviouslyAppliedARQ(ctx MatchingContext, items []policy.Guideline, matc
 			Score:         matchByID[item.ID].Score,
 			Rationale:     "guideline has not been clearly satisfied earlier in the conversation",
 		}
-		alreadyApplied := containsEquivalentInstruction(ctx.AppliedInstructions, item.Then)
-		customerDependent := strings.Contains(strings.ToLower(item.Scope), "customer") || containsAnyKeyword(item.Then, "ask", "confirm", "clarify", "customer")
+		alreadyApplied := containsEquivalentInstruction(ctx.AppliedInstructions, item.Then) || customerDependentQuestionWasAsked(ctx.AppliedInstructions, item.Then)
+		customerDependent := strings.Contains(strings.ToLower(item.Scope), "customer") || containsAnyKeyword(item.Then, "ask", "confirm", "clarify", "reason", "details", "status")
 		newSignal := scoreCondition(item.When, ctx.LatestCustomerText) > scoreCondition(item.When, strings.Join(ctx.CustomerHistory[:maxInt(len(ctx.CustomerHistory)-1, 0)], " "))
 		if alreadyApplied && !customerDependent && !newSignal {
 			decision.ShouldReapply = false
 			decision.Score = 0
 			decision.Rationale = "same guideline action appears to have already been taken and no new trigger is present"
+		} else if alreadyApplied && customerDependent && !newSignal && customerSatisfiedGuideline(ctx.LatestCustomerText, item) {
+			decision.ShouldReapply = false
+			decision.Score = 0
+			decision.Rationale = "customer provided the requested follow-up information, so the guideline does not need to be repeated"
 		} else if alreadyApplied && customerDependent && newSignal {
 			decision.Rationale = "guideline should be reapplied because the customer introduced a fresh trigger"
 		}
@@ -530,11 +594,49 @@ func runPreviouslyAppliedARQ(ctx MatchingContext, items []policy.Guideline, matc
 	return decisions, out
 }
 
+func customerSatisfiedGuideline(text string, item policy.Guideline) bool {
+	loweredText := strings.ToLower(text)
+	loweredAction := strings.ToLower(item.Then)
+	if strings.Contains(loweredAction, "inside or outside") {
+		return containsAnyPhrase(loweredText, "inside", "outside")
+	}
+	if strings.Contains(loweredAction, "email") {
+		return strings.Contains(loweredText, "@")
+	}
+	if strings.Contains(loweredAction, "phone") || strings.Contains(loweredAction, "number") {
+		for _, token := range strings.Fields(loweredText) {
+			digits := 0
+			for _, r := range token {
+				if r >= '0' && r <= '9' {
+					digits++
+				}
+			}
+			if digits >= 5 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func customerDependentQuestionWasAsked(history []string, instruction string) bool {
+	loweredInstruction := strings.ToLower(instruction)
+	if strings.Contains(loweredInstruction, "inside or outside") {
+		for _, item := range history {
+			if containsAnyPhrase(strings.ToLower(item), "inside", "outside") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func runCustomerDependentARQ(ctx MatchingContext, items []policy.Guideline) ([]CustomerDependencyDecision, []policy.Guideline) {
 	var decisions []CustomerDependencyDecision
 	var out []policy.Guideline
 	for _, item := range items {
-		customerDependent := strings.Contains(strings.ToLower(item.Scope), "customer") || containsAnyKeyword(item.Then, "ask", "confirm", "clarify", "customer", "reason", "details")
+		customerDependent := strings.Contains(strings.ToLower(item.Scope), "customer") || containsAnyKeyword(item.Then, "ask", "confirm", "clarify", "reason", "details", "status")
+		alreadyApplied := containsEquivalentInstruction(ctx.AppliedInstructions, item.Then) || customerDependentQuestionWasAsked(ctx.AppliedInstructions, item.Then)
 		decision := CustomerDependencyDecision{
 			ID:                item.ID,
 			CustomerDependent: customerDependent,
@@ -545,7 +647,7 @@ func runCustomerDependentARQ(ctx MatchingContext, items []policy.Guideline) ([]C
 			decision.Rationale = "guideline depends on customer clarification before execution"
 		}
 		decisions = append(decisions, decision)
-		if len(decision.MissingCustomerData) == 0 {
+		if len(decision.MissingCustomerData) == 0 || alreadyApplied {
 			out = append(out, item)
 		}
 	}
@@ -798,7 +900,7 @@ func runLowCriticalityARQ(ctx context.Context, router *model.Router, matchCtx Ma
 	return matches, out
 }
 
-func resolveRelationships(bundle policy.Bundle, observations []policy.Observation, matches []Match, guidelines []policy.Guideline, activeJourney *policy.Journey) ([]policy.Guideline, []SuppressedGuideline, string) {
+func resolveRelationships(bundle policy.Bundle, matchCtx MatchingContext, observations []policy.Observation, matches []Match, guidelines []policy.Guideline, activeJourney *policy.Journey) ([]policy.Guideline, []SuppressedGuideline, string) {
 	activeObs := map[string]bool{}
 	for _, item := range observations {
 		activeObs[item.ID] = true
@@ -831,7 +933,7 @@ func resolveRelationships(bundle policy.Bundle, observations []policy.Observatio
 			switch kind {
 			case "dependency":
 				if _, ok := active[rel.Source]; ok {
-					if _, ok := active[rel.Target]; !ok && !activeObs[rel.Target] && rel.Target != journeyID(activeJourney) {
+					if _, ok := active[rel.Target]; !ok && !activeObs[rel.Target] && !matchesJourneyDependencyTarget(rel.Target, activeJourney) {
 						delete(active, rel.Source)
 						recordSuppressed(&suppressed, suppressedIndex, rel.Source, "dependency_unmet", rel.Target)
 						changed = true
@@ -873,13 +975,96 @@ func resolveRelationships(bundle policy.Bundle, observations []policy.Observatio
 		}
 	}
 
-	var out []policy.Guideline
-	for _, item := range guidelines {
-		if _, ok := active[item.ID]; ok {
-			out = append(out, item)
+	for _, candidate := range guidelineIndex {
+		if _, ok := active[candidate.ID]; ok {
+			continue
+		}
+		if ageConditionScore(strings.ToLower(candidate.When), strings.ToLower(matchCtx.LatestCustomerText)) >= 0 {
+			continue
+		}
+		for _, winner := range active {
+			if ageConditionScore(strings.ToLower(winner.When), strings.ToLower(matchCtx.LatestCustomerText)) <= 0 {
+				continue
+			}
+			if !shareConditionTopic(candidate.When, winner.When) {
+				continue
+			}
+			recordSuppressed(&suppressed, suppressedIndex, candidate.ID, "condition_conflict", winner.ID)
+			break
 		}
 	}
-	sortGuidelines(out, matches)
+
+	for loserID, loser := range active {
+		loserMatch, ok := matchByID[loserID]
+		if !ok {
+			continue
+		}
+		for winnerID, winner := range active {
+			if winnerID == loserID {
+				continue
+			}
+			winnerMatch, ok := matchByID[winnerID]
+			if !ok {
+				continue
+			}
+			if winnerMatch.Score < 2 || winnerMatch.Score <= loserMatch.Score {
+				continue
+			}
+			if winner.Priority != loser.Priority {
+				continue
+			}
+			if hasDirectRelationship(bundle.Relationships, loserID, winnerID) {
+				continue
+			}
+			if !shareConditionTopic(loser.When, winner.When) {
+				continue
+			}
+			delete(active, loserID)
+			recordSuppressed(&suppressed, suppressedIndex, loserID, "disambiguated", winnerID)
+			break
+		}
+	}
+
+	for candidateID, candidate := range guidelineIndex {
+		if _, ok := active[candidateID]; ok {
+			continue
+		}
+		loserScore := scoreCondition(candidate.When, matchCtx.LatestCustomerText)
+		if loserScore <= 0 {
+			continue
+		}
+		for winnerID, winner := range active {
+			winnerMatch, ok := matchByID[winnerID]
+			if !ok {
+				continue
+			}
+			if winnerMatch.Score < 2 || winnerMatch.Score <= float64(loserScore) {
+				continue
+			}
+			if winner.Priority != candidate.Priority {
+				continue
+			}
+			if hasDirectRelationship(bundle.Relationships, candidateID, winnerID) {
+				continue
+			}
+			if !shareConditionTopic(candidate.When, winner.When) {
+				continue
+			}
+			recordSuppressed(&suppressed, suppressedIndex, candidateID, "disambiguated", winnerID)
+			break
+		}
+	}
+
+	out := make([]policy.Guideline, 0, len(active))
+	for _, item := range active {
+		out = append(out, item)
+	}
+	allMatches := make([]Match, 0, len(matchByID))
+	for _, item := range matchByID {
+		allMatches = append(allMatches, item)
+	}
+	sortMatches(allMatches)
+	sortGuidelines(out, allMatches)
 	return out, suppressed, disambiguation
 }
 
@@ -1339,6 +1524,9 @@ func renderTemplate(templates []policy.Template, toolOutput map[string]any) stri
 	for key, value := range toolOutput {
 		out = strings.ReplaceAll(out, "{{"+key+"}}", fmt.Sprint(value))
 	}
+	if strings.Contains(out, "{{") || strings.Contains(out, "}}") {
+		return ""
+	}
 	return strings.TrimSpace(out)
 }
 
@@ -1547,7 +1735,56 @@ func scoreCondition(condition, text string) int {
 			score++
 		}
 	}
+	score += ageConditionScore(strings.ToLower(condition), strings.ToLower(text))
 	return score
+}
+
+func ageConditionScore(condition, text string) int {
+	age, ok := extractMentionedAge(text)
+	if !ok {
+		return 0
+	}
+	switch {
+	case containsAnyPhrase(condition, "under 21", "younger than 21", "below 21"):
+		if age < 21 {
+			return 3
+		}
+		return -3
+	case containsAnyPhrase(condition, "21 or older", "over 21", "21 and older", "at least 21"):
+		if age >= 21 {
+			return 3
+		}
+		return -3
+	default:
+		return 0
+	}
+}
+
+func extractMentionedAge(text string) (int, bool) {
+	lowered := strings.ToLower(text)
+	parts := strings.Fields(lowered)
+	for i, token := range parts {
+		token = strings.Trim(token, ".,!?;:\"'()[]{}")
+		value, err := strconv.Atoi(token)
+		if err != nil || value <= 0 || value >= 130 {
+			continue
+		}
+		prev := ""
+		next := ""
+		if i > 0 {
+			prev = strings.Trim(parts[i-1], ".,!?;:\"'()[]{}")
+		}
+		if i+1 < len(parts) {
+			next = strings.Trim(parts[i+1], ".,!?;:\"'()[]{}")
+		}
+		if prev == "i'm" || prev == "im" || prev == "aged" || next == "years" || next == "year-old" || next == "yo" {
+			return value, true
+		}
+		if i > 0 && parts[i-1] == "age" {
+			return value, true
+		}
+	}
+	return 0, false
 }
 
 func keywords(input string) []string {
@@ -1556,8 +1793,21 @@ func keywords(input string) []string {
 	stop := map[string]struct{}{
 		"the": {}, "a": {}, "an": {}, "and": {}, "or": {}, "to": {}, "for": {}, "with": {}, "of": {}, "is": {}, "are": {}, "be": {}, "i": {}, "you": {}, "my": {}, "your": {}, "it": {}, "this": {}, "that": {}, "do": {}, "does": {},
 	}
+	aliases := map[string]string{
+		"hi":        "hello",
+		"hey":       "hello",
+		"greetings": "hello",
+		"greet":     "hello",
+		"greeting":  "hello",
+		"says":      "say",
+		"said":      "say",
+		"saying":    "say",
+	}
 	for _, token := range raw {
 		token = strings.Trim(token, ".,!?;:\"'()[]{}")
+		if canonical, ok := aliases[token]; ok {
+			token = canonical
+		}
 		if len(token) < 3 {
 			continue
 		}
@@ -1624,6 +1874,19 @@ func dedupeObservations(items []policy.Observation) []policy.Observation {
 func dedupeGuidelines(items []policy.Guideline) []policy.Guideline {
 	seen := map[string]struct{}{}
 	out := make([]policy.Guideline, 0, len(items))
+	for _, item := range items {
+		if _, ok := seen[item.ID]; ok {
+			continue
+		}
+		seen[item.ID] = struct{}{}
+		out = append(out, item)
+	}
+	return out
+}
+
+func dedupeMatches(items []Match) []Match {
+	seen := map[string]struct{}{}
+	out := make([]Match, 0, len(items))
 	for _, item := range items {
 		if _, ok := seen[item.ID]; ok {
 			continue
@@ -2022,4 +2285,54 @@ func journeyID(item *policy.Journey) string {
 		return ""
 	}
 	return item.ID
+}
+
+func matchesJourneyDependencyTarget(target string, activeJourney *policy.Journey) bool {
+	if activeJourney == nil {
+		return false
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	return target == activeJourney.ID || target == "journey:"+activeJourney.ID
+}
+
+func shareConditionTopic(left string, right string) bool {
+	leftWords := keywords(strings.ToLower(left))
+	rightWords := keywords(strings.ToLower(right))
+	rightSet := make(map[string]struct{}, len(rightWords))
+	for _, word := range rightWords {
+		if isAgeQualifierWord(word) {
+			continue
+		}
+		rightSet[word] = struct{}{}
+	}
+	for _, word := range leftWords {
+		if isAgeQualifierWord(word) {
+			continue
+		}
+		if _, ok := rightSet[word]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func isAgeQualifierWord(word string) bool {
+	switch word {
+	case "under", "over", "older", "younger", "below", "least", "traveler":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasDirectRelationship(items []policy.Relationship, left string, right string) bool {
+	for _, item := range items {
+		if (item.Source == left && item.Target == right) || (item.Source == right && item.Target == left) {
+			return true
+		}
+	}
+	return false
 }

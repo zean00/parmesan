@@ -1,0 +1,379 @@
+version: v1alpha1
+description: >
+  Draft golden scenarios for Parmesan parity testing against Parlant. These
+  scenarios are derived from Parlant stable baseline features, stable matcher
+  tests, and embedded shot libraries. The focus is normalized policy/runtime
+  decisions first, with final response checks as secondary assertions.
+
+normalization:
+  compare:
+    - matched_observations
+    - matched_guidelines
+    - suppressed_guidelines
+    - suppression_reasons
+    - active_journey
+    - active_journey_node
+    - journey_decision
+    - next_journey_node
+    - exposed_tools
+    - selected_tool
+    - response_mode
+    - no_match
+    - selected_template
+    - verification_outcome
+  notes:
+    - Final text should be checked semantically, not by exact string equality.
+    - Tool side effects should be replayed from stored tool results where possible.
+    - Source references point to the original Parlant files used to derive each case.
+
+scenarios:
+  - id: journey_reset_password_start
+    title: Reset password journey starts and asks the first missing field
+    category: journey
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/features/baseline/journeys.feature
+    transcript:
+      - role: customer
+        text: I want to reset my password
+    expectations:
+      matched_guidelines:
+        - journey:Reset Password Journey
+      active_journey:
+        id: Reset Password Journey
+      journey_decision: start
+      next_journey_node: ask_account_name
+      response_mode: guided
+      no_match: false
+      response_semantics:
+        must_include:
+          - ask for username or account name
+        must_not_include:
+          - ask for email
+          - ask for phone number
+
+  - id: journey_irrelevant_password_question
+    title: Password advice should not activate reset-password journey
+    category: journey
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/features/baseline/journeys.feature
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/features/baseline/strict_canned_responses.feature
+    transcript:
+      - role: customer
+        text: What are some tips I could use to come up with a strong password?
+    expectations:
+      matched_guidelines: []
+      active_journey: null
+      journey_decision: ignore
+      no_match: false
+      response_semantics:
+        must_not_include:
+          - reset your password
+          - username
+          - email address attached to your account
+
+  - id: journey_book_taxi_backtrack_due_to_changed_plan
+    title: Taxi booking journey backtracks when the customer changes the booking subject
+    category: journey_backtrack
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/features/baseline/journeys.feature
+      - /home/sahal/workspace/agents/parlant/src/parlant/core/engines/alpha/guideline_matching/generic/journey/journey_backtrack_node_selection.py
+    prior_state:
+      active_journey: Book Taxi Ride
+      journey_path:
+        - ask_pickup_location
+        - ask_dropoff_location
+        - ask_pickup_time
+    transcript:
+      - role: customer
+        text: Hi, I'd like to book a taxi for myself
+      - role: agent
+        text: Great! What's your pickup location?
+      - role: customer
+        text: Main street 1234
+      - role: agent
+        text: Got it. What's your drop-off location?
+      - role: customer
+        text: 3rd Avenue by the river
+      - role: agent
+        text: Got it. What time would you like to pick up?
+      - role: customer
+        text: Oh hold up, my plans have changed. I'm actually going to need a cab for my son, he'll be waiting at JFK airport, at the taxi stand.
+    expectations:
+      active_journey:
+        id: Book Taxi Ride
+      journey_decision: backtrack
+      next_journey_node: ask_dropoff_location
+
+  - id: journey_book_flight_skip_answered_steps
+    title: Journey skips already satisfied steps and asks the next unresolved question
+    category: journey_progress
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/features/baseline/journeys.feature
+      - /home/sahal/workspace/agents/parlant/src/parlant/core/engines/alpha/guideline_matching/generic/journey/journey_next_step_selection.py
+    prior_state:
+      active_journey: Book Flight
+      journey_path:
+        - ask_origin
+    transcript:
+      - role: customer
+        text: Hi, my name is John Smith and I'd like to book a flight for myself from Ben Gurion airport. We flight in the 12.10 and return in the 17.10.
+      - role: agent
+        text: Hi John, thanks for reaching out! I see you're planning to fly from Ben Gurion airport. Could you please let me know your destination airport?
+      - role: customer
+        text: Suvarnabhumi Airport, please
+    expectations:
+      active_journey:
+        id: Book Flight
+      journey_decision: advance
+      next_journey_node: ask_class
+
+  - id: journey_dependency_guideline_under_21
+    title: Journey activation enables dependent age-based flight guideline
+    category: journey_relationship
+    skip_engine_diff: true
+    skip_parlant_expectations: true
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/features/baseline/journeys.feature
+    transcript:
+      - role: customer
+        text: Hi, my name is John Smith and I'd like to book a flight for myself from Ben Gurion airport to JFK. We flight in the 12.10 and return in the 17.10. I'm 19 if that affects anything.
+    policy_setup:
+      extra_guidelines:
+        - id: under_21
+          kind: actionable
+          condition: customer wants to book a flight and the traveler is under 21
+          action: inform the customer that only economy class is available
+        - id: age_21_or_older
+          kind: actionable
+          condition: customer wants to book a flight and the traveler is 21 or older
+          action: tell the customer they may choose between economy and business class
+      relationships:
+        - kind: dependency
+          source: under_21
+          target: journey:Book Flight
+        - kind: dependency
+          source: age_21_or_older
+          target: journey:Book Flight
+    expectations:
+      matched_guidelines:
+        - journey:Book Flight
+        - under_21
+      suppressed_guidelines:
+        - age_21_or_older
+      response_semantics:
+        must_include:
+          - only economy class is available
+
+  - id: relationship_entailment_howdy_good_sir
+    title: Entailed guideline should be applied with the source guideline
+    category: relationships
+    agent_job: sell pizza
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/features/baseline/relationships.feature
+    transcript:
+      - role: customer
+        text: Hi
+    policy_setup:
+      extra_guidelines:
+        - id: howdy
+          kind: actionable
+          condition: the customer says hello
+          action: greet the customer with "Howdy"
+        - id: good_sir
+          kind: actionable
+          condition: saying "Howdy"
+          action: add "good sir"
+      relationships:
+        - kind: entails
+          source: howdy
+          target: good_sir
+    expectations:
+      matched_guidelines:
+        - howdy
+        - good_sir
+      suppression_reasons: []
+      response_semantics:
+        must_include:
+          - Howdy
+          - good sir
+
+  - id: previously_applied_customer_dependent_still_waiting
+    title: Customer-dependent guideline stays active until the customer completes their side
+    category: previously_applied_customer_dependent
+    timeout_seconds: 180
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_previously_applied_actionable_customer_dependent_batch.py
+    transcript:
+      - role: customer
+        text: Hi, I’d like to book a table for tomorrow night.
+      - role: agent
+        text: Sure! Would you prefer to sit inside or outside?
+      - role: customer
+        text: 7 PM would be great.
+    policy_setup:
+      extra_guidelines:
+        - id: reservation_location
+          kind: actionable
+          condition: customer wants to make a reservation
+          action: check if they prefer inside or outside
+          customer_dependent: true
+    expectations:
+      matched_guidelines:
+        - reservation_location
+      response_analysis:
+        still_required:
+          - reservation_location
+      response_semantics:
+        must_include:
+          - inside or outside
+
+  - id: previously_applied_customer_dependent_completed
+    title: Customer-dependent guideline should not reapply after the customer answers
+    category: previously_applied_customer_dependent
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_previously_applied_actionable_customer_dependent_batch.py
+    transcript:
+      - role: customer
+        text: Hi, I’d like to book a table for tomorrow night.
+      - role: agent
+        text: Sure! Would you prefer to sit inside or outside?
+      - role: customer
+        text: I prefer it outside, thanks
+    policy_setup:
+      extra_guidelines:
+        - id: reservation_location
+          kind: actionable
+          condition: customer wants to make a reservation
+          action: check if they prefer inside or outside
+          customer_dependent: true
+    expectations:
+      matched_guidelines: []
+      response_analysis:
+        already_satisfied:
+          - reservation_location
+
+  - id: disambiguation_lost_card
+    title: Lost-card request should prefer the clarified lost-card action set instead of unrelated card actions
+    category: disambiguation
+    skip_engine_diff: true
+    skip_parlant_expectations: true
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_disambiguation_batch.py
+    transcript:
+      - role: customer
+        text: I lost my card
+    policy_setup:
+      extra_guidelines:
+        - id: report_lost
+          kind: actionable
+          condition: the customer wants to report a card lost
+          action: report card lost
+        - id: lock_card
+          kind: actionable
+          condition: the customer wants to lock their card
+          action: do locking
+        - id: replacement_card
+          kind: actionable
+          condition: the customer requests a replacement card
+          action: order them a new card
+    expectations:
+      disambiguation_required: true
+      matched_guidelines:
+        - report_lost
+      suppressed_guidelines:
+        - lock_card
+        - replacement_card
+
+  - id: strict_no_match_without_valid_template
+    title: Strict canned mode should emit no-match instead of fabricating a response
+    category: strict_canned
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/features/baseline/strict_canned_responses.feature
+    mode: strict
+    transcript:
+      - role: customer
+        text: Man it's hard to make ends meet. Do you have any advice?
+    policy_setup:
+      extra_guidelines:
+        - id: savings_options
+          kind: actionable
+          condition: customer asks how to save money
+          action: talk about savings options
+      canned_responses:
+        - "Your account balance is {{balance}}"
+    expectations:
+      response_mode: strict
+      no_match: true
+      selected_template: null
+
+  - id: strict_tool_result_template_fill
+    title: Strict canned mode should use tool data to fill the selected template
+    category: strict_canned_tool_fill
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/features/baseline/strict_canned_responses.feature
+    mode: strict
+    transcript:
+      - role: customer
+        text: What are the requirements for the developer position?
+    policy_setup:
+      extra_guidelines:
+        - id: retrieve_qualification_info
+          kind: actionable
+          condition: asked about position qualifications
+          action: explain qualification criteria
+      tools:
+        - id: local:get_qualification_info
+      associations:
+        - guideline: retrieve_qualification_info
+          tool: local:get_qualification_info
+      canned_responses:
+        - "In terms of years of experience, the requirement is {{qualification_info}}."
+    expectations:
+      exposed_tools:
+        - local:get_qualification_info
+      selected_tool: local:get_qualification_info
+      response_mode: strict
+      no_match: false
+      response_semantics:
+        must_include:
+          - 5+ years of experience
+
+  - id: tool_from_entailed_guideline
+    title: Tool exposure should include tools from an entailed guideline
+    category: tools_relationships
+    skip_engine_diff: true
+    skip_parlant_expectations: true
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/features/baseline/tools.feature
+    transcript:
+      - role: customer
+        text: What pizza topping should I take?
+    policy_setup:
+      extra_guidelines:
+        - id: suggest_toppings
+          kind: actionable
+          condition: customer asks for topping recommendations
+          action: suggest pineapple
+        - id: check_stock
+          kind: actionable
+          condition: suggesting products
+          action: check if the product is available in stock, and only suggest it if it is
+      relationships:
+        - kind: entails
+          source: suggest_toppings
+          target: check_stock
+      tools:
+        - id: local:get_available_toppings
+      associations:
+        - guideline: check_stock
+          tool: local:get_available_toppings
+    expectations:
+      matched_guidelines:
+        - suggest_toppings
+        - check_stock
+      exposed_tools:
+        - local:get_available_toppings
+      selected_tool: local:get_available_toppings
+      response_semantics:
+        must_not_include:
+          - pineapple

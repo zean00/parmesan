@@ -12,19 +12,17 @@ func renderResponse(view resolvedView, toolOutput map[string]any) string {
 	if view.DisambiguationPrompt != "" {
 		return view.DisambiguationPrompt
 	}
-	if strings.TrimSpace(view.ResponseAnalysis.RecommendedTemplate) != "" {
-		return strings.TrimSpace(view.ResponseAnalysis.RecommendedTemplate)
+	if rendered := renderTemplateText(view.ResponseAnalysis.RecommendedTemplate, toolOutput); rendered != "" {
+		return rendered
 	}
 	if strings.EqualFold(view.CompositionMode, "strict") {
 		if rendered := renderTemplate(view.CandidateTemplates, toolOutput); rendered != "" {
 			return rendered
 		}
-		if strings.TrimSpace(view.NoMatch) != "" {
-			return view.NoMatch
+		if view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
+			return view.ActiveJourneyState.Instruction
 		}
-	}
-	if view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
-		return view.ActiveJourneyState.Instruction
+		return strictNoMatchText(view.NoMatch)
 	}
 	if rendered := renderTemplate(view.CandidateTemplates, toolOutput); rendered != "" {
 		return rendered
@@ -40,6 +38,9 @@ func renderResponse(view resolvedView, toolOutput map[string]any) string {
 			return strings.Join(parts, " ")
 		}
 	}
+	if view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
+		return view.ActiveJourneyState.Instruction
+	}
 	if len(toolOutput) > 0 {
 		raw, _ := json.Marshal(toolOutput)
 		return fmt.Sprintf("I checked the tool result: %s", string(raw))
@@ -52,8 +53,26 @@ func renderTemplate(templates []policy.Template, toolOutput map[string]any) stri
 		return ""
 	}
 	out := templates[0].Text
+	return renderTemplateText(out, toolOutput)
+}
+
+func renderTemplateText(text string, toolOutput map[string]any) string {
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+	out := text
 	for key, value := range toolOutput {
 		out = strings.ReplaceAll(out, "{{"+key+"}}", fmt.Sprint(value))
 	}
+	if strings.Contains(out, "{{") || strings.Contains(out, "}}") {
+		return ""
+	}
 	return strings.TrimSpace(out)
+}
+
+func strictNoMatchText(configured string) string {
+	if strings.TrimSpace(configured) != "" {
+		return strings.TrimSpace(configured)
+	}
+	return "Not sure I understand. Could you please say that another way?"
 }
