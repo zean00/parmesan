@@ -4,3 +4,5 @@ bin/
 dist/
 .cache/
 coverage.out
+__pycache__/
+*.py[cod]
