@@ -19,6 +19,7 @@ func ParseBundle(raw []byte) (policy.Bundle, error) {
 
 	bundle.SourceYAML = string(raw)
 	bundle.ImportedAt = time.Now().UTC()
+	bundle.Journeys = normalizeJourneys(bundle.Journeys)
 
 	if err := ValidateBundle(bundle); err != nil {
 		return policy.Bundle{}, err
@@ -69,12 +70,30 @@ func ValidateBundle(bundle policy.Bundle) error {
 		if len(item.States) == 0 {
 			return fmt.Errorf("journey %q requires states", item.ID)
 		}
+		if strings.TrimSpace(item.RootID) == "" {
+			return fmt.Errorf("journey %q requires root_id after normalization", item.ID)
+		}
+		stateIDs := map[string]struct{}{}
 		for _, state := range item.States {
 			if strings.TrimSpace(state.ID) == "" || strings.TrimSpace(state.Type) == "" {
 				return fmt.Errorf("journey %q has invalid state", item.ID)
 			}
+			stateIDs[strings.TrimSpace(state.ID)] = struct{}{}
 			if err := validateMCPRef(state.MCP); err != nil {
 				return fmt.Errorf("journey %q state %q: %w", item.ID, state.ID, err)
+			}
+		}
+		for _, edge := range item.Edges {
+			if strings.TrimSpace(edge.ID) == "" || strings.TrimSpace(edge.Source) == "" || strings.TrimSpace(edge.Target) == "" {
+				return fmt.Errorf("journey %q has invalid edge", item.ID)
+			}
+			if edge.Source != item.RootID {
+				if _, ok := stateIDs[edge.Source]; !ok {
+					return fmt.Errorf("journey %q edge %q references unknown source %q", item.ID, edge.ID, edge.Source)
+				}
+			}
+			if _, ok := stateIDs[edge.Target]; !ok {
+				return fmt.Errorf("journey %q edge %q references unknown target %q", item.ID, edge.ID, edge.Target)
 			}
 		}
 		for _, guideline := range item.Guidelines {
@@ -184,4 +203,64 @@ func compileGuidelineToolAssociations(bundle policy.Bundle) []policy.GuidelineTo
 		}
 	}
 	return out
+}
+
+func normalizeJourneys(items []policy.Journey) []policy.Journey {
+	out := make([]policy.Journey, 0, len(items))
+	for _, item := range items {
+		if len(item.States) > 0 && strings.TrimSpace(item.RootID) == "" {
+			item.RootID = strings.TrimSpace(item.States[0].ID)
+		}
+		if len(item.Edges) == 0 {
+			item.Edges = compileJourneyEdges(item)
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func compileJourneyEdges(item policy.Journey) []policy.JourneyEdge {
+	var out []policy.JourneyEdge
+	seen := map[string]struct{}{}
+	rootID := strings.TrimSpace(item.RootID)
+	for i, state := range item.States {
+		if i == 0 && rootID != "" && state.ID != rootID {
+			edgeID := fmt.Sprintf("%s:root->%s", item.ID, state.ID)
+			if _, ok := seen[edgeID]; !ok {
+				seen[edgeID] = struct{}{}
+				out = append(out, policy.JourneyEdge{ID: edgeID, Source: rootID, Target: state.ID})
+			}
+		}
+		for _, next := range state.Next {
+			next = strings.TrimSpace(next)
+			if next == "" {
+				continue
+			}
+			edgeID := fmt.Sprintf("%s:%s->%s", item.ID, state.ID, next)
+			if _, ok := seen[edgeID]; ok {
+				continue
+			}
+			seen[edgeID] = struct{}{}
+			out = append(out, policy.JourneyEdge{
+				ID:        edgeID,
+				Source:    state.ID,
+				Target:    next,
+				Condition: strings.Join(itemStateWhen(item, next), " "),
+			})
+		}
+	}
+	if len(out) == 0 && len(item.States) > 0 && rootID != "" {
+		edgeID := fmt.Sprintf("%s:%s->%s", item.ID, rootID, item.States[0].ID)
+		out = append(out, policy.JourneyEdge{ID: edgeID, Source: rootID, Target: item.States[0].ID})
+	}
+	return out
+}
+
+func itemStateWhen(item policy.Journey, stateID string) []string {
+	for _, state := range item.States {
+		if state.ID == stateID {
+			return append([]string(nil), state.When...)
+		}
+	}
+	return nil
 }

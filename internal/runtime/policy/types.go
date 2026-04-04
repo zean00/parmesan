@@ -12,10 +12,20 @@ type MatchingContext struct {
 	LatestCustomerText  string
 	CustomerHistory     []string
 	AssistantHistory    []string
+	StagedToolCalls     []StagedToolCall
+	StagedToolText      []string
 	ConversationText    string
 	AppliedGuidelines   []string
 	AppliedInstructions []string
 	OccurredAt          time.Time
+}
+
+type StagedToolCall struct {
+	ToolID     string         `json:"tool_id"`
+	Arguments  map[string]any `json:"arguments,omitempty"`
+	Result     map[string]any `json:"result,omitempty"`
+	DocumentID string         `json:"document_id,omitempty"`
+	ModulePath string         `json:"module_path,omitempty"`
 }
 
 type Match struct {
@@ -51,14 +61,41 @@ type SuppressedGuideline struct {
 	RelatedIDs []string `json:"related_ids,omitempty"`
 }
 
+type ResolutionKind string
+
+const (
+	ResolutionNone               ResolutionKind = "none"
+	ResolutionUnmetDependency    ResolutionKind = "unmet_dependency"
+	ResolutionUnmetDependencyAny ResolutionKind = "unmet_dependency_any"
+	ResolutionDeprioritized      ResolutionKind = "deprioritized"
+	ResolutionEntailed           ResolutionKind = "entailed"
+)
+
+type ResolutionDetails struct {
+	Description string   `json:"description"`
+	TargetIDs   []string `json:"target_ids,omitempty"`
+}
+
+type ResolutionRecord struct {
+	EntityID string            `json:"entity_id"`
+	Kind     ResolutionKind    `json:"kind"`
+	Details  ResolutionDetails `json:"details"`
+}
+
 type ProjectedJourneyNode struct {
-	ID          string   `json:"id"`
-	JourneyID   string   `json:"journey_id"`
-	StateID     string   `json:"state_id"`
-	Instruction string   `json:"instruction,omitempty"`
-	FollowUps   []string `json:"follow_ups,omitempty"`
-	ToolRefs    []string `json:"tool_refs,omitempty"`
-	Priority    int      `json:"priority,omitempty"`
+	ID              string         `json:"id"`
+	JourneyID       string         `json:"journey_id"`
+	StateID         string         `json:"state_id"`
+	SourceEdgeID    string         `json:"source_edge_id,omitempty"`
+	Index           int            `json:"index,omitempty"`
+	Instruction     string         `json:"instruction,omitempty"`
+	FollowUps       []string       `json:"follow_ups,omitempty"`
+	LegalFollowUps  []string       `json:"legal_follow_ups,omitempty"`
+	ToolRefs        []string       `json:"tool_refs,omitempty"`
+	Labels          []string       `json:"labels,omitempty"`
+	CompositionMode string         `json:"composition_mode,omitempty"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
+	Priority        int            `json:"priority,omitempty"`
 }
 
 type JourneyDecision struct {
@@ -83,6 +120,56 @@ type ToolDecision struct {
 	Grounded         bool                `json:"grounded"`
 }
 
+type ToolCandidate struct {
+	ToolID               string              `json:"tool_id"`
+	GroupKey             string              `json:"group_key,omitempty"`
+	ReferenceTools       []string            `json:"reference_tools,omitempty"`
+	RunInTandemWith      []string            `json:"run_in_tandem_with,omitempty"`
+	Consequential        bool                `json:"consequential,omitempty"`
+	AutoApproved         bool                `json:"auto_approved,omitempty"`
+	Grounded             bool                `json:"grounded"`
+	ShouldRun            bool                `json:"should_run,omitempty"`
+	AlreadyStaged        bool                `json:"already_staged,omitempty"`
+	SameCallStaged       bool                `json:"same_call_staged,omitempty"`
+	AlreadySatisfied     bool                `json:"already_satisfied,omitempty"`
+	DecisionState        string              `json:"decision_state,omitempty"`
+	ApprovalMode         string              `json:"approval_mode,omitempty"`
+	Arguments            map[string]any      `json:"arguments,omitempty"`
+	MissingIssues        []ToolArgumentIssue `json:"missing_issues,omitempty"`
+	InvalidIssues        []ToolArgumentIssue `json:"invalid_issues,omitempty"`
+	RejectedBy           string              `json:"rejected_by,omitempty"`
+	PreparationRationale string              `json:"preparation_rationale,omitempty"`
+	SelectionRationale   string              `json:"selection_rationale,omitempty"`
+	Rationale            string              `json:"rationale,omitempty"`
+}
+
+type ToolCallBatchResult struct {
+	Kind            string   `json:"kind"`
+	CandidateTools  []string `json:"candidate_tools,omitempty"`
+	ReferenceTools  []string `json:"reference_tools,omitempty"`
+	RunInTandemWith []string `json:"run_in_tandem_with,omitempty"`
+	SelectedTool    string   `json:"selected_tool,omitempty"`
+	Consequential   bool     `json:"consequential,omitempty"`
+	Simplified      bool     `json:"simplified,omitempty"`
+	Rationale       string   `json:"rationale,omitempty"`
+}
+
+type ToolCallPlan struct {
+	Candidates        []ToolCandidate       `json:"candidates,omitempty"`
+	Batches           []ToolCallBatchResult `json:"batches,omitempty"`
+	SelectedTool      string                `json:"selected_tool,omitempty"`
+	SelectedTools     []string              `json:"selected_tools,omitempty"`
+	Calls             []ToolPlannedCall     `json:"calls,omitempty"`
+	OverlappingGroups [][]string            `json:"overlapping_groups,omitempty"`
+	Rationale         string                `json:"rationale,omitempty"`
+}
+
+type ToolPlannedCall struct {
+	ToolID    string         `json:"tool_id"`
+	Arguments map[string]any `json:"arguments,omitempty"`
+	Rationale string         `json:"rationale,omitempty"`
+}
+
 type ToolArgumentIssue struct {
 	Parameter    string   `json:"parameter"`
 	Required     bool     `json:"required,omitempty"`
@@ -94,11 +181,14 @@ type ToolArgumentIssue struct {
 }
 
 type AnalyzedGuideline struct {
-	ID               string `json:"id"`
-	AlreadySatisfied bool   `json:"already_satisfied"`
-	RequiresResponse bool   `json:"requires_response"`
-	RequiresTemplate bool   `json:"requires_template"`
-	Rationale        string `json:"rationale,omitempty"`
+	ID                   string `json:"id"`
+	AlreadySatisfied     bool   `json:"already_satisfied"`
+	SatisfiedByToolEvent bool   `json:"satisfied_by_tool_event,omitempty"`
+	SatisfactionSource   string `json:"satisfaction_source,omitempty"`
+	AppliedDegree        string `json:"applied_degree,omitempty"`
+	RequiresResponse     bool   `json:"requires_response"`
+	RequiresTemplate     bool   `json:"requires_template"`
+	Rationale            string `json:"rationale,omitempty"`
 }
 
 type ResponseAnalysis struct {
@@ -125,6 +215,9 @@ type BatchResult struct {
 	Name          string         `json:"name"`
 	Strategy      string         `json:"strategy"`
 	PromptVersion string         `json:"prompt_version,omitempty"`
+	BatchSize     int            `json:"batch_size,omitempty"`
+	RetryCount    int            `json:"retry_count,omitempty"`
+	DurationMS    int64          `json:"duration_ms,omitempty"`
 	Output        map[string]any `json:"output,omitempty"`
 }
 
@@ -144,8 +237,10 @@ type ResolvedView struct {
 	JourneyInstance      *journey.Instance
 	ProjectedNodes       []ProjectedJourneyNode
 	JourneyDecision      JourneyDecision
+	ResolutionRecords    []ResolutionRecord
 	ExposedTools         []string
 	ToolApprovals        map[string]string
+	ToolPlan             ToolCallPlan
 	ToolDecision         ToolDecision
 	ResponseAnalysis     ResponseAnalysis
 	CandidateTemplates   []policy.Template

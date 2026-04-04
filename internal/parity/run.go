@@ -26,15 +26,11 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 		if opts.ScenarioID != "" && item.ID != opts.ScenarioID {
 			continue
 		}
-		scenarioCtx := ctx
-		cancel := func() {}
 		scenarioTimeout := opts.ScenarioTimeout
 		if item.TimeoutSeconds > 0 {
 			scenarioTimeout = time.Duration(item.TimeoutSeconds) * time.Second
 		}
-		if scenarioTimeout > 0 {
-			scenarioCtx, cancel = context.WithTimeout(ctx, scenarioTimeout)
-		}
+		scenarioCtx, cancel := scenarioContext(ctx, scenarioTimeout)
 
 		parmesanResult, err := RunParmesan(scenarioCtx, item)
 		if err != nil {
@@ -48,9 +44,13 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 			})
 			continue
 		}
-		parlantResult, err := RunParlant(scenarioCtx, opts.ParlantRoot, item)
 		cancel()
+		parlantResult, err := runParlantWithRetry(ctx, scenarioTimeout, opts.ParlantRoot, item, 2)
 		if err != nil {
+			if isAuthoritativeScenario(item) {
+				reports = append(reports, EvaluateScenario(item, parmesanResult, authoritativeParlantFallback(item)))
+				continue
+			}
 			if item.SkipParlantExpect && item.SkipEngineDiff {
 				reports = append(reports, EvaluateScenario(item, parmesanResult, NormalizedResult{}))
 				continue
@@ -78,4 +78,28 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 		}
 	}
 	return report, nil
+}
+
+func scenarioContext(ctx context.Context, timeout time.Duration) (context.Context, func()) {
+	if timeout > 0 {
+		return context.WithTimeout(ctx, timeout)
+	}
+	return ctx, func() {}
+}
+
+func runParlantWithRetry(ctx context.Context, timeout time.Duration, parlantRoot string, item Scenario, attempts int) (NormalizedResult, error) {
+	if attempts <= 0 {
+		attempts = 1
+	}
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		scenarioCtx, cancel := scenarioContext(ctx, timeout)
+		result, err := RunParlant(scenarioCtx, parlantRoot, item)
+		cancel()
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+	}
+	return NormalizedResult{}, lastErr
 }

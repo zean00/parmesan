@@ -2,6 +2,7 @@ package policyruntime
 
 import (
 	"context"
+	"strings"
 
 	"github.com/sahal/parmesan/internal/domain/journey"
 	"github.com/sahal/parmesan/internal/domain/policy"
@@ -27,6 +28,7 @@ type guidelineMatchingStrategy interface {
 	Name() string
 	CreateMatchingBatches(*matchingState, []policy.Guideline) []guidelineMatchingBatch
 	CreateResponseAnalysisBatches(*matchingState) []responseAnalysisBatch
+	TransformMatches(*matchingState)
 }
 
 type guidelineMatchingStrategyResolver interface {
@@ -108,11 +110,13 @@ type matchingState struct {
 	reapplyDecisions     []ReapplyDecision
 	customerDecisions    []CustomerDependencyDecision
 	suppressedGuidelines []SuppressedGuideline
+	resolutionRecords    []ResolutionRecord
 	disambiguationPrompt string
 	candidateTemplates   []policy.Template
 	responseAnalysis     ResponseAnalysis
 	exposedTools         []string
 	toolApprovals        map[string]string
+	toolPlan             ToolCallPlan
 	toolDecision         ToolDecision
 	batchResults         []BatchResult
 	promptSetVersions    map[string]string
@@ -128,6 +132,22 @@ func (genericStrategy) Name() string {
 
 func (customStrategy) Name() string {
 	return "custom"
+}
+
+func (genericStrategy) TransformMatches(state *matchingState) {
+	if state == nil {
+		return
+	}
+	sortMatches(state.guidelineMatches)
+	state.guidelineMatches = dedupeMatches(state.guidelineMatches)
+	sortGuidelines(state.matchedGuidelines, state.guidelineMatches)
+	state.matchedGuidelines = dedupeGuidelines(state.matchedGuidelines)
+	state.suppressedGuidelines = dedupeSuppressedGuidelines(state.suppressedGuidelines)
+	state.resolutionRecords = dedupeResolutionRecords(state.resolutionRecords)
+}
+
+func (customStrategy) TransformMatches(state *matchingState) {
+	genericStrategy{}.TransformMatches(state)
 }
 
 func (genericStrategy) CreateMatchingBatches(state *matchingState, items []policy.Guideline) []guidelineMatchingBatch {
@@ -163,7 +183,15 @@ func (genericStrategy) CreateMatchingBatches(state *matchingState, items []polic
 			return nil
 		}),
 		makeBatch("relationship_resolution", "generic", promptVersion("relationship_resolution"), func(_ context.Context, state *matchingState) error {
-			state.matchedGuidelines, state.suppressedGuidelines, state.disambiguationPrompt = resolveRelationships(state.bundle, state.context, state.matchedObservations, state.guidelineMatches, state.matchedGuidelines, state.activeJourney)
+			resolved := resolveRelationships(state.bundle, state.context, state.matchedObservations, state.guidelineMatches, state.matchedGuidelines, state.activeJourney, state.activeJourneyState)
+			state.matchedGuidelines = resolved.guidelines
+			state.suppressedGuidelines = resolved.suppressed
+			state.disambiguationPrompt = resolved.disambiguation
+			state.resolutionRecords = resolved.resolutions
+			state.activeJourney = resolved.activeJourney
+			if state.activeJourney == nil {
+				state.activeJourneyState = nil
+			}
 			return nil
 		}),
 		makeBatch("disambiguation", "generic", promptVersion("disambiguation"), func(ctx context.Context, state *matchingState) error {
@@ -178,7 +206,7 @@ func (genericStrategy) CreateResponseAnalysisBatches(state *matchingState) []res
 		makeResponseBatch("response_analysis", "generic", promptVersion("response_analysis"), func(ctx context.Context, state *matchingState) error {
 			state.candidateTemplates = collectTemplates(state.bundle, state.activeJourney, state.activeJourneyState, state.context)
 			mode := modeOrDefault(state.bundle.CompositionMode, state.candidateTemplates)
-			state.responseAnalysis = analyzeResponsePlan(ctx, state.router, state.context, state.matchedGuidelines, state.candidateTemplates, mode, state.bundle.NoMatch)
+			state.responseAnalysis = analyzeResponsePlan(ctx, state.router, state.context, responseAnalysisGuidelines(state.bundle, state.context, state.matchedGuidelines), state.candidateTemplates, mode, state.bundle.NoMatch)
 			return nil
 		}),
 	}
@@ -240,4 +268,51 @@ func (b responseBatchFunc) Process(ctx context.Context, state *matchingState) er
 
 func promptVersion(stage string) string {
 	return stage + ".v1"
+}
+
+func dedupeSuppressedGuidelines(items []SuppressedGuideline) []SuppressedGuideline {
+	seen := map[string]SuppressedGuideline{}
+	order := make([]string, 0, len(items))
+	for _, item := range items {
+		if existing, ok := seen[item.ID]; ok {
+			existing.RelatedIDs = dedupe(append(existing.RelatedIDs, item.RelatedIDs...))
+			if existing.Reason == "" {
+				existing.Reason = item.Reason
+			}
+			seen[item.ID] = existing
+			continue
+		}
+		copied := item
+		copied.RelatedIDs = dedupe(append([]string(nil), item.RelatedIDs...))
+		seen[item.ID] = copied
+		order = append(order, item.ID)
+	}
+	out := make([]SuppressedGuideline, 0, len(order))
+	for _, id := range order {
+		out = append(out, seen[id])
+	}
+	return out
+}
+
+func dedupeResolutionRecords(items []ResolutionRecord) []ResolutionRecord {
+	seen := map[string]ResolutionRecord{}
+	order := make([]string, 0, len(items))
+	keyFor := func(item ResolutionRecord) string {
+		return item.EntityID + "|" + string(item.Kind) + "|" + strings.Join(item.Details.TargetIDs, ",")
+	}
+	for _, item := range items {
+		key := keyFor(item)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		copied := item
+		copied.Details.TargetIDs = dedupe(append([]string(nil), item.Details.TargetIDs...))
+		seen[key] = copied
+		order = append(order, key)
+	}
+	out := make([]ResolutionRecord, 0, len(order))
+	for _, key := range order {
+		out = append(out, seen[key])
+	}
+	return out
 }

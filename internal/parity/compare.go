@@ -29,7 +29,7 @@ func EvaluateScenario(s Scenario, parmesan NormalizedResult, parlant NormalizedR
 	}
 	diffErrs := []string(nil)
 	if !s.SkipEngineDiff {
-		diffErrs = compareResults(parmesan, parlant)
+		diffErrs = compareResults(s, parmesan, parlant)
 	}
 	return ScenarioReport{
 		Scenario:          s,
@@ -52,6 +52,9 @@ func checkExpectations(exp Expectations, got NormalizedResult, label string) []s
 	if len(exp.SuppressedGuidelines) > 0 && !sameSet(exp.SuppressedGuidelines, got.SuppressedGuidelines) {
 		out = append(out, fmt.Sprintf("%s suppressed_guidelines = %v, want %v", label, got.SuppressedGuidelines, exp.SuppressedGuidelines))
 	}
+	if len(exp.ResolutionRecords) > 0 && !sameResolutionSet(exp.ResolutionRecords, got.ResolutionRecords) {
+		out = append(out, fmt.Sprintf("%s resolution_records = %v, want %v", label, got.ResolutionRecords, exp.ResolutionRecords))
+	}
 	if exp.ActiveJourney != nil && strings.TrimSpace(exp.ActiveJourney.ID) != strings.TrimSpace(got.ActiveJourney) {
 		out = append(out, fmt.Sprintf("%s active_journey = %q, want %q", label, got.ActiveJourney, exp.ActiveJourney.ID))
 	}
@@ -61,11 +64,49 @@ func checkExpectations(exp Expectations, got NormalizedResult, label string) []s
 	if exp.NextJourneyNode != "" && exp.NextJourneyNode != got.NextJourneyNode {
 		out = append(out, fmt.Sprintf("%s next_journey_node = %q, want %q", label, got.NextJourneyNode, exp.NextJourneyNode))
 	}
+	if len(exp.ProjectedFollowUps) > 0 && !sameMapSet(exp.ProjectedFollowUps, got.ProjectedFollowUps) {
+		out = append(out, fmt.Sprintf("%s projected_follow_ups = %v, want %v", label, got.ProjectedFollowUps, exp.ProjectedFollowUps))
+	}
+	if len(exp.LegalFollowUps) > 0 && !sameMapSet(exp.LegalFollowUps, got.LegalFollowUps) {
+		out = append(out, fmt.Sprintf("%s legal_follow_ups = %v, want %v", label, got.LegalFollowUps, exp.LegalFollowUps))
+	}
 	if len(exp.ExposedTools) > 0 && !sameSet(exp.ExposedTools, got.ExposedTools) {
 		out = append(out, fmt.Sprintf("%s exposed_tools = %v, want %v", label, got.ExposedTools, exp.ExposedTools))
 	}
+	if len(exp.ToolCandidates) > 0 && !sameSet(exp.ToolCandidates, got.ToolCandidates) {
+		out = append(out, fmt.Sprintf("%s tool_candidates = %v, want %v", label, got.ToolCandidates, exp.ToolCandidates))
+	}
+	if len(exp.ToolCandidateStates) > 0 && !sameStringMap(exp.ToolCandidateStates, got.ToolCandidateStates) {
+		out = append(out, fmt.Sprintf("%s tool_candidate_states = %v, want %v", label, got.ToolCandidateStates, exp.ToolCandidateStates))
+	}
+	if len(exp.ToolCandidateRejectedBy) > 0 && !sameStringMap(exp.ToolCandidateRejectedBy, got.ToolCandidateRejectedBy) {
+		out = append(out, fmt.Sprintf("%s tool_candidate_rejected_by = %v, want %v", label, got.ToolCandidateRejectedBy, exp.ToolCandidateRejectedBy))
+	}
+	if len(exp.ToolCandidateReasons) > 0 {
+		for key, want := range exp.ToolCandidateReasons {
+			gotReason := got.ToolCandidateReasons[key]
+			if !semanticContains(gotReason, want) {
+				out = append(out, fmt.Sprintf("%s tool_candidate_reasons[%s] = %q, want semantic match for %q", label, key, gotReason, want))
+			}
+		}
+	}
+	if len(exp.ToolCandidateTandemWith) > 0 && !sameMapSet(exp.ToolCandidateTandemWith, got.ToolCandidateTandemWith) {
+		out = append(out, fmt.Sprintf("%s tool_candidate_tandem_with = %v, want %v", label, got.ToolCandidateTandemWith, exp.ToolCandidateTandemWith))
+	}
+	if len(exp.OverlappingToolGroups) > 0 && !sameGroupSet(exp.OverlappingToolGroups, got.OverlappingToolGroups) {
+		out = append(out, fmt.Sprintf("%s overlapping_tool_groups = %v, want %v", label, got.OverlappingToolGroups, exp.OverlappingToolGroups))
+	}
 	if exp.SelectedTool != "" && exp.SelectedTool != got.SelectedTool {
 		out = append(out, fmt.Sprintf("%s selected_tool = %q, want %q", label, got.SelectedTool, exp.SelectedTool))
+	}
+	if len(exp.SelectedTools) > 0 && !sameSet(exp.SelectedTools, got.SelectedTools) {
+		out = append(out, fmt.Sprintf("%s selected_tools = %v, want %v", label, got.SelectedTools, exp.SelectedTools))
+	}
+	if exp.ToolCallCount > 0 && len(got.ToolCalls) != exp.ToolCallCount {
+		out = append(out, fmt.Sprintf("%s tool_call_count = %d, want %d", label, len(got.ToolCalls), exp.ToolCallCount))
+	}
+	if len(exp.ToolCallTools) > 0 && !sameMultiset(exp.ToolCallTools, got.ToolCallTools) {
+		out = append(out, fmt.Sprintf("%s tool_call_tools = %v, want %v", label, got.ToolCallTools, exp.ToolCallTools))
 	}
 	if exp.ResponseMode != "" && exp.ResponseMode != got.ResponseMode {
 		out = append(out, fmt.Sprintf("%s response_mode = %q, want %q", label, got.ResponseMode, exp.ResponseMode))
@@ -87,17 +128,34 @@ func checkExpectations(exp Expectations, got NormalizedResult, label string) []s
 	}
 	if len(exp.ResponseAnalysis.StillRequired) > 0 {
 		for _, item := range exp.ResponseAnalysis.StillRequired {
-			if !strings.Contains(strings.ToLower(got.ResponseText), strings.ToLower(item)) && !slices.Contains(got.MatchedGuidelines, item) {
+			if !slices.Contains(got.ResponseAnalysisStillRequired, item) && !strings.Contains(strings.ToLower(got.ResponseText), strings.ToLower(item)) && !slices.Contains(got.MatchedGuidelines, item) {
 				out = append(out, fmt.Sprintf("%s response_analysis.still_required missing signal %q", label, item))
 			}
 		}
 	}
 	if len(exp.ResponseAnalysis.AlreadySatisfied) > 0 {
 		for _, item := range exp.ResponseAnalysis.AlreadySatisfied {
-			if slices.Contains(got.MatchedGuidelines, item) {
+			if !slices.Contains(got.ResponseAnalysisAlreadySatisfied, item) && slices.Contains(got.MatchedGuidelines, item) {
 				out = append(out, fmt.Sprintf("%s response_analysis.already_satisfied guideline still matched %q", label, item))
 			}
 		}
+	}
+	if len(exp.ResponseAnalysis.PartiallyApplied) > 0 {
+		for _, item := range exp.ResponseAnalysis.PartiallyApplied {
+			if !slices.Contains(got.ResponseAnalysisPartiallyApplied, item) {
+				out = append(out, fmt.Sprintf("%s response_analysis.partially_applied missing signal %q", label, item))
+			}
+		}
+	}
+	if len(exp.ResponseAnalysis.SatisfiedByToolEvent) > 0 {
+		for _, item := range exp.ResponseAnalysis.SatisfiedByToolEvent {
+			if !slices.Contains(got.ResponseAnalysisToolSatisfied, item) {
+				out = append(out, fmt.Sprintf("%s response_analysis.satisfied_by_tool_event missing signal %q", label, item))
+			}
+		}
+	}
+	if len(exp.ResponseAnalysis.SatisfactionSources) > 0 && !sameStringMap(exp.ResponseAnalysis.SatisfactionSources, got.ResponseAnalysisSources) {
+		out = append(out, fmt.Sprintf("%s response_analysis.satisfaction_sources = %v, want %v", label, got.ResponseAnalysisSources, exp.ResponseAnalysis.SatisfactionSources))
 	}
 	for _, needle := range exp.ResponseSemantics.MustInclude {
 		if !semanticContains(got.ResponseText, needle) {
@@ -112,37 +170,79 @@ func checkExpectations(exp Expectations, got NormalizedResult, label string) []s
 	return out
 }
 
-func compareResults(left NormalizedResult, right NormalizedResult) []string {
+func compareResults(s Scenario, left NormalizedResult, right NormalizedResult) []string {
 	var out []string
-	if !sameSet(left.MatchedGuidelines, right.MatchedGuidelines) {
+	if len(s.Expect.MatchedGuidelines) > 0 && !sameSet(left.MatchedGuidelines, right.MatchedGuidelines) {
 		out = append(out, fmt.Sprintf("matched_guidelines differ: parmesan=%v parlant=%v", left.MatchedGuidelines, right.MatchedGuidelines))
 	}
-	if !sameSet(left.MatchedObservations, right.MatchedObservations) {
+	if len(s.Expect.MatchedObservations) > 0 && !sameSet(left.MatchedObservations, right.MatchedObservations) {
 		out = append(out, fmt.Sprintf("matched_observations differ: parmesan=%v parlant=%v", left.MatchedObservations, right.MatchedObservations))
 	}
-	if strings.TrimSpace(left.ActiveJourney) != strings.TrimSpace(right.ActiveJourney) {
+	if s.Expect.ActiveJourney != nil && strings.TrimSpace(left.ActiveJourney) != strings.TrimSpace(right.ActiveJourney) {
 		out = append(out, fmt.Sprintf("active_journey differs: parmesan=%q parlant=%q", left.ActiveJourney, right.ActiveJourney))
 	}
-	if strings.TrimSpace(left.ActiveJourneyNode) != strings.TrimSpace(right.ActiveJourneyNode) {
+	if s.Expect.NextJourneyNode != "" && strings.TrimSpace(left.ActiveJourneyNode) != strings.TrimSpace(right.ActiveJourneyNode) {
 		out = append(out, fmt.Sprintf("active_journey_node differs: parmesan=%q parlant=%q", left.ActiveJourneyNode, right.ActiveJourneyNode))
 	}
-	if left.JourneyDecision != right.JourneyDecision {
+	if len(s.Expect.ResolutionRecords) > 0 && !sameResolutionSetForScenario(s.Expect.ResolutionRecords, left.ResolutionRecords, right.ResolutionRecords) {
+		out = append(out, fmt.Sprintf("resolution_records differ: parmesan=%v parlant=%v", left.ResolutionRecords, right.ResolutionRecords))
+	}
+	if s.Expect.JourneyDecision != "" && left.JourneyDecision != right.JourneyDecision {
 		out = append(out, fmt.Sprintf("journey_decision differs: parmesan=%q parlant=%q", left.JourneyDecision, right.JourneyDecision))
 	}
-	if left.NextJourneyNode != right.NextJourneyNode {
+	if s.Expect.NextJourneyNode != "" && left.NextJourneyNode != right.NextJourneyNode {
 		out = append(out, fmt.Sprintf("next_journey_node differs: parmesan=%q parlant=%q", left.NextJourneyNode, right.NextJourneyNode))
 	}
-	if !sameSet(left.ExposedTools, right.ExposedTools) {
+	if len(s.Expect.ProjectedFollowUps) > 0 && !sameMapSet(left.ProjectedFollowUps, right.ProjectedFollowUps) {
+		out = append(out, fmt.Sprintf("projected_follow_ups differ: parmesan=%v parlant=%v", left.ProjectedFollowUps, right.ProjectedFollowUps))
+	}
+	if len(s.Expect.LegalFollowUps) > 0 && !sameMapSet(left.LegalFollowUps, right.LegalFollowUps) {
+		out = append(out, fmt.Sprintf("legal_follow_ups differ: parmesan=%v parlant=%v", left.LegalFollowUps, right.LegalFollowUps))
+	}
+	if len(s.Expect.ExposedTools) > 0 && !sameSet(left.ExposedTools, right.ExposedTools) {
 		out = append(out, fmt.Sprintf("exposed_tools differ: parmesan=%v parlant=%v", left.ExposedTools, right.ExposedTools))
 	}
-	if left.SelectedTool != right.SelectedTool {
+	if len(s.Expect.ToolCandidates) > 0 && !sameSet(left.ToolCandidates, right.ToolCandidates) {
+		out = append(out, fmt.Sprintf("tool_candidates differ: parmesan=%v parlant=%v", left.ToolCandidates, right.ToolCandidates))
+	}
+	if len(s.Expect.ToolCandidateStates) > 0 && !sameStringMap(left.ToolCandidateStates, right.ToolCandidateStates) {
+		out = append(out, fmt.Sprintf("tool_candidate_states differ: parmesan=%v parlant=%v", left.ToolCandidateStates, right.ToolCandidateStates))
+	}
+	if len(s.Expect.ToolCandidateRejectedBy) > 0 && !sameStringMap(left.ToolCandidateRejectedBy, right.ToolCandidateRejectedBy) {
+		out = append(out, fmt.Sprintf("tool_candidate_rejected_by differ: parmesan=%v parlant=%v", left.ToolCandidateRejectedBy, right.ToolCandidateRejectedBy))
+	}
+	if len(s.Expect.ToolCandidateReasons) > 0 && !sameSemanticStringMap(left.ToolCandidateReasons, right.ToolCandidateReasons, s.Expect.ToolCandidateReasons) {
+		out = append(out, fmt.Sprintf("tool_candidate_reasons differ: parmesan=%v parlant=%v", left.ToolCandidateReasons, right.ToolCandidateReasons))
+	}
+	if len(s.Expect.ToolCandidateTandemWith) > 0 && !sameMapSet(left.ToolCandidateTandemWith, right.ToolCandidateTandemWith) {
+		out = append(out, fmt.Sprintf("tool_candidate_tandem_with differ: parmesan=%v parlant=%v", left.ToolCandidateTandemWith, right.ToolCandidateTandemWith))
+	}
+	if len(s.Expect.OverlappingToolGroups) > 0 && !sameGroupSet(left.OverlappingToolGroups, right.OverlappingToolGroups) {
+		out = append(out, fmt.Sprintf("overlapping_tool_groups differ: parmesan=%v parlant=%v", left.OverlappingToolGroups, right.OverlappingToolGroups))
+	}
+	if s.Expect.SelectedTool != "" && left.SelectedTool != right.SelectedTool {
 		out = append(out, fmt.Sprintf("selected_tool differs: parmesan=%q parlant=%q", left.SelectedTool, right.SelectedTool))
 	}
-	if left.ResponseMode != right.ResponseMode {
+	if len(s.Expect.SelectedTools) > 0 && !sameSet(left.SelectedTools, right.SelectedTools) {
+		out = append(out, fmt.Sprintf("selected_tools differ: parmesan=%v parlant=%v", left.SelectedTools, right.SelectedTools))
+	}
+	if s.Expect.ToolCallCount > 0 && len(left.ToolCalls) != len(right.ToolCalls) {
+		out = append(out, fmt.Sprintf("tool_call_count differs: parmesan=%d parlant=%d", len(left.ToolCalls), len(right.ToolCalls)))
+	}
+	if len(s.Expect.ToolCallTools) > 0 && !sameMultiset(left.ToolCallTools, right.ToolCallTools) {
+		out = append(out, fmt.Sprintf("tool_call_tools differ: parmesan=%v parlant=%v", left.ToolCallTools, right.ToolCallTools))
+	}
+	if s.Expect.ResponseMode != "" && left.ResponseMode != right.ResponseMode {
 		out = append(out, fmt.Sprintf("response_mode differs: parmesan=%q parlant=%q", left.ResponseMode, right.ResponseMode))
 	}
-	if left.NoMatch != right.NoMatch {
+	if s.Expect.NoMatch != nil && left.NoMatch != right.NoMatch {
 		out = append(out, fmt.Sprintf("no_match differs: parmesan=%t parlant=%t", left.NoMatch, right.NoMatch))
+	}
+	if len(s.Expect.ResponseAnalysis.SatisfactionSources) > 0 && !sameStringMap(left.ResponseAnalysisSources, right.ResponseAnalysisSources) {
+		out = append(out, fmt.Sprintf("response_analysis.satisfaction_sources differ: parmesan=%v parlant=%v", left.ResponseAnalysisSources, right.ResponseAnalysisSources))
+	}
+	if len(s.Expect.ResponseAnalysis.PartiallyApplied) > 0 && !sameSet(left.ResponseAnalysisPartiallyApplied, right.ResponseAnalysisPartiallyApplied) {
+		out = append(out, fmt.Sprintf("response_analysis.partially_applied differ: parmesan=%v parlant=%v", left.ResponseAnalysisPartiallyApplied, right.ResponseAnalysisPartiallyApplied))
 	}
 	return out
 }
@@ -233,6 +333,122 @@ func sameSet(left, right []string) bool {
 	a := dedupeAndSort(left)
 	b := dedupeAndSort(right)
 	return slices.Equal(a, b)
+}
+
+func sameMultiset(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	a := append([]string(nil), left...)
+	b := append([]string(nil), right...)
+	slices.Sort(a)
+	slices.Sort(b)
+	return slices.Equal(a, b)
+}
+
+func sameMapSet(left, right map[string][]string) bool {
+	if len(left) == 0 && len(right) == 0 {
+		return true
+	}
+	if len(left) != len(right) {
+		return false
+	}
+	for key, leftItems := range left {
+		rightItems, ok := right[key]
+		if !ok || !sameSet(leftItems, rightItems) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameStringMap(left, right map[string]string) bool {
+	if len(left) == 0 && len(right) == 0 {
+		return true
+	}
+	if len(left) != len(right) {
+		return false
+	}
+	for key, leftValue := range left {
+		if strings.TrimSpace(right[key]) != strings.TrimSpace(leftValue) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameSemanticStringMap(left, right, keys map[string]string) bool {
+	for key := range keys {
+		if !semanticContains(left[key], right[key]) && !semanticContains(right[key], left[key]) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameGroupSet(left, right [][]string) bool {
+	if len(left) == 0 && len(right) == 0 {
+		return true
+	}
+	normalize := func(groups [][]string) []string {
+		out := make([]string, 0, len(groups))
+		for _, group := range groups {
+			out = append(out, strings.Join(dedupeAndSort(group), ","))
+		}
+		slices.Sort(out)
+		return out
+	}
+	return slices.Equal(normalize(left), normalize(right))
+}
+
+func sameResolutionSet(exp []ResolutionExpectation, got []NormalizedResolution) bool {
+	want := make([]NormalizedResolution, 0, len(exp))
+	for _, item := range exp {
+		want = append(want, NormalizedResolution{EntityID: item.EntityID, Kind: item.Kind})
+	}
+	return sameResolutionSetForScenario(exp, want, got)
+}
+
+func sameResolutionSetForScenario(exp []ResolutionExpectation, left, right []NormalizedResolution) bool {
+	scoped := func(items []NormalizedResolution) []NormalizedResolution {
+		if len(items) == 0 {
+			return nil
+		}
+		expectedNone := map[string]struct{}{}
+		for _, item := range exp {
+			if strings.EqualFold(strings.TrimSpace(item.Kind), "none") {
+				expectedNone[strings.TrimSpace(item.EntityID)] = struct{}{}
+			}
+		}
+		out := make([]NormalizedResolution, 0, len(items))
+		for _, item := range items {
+			entityID := strings.TrimSpace(item.EntityID)
+			kind := strings.TrimSpace(item.Kind)
+			if strings.EqualFold(kind, "none") {
+				if _, ok := expectedNone[entityID]; !ok {
+					continue
+				}
+			}
+			out = append(out, NormalizedResolution{EntityID: entityID, Kind: kind})
+		}
+		return out
+	}
+	return sameResolutionSetFromNormalized(scoped(left), scoped(right))
+}
+
+func sameResolutionSetFromNormalized(left, right []NormalizedResolution) bool {
+	if len(left) == 0 && len(right) == 0 {
+		return true
+	}
+	normalize := func(items []NormalizedResolution) []string {
+		out := make([]string, 0, len(items))
+		for _, item := range items {
+			out = append(out, strings.TrimSpace(item.EntityID)+"|"+strings.TrimSpace(item.Kind))
+		}
+		slices.Sort(out)
+		return out
+	}
+	return slices.Equal(normalize(left), normalize(right))
 }
 
 func dedupeAndSort(items []string) []string {

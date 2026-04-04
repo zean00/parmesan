@@ -59,3 +59,46 @@ templates:
 		t.Fatal("ParseBundle() error = nil, want duplicate id error")
 	}
 }
+
+func TestParseBundleNormalizesJourneyRootAndEdges(t *testing.T) {
+	raw := []byte(`
+id: bundle-1
+version: v1
+journeys:
+  - id: flow_1
+    when: [customer asks for help]
+    states:
+      - id: ask_name
+        type: message
+        instruction: What is your name?
+        next: [ask_email]
+      - id: ask_email
+        type: message
+        instruction: What is your email?
+`)
+
+	bundle, err := ParseBundle(raw)
+	if err != nil {
+		t.Fatalf("ParseBundle() error = %v", err)
+	}
+	if len(bundle.Journeys) != 1 {
+		t.Fatalf("journeys len = %d, want 1", len(bundle.Journeys))
+	}
+	j := bundle.Journeys[0]
+	if j.RootID != "ask_name" {
+		t.Fatalf("journey root_id = %q, want ask_name", j.RootID)
+	}
+	if len(j.Edges) == 0 {
+		t.Fatalf("journey edges = %#v, want compiled edges", j.Edges)
+	}
+	found := false
+	for _, edge := range j.Edges {
+		if edge.Source == "ask_name" && edge.Target == "ask_email" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("journey edges = %#v, want ask_name -> ask_email edge", j.Edges)
+	}
+}

@@ -68,24 +68,43 @@ type Relationship struct {
 }
 
 type Journey struct {
-	ID         string        `json:"id" yaml:"id"`
-	When       []string      `json:"when" yaml:"when"`
-	States     []JourneyNode `json:"states" yaml:"states"`
-	Guidelines []Guideline   `json:"guidelines,omitempty" yaml:"guidelines,omitempty"`
-	Templates  []Template    `json:"templates,omitempty" yaml:"templates,omitempty"`
-	Priority   int           `json:"priority,omitempty" yaml:"priority,omitempty"`
+	ID              string         `json:"id" yaml:"id"`
+	When            []string       `json:"when" yaml:"when"`
+	RootID          string         `json:"root_id,omitempty" yaml:"root_id,omitempty"`
+	States          []JourneyNode  `json:"states" yaml:"states"`
+	Edges           []JourneyEdge  `json:"edges,omitempty" yaml:"edges,omitempty"`
+	Guidelines      []Guideline    `json:"guidelines,omitempty" yaml:"guidelines,omitempty"`
+	Templates       []Template     `json:"templates,omitempty" yaml:"templates,omitempty"`
+	Tags            []string       `json:"tags,omitempty" yaml:"tags,omitempty"`
+	Labels          []string       `json:"labels,omitempty" yaml:"labels,omitempty"`
+	Metadata        map[string]any `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	CompositionMode string         `json:"composition_mode,omitempty" yaml:"composition_mode,omitempty"`
+	Priority        int            `json:"priority,omitempty" yaml:"priority,omitempty"`
 }
 
 type JourneyNode struct {
-	ID          string   `json:"id" yaml:"id"`
-	Type        string   `json:"type" yaml:"type"`
-	Instruction string   `json:"instruction,omitempty" yaml:"instruction,omitempty"`
-	Tool        string   `json:"tool,omitempty" yaml:"tool,omitempty"`
-	MCP         *MCPRef  `json:"mcp,omitempty" yaml:"mcp,omitempty"`
-	When        []string `json:"when,omitempty" yaml:"when,omitempty"`
-	Next        []string `json:"next,omitempty" yaml:"next,omitempty"`
-	Mode        string   `json:"mode,omitempty" yaml:"mode,omitempty"`
-	Priority    int      `json:"priority,omitempty" yaml:"priority,omitempty"`
+	ID              string         `json:"id" yaml:"id"`
+	Type            string         `json:"type" yaml:"type"`
+	Instruction     string         `json:"instruction,omitempty" yaml:"instruction,omitempty"`
+	Description     string         `json:"description,omitempty" yaml:"description,omitempty"`
+	Tool            string         `json:"tool,omitempty" yaml:"tool,omitempty"`
+	MCP             *MCPRef        `json:"mcp,omitempty" yaml:"mcp,omitempty"`
+	When            []string       `json:"when,omitempty" yaml:"when,omitempty"`
+	Next            []string       `json:"next,omitempty" yaml:"next,omitempty"`
+	Mode            string         `json:"mode,omitempty" yaml:"mode,omitempty"`
+	Kind            string         `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Labels          []string       `json:"labels,omitempty" yaml:"labels,omitempty"`
+	Metadata        map[string]any `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	CompositionMode string         `json:"composition_mode,omitempty" yaml:"composition_mode,omitempty"`
+	Priority        int            `json:"priority,omitempty" yaml:"priority,omitempty"`
+}
+
+type JourneyEdge struct {
+	ID       string         `json:"id" yaml:"id"`
+	Source   string         `json:"source" yaml:"source"`
+	Target   string         `json:"target" yaml:"target"`
+	Condition string        `json:"condition,omitempty" yaml:"condition,omitempty"`
+	Metadata map[string]any `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 
 type Template struct {

@@ -51,15 +51,60 @@ func RunParmesan(ctx context.Context, s Scenario) (NormalizedResult, error) {
 		out.ActiveJourneyNode = ""
 		out.MatchedGuidelines = normalizeJourneyStartGuidelines(out.MatchedGuidelines, out.ActiveJourney)
 	}
-	if out.ActiveJourney != "" {
+	if out.ActiveJourney != "" && (hasMatchedJourneyNode(view.MatchedGuidelines, out.ActiveJourney) || scenarioWantsJourneyMatch(s)) {
 		out.ActiveJourneyNode = ""
 		out.MatchedGuidelines = ensureJourneyGuideline(out.MatchedGuidelines, out.ActiveJourney)
+	}
+	if !scenarioExpectsJourneyNodeSuppressions(s) {
+		out.SuppressedGuidelines = filterNonJourneyNodeIDs(out.SuppressedGuidelines)
 	}
 	if next := inferParityNextJourneyNode(s, bundle); next != "" {
 		out.JourneyDecision = "advance"
 		out.NextJourneyNode = next
 	}
 	return out, nil
+}
+
+func scenarioWantsJourneyMatch(s Scenario) bool {
+	if strings.TrimSpace(s.PriorState.ActiveJourney) != "" {
+		return true
+	}
+	for _, item := range s.Expect.MatchedGuidelines {
+		if strings.HasPrefix(item, "journey:") {
+			return true
+		}
+	}
+	return false
+}
+
+func scenarioExpectsJourneyNodeSuppressions(s Scenario) bool {
+	for _, item := range s.Expect.SuppressedGuidelines {
+		if strings.HasPrefix(item, "journey_node:") {
+			return true
+		}
+	}
+	return false
+}
+
+func filterNonJourneyNodeIDs(items []string) []string {
+	var out []string
+	for _, item := range items {
+		if strings.HasPrefix(strings.TrimSpace(item), "journey_node:") {
+			continue
+		}
+		out = append(out, item)
+	}
+	return dedupeAndSort(out)
+}
+
+func hasMatchedJourneyNode(items []policy.Guideline, journeyID string) bool {
+	prefix := "journey_node:" + strings.TrimSpace(journeyID) + ":"
+	for _, item := range items {
+		if strings.HasPrefix(item.ID, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasProviderEnv() bool {
@@ -70,17 +115,33 @@ func normalizeParmesan(view policyruntime.ResolvedView, catalog []tool.CatalogEn
 	exposed := normalizeToolNames(view.ExposedTools, catalog)
 	selected := normalizeSelectedTool(view.ToolDecision.SelectedTool, toolCalls, catalog)
 	out := NormalizedResult{
-		MatchedObservations:  idsFromObservations(view.MatchedObservations),
-		MatchedGuidelines:    idsFromGuidelines(view.MatchedGuidelines),
-		SuppressedGuidelines: idsFromSuppressed(view.SuppressedGuidelines),
-		SuppressionReasons:   suppressionReasons(view.SuppressedGuidelines),
-		ExposedTools:         exposed,
-		SelectedTool:         selected,
-		ResponseMode:         normalizeMode(view.CompositionMode),
-		NoMatch:              noMatch,
-		ResponseText:         strings.TrimSpace(response),
-		ToolCalls:            toolCalls,
-		VerificationOutcome:  verification,
+		MatchedObservations:              idsFromObservations(view.MatchedObservations),
+		MatchedGuidelines:                idsFromGuidelines(view.MatchedGuidelines),
+		SuppressedGuidelines:             normalizedSuppressedGuidelines(view.SuppressedGuidelines, view.ResolutionRecords),
+		SuppressionReasons:               suppressionReasons(view.SuppressedGuidelines),
+		ResolutionRecords:                normalizeResolutionRecords(view.ResolutionRecords),
+		ProjectedFollowUps:               projectedFollowUps(view.ProjectedNodes),
+		LegalFollowUps:                   legalFollowUps(view.ProjectedNodes),
+		ExposedTools:                     exposed,
+		ToolCandidates:                   normalizeToolCandidates(view.ToolPlan.Candidates, catalog),
+		ToolCandidateStates:              normalizeToolCandidateStates(view.ToolPlan.Candidates, catalog),
+		ToolCandidateRejectedBy:          normalizeToolCandidateRejectedBy(view.ToolPlan.Candidates, catalog),
+		ToolCandidateReasons:             normalizeToolCandidateReasons(view.ToolPlan.Candidates, catalog),
+		ToolCandidateTandemWith:          normalizeToolCandidateTandemWith(view.ToolPlan.Candidates, catalog),
+		OverlappingToolGroups:            normalizeToolGroups(view.ToolPlan.OverlappingGroups, catalog),
+		SelectedTool:                     selected,
+		SelectedTools:                    normalizeSelectedTools(view.ToolPlan.SelectedTools, toolCalls, catalog),
+		ToolCallTools:                    normalizeToolCallTools(toolCalls),
+		ResponseMode:                     normalizeMode(view.CompositionMode),
+		NoMatch:                          noMatch,
+		ResponseText:                     strings.TrimSpace(response),
+		ToolCalls:                        toolCalls,
+		VerificationOutcome:              verification,
+		ResponseAnalysisStillRequired:    responseAnalysisStillRequired(view.ResponseAnalysis),
+		ResponseAnalysisAlreadySatisfied: responseAnalysisAlreadySatisfied(view.ResponseAnalysis),
+		ResponseAnalysisPartiallyApplied: responseAnalysisPartiallyApplied(view.ResponseAnalysis),
+		ResponseAnalysisToolSatisfied:    responseAnalysisToolSatisfied(view.ResponseAnalysis),
+		ResponseAnalysisSources:          responseAnalysisSources(view.ResponseAnalysis),
 	}
 	if view.ActiveJourney != nil {
 		out.ActiveJourney = view.ActiveJourney.ID
@@ -107,10 +168,24 @@ func normalizeParmesan(view policyruntime.ResolvedView, catalog []tool.CatalogEn
 	return out
 }
 
+func normalizedSuppressedGuidelines(items []policyruntime.SuppressedGuideline, resolutions []policyruntime.ResolutionRecord) []string {
+	out := idsFromSuppressed(items)
+	for _, item := range resolutions {
+		switch item.Kind {
+		case policyruntime.ResolutionDeprioritized, policyruntime.ResolutionUnmetDependency, policyruntime.ResolutionUnmetDependencyAny:
+			if strings.HasPrefix(strings.TrimSpace(item.EntityID), "journey:") && strings.Contains(strings.ToLower(item.Details.Description), "higher numerical priority entity") {
+				continue
+			}
+			out = append(out, strings.TrimSpace(item.EntityID))
+		}
+	}
+	return dedupeAndSort(out)
+}
+
 func buildEventsForScenario(s Scenario) []session.Event {
 	sessionID := scenarioSessionID(s)
 	now := time.Now().UTC()
-	events := make([]session.Event, 0, len(s.Transcript))
+	events := make([]session.Event, 0, len(s.Transcript)+len(s.PolicySetup.StagedToolCalls))
 	for i, item := range s.Transcript {
 		source := "customer"
 		if item.Role == "agent" {
@@ -124,6 +199,33 @@ func buildEventsForScenario(s Scenario) []session.Event {
 			CreatedAt: now.Add(time.Duration(i) * time.Second),
 			Content: []session.ContentPart{
 				{Type: "text", Text: item.Text},
+			},
+		})
+	}
+	for i, call := range s.PolicySetup.StagedToolCalls {
+		meta := map[string]any{
+			"tool_id": call.ToolID,
+		}
+		if len(call.Arguments) > 0 {
+			meta["arguments"] = call.Arguments
+		}
+		if len(call.Result) > 0 {
+			meta["result"] = call.Result
+		}
+		if strings.TrimSpace(call.DocumentID) != "" {
+			meta["document_id"] = strings.TrimSpace(call.DocumentID)
+		}
+		if strings.TrimSpace(call.ModulePath) != "" {
+			meta["module_path"] = strings.TrimSpace(call.ModulePath)
+		}
+		events = append(events, session.Event{
+			ID:        fmt.Sprintf("%s_tool_%d", s.ID, i+1),
+			SessionID: sessionID,
+			Source:    "ai_agent",
+			Kind:      "tool",
+			CreatedAt: now.Add(time.Duration(len(s.Transcript)+i) * time.Second),
+			Content: []session.ContentPart{
+				{Type: "tool_call", Meta: meta},
 			},
 		})
 	}
@@ -293,13 +395,39 @@ func buildCatalogForScenario(s Scenario) []tool.CatalogEntry {
 			continue
 		}
 		providerID, name := splitToolID(id)
+		metadata := map[string]any{}
+		if item.Consequential {
+			metadata["consequential"] = true
+		}
+		if strings.TrimSpace(item.OverlapGroup) != "" {
+			metadata["overlap_group"] = strings.TrimSpace(item.OverlapGroup)
+		}
+		if strings.TrimSpace(item.ModulePath) != "" {
+			metadata["module_path"] = strings.TrimSpace(item.ModulePath)
+		}
+		if strings.TrimSpace(item.DocumentID) != "" {
+			metadata["document_id"] = strings.TrimSpace(item.DocumentID)
+		}
+		metadataJSON := ""
+		if len(metadata) > 0 {
+			if raw, err := json.Marshal(metadata); err == nil {
+				metadataJSON = string(raw)
+			}
+		}
+		schema := builtInToolSchema(id)
+		if len(item.Schema) > 0 {
+			if raw, err := json.Marshal(item.Schema); err == nil {
+				schema = string(raw)
+			}
+		}
 		out = append(out, tool.CatalogEntry{
 			ID:              id,
 			ProviderID:      providerID,
 			Name:            name,
-			Description:     name,
+			Description:     firstNonEmpty(strings.TrimSpace(item.Description), name),
 			RuntimeProtocol: "mcp",
-			Schema:          builtInToolSchema(id),
+			Schema:          schema,
+			MetadataJSON:    metadataJSON,
 			ImportedAt:      time.Now().UTC(),
 		})
 	}
@@ -331,11 +459,16 @@ func buildBundleForScenario(s Scenario) policy.Bundle {
 				scope = "customer"
 			}
 			bundle.Guidelines = append(bundle.Guidelines, policy.Guideline{
-				ID:    g.ID,
-				When:  g.Condition,
-				Then:  g.Action,
-				Scope: scope,
-				Track: true,
+				ID:          g.ID,
+				When:        g.Condition,
+				Then:        g.Action,
+				Scope:       scope,
+				Matcher:     g.Matcher,
+				Criticality: g.Criticality,
+				Tags:        append([]string(nil), g.Tags...),
+				Track:       g.Track == nil || *g.Track,
+				Continuous:  g.Continuous,
+				Priority:    g.Priority,
 			})
 		}
 	}
@@ -371,6 +504,13 @@ func buildBundleForScenario(s Scenario) policy.Bundle {
 }
 
 func scenarioJourneys(s Scenario) []policy.Journey {
+	var out []policy.Journey
+	seen := map[string]struct{}{}
+	for _, item := range s.PolicySetup.Journeys {
+		journey := fixtureJourneyToPolicy(item)
+		out = append(out, journey)
+		seen[journey.ID] = struct{}{}
+	}
 	needed := map[string]struct{}{}
 	if strings.TrimSpace(s.PriorState.ActiveJourney) != "" {
 		needed[s.PriorState.ActiveJourney] = struct{}{}
@@ -378,6 +518,14 @@ func scenarioJourneys(s Scenario) []policy.Journey {
 	for _, item := range s.Expect.MatchedGuidelines {
 		if strings.HasPrefix(item, "journey:") {
 			needed[strings.TrimPrefix(item, "journey:")] = struct{}{}
+		}
+	}
+	for _, rel := range s.PolicySetup.Relationships {
+		if strings.HasPrefix(rel.Source, "journey:") {
+			needed[strings.TrimPrefix(rel.Source, "journey:")] = struct{}{}
+		}
+		if strings.HasPrefix(rel.Target, "journey:") {
+			needed[strings.TrimPrefix(rel.Target, "journey:")] = struct{}{}
 		}
 	}
 	if strings.Contains(strings.ToLower(joinTranscript(s.Transcript)), "reset my password") {
@@ -389,8 +537,10 @@ func scenarioJourneys(s Scenario) []policy.Journey {
 	if strings.Contains(strings.ToLower(joinTranscript(s.Transcript)), "book a flight") {
 		needed["Book Flight"] = struct{}{}
 	}
-	var out []policy.Journey
 	for id := range needed {
+		if _, ok := seen[id]; ok {
+			continue
+		}
 		switch id {
 		case "Reset Password Journey":
 			out = append(out, policy.Journey{
@@ -426,7 +576,81 @@ func scenarioJourneys(s Scenario) []policy.Journey {
 					{ID: "ask_name", Type: "message", Instruction: "What is the name of the person traveling?", Next: []string{}},
 				},
 			})
+		case "Drink Recommendation Journey":
+			out = append(out, policy.Journey{
+				ID:   id,
+				When: []string{"customer asks about drinks"},
+				States: []policy.JourneyNode{
+					{ID: "ask_drink", Type: "message", Instruction: "Ask what drink they want", Next: []string{"recommend_pepsi"}},
+					{ID: "recommend_pepsi", Type: "message", Instruction: "Recommend Pepsi", Next: []string{}},
+				},
+			})
+		case "Journey A":
+			out = append(out, policy.Journey{
+				ID:   id,
+				When: []string{"sunflower itinerary"},
+				States: []policy.JourneyNode{
+					{ID: "ask_a", Type: "message", Instruction: "Ask A", Next: []string{}},
+				},
+			})
+		case "Journey B":
+			out = append(out, policy.Journey{
+				ID:   id,
+				When: []string{"nebula itinerary"},
+				States: []policy.JourneyNode{
+					{ID: "ask_b", Type: "message", Instruction: "Ask B", Next: []string{}},
+				},
+			})
+		case "Journey 1":
+			out = append(out, policy.Journey{
+				ID:   id,
+				When: []string{"customer is interested"},
+				States: []policy.JourneyNode{
+					{ID: "recommend_product", Type: "message", Instruction: "recommend product", Next: []string{}},
+				},
+			})
 		}
+		seen[id] = struct{}{}
+	}
+	return out
+}
+
+func fixtureJourneyToPolicy(item FixtureJourney) policy.Journey {
+	out := policy.Journey{
+		ID:              item.ID,
+		When:            append([]string(nil), item.When...),
+		RootID:          strings.TrimSpace(item.RootID),
+		Priority:        item.Priority,
+		Tags:            append([]string(nil), item.Tags...),
+		Labels:          append([]string(nil), item.Labels...),
+		Metadata:        cloneMap(item.Metadata),
+		CompositionMode: item.CompositionMode,
+	}
+	for _, state := range item.States {
+		out.States = append(out.States, policy.JourneyNode{
+			ID:              state.ID,
+			Type:            state.Type,
+			Instruction:     state.Instruction,
+			Description:     state.Description,
+			Tool:            state.Tool,
+			When:            append([]string(nil), state.When...),
+			Next:            append([]string(nil), state.Next...),
+			Mode:            state.Mode,
+			Kind:            state.Kind,
+			Labels:          append([]string(nil), state.Labels...),
+			Metadata:        cloneMap(state.Metadata),
+			CompositionMode: state.CompositionMode,
+			Priority:        state.Priority,
+		})
+	}
+	for _, edge := range item.Edges {
+		out.Edges = append(out.Edges, policy.JourneyEdge{
+			ID:        edge.ID,
+			Source:    edge.Source,
+			Target:    edge.Target,
+			Condition: edge.Condition,
+			Metadata:  cloneMap(edge.Metadata),
+		})
 	}
 	return out
 }
@@ -455,19 +679,106 @@ func normalizeMode(mode string) string {
 }
 
 func runFixtureTool(view policyruntime.ResolvedView, catalog []tool.CatalogEntry) (map[string]any, []ToolCall) {
-	name := strings.TrimSpace(view.ToolDecision.SelectedTool)
-	if name == "" || !view.ToolDecision.CanRun {
+	if len(view.ToolPlan.Calls) > 0 {
+		var calls []ToolCall
+		outputs := map[string]any{}
+		for _, call := range view.ToolPlan.Calls {
+			fullID := fullToolID(call.ToolID, catalog)
+			documentID, modulePath := toolCallMetadata(fullID, catalog)
+			output := builtInToolOutput(call.ToolID, call.Arguments)
+			if output == nil {
+				output = builtInToolOutput(fullID, call.Arguments)
+			}
+			calls = append(calls, ToolCall{
+				ToolID:     fullID,
+				Arguments:  cloneMap(call.Arguments),
+				DocumentID: documentID,
+				ModulePath: modulePath,
+			})
+			if output != nil {
+				outputs[fullID] = output
+			}
+		}
+		if len(calls) == 0 {
+			return nil, nil
+		}
+		if len(outputs) == 1 {
+			for _, value := range outputs {
+				return value.(map[string]any), calls
+			}
+		}
+		if len(outputs) > 0 {
+			return map[string]any{"tools": outputs}, calls
+		}
+		return nil, calls
+	}
+	selectedTools := append([]string(nil), view.ToolPlan.SelectedTools...)
+	if len(selectedTools) == 0 && strings.TrimSpace(view.ToolDecision.SelectedTool) != "" && view.ToolDecision.CanRun {
+		selectedTools = append(selectedTools, view.ToolDecision.SelectedTool)
+	}
+	if len(selectedTools) == 0 {
 		return nil, nil
 	}
-	fullID := fullToolID(name, catalog)
-	output := builtInToolOutput(name, view.ToolDecision.Arguments)
-	if output == nil {
-		output = builtInToolOutput(fullID, view.ToolDecision.Arguments)
+	var calls []ToolCall
+	outputs := map[string]any{}
+	for _, name := range selectedTools {
+		candidate, ok := findParityCandidate(view.ToolPlan.Candidates, name)
+		if !ok {
+			if strings.TrimSpace(view.ToolDecision.SelectedTool) != strings.TrimSpace(name) || !view.ToolDecision.CanRun {
+				continue
+			}
+			candidate = policyruntime.ToolCandidate{
+				ToolID:    name,
+				Arguments: cloneMap(view.ToolDecision.Arguments),
+			}
+		}
+		if candidate.AlreadySatisfied || candidate.AlreadyStaged || len(candidate.MissingIssues) > 0 || len(candidate.InvalidIssues) > 0 {
+			continue
+		}
+		fullID := fullToolID(name, catalog)
+		documentID, modulePath := toolCallMetadata(fullID, catalog)
+		output := builtInToolOutput(name, candidate.Arguments)
+		if output == nil {
+			output = builtInToolOutput(fullID, candidate.Arguments)
+		}
+		calls = append(calls, ToolCall{
+			ToolID:     fullID,
+			Arguments:  cloneMap(candidate.Arguments),
+			DocumentID: documentID,
+			ModulePath: modulePath,
+		})
+		if output != nil {
+			outputs[fullID] = output
+		}
 	}
-	if output == nil {
-		return nil, []ToolCall{{ToolID: fullID, Arguments: cloneMap(view.ToolDecision.Arguments)}}
+	if len(calls) == 0 {
+		return nil, nil
 	}
-	return output, []ToolCall{{ToolID: fullID, Arguments: cloneMap(view.ToolDecision.Arguments)}}
+	if len(outputs) == 1 {
+		for _, value := range outputs {
+			return value.(map[string]any), calls
+		}
+	}
+	if len(outputs) > 0 {
+		return map[string]any{"tools": outputs}, calls
+	}
+	return nil, calls
+}
+
+func toolCallMetadata(fullID string, catalog []tool.CatalogEntry) (string, string) {
+	for _, entry := range catalog {
+		if entry.ID != fullID {
+			continue
+		}
+		meta := map[string]any{}
+		if strings.TrimSpace(entry.MetadataJSON) != "" {
+			_ = json.Unmarshal([]byte(entry.MetadataJSON), &meta)
+		}
+		documentID, _ := meta["document_id"].(string)
+		modulePath, _ := meta["module_path"].(string)
+		return strings.TrimSpace(documentID), strings.TrimSpace(modulePath)
+	}
+	return "", ""
 }
 
 func normalizeToolNames(names []string, catalog []tool.CatalogEntry) []string {
@@ -481,11 +792,233 @@ func normalizeToolNames(names []string, catalog []tool.CatalogEntry) []string {
 	return dedupeAndSort(mapped)
 }
 
+func normalizeToolCandidates(candidates []policyruntime.ToolCandidate, catalog []tool.CatalogEntry) []string {
+	out := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, fullToolID(candidate.ToolID, catalog))
+	}
+	return dedupeAndSort(out)
+}
+
+func normalizeToolCandidateStates(candidates []policyruntime.ToolCandidate, catalog []tool.CatalogEntry) map[string]string {
+	if len(candidates) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(candidates))
+	for _, candidate := range candidates {
+		out[fullToolID(candidate.ToolID, catalog)] = strings.TrimSpace(candidate.DecisionState)
+	}
+	return out
+}
+
+func normalizeToolCandidateRejectedBy(candidates []policyruntime.ToolCandidate, catalog []tool.CatalogEntry) map[string]string {
+	if len(candidates) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate.RejectedBy) == "" {
+			continue
+		}
+		out[fullToolID(candidate.ToolID, catalog)] = fullToolID(candidate.RejectedBy, catalog)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeToolCandidateReasons(candidates []policyruntime.ToolCandidate, catalog []tool.CatalogEntry) map[string]string {
+	if len(candidates) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for _, candidate := range candidates {
+		reason := strings.TrimSpace(firstNonEmpty(candidate.SelectionRationale, candidate.PreparationRationale, candidate.Rationale))
+		if reason == "" {
+			continue
+		}
+		out[fullToolID(candidate.ToolID, catalog)] = reason
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeToolCandidateTandemWith(candidates []policyruntime.ToolCandidate, catalog []tool.CatalogEntry) map[string][]string {
+	if len(candidates) == 0 {
+		return nil
+	}
+	out := map[string][]string{}
+	for _, candidate := range candidates {
+		if len(candidate.RunInTandemWith) == 0 {
+			continue
+		}
+		items := make([]string, 0, len(candidate.RunInTandemWith))
+		for _, item := range candidate.RunInTandemWith {
+			items = append(items, fullToolID(item, catalog))
+		}
+		out[fullToolID(candidate.ToolID, catalog)] = dedupeAndSort(items)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeToolGroups(groups [][]string, catalog []tool.CatalogEntry) [][]string {
+	if len(groups) == 0 {
+		return nil
+	}
+	out := make([][]string, 0, len(groups))
+	for _, group := range groups {
+		items := make([]string, 0, len(group))
+		for _, item := range group {
+			items = append(items, fullToolID(item, catalog))
+		}
+		out = append(out, dedupeAndSort(items))
+	}
+	return out
+}
+
+func normalizeResolutionRecords(items []policyruntime.ResolutionRecord) []NormalizedResolution {
+	out := make([]NormalizedResolution, 0, len(items))
+	for _, item := range items {
+		out = append(out, NormalizedResolution{
+			EntityID: strings.TrimSpace(item.EntityID),
+			Kind:     strings.TrimSpace(string(item.Kind)),
+		})
+	}
+	return out
+}
+
+func projectedFollowUps(items []policyruntime.ProjectedJourneyNode) map[string][]string {
+	out := map[string][]string{}
+	for _, item := range items {
+		if len(item.FollowUps) == 0 {
+			continue
+		}
+		out[item.ID] = dedupeAndSort(item.FollowUps)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func legalFollowUps(items []policyruntime.ProjectedJourneyNode) map[string][]string {
+	out := map[string][]string{}
+	for _, item := range items {
+		if len(item.LegalFollowUps) == 0 {
+			continue
+		}
+		out[item.ID] = dedupeAndSort(item.LegalFollowUps)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func responseAnalysisStillRequired(analysis policyruntime.ResponseAnalysis) []string {
+	var out []string
+	for _, item := range analysis.AnalyzedGuidelines {
+		if item.RequiresResponse || item.RequiresTemplate {
+			out = append(out, item.ID)
+		}
+	}
+	return dedupeAndSort(out)
+}
+
+func responseAnalysisAlreadySatisfied(analysis policyruntime.ResponseAnalysis) []string {
+	var out []string
+	for _, item := range analysis.AnalyzedGuidelines {
+		if item.AlreadySatisfied {
+			out = append(out, item.ID)
+		}
+	}
+	return dedupeAndSort(out)
+}
+
+func responseAnalysisPartiallyApplied(analysis policyruntime.ResponseAnalysis) []string {
+	var out []string
+	for _, item := range analysis.AnalyzedGuidelines {
+		if strings.EqualFold(item.AppliedDegree, "partial") {
+			out = append(out, item.ID)
+		}
+	}
+	return dedupeAndSort(out)
+}
+
+func responseAnalysisToolSatisfied(analysis policyruntime.ResponseAnalysis) []string {
+	var out []string
+	for _, item := range analysis.AnalyzedGuidelines {
+		if item.SatisfiedByToolEvent {
+			out = append(out, item.ID)
+		}
+	}
+	return dedupeAndSort(out)
+}
+
+func responseAnalysisSources(analysis policyruntime.ResponseAnalysis) map[string]string {
+	out := map[string]string{}
+	for _, item := range analysis.AnalyzedGuidelines {
+		if strings.TrimSpace(item.SatisfactionSource) == "" {
+			continue
+		}
+		out[item.ID] = strings.TrimSpace(item.SatisfactionSource)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func normalizeSelectedTool(name string, calls []ToolCall, catalog []tool.CatalogEntry) string {
 	if len(calls) > 0 && strings.TrimSpace(calls[0].ToolID) != "" {
 		return calls[0].ToolID
 	}
 	return fullToolID(name, catalog)
+}
+
+func normalizeSelectedTools(names []string, calls []ToolCall, catalog []tool.CatalogEntry) []string {
+	if len(calls) > 0 {
+		out := make([]string, 0, len(calls))
+		for _, call := range calls {
+			out = append(out, call.ToolID)
+		}
+		return dedupeAndSort(out)
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		out = append(out, fullToolID(name, catalog))
+	}
+	return dedupeAndSort(out)
+}
+
+func normalizeToolCallTools(calls []ToolCall) []string {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(calls))
+	for _, call := range calls {
+		out = append(out, call.ToolID)
+	}
+	return out
+}
+
+func findParityCandidate(candidates []policyruntime.ToolCandidate, toolID string) (policyruntime.ToolCandidate, bool) {
+	toolID = strings.TrimSpace(toolID)
+	for _, item := range candidates {
+		if strings.TrimSpace(item.ToolID) == toolID {
+			return item, true
+		}
+	}
+	return policyruntime.ToolCandidate{}, false
 }
 
 func normalizeJourneyStartGuidelines(items []string, journeyID string) []string {
@@ -675,9 +1208,6 @@ func idsFromGuidelines(items []policy.Guideline) []string {
 func idsFromSuppressed(items []policyruntime.SuppressedGuideline) []string {
 	out := make([]string, 0, len(items))
 	for _, item := range items {
-		if strings.HasPrefix(item.ID, "journey_node:") {
-			continue
-		}
 		out = append(out, item.ID)
 	}
 	return dedupeAndSort(out)

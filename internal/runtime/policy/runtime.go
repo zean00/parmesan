@@ -38,16 +38,25 @@ func ResolveWithRouter(ctx context.Context, router *model.Router, events []sessi
 		projected := projectedNodeGuideline(*state.activeJourney, *state.activeJourneyState)
 		if strategy := resolver.Resolve(projected); strategy != nil {
 			appendProjectedGuideline(ctx, state, strategy, projected)
+			state.matchedGuidelines = matchedGuidelinesFromMatches(state.bundle, state.guidelineMatches, state.activeJourney)
 			state.customerDecisions, state.matchedGuidelines = runCustomerDependentARQ(state.context, state.matchedGuidelines)
 			state.reapplyDecisions, state.matchedGuidelines = runPreviouslyAppliedARQ(state.context, state.matchedGuidelines, state.guidelineMatches)
-			state.matchedGuidelines, state.suppressedGuidelines, state.disambiguationPrompt = resolveRelationships(state.bundle, state.context, state.matchedObservations, state.guidelineMatches, state.matchedGuidelines, state.activeJourney)
+			resolved := resolveRelationships(state.bundle, state.context, state.matchedObservations, state.guidelineMatches, state.matchedGuidelines, state.activeJourney, state.activeJourneyState)
+			state.matchedGuidelines = resolved.guidelines
+			state.suppressedGuidelines = resolved.suppressed
+			state.disambiguationPrompt = resolved.disambiguation
+			state.resolutionRecords = resolved.resolutions
+			state.activeJourney = resolved.activeJourney
+			if state.activeJourney == nil {
+				state.activeJourneyState = nil
+			}
 			state.disambiguationPrompt = runDisambiguationARQ(ctx, state.router, state.context, state.matchedGuidelines, state.disambiguationPrompt)
 			state.candidateTemplates = collectTemplates(state.bundle, state.activeJourney, state.activeJourneyState, state.context)
-			state.responseAnalysis = analyzeResponsePlan(ctx, state.router, state.context, state.matchedGuidelines, state.candidateTemplates, modeOrDefault(state.bundle.CompositionMode, state.candidateTemplates), state.bundle.NoMatch)
+			state.responseAnalysis = analyzeResponsePlan(ctx, state.router, state.context, responseAnalysisGuidelines(state.bundle, state.context, state.matchedGuidelines), state.candidateTemplates, modeOrDefault(state.bundle.CompositionMode, state.candidateTemplates), state.bundle.NoMatch)
 		}
 	}
 	state.exposedTools, state.toolApprovals = resolveToolExposure(bundle.GuidelineToolAssociations, state.matchedObservations, state.matchedGuidelines, state.activeJourneyState, bundle.ToolPolicies, catalog)
-	state.toolDecision = runToolDecisionARQ(ctx, router, matchCtx, state.activeJourney, state.activeJourneyState, state.matchedGuidelines, state.exposedTools, state.toolApprovals, catalog)
+	state.toolPlan, state.toolDecision = buildToolPlan(ctx, router, matchCtx, state.activeJourney, state.activeJourneyState, state.matchedGuidelines, state.exposedTools, state.toolApprovals, bundle.Relationships, catalog)
 
 	mode := strings.ToLower(strings.TrimSpace(bundle.CompositionMode))
 	if mode == "" {
@@ -58,6 +67,13 @@ func ResolveWithRouter(ctx context.Context, router *model.Router, events []sessi
 	}
 
 	arqs := arqsFromState(state)
+	arqs = append(arqs, ARQResult{Name: "tool_plan", Version: promptVersion("tool_plan"), Output: map[string]any{
+		"candidates":         state.toolPlan.Candidates,
+		"selected_tool":      state.toolPlan.SelectedTool,
+		"selected_tools":     state.toolPlan.SelectedTools,
+		"overlapping_groups": state.toolPlan.OverlappingGroups,
+		"rationale":          state.toolPlan.Rationale,
+	}})
 	arqs = append(arqs, ARQResult{Name: "tool_decision", Version: promptVersion("tool_decision"), Output: map[string]any{
 		"selected_tool":     state.toolDecision.SelectedTool,
 		"arguments":         state.toolDecision.Arguments,
@@ -71,11 +87,17 @@ func ResolveWithRouter(ctx context.Context, router *model.Router, events []sessi
 		"rationale":         state.toolDecision.Rationale,
 	}})
 	state.batchResults = append(state.batchResults, BatchResult{
+		Name:          "tool_plan",
+		Strategy:      "generic",
+		PromptVersion: promptVersion("tool_plan"),
+		Output:        arqs[len(arqs)-2].Output,
+	}, BatchResult{
 		Name:          "tool_decision",
 		Strategy:      "generic",
 		PromptVersion: promptVersion("tool_decision"),
 		Output:        arqs[len(arqs)-1].Output,
 	})
+	state.promptSetVersions["tool_plan"] = promptVersion("tool_plan")
 	state.promptSetVersions["tool_decision"] = promptVersion("tool_decision")
 
 	return ResolvedView{
@@ -94,8 +116,10 @@ func ResolveWithRouter(ctx context.Context, router *model.Router, events []sessi
 		JourneyInstance:      state.journeyInstance,
 		ProjectedNodes:       state.projectedNodes,
 		JourneyDecision:      state.journeyDecision,
+		ResolutionRecords:    state.resolutionRecords,
 		ExposedTools:         state.exposedTools,
 		ToolApprovals:        state.toolApprovals,
+		ToolPlan:             state.toolPlan,
 		ToolDecision:         state.toolDecision,
 		ResponseAnalysis:     state.responseAnalysis,
 		CandidateTemplates:   state.candidateTemplates,
@@ -143,6 +167,29 @@ func VerifyDraft(view ResolvedView, draft string, toolOutput map[string]any) Ver
 				Replacement: strictNoMatchText(view.NoMatch),
 			}
 		}
+	}
+	for _, item := range view.ResponseAnalysis.AnalyzedGuidelines {
+		if !item.RequiresTemplate {
+			continue
+		}
+		if strings.TrimSpace(view.ResponseAnalysis.RecommendedTemplate) != "" && normalizeText(draft) != normalizeText(view.ResponseAnalysis.RecommendedTemplate) {
+			return VerificationResult{
+				Status:      "revise",
+				Reasons:     []string{"response_analysis_template_required"},
+				Replacement: view.ResponseAnalysis.RecommendedTemplate,
+			}
+		}
+		if strings.EqualFold(view.CompositionMode, "strict") && strings.TrimSpace(view.ResponseAnalysis.RecommendedTemplate) == "" && view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
+			expected := strings.TrimSpace(view.ActiveJourneyState.Instruction)
+			if normalizeText(draft) != normalizeText(expected) {
+				return VerificationResult{
+					Status:      "revise",
+					Reasons:     []string{"response_analysis_journey_instruction_required"},
+					Replacement: expected,
+				}
+			}
+		}
+		break
 	}
 	if view.ResponseAnalysis.NeedsStrictMode && !strings.EqualFold(view.CompositionMode, "strict") {
 		return VerificationResult{
@@ -217,7 +264,7 @@ func appendProjectedGuideline(ctx context.Context, state *matchingState, strateg
 				previousMatches = append([]Match(nil), state.guidelineMatches...)
 				previousGuidelines = append([]policy.Guideline(nil), state.matchedGuidelines...)
 			}
-			recordBatchResult(state, batch.Name(), batch.Strategy(), batch.PromptVersion(), state)
+			recordBatchResult(state, batch.Name(), batch.Strategy(), batch.PromptVersion(), 0, 1, 0, state)
 		}
 	}
 }
@@ -246,47 +293,205 @@ func clonePromptVersions(input map[string]string) map[string]string {
 }
 
 func analyzeResponsePlan(ctx context.Context, router *model.Router, matchCtx MatchingContext, guidelines []policy.Guideline, templates []policy.Template, mode string, noMatch string) ResponseAnalysis {
-	analysis := ResponseAnalysis{}
-	for _, guideline := range guidelines {
-		item := AnalyzedGuideline{
-			ID:               guideline.ID,
-			RequiresResponse: strings.TrimSpace(guideline.Then) != "",
-			Rationale:        "matched guideline still influences the pending response",
-		}
-		if containsEquivalentInstruction(matchCtx.AppliedInstructions, guideline.Then) {
-			item.AlreadySatisfied = true
-			item.RequiresResponse = false
-			item.Rationale = "guideline action appears satisfied by a previous assistant turn"
-		}
-		if strings.EqualFold(mode, "strict") && len(templates) == 0 && noMatch != "" {
-			item.RequiresTemplate = true
-		}
-		analysis.AnalyzedGuidelines = append(analysis.AnalyzedGuidelines, item)
+	analysis := ResponseAnalysis{
+		AnalyzedGuidelines: baselineResponseAnalysis(matchCtx, guidelines, templates, mode),
 	}
 	if strings.EqualFold(mode, "strict") && len(templates) > 0 {
 		analysis.RecommendedTemplate = templates[0].Text
 		analysis.Rationale = "strict mode prefers the highest-ranked approved template"
 	}
 	if router != nil && len(guidelines) > 0 && (len(templates) > 0 || strings.EqualFold(mode, "strict") || len(matchCtx.AssistantHistory) > 0) {
-		var structured struct {
+		type structuredResponseAnalysisBatch struct {
 			NeedsRevision       bool                `json:"needs_revision"`
 			NeedsStrictMode     bool                `json:"needs_strict_mode"`
 			RecommendedTemplate string              `json:"recommended_template"`
 			Rationale           string              `json:"rationale"`
 			Analyzed            []AnalyzedGuideline `json:"analyzed_guidelines"`
 		}
-		prompt := buildResponseAnalysisPrompt(matchCtx, guidelines, templates, mode, noMatch)
-		if generateStructuredWithRetry(ctx, router, prompt, &structured) {
-			if len(structured.Analyzed) > 0 {
-				analysis.AnalyzedGuidelines = structured.Analyzed
+		results, ok := processBatchesInParallel(ctx, chunkGeneric(guidelines, 5), func(ctx context.Context, batch []policy.Guideline) (structuredResponseAnalysisBatch, bool) {
+			var structured structuredResponseAnalysisBatch
+			prompt := buildResponseAnalysisPrompt(matchCtx, batch, templates, mode, noMatch)
+			if !generateStructuredWithRetry(ctx, router, prompt, &structured) {
+				return structuredResponseAnalysisBatch{}, false
 			}
-			analysis.NeedsRevision = structured.NeedsRevision
-			analysis.NeedsStrictMode = structured.NeedsStrictMode
-			analysis.RecommendedTemplate = firstNonEmpty(structured.RecommendedTemplate, analysis.RecommendedTemplate)
-			analysis.Rationale = firstNonEmpty(structured.Rationale, analysis.Rationale)
+			return structured, true
+		})
+		if ok {
+			for _, structured := range results {
+				if len(structured.Analyzed) > 0 {
+					analysis.AnalyzedGuidelines = mergeStructuredResponseAnalysis(analysis.AnalyzedGuidelines, structured.Analyzed)
+				}
+				analysis.NeedsRevision = analysis.NeedsRevision || structured.NeedsRevision
+				analysis.NeedsStrictMode = analysis.NeedsStrictMode || structured.NeedsStrictMode
+				analysis.RecommendedTemplate = firstNonEmpty(structured.RecommendedTemplate, analysis.RecommendedTemplate)
+				analysis.Rationale = firstNonEmpty(structured.Rationale, analysis.Rationale)
+			}
+		}
+	}
+	for _, item := range analysis.AnalyzedGuidelines {
+		if item.RequiresTemplate {
+			analysis.NeedsStrictMode = true
+			if analysis.RecommendedTemplate == "" && len(templates) > 0 {
+				analysis.RecommendedTemplate = templates[0].Text
+			}
+			if analysis.Rationale == "" {
+				analysis.Rationale = "analyzed guidelines require a template-backed response"
+			}
+			break
+		}
+	}
+	if strings.EqualFold(mode, "strict") && len(templates) == 0 && noMatch != "" {
+		allSatisfied := true
+		for _, item := range analysis.AnalyzedGuidelines {
+			if item.RequiresResponse {
+				allSatisfied = false
+				break
+			}
+		}
+		if !allSatisfied {
+			analysis.NeedsStrictMode = true
+			if analysis.Rationale == "" {
+				analysis.Rationale = "strict mode has no template, so the runtime must fall back to the configured strict response path"
+			}
 		}
 	}
 	return analysis
+}
+
+func baselineResponseAnalysis(matchCtx MatchingContext, guidelines []policy.Guideline, templates []policy.Template, mode string) []AnalyzedGuideline {
+	out := make([]AnalyzedGuideline, 0, len(guidelines))
+	for _, guideline := range guidelines {
+		item := AnalyzedGuideline{
+			ID:               guideline.ID,
+			AppliedDegree:    "none",
+			RequiresResponse: strings.TrimSpace(guideline.Then) != "",
+			Rationale:        "matched guideline still influences the pending response",
+		}
+		appliedDegree, source, satisfiedByTool, rationale := guidelineApplicationAssessment(matchCtx, guideline)
+		item.AppliedDegree = appliedDegree
+		item.SatisfactionSource = source
+		item.SatisfiedByToolEvent = satisfiedByTool
+		if rationale != "" {
+			item.Rationale = rationale
+		}
+		if appliedDegree == "full" {
+			item.AlreadySatisfied = true
+			item.RequiresResponse = false
+		} else if appliedDegree == "partial" {
+			item.RequiresResponse = true
+			if item.Rationale == "" {
+				item.Rationale = "guideline action appears only partially handled and still needs a follow-up response"
+			}
+		}
+		if strings.EqualFold(mode, "strict") && len(templates) > 0 && item.RequiresResponse {
+			item.RequiresTemplate = true
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func responseAnalysisGuidelines(bundle policy.Bundle, matchCtx MatchingContext, matched []policy.Guideline) []policy.Guideline {
+	out := append([]policy.Guideline(nil), matched...)
+	seen := make(map[string]struct{}, len(out))
+	for _, item := range out {
+		seen[item.ID] = struct{}{}
+	}
+	for _, item := range bundle.Guidelines {
+		if _, ok := seen[item.ID]; ok {
+			continue
+		}
+		if !item.Track {
+			continue
+		}
+		if degree, _, _, _ := guidelineApplicationAssessment(matchCtx, item); degree == "none" {
+			continue
+		}
+		out = append(out, item)
+		seen[item.ID] = struct{}{}
+	}
+	return out
+}
+
+func mergeStructuredResponseAnalysis(base []AnalyzedGuideline, structured []AnalyzedGuideline) []AnalyzedGuideline {
+	if len(structured) == 0 {
+		return base
+	}
+	baseByID := make(map[string]AnalyzedGuideline, len(base))
+	for _, item := range base {
+		baseByID[item.ID] = item
+	}
+	merged := make([]AnalyzedGuideline, 0, len(structured))
+	for _, item := range structured {
+		if prior, ok := baseByID[item.ID]; ok && prior.SatisfiedByToolEvent {
+			item.SatisfiedByToolEvent = true
+			item.AlreadySatisfied = true
+			item.SatisfactionSource = firstNonEmpty(prior.SatisfactionSource, "tool_event")
+			item.AppliedDegree = firstNonEmpty(prior.AppliedDegree, "full")
+			item.RequiresResponse = false
+			item.Rationale = firstNonEmpty(item.Rationale, prior.Rationale)
+		} else if prior, ok := baseByID[item.ID]; ok {
+			item.SatisfactionSource = firstNonEmpty(item.SatisfactionSource, prior.SatisfactionSource)
+			item.AppliedDegree = strongerAppliedDegree(item.AppliedDegree, prior.AppliedDegree)
+			if item.AppliedDegree == "full" {
+				item.AlreadySatisfied = true
+				item.RequiresResponse = false
+			} else if item.AppliedDegree == "partial" && !item.AlreadySatisfied {
+				item.RequiresResponse = true
+			}
+		}
+		merged = append(merged, item)
+		delete(baseByID, item.ID)
+	}
+	for _, item := range base {
+		if _, ok := baseByID[item.ID]; ok {
+			merged = append(merged, item)
+		}
+	}
+	return merged
+}
+
+func guidelineLikelySatisfiedByToolHistory(matchCtx MatchingContext, guideline policy.Guideline) bool {
+	degree, _, _, _ := guidelineApplicationAssessment(matchCtx, guideline)
+	return degree == "full"
+}
+
+func guidelineLikelySatisfiedByAssistantHistory(matchCtx MatchingContext, guideline policy.Guideline) bool {
+	degree, source, _, _ := guidelineApplicationAssessment(matchCtx, guideline)
+	return degree == "full" && source == "assistant_message"
+}
+
+func guidelineSatisfiedByStagedToolCalls(calls []StagedToolCall, guideline policy.Guideline) bool {
+	then := strings.ToLower(strings.TrimSpace(guideline.Then))
+	if then == "" {
+		return false
+	}
+	for _, call := range calls {
+		summary := strings.ToLower(summarizeStagedToolCall(call))
+		switch {
+		case strings.Contains(then, "check the return status"):
+			if strings.Contains(summary, "return") || strings.Contains(summary, "status") {
+				return true
+			}
+		case strings.Contains(then, "check the order status"):
+			if strings.Contains(summary, "order") || strings.Contains(summary, "status") {
+				return true
+			}
+		case strings.Contains(then, "offer a discount"):
+			if strings.Contains(summary, "discount") {
+				return true
+			}
+		case strings.Contains(then, "lock the card"):
+			if strings.Contains(summary, "lock_card") || strings.Contains(summary, "locked") {
+				return true
+			}
+		default:
+			if containsAllKeywords(summary, guideline.Then) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func AdvanceJourney(instance *journey.Instance, activeState *policy.JourneyNode, activeJourney *policy.Journey, decision JourneyDecision) *journey.Instance {
@@ -302,12 +507,18 @@ func AdvanceJourney(instance *journey.Instance, activeState *policy.JourneyNode,
 	if strings.EqualFold(decision.Action, "backtrack") && strings.TrimSpace(decision.BacktrackTo) != "" {
 		instance.StateID = decision.BacktrackTo
 		instance.Path = trimJourneyPath(instance.Path, decision.BacktrackTo)
+		if nextState := strings.TrimSpace(decision.NextState); nextState != "" && nextState != decision.BacktrackTo {
+			if branch := journeyPathBetween(*activeJourney, decision.BacktrackTo, nextState); len(branch) > 0 {
+				instance.Path = append(instance.Path, branch...)
+				instance.StateID = nextState
+			}
+		}
 		instance.UpdatedAt = now
 		return instance
 	}
 	nextState := strings.TrimSpace(decision.NextState)
 	if nextState == "" {
-		if len(activeState.Next) == 0 {
+		if len(journeyNextStateIDs(*activeJourney, activeState.ID)) == 0 {
 			instance.Status = journey.StatusCompleted
 			instance.UpdatedAt = now
 			return instance
@@ -329,6 +540,12 @@ func buildMatchingContext(events []session.Event) MatchingContext {
 			ctx.OccurredAt = event.CreatedAt
 		}
 		for _, part := range event.Content {
+			if call, ok := stagedToolCallFromPart(event, part); ok {
+				ctx.StagedToolCalls = append(ctx.StagedToolCalls, call)
+				if summary := summarizeStagedToolCall(call); strings.TrimSpace(summary) != "" {
+					ctx.StagedToolText = append(ctx.StagedToolText, summary)
+				}
+			}
 			if part.Type != "text" || strings.TrimSpace(part.Text) == "" {
 				continue
 			}
@@ -352,6 +569,7 @@ func buildMatchingContext(events []session.Event) MatchingContext {
 	}
 	segments := append([]string(nil), ctx.CustomerHistory...)
 	segments = append(segments, ctx.AssistantHistory...)
+	segments = append(segments, ctx.StagedToolText...)
 	ctx.ConversationText = strings.Join(segments, " ")
 	for id := range applied {
 		ctx.AppliedGuidelines = append(ctx.AppliedGuidelines, id)
@@ -360,12 +578,93 @@ func buildMatchingContext(events []session.Event) MatchingContext {
 	return ctx
 }
 
+func stagedToolCallFromPart(event session.Event, part session.ContentPart) (StagedToolCall, bool) {
+	if strings.TrimSpace(event.Kind) != "tool" {
+		return StagedToolCall{}, false
+	}
+	meta := part.Meta
+	if meta == nil {
+		return StagedToolCall{}, false
+	}
+	toolID := strings.TrimSpace(fmt.Sprint(meta["tool_id"]))
+	if toolID == "" {
+		return StagedToolCall{}, false
+	}
+	call := StagedToolCall{
+		ToolID:     toolID,
+		Arguments:  mapValue(meta["arguments"]),
+		Result:     mapValue(meta["result"]),
+		DocumentID: strings.TrimSpace(fmt.Sprint(meta["document_id"])),
+		ModulePath: strings.TrimSpace(fmt.Sprint(meta["module_path"])),
+	}
+	return call, true
+}
+
+func mapValue(v any) map[string]any {
+	if v == nil {
+		return nil
+	}
+	if out, ok := v.(map[string]any); ok {
+		return out
+	}
+	return nil
+}
+
+func summarizeStagedToolCall(call StagedToolCall) string {
+	parts := []string{"tool", call.ToolID}
+	if len(call.Arguments) > 0 {
+		parts = append(parts, "arguments", summarizeMap(call.Arguments))
+	}
+	if len(call.Result) > 0 {
+		parts = append(parts, "result", summarizeMap(call.Result))
+		if ageText := stagedToolAgeText(call); ageText != "" {
+			parts = append(parts, ageText)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, " "))
+}
+
+func stagedToolAgeText(call StagedToolCall) string {
+	if !strings.Contains(strings.ToLower(call.ToolID), "age") {
+		return ""
+	}
+	value, ok := call.Result["data"]
+	if !ok {
+		return ""
+	}
+	switch item := value.(type) {
+	case int:
+		return fmt.Sprintf("age %d", item)
+	case int64:
+		return fmt.Sprintf("age %d", item)
+	case float64:
+		if item > 0 && item < 130 {
+			return fmt.Sprintf("age %d", int(item))
+		}
+	case string:
+		if age, err := strconv.Atoi(strings.TrimSpace(item)); err == nil && age > 0 && age < 130 {
+			return fmt.Sprintf("age %d", age)
+		}
+	}
+	return ""
+}
+
+func summarizeMap(value map[string]any) string {
+	if len(value) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	text := strings.TrimSpace(string(raw))
+	replacer := strings.NewReplacer("{", " ", "}", " ", "[", " ", "]", " ", "\"", " ", ":", " ")
+	return strings.Join(strings.Fields(replacer.Replace(text)), " ")
+}
+
 func runPolicyAttentionARQ(ctx MatchingContext, bundle policy.Bundle, projected []ProjectedJourneyNode) PolicyAttention {
 	out := PolicyAttention{}
-	source := ctx.LatestCustomerText
-	if strings.TrimSpace(source) == "" {
-		source = ctx.ConversationText
-	}
+	source := matchingSource(ctx)
 	for _, item := range bundle.Observations {
 		if scoreCondition(item.When, source) > 0 {
 			out.ContextSignals = append(out.ContextSignals, item.ID)
@@ -405,10 +704,7 @@ func splitLowCriticalityGuidelines(items []policy.Guideline) ([]policy.Guideline
 func runObservationARQ(ctx context.Context, router *model.Router, matchCtx MatchingContext, items []policy.Observation) ([]Match, []policy.Observation) {
 	var matches []Match
 	var out []policy.Observation
-	source := matchCtx.LatestCustomerText
-	if strings.TrimSpace(source) == "" {
-		source = matchCtx.ConversationText
-	}
+	source := matchingSource(matchCtx)
 	if router != nil && len(items) > 0 {
 		index := map[string]policy.Observation{}
 		adapted := make([]policy.Observation, 0, len(items))
@@ -416,7 +712,11 @@ func runObservationARQ(ctx context.Context, router *model.Router, matchCtx Match
 			index[item.ID] = item
 			adapted = append(adapted, item)
 		}
-		for _, batch := range chunkGeneric(adapted, defaultARQBatchSize) {
+		type observationBatch struct {
+			Matches []Match
+			Items   []policy.Observation
+		}
+		results, ok := processBatchesInParallel(ctx, chunkGeneric(adapted, defaultARQBatchSize), func(ctx context.Context, batch []policy.Observation) (observationBatch, bool) {
 			var structured struct {
 				Checks []struct {
 					ID        string `json:"id"`
@@ -426,19 +726,28 @@ func runObservationARQ(ctx context.Context, router *model.Router, matchCtx Match
 			}
 			prompt := buildObservationPrompt(matchCtx, batch)
 			if !generateStructuredWithRetry(ctx, router, prompt, &structured) {
-				matches = nil
-				out = nil
-				break
+				return observationBatch{}, false
 			}
+			var result observationBatch
 			for _, check := range structured.Checks {
 				item, ok := index[check.ID]
 				if !ok || !check.Applies {
 					continue
 				}
 				score := scoreCondition(item.When, source)
-				matches = append(matches, Match{ID: item.ID, Kind: "observation", Score: float64(maxInt(score, 1) + item.Priority), Rationale: firstNonEmpty(check.Rationale, "structured match")})
-				out = append(out, item)
+				result.Matches = append(result.Matches, Match{ID: item.ID, Kind: "observation", Score: float64(maxInt(score, 1) + item.Priority), Rationale: firstNonEmpty(check.Rationale, "structured match")})
+				result.Items = append(result.Items, item)
 			}
+			return result, true
+		})
+		if ok {
+			for _, result := range results {
+				matches = append(matches, result.Matches...)
+				out = append(out, result.Items...)
+			}
+		} else {
+			matches = nil
+			out = nil
 		}
 		if len(matches) > 0 || len(out) > 0 {
 			sortMatches(matches)
@@ -467,10 +776,7 @@ func runObservationARQ(ctx context.Context, router *model.Router, matchCtx Match
 func runActionableARQ(ctx context.Context, router *model.Router, matchCtx MatchingContext, items []policy.Guideline) ([]Match, []policy.Guideline) {
 	var matches []Match
 	var out []policy.Guideline
-	source := matchCtx.LatestCustomerText
-	if strings.TrimSpace(source) == "" {
-		source = matchCtx.ConversationText
-	}
+	source := matchingSource(matchCtx)
 	if router != nil && len(items) > 0 {
 		index := map[string]policy.Guideline{}
 		adapted := make([]policy.Guideline, 0, len(items))
@@ -478,7 +784,11 @@ func runActionableARQ(ctx context.Context, router *model.Router, matchCtx Matchi
 			index[item.ID] = item
 			adapted = append(adapted, item)
 		}
-		for _, batch := range chunkGeneric(adapted, defaultARQBatchSize) {
+		type actionableBatch struct {
+			Matches []Match
+			Items   []policy.Guideline
+		}
+		results, ok := processBatchesInParallel(ctx, chunkGeneric(adapted, defaultARQBatchSize), func(ctx context.Context, batch []policy.Guideline) (actionableBatch, bool) {
 			var structured struct {
 				Checks []struct {
 					ID        string `json:"id"`
@@ -488,10 +798,9 @@ func runActionableARQ(ctx context.Context, router *model.Router, matchCtx Matchi
 			}
 			prompt := buildActionablePrompt(matchCtx, batch)
 			if !generateStructuredWithRetry(ctx, router, prompt, &structured) {
-				matches = nil
-				out = nil
-				break
+				return actionableBatch{}, false
 			}
+			var result actionableBatch
 			for _, check := range structured.Checks {
 				item, ok := index[check.ID]
 				if !ok || !check.Applies {
@@ -502,9 +811,19 @@ func runActionableARQ(ctx context.Context, router *model.Router, matchCtx Matchi
 					kind = "journey_node"
 				}
 				score := scoreCondition(item.When, source)
-				matches = append(matches, Match{ID: item.ID, Kind: kind, Score: float64(maxInt(score, 1) + item.Priority), Rationale: firstNonEmpty(check.Rationale, "structured match")})
-				out = append(out, item)
+				result.Matches = append(result.Matches, Match{ID: item.ID, Kind: kind, Score: float64(maxInt(score, 1) + item.Priority), Rationale: firstNonEmpty(check.Rationale, "structured match")})
+				result.Items = append(result.Items, item)
 			}
+			return result, true
+		})
+		if ok {
+			for _, result := range results {
+				matches = append(matches, result.Matches...)
+				out = append(out, result.Items...)
+			}
+		} else {
+			matches = nil
+			out = nil
 		}
 		seen := map[string]struct{}{}
 		for _, item := range out {
@@ -566,6 +885,17 @@ func runPreviouslyAppliedARQ(ctx MatchingContext, items []policy.Guideline, matc
 		matchByID[item.ID] = item
 	}
 	for _, item := range items {
+		if strings.Contains(strings.ToLower(item.Scope), "journey") {
+			decision := ReapplyDecision{
+				ID:            item.ID,
+				ShouldReapply: true,
+				Score:         matchByID[item.ID].Score,
+				Rationale:     "journey-scoped guidance remains active while the journey state is active",
+			}
+			decisions = append(decisions, decision)
+			out = append(out, item)
+			continue
+		}
 		decision := ReapplyDecision{
 			ID:            item.ID,
 			ShouldReapply: true,
@@ -631,10 +961,151 @@ func customerDependentQuestionWasAsked(history []string, instruction string) boo
 	return false
 }
 
+func guidelineLikelySatisfiedByCustomerAnswer(ctx MatchingContext, item policy.Guideline) bool {
+	degree, source, _, _ := guidelineApplicationAssessment(ctx, item)
+	return degree == "full" && source == "customer_answer"
+}
+
+func guidelineApplicationAssessment(matchCtx MatchingContext, guideline policy.Guideline) (degree string, source string, satisfiedByTool bool, rationale string) {
+	then := strings.TrimSpace(guideline.Then)
+	if then == "" {
+		return "none", "", false, ""
+	}
+	if guidelineSatisfiedByStagedToolCalls(matchCtx.StagedToolCalls, guideline) {
+		return "full", "tool_event", true, "guideline action appears satisfied by a previous tool-backed assistant turn"
+	}
+	if len(matchCtx.AssistantHistory) > 0 {
+		history := strings.ToLower(strings.Join(matchCtx.AssistantHistory, "\n"))
+		if assistantHistoryReflectsToolResult(history, then) {
+			return "full", "tool_event", true, "guideline action appears satisfied by a previous tool-backed assistant turn"
+		}
+	}
+	if len(matchCtx.AssistantHistory) > 0 {
+		history := strings.ToLower(strings.Join(matchCtx.AssistantHistory, "\n"))
+		if degree := actionCoverageDegree(history, then); degree != "none" {
+			if degree == "full" {
+				return degree, "assistant_message", false, "guideline action appears satisfied by a previous assistant turn"
+			}
+			return degree, "assistant_message", false, "guideline action appears partially handled by a previous assistant turn"
+		}
+	}
+	if customerSatisfiedGuideline(matchCtx.LatestCustomerText, guideline) {
+		loweredScope := strings.ToLower(guideline.Scope)
+		if strings.Contains(loweredScope, "customer") || customerDependentQuestionWasAsked(matchCtx.AppliedInstructions, guideline.Then) || containsAnyKeyword(guideline.Then, "ask", "confirm", "clarify", "reason", "details", "status", "inside", "outside") {
+			return "full", "customer_answer", false, "guideline action appears satisfied by the customer's follow-up answer"
+		}
+	}
+	return "none", "", false, ""
+}
+
+func actionCoverageDegree(history string, instruction string) string {
+	if strings.TrimSpace(history) == "" || strings.TrimSpace(instruction) == "" {
+		return "none"
+	}
+	if containsEquivalentInstruction([]string{history}, instruction) {
+		return "full"
+	}
+	segments := splitActionSegments(instruction)
+	if len(segments) == 0 {
+		if segmentSatisfiedByHistory(history, instruction) {
+			return "full"
+		}
+		return "none"
+	}
+	matched := 0
+	for _, segment := range segments {
+		if segmentSatisfiedByHistory(history, segment) {
+			matched++
+		}
+	}
+	switch {
+	case matched == 0:
+		return "none"
+	case matched == len(segments):
+		return "full"
+	default:
+		return "partial"
+	}
+}
+
+func splitActionSegments(instruction string) []string {
+	normalized := strings.NewReplacer(" and then ", ".", " then ", ".", " and ", ".", ";", ".", ",", ".").Replace(strings.ToLower(strings.TrimSpace(instruction)))
+	raw := strings.Split(normalized, ".")
+	var out []string
+	for _, item := range raw {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		out = append(out, item)
+	}
+	if len(out) == 0 && strings.TrimSpace(instruction) != "" {
+		return []string{strings.TrimSpace(strings.ToLower(instruction))}
+	}
+	return out
+}
+
+func segmentSatisfiedByHistory(history string, segment string) bool {
+	lowered := strings.ToLower(strings.TrimSpace(segment))
+	if lowered == "" {
+		return false
+	}
+	switch {
+	case strings.Contains(lowered, "apolog"):
+		return containsAnyPhrase(history, "sorry", "apolog")
+	case strings.Contains(lowered, "discount"):
+		return strings.Contains(history, "discount")
+	case strings.Contains(lowered, "check the return status"), strings.Contains(lowered, "return status"):
+		return containsAnyPhrase(history, "status is", "return status", "tracking")
+	case strings.Contains(lowered, "check the order status"), strings.Contains(lowered, "order status"):
+		return containsAnyPhrase(history, "order status", "status is", "tracking")
+	case strings.Contains(lowered, "lock the card"):
+		return containsAnyPhrase(history, "card is now locked", "locked your card", "lock_card", "locked")
+	default:
+		return containsAllKeywords(history, lowered)
+	}
+}
+
+func strongerAppliedDegree(values ...string) string {
+	best := "none"
+	rank := map[string]int{"none": 0, "partial": 1, "full": 2}
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if rank[value] > rank[best] {
+			best = value
+		}
+	}
+	return best
+}
+
+func assistantHistoryReflectsToolResult(history string, instruction string) bool {
+	then := strings.ToLower(strings.TrimSpace(instruction))
+	switch {
+	case strings.Contains(then, "check the return status"):
+		return strings.Contains(history, "status is") || strings.Contains(history, "return status") || strings.Contains(history, "tracking")
+	case strings.Contains(then, "check the order status"):
+		return strings.Contains(history, "order status") || strings.Contains(history, "status is")
+	case strings.Contains(then, "lock the card"):
+		return strings.Contains(history, "card is now locked") || strings.Contains(history, "locked your card")
+	default:
+		return false
+	}
+}
+
 func runCustomerDependentARQ(ctx MatchingContext, items []policy.Guideline) ([]CustomerDependencyDecision, []policy.Guideline) {
 	var decisions []CustomerDependencyDecision
 	var out []policy.Guideline
 	for _, item := range items {
+		if strings.Contains(strings.ToLower(item.Scope), "journey") {
+			decision := CustomerDependencyDecision{
+				ID:                item.ID,
+				CustomerDependent: false,
+				Rationale:         "journey-scoped guidance is controlled by the active journey state, not customer-dependent filtering",
+			}
+			decisions = append(decisions, decision)
+			out = append(out, item)
+			continue
+		}
 		customerDependent := strings.Contains(strings.ToLower(item.Scope), "customer") || containsAnyKeyword(item.Then, "ask", "confirm", "clarify", "reason", "details", "status")
 		alreadyApplied := containsEquivalentInstruction(ctx.AppliedInstructions, item.Then) || customerDependentQuestionWasAsked(ctx.AppliedInstructions, item.Then)
 		decision := CustomerDependencyDecision{
@@ -683,26 +1154,74 @@ func resolveJourney(bundle policy.Bundle, instances []journey.Instance, ctx Matc
 			}
 		}
 		score += j.Priority
-		if score > bestScore && len(j.States) > 0 {
+		if score > bestScore && journeyRootState(&j) != nil {
 			copied := j
 			selected = &copied
 			bestScore = score
 		}
 	}
-	if selected == nil || len(selected.States) == 0 {
+	root := journeyRootState(selected)
+	if selected == nil || root == nil {
 		return nil, nil, nil
+	}
+	startState, startPath := firstExecutableJourneyState(selected, root.ID)
+	if startState == nil {
+		startState = root
+		startPath = []string{root.ID}
 	}
 	instance := journey.Instance{
 		ID:        fmt.Sprintf("journey_%s", selected.ID),
 		SessionID: "",
 		JourneyID: selected.ID,
-		StateID:   selected.States[0].ID,
-		Path:      []string{selected.States[0].ID},
+		StateID:   startState.ID,
+		Path:      startPath,
 		Status:    journey.StatusActive,
 		UpdatedAt: time.Now().UTC(),
 	}
-	state := selected.States[0]
+	state := *startState
 	return selected, &state, &instance
+}
+
+func firstExecutableJourneyState(flow *policy.Journey, rootID string) (*policy.JourneyNode, []string) {
+	if flow == nil {
+		return nil, nil
+	}
+	path := []string{}
+	currentID := strings.TrimSpace(rootID)
+	seen := map[string]struct{}{}
+	for currentID != "" {
+		if _, ok := seen[currentID]; ok {
+			break
+		}
+		seen[currentID] = struct{}{}
+		path = append(path, currentID)
+		current := findState(*flow, currentID)
+		if current == nil {
+			return nil, nil
+		}
+		nextIDs := journeyNextStateIDs(*flow, currentID)
+		if !shouldSkipStartupNode(*current, len(nextIDs)) {
+			return current, path
+		}
+		if len(nextIDs) != 1 {
+			return current, path
+		}
+		currentID = strings.TrimSpace(nextIDs[0])
+	}
+	return nil, path
+}
+
+func shouldSkipStartupNode(state policy.JourneyNode, nextCount int) bool {
+	if nextCount != 1 {
+		return false
+	}
+	if strings.EqualFold(state.Kind, "fork") {
+		return true
+	}
+	if strings.EqualFold(state.Type, "tool") {
+		return false
+	}
+	return strings.TrimSpace(state.Instruction) == ""
 }
 
 func runJourneyBacktrackARQ(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, instance *journey.Instance) JourneyDecision {
@@ -710,8 +1229,8 @@ func runJourneyBacktrackARQ(ctx context.Context, router *model.Router, matchCtx 
 		return JourneyDecision{}
 	}
 	rootID := ""
-	if len(activeJourney.States) > 0 {
-		rootID = activeJourney.States[0].ID
+	if root := journeyRootState(activeJourney); root != nil {
+		rootID = root.ID
 	}
 	if router != nil {
 		var structured struct {
@@ -722,9 +1241,11 @@ func runJourneyBacktrackARQ(ctx context.Context, router *model.Router, matchCtx 
 		prompt := buildJourneyBacktrackPrompt(matchCtx, activeJourney, activeState, rootID)
 		if generateStructuredWithRetry(ctx, router, prompt, &structured) && structured.RequiresBacktracking {
 			target := rootID
+			nextState := ""
 			if structured.BacktrackToSame {
-				if previous := previousVisitedState(activeJourney, instance.Path, activeState.ID); previous != nil {
-					target = previous.ID
+				if selected := selectBestBacktrackTarget(matchCtx, activeJourney, instance.Path, activeState.ID, false); selected != nil {
+					target = selected.ID
+					nextState = backtrackFastForwardState(matchCtx, activeJourney, selected.ID)
 				} else if strings.TrimSpace(target) == "" {
 					target = activeState.ID
 				}
@@ -736,6 +1257,7 @@ func runJourneyBacktrackARQ(ctx context.Context, router *model.Router, matchCtx 
 				Action:       "backtrack",
 				CurrentState: activeState.ID,
 				BacktrackTo:  target,
+				NextState:    nextState,
 				Rationale:    firstNonEmpty(structured.Rationale, "journey should backtrack before proceeding"),
 			}
 		}
@@ -743,7 +1265,22 @@ func runJourneyBacktrackARQ(ctx context.Context, router *model.Router, matchCtx 
 	message := strings.ToLower(matchCtx.LatestCustomerText)
 	sameProcessMarkers := []string{"actually", "change", "changed", "resume", "continue", "go back"}
 	newPurposeMarkers := []string{"instead", "different", "another", "new", "start over", "again", "restart"}
-	if containsAnyPhrase(message, newPurposeMarkers...) && rootID != "" && activeState.ID != rootID {
+	if containsAnyPhrase(message, sameProcessMarkers...) {
+		if selected := selectBestBacktrackTarget(matchCtx, activeJourney, instance.Path, activeState.ID, false); selected != nil {
+			nextState := backtrackFastForwardState(matchCtx, activeJourney, selected.ID)
+			if !isLegalBacktrackTarget(instance.Path, selected.ID, rootID) {
+				return JourneyDecision{}
+			}
+			return JourneyDecision{
+				Action:       "backtrack",
+				CurrentState: activeState.ID,
+				BacktrackTo:  selected.ID,
+				NextState:    nextState,
+				Rationale:    "customer is revisiting a previous decision in the same journey process",
+			}
+		}
+	}
+	if containsAnyPhrase(message, newPurposeMarkers...) && !containsAnyPhrase(message, sameProcessMarkers...) && rootID != "" && activeState.ID != rootID {
 		if !isLegalBacktrackTarget(instance.Path, rootID, rootID) {
 			return JourneyDecision{}
 		}
@@ -752,19 +1289,6 @@ func runJourneyBacktrackARQ(ctx context.Context, router *model.Router, matchCtx 
 			CurrentState: activeState.ID,
 			BacktrackTo:  rootID,
 			Rationale:    "customer changed the purpose of the journey, so restart from the beginning",
-		}
-	}
-	if containsAnyPhrase(message, sameProcessMarkers...) {
-		if previous := previousVisitedState(activeJourney, instance.Path, activeState.ID); previous != nil {
-			if !isLegalBacktrackTarget(instance.Path, previous.ID, rootID) {
-				return JourneyDecision{}
-			}
-			return JourneyDecision{
-				Action:       "backtrack",
-				CurrentState: activeState.ID,
-				BacktrackTo:  previous.ID,
-				Rationale:    "customer is revisiting a previous decision in the same journey process",
-			}
 		}
 	}
 	return JourneyDecision{}
@@ -789,12 +1313,14 @@ func runJourneyProgressARQ(ctx context.Context, router *model.Router, matchCtx M
 	}
 	if len(activeState.When) > 0 && !matchesAnyCondition(activeState.When, matchCtx.LatestCustomerText) {
 		rootID := ""
-		if len(activeJourney.States) > 0 {
-			rootID = activeJourney.States[0].ID
+		if root := journeyRootState(activeJourney); root != nil {
+			rootID = root.ID
 		}
-		if previous := previousVisitedState(activeJourney, instance.Path, activeState.ID); previous != nil && isLegalBacktrackTarget(instance.Path, previous.ID, rootID) {
+		if selected := selectBestBacktrackTarget(matchCtx, activeJourney, instance.Path, activeState.ID, true); selected != nil && isLegalBacktrackTarget(instance.Path, selected.ID, rootID) {
+			nextState := backtrackFastForwardState(matchCtx, activeJourney, selected.ID)
 			decision.Action = "backtrack"
-			decision.BacktrackTo = previous.ID
+			decision.BacktrackTo = selected.ID
+			decision.NextState = nextState
 			decision.Rationale = "active node no longer matches the customer context, so the journey should backtrack"
 			return decision
 		}
@@ -802,32 +1328,31 @@ func runJourneyProgressARQ(ctx context.Context, router *model.Router, matchCtx M
 		decision.Rationale = "state entry condition is not yet satisfied"
 		return decision
 	}
-	if activeState.Type == "tool" && len(activeState.Next) > 0 {
+	nextIDs := journeyNextStateIDs(*activeJourney, activeState.ID)
+	if activeState.Type == "tool" && len(nextIDs) > 0 {
+		if !journeyToolStateExecuted(matchCtx, *activeState) {
+			decision.Missing = append(decision.Missing, "tool_execution")
+			decision.Rationale = "tool state requires execution before the journey can advance"
+			return decision
+		}
 		decision.Action = "advance"
-		decision.NextState = activeState.Next[0]
+		decision.NextState = nextIDs[0]
 		decision.Rationale = "tool state can advance after execution"
 		return decision
 	}
-	bestNextID := ""
-	bestNextScore := 0
-	for _, nextID := range activeState.Next {
-		if strings.TrimSpace(nextID) == "" {
-			continue
+	if strings.EqualFold(activeState.Kind, "fork") && len(nextIDs) > 0 {
+		bestNextID := selectNextJourneyState(matchCtx, activeJourney, activeState, nextIDs)
+		if bestNextID == "" && len(nextIDs) == 1 {
+			bestNextID = nextIDs[0]
 		}
-		if nextState := findState(*activeJourney, nextID); nextState != nil {
-			score := journeyNextStateScore(matchCtx, *nextState)
-			if score > bestNextScore {
-				bestNextScore = score
-				bestNextID = nextID
-			}
-			continue
-		}
-		score := scoreCondition(nextID, matchCtx.LatestCustomerText)
-		if score > bestNextScore {
-			bestNextScore = score
-			bestNextID = nextID
+		if bestNextID != "" {
+			decision.Action = "advance"
+			decision.NextState = bestNextID
+			decision.Rationale = "fork state routes to the best matching legal follow-up"
+			return decision
 		}
 	}
+	bestNextID := selectNextJourneyState(matchCtx, activeJourney, activeState, nextIDs)
 	if bestNextID != "" {
 		decision.Action = "advance"
 		decision.NextState = bestNextID
@@ -840,10 +1365,7 @@ func runJourneyProgressARQ(ctx context.Context, router *model.Router, matchCtx M
 func runLowCriticalityARQ(ctx context.Context, router *model.Router, matchCtx MatchingContext, items []policy.Guideline) ([]Match, []policy.Guideline) {
 	var matches []Match
 	var out []policy.Guideline
-	source := matchCtx.LatestCustomerText
-	if strings.TrimSpace(source) == "" {
-		source = matchCtx.ConversationText
-	}
+	source := matchingSource(matchCtx)
 	if len(items) == 0 {
 		return nil, nil
 	}
@@ -852,7 +1374,11 @@ func runLowCriticalityARQ(ctx context.Context, router *model.Router, matchCtx Ma
 		for _, item := range items {
 			index[item.ID] = item
 		}
-		for _, batch := range chunkGeneric(items, defaultARQBatchSize) {
+		type lowBatch struct {
+			Matches []Match
+			Items   []policy.Guideline
+		}
+		results, ok := processBatchesInParallel(ctx, chunkGeneric(items, defaultARQBatchSize), func(ctx context.Context, batch []policy.Guideline) (lowBatch, bool) {
 			var structured struct {
 				Checks []struct {
 					ID        string `json:"id"`
@@ -862,19 +1388,28 @@ func runLowCriticalityARQ(ctx context.Context, router *model.Router, matchCtx Ma
 			}
 			prompt := buildLowCriticalityPrompt(matchCtx, batch)
 			if !generateStructuredWithRetry(ctx, router, prompt, &structured) {
-				matches = nil
-				out = nil
-				break
+				return lowBatch{}, false
 			}
+			var result lowBatch
 			for _, check := range structured.Checks {
 				item, ok := index[check.ID]
 				if !ok || !check.Applies {
 					continue
 				}
 				score := scoreCondition(item.When, source)
-				matches = append(matches, Match{ID: item.ID, Kind: "guideline", Score: float64(maxInt(score, 1) + item.Priority), Rationale: firstNonEmpty(check.Rationale, "structured low-criticality match")})
-				out = append(out, item)
+				result.Matches = append(result.Matches, Match{ID: item.ID, Kind: "guideline", Score: float64(maxInt(score, 1) + item.Priority), Rationale: firstNonEmpty(check.Rationale, "structured low-criticality match")})
+				result.Items = append(result.Items, item)
 			}
+			return result, true
+		})
+		if ok {
+			for _, result := range results {
+				matches = append(matches, result.Matches...)
+				out = append(out, result.Items...)
+			}
+		} else {
+			matches = nil
+			out = nil
 		}
 		if len(matches) > 0 || len(out) > 0 {
 			sortMatches(matches)
@@ -898,174 +1433,6 @@ func runLowCriticalityARQ(ctx context.Context, router *model.Router, matchCtx Ma
 	sortMatches(matches)
 	sortGuidelines(out, matches)
 	return matches, out
-}
-
-func resolveRelationships(bundle policy.Bundle, matchCtx MatchingContext, observations []policy.Observation, matches []Match, guidelines []policy.Guideline, activeJourney *policy.Journey) ([]policy.Guideline, []SuppressedGuideline, string) {
-	activeObs := map[string]bool{}
-	for _, item := range observations {
-		activeObs[item.ID] = true
-	}
-	matchByID := map[string]Match{}
-	for _, item := range matches {
-		matchByID[item.ID] = item
-	}
-	active := map[string]policy.Guideline{}
-	for _, item := range guidelines {
-		active[item.ID] = item
-	}
-	guidelineIndex := map[string]policy.Guideline{}
-	for _, item := range append(bundle.Guidelines, collectJourneyGuidelines(bundle)...) {
-		guidelineIndex[item.ID] = item
-	}
-	if activeJourney != nil {
-		for _, item := range activeJourney.Guidelines {
-			guidelineIndex[item.ID] = item
-		}
-	}
-	var suppressed []SuppressedGuideline
-	suppressedIndex := map[string]int{}
-	disambiguation := ""
-
-	for iteration := 0; iteration < 3; iteration++ {
-		changed := false
-		for _, rel := range bundle.Relationships {
-			kind := strings.ToLower(strings.TrimSpace(rel.Kind))
-			switch kind {
-			case "dependency":
-				if _, ok := active[rel.Source]; ok {
-					if _, ok := active[rel.Target]; !ok && !activeObs[rel.Target] && !matchesJourneyDependencyTarget(rel.Target, activeJourney) {
-						delete(active, rel.Source)
-						recordSuppressed(&suppressed, suppressedIndex, rel.Source, "dependency_unmet", rel.Target)
-						changed = true
-					}
-				}
-			case "priority", "overrides":
-				if source, ok := active[rel.Source]; ok {
-					target, targetActive := active[rel.Target]
-					if !targetActive {
-						continue
-					}
-					if guidelinePriority(source, matchByID[source.ID]) >= guidelinePriority(target, matchByID[target.ID]) {
-						delete(active, rel.Target)
-						recordSuppressed(&suppressed, suppressedIndex, rel.Target, "deprioritized", rel.Source)
-						changed = true
-					}
-				}
-			case "entails", "entailment":
-				if _, ok := active[rel.Source]; ok {
-					if _, ok := active[rel.Target]; ok {
-						continue
-					}
-					if target, ok := guidelineIndex[rel.Target]; ok {
-						active[target.ID] = target
-						matchByID[target.ID] = Match{ID: target.ID, Kind: "guideline", Score: 0.5, Rationale: "activated by entailment"}
-						changed = true
-					}
-				}
-			case "disambiguation", "disambiguates":
-				if _, ok := active[rel.Source]; ok {
-					if _, ok := active[rel.Target]; ok {
-						disambiguation = "Could you clarify which option you mean?"
-					}
-				}
-			}
-		}
-		if !changed {
-			break
-		}
-	}
-
-	for _, candidate := range guidelineIndex {
-		if _, ok := active[candidate.ID]; ok {
-			continue
-		}
-		if ageConditionScore(strings.ToLower(candidate.When), strings.ToLower(matchCtx.LatestCustomerText)) >= 0 {
-			continue
-		}
-		for _, winner := range active {
-			if ageConditionScore(strings.ToLower(winner.When), strings.ToLower(matchCtx.LatestCustomerText)) <= 0 {
-				continue
-			}
-			if !shareConditionTopic(candidate.When, winner.When) {
-				continue
-			}
-			recordSuppressed(&suppressed, suppressedIndex, candidate.ID, "condition_conflict", winner.ID)
-			break
-		}
-	}
-
-	for loserID, loser := range active {
-		loserMatch, ok := matchByID[loserID]
-		if !ok {
-			continue
-		}
-		for winnerID, winner := range active {
-			if winnerID == loserID {
-				continue
-			}
-			winnerMatch, ok := matchByID[winnerID]
-			if !ok {
-				continue
-			}
-			if winnerMatch.Score < 2 || winnerMatch.Score <= loserMatch.Score {
-				continue
-			}
-			if winner.Priority != loser.Priority {
-				continue
-			}
-			if hasDirectRelationship(bundle.Relationships, loserID, winnerID) {
-				continue
-			}
-			if !shareConditionTopic(loser.When, winner.When) {
-				continue
-			}
-			delete(active, loserID)
-			recordSuppressed(&suppressed, suppressedIndex, loserID, "disambiguated", winnerID)
-			break
-		}
-	}
-
-	for candidateID, candidate := range guidelineIndex {
-		if _, ok := active[candidateID]; ok {
-			continue
-		}
-		loserScore := scoreCondition(candidate.When, matchCtx.LatestCustomerText)
-		if loserScore <= 0 {
-			continue
-		}
-		for winnerID, winner := range active {
-			winnerMatch, ok := matchByID[winnerID]
-			if !ok {
-				continue
-			}
-			if winnerMatch.Score < 2 || winnerMatch.Score <= float64(loserScore) {
-				continue
-			}
-			if winner.Priority != candidate.Priority {
-				continue
-			}
-			if hasDirectRelationship(bundle.Relationships, candidateID, winnerID) {
-				continue
-			}
-			if !shareConditionTopic(candidate.When, winner.When) {
-				continue
-			}
-			recordSuppressed(&suppressed, suppressedIndex, candidateID, "disambiguated", winnerID)
-			break
-		}
-	}
-
-	out := make([]policy.Guideline, 0, len(active))
-	for _, item := range active {
-		out = append(out, item)
-	}
-	allMatches := make([]Match, 0, len(matchByID))
-	for _, item := range matchByID {
-		allMatches = append(allMatches, item)
-	}
-	sortMatches(allMatches)
-	sortGuidelines(out, allMatches)
-	return out, suppressed, disambiguation
 }
 
 func runDisambiguationARQ(ctx context.Context, router *model.Router, matchCtx MatchingContext, guidelines []policy.Guideline, existing string) string {
@@ -1180,143 +1547,6 @@ func resolveToolExposure(associations []policy.GuidelineToolAssociation, observa
 	return dedupe(out), approvals
 }
 
-func runToolDecisionARQ(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, guidelines []policy.Guideline, exposedTools []string, approvals map[string]string, catalog []tool.CatalogEntry) ToolDecision {
-	decision := ToolDecision{
-		Arguments: map[string]any{
-			"session_id":           matchCtx.SessionID,
-			"customer_message":     matchCtx.LatestCustomerText,
-			"conversation_excerpt": firstNonEmpty(matchCtx.LatestCustomerText, matchCtx.ConversationText),
-		},
-		CanRun:   true,
-		Grounded: len(strings.TrimSpace(matchCtx.LatestCustomerText)) > 0,
-	}
-	if activeJourney != nil {
-		decision.Arguments["journey_id"] = activeJourney.ID
-	}
-	if activeState != nil {
-		decision.Arguments["journey_state"] = activeState.ID
-		if strings.TrimSpace(activeState.Tool) != "" {
-			decision.SelectedTool = strings.TrimSpace(activeState.Tool)
-			decision.Rationale = "current journey node explicitly requires a tool"
-		}
-		if activeState.MCP != nil && strings.TrimSpace(activeState.MCP.Tool) != "" {
-			decision.SelectedTool = strings.TrimSpace(activeState.MCP.Tool)
-			decision.Rationale = "current journey node explicitly requires an MCP tool"
-		}
-	}
-	if decision.SelectedTool == "" && len(exposedTools) > 0 {
-		decision.SelectedTool = exposedTools[0]
-		decision.Rationale = "matched policy exposes a relevant tool"
-	}
-	if router != nil && len(exposedTools) > 0 {
-		var structured struct {
-			SelectedTool     string         `json:"selected_tool"`
-			ApprovalRequired bool           `json:"approval_required"`
-			Arguments        map[string]any `json:"arguments"`
-			Rationale        string         `json:"rationale"`
-		}
-		prompt := buildToolDecisionPrompt(matchCtx, guidelines, activeJourney, activeState, exposedTools)
-		if generateStructuredWithRetry(ctx, router, prompt, &structured) {
-			if strings.TrimSpace(structured.SelectedTool) != "" {
-				decision.SelectedTool = structured.SelectedTool
-			}
-			if len(structured.Arguments) > 0 {
-				for key, value := range structured.Arguments {
-					decision.Arguments[key] = value
-				}
-			}
-			decision.Rationale = firstNonEmpty(structured.Rationale, decision.Rationale)
-			decision.ApprovalRequired = structured.ApprovalRequired
-		}
-	}
-	if decision.SelectedTool != "" {
-		mode := approvals[decision.SelectedTool]
-		if strings.EqualFold(mode, "required") {
-			decision.ApprovalRequired = true
-			decision.Rationale = strings.TrimSpace(decision.Rationale + "; approval required")
-		}
-	}
-	entry, ok := findToolCatalogEntry(catalog, decision.SelectedTool)
-	if ok {
-		specs := extractToolRequirements(entry)
-		for field, spec := range specs {
-			value, exists := decision.Arguments[field]
-			if spec.Hidden && (!exists || isEmptyArgumentValue(value)) {
-				if auto, ok := inferHiddenArgumentValue(field, spec, decision.Arguments); ok {
-					decision.Arguments[field] = auto
-					value = auto
-					exists = true
-				}
-			}
-			if (!exists || isEmptyArgumentValue(value)) && spec.HasDefault && spec.DefaultValue != nil {
-				decision.Arguments[field] = spec.DefaultValue
-				value = spec.DefaultValue
-				exists = true
-			}
-			if spec.Required && !spec.HasDefault {
-				if !exists || isEmptyArgumentValue(value) {
-					decision.MissingArguments = append(decision.MissingArguments, field)
-					decision.MissingIssues = append(decision.MissingIssues, ToolArgumentIssue{
-						Parameter:    field,
-						Required:     true,
-						Hidden:       spec.Hidden,
-						HasDefault:   spec.HasDefault,
-						Choices:      append([]string(nil), spec.Choices...),
-						Significance: spec.Significance,
-						Reason:       issueReasonForMissing(spec),
-					})
-				}
-			}
-			if !exists || len(spec.Choices) == 0 {
-				continue
-			}
-			if !stringInSlice(fmt.Sprint(value), spec.Choices) {
-				decision.InvalidArguments = append(decision.InvalidArguments, field)
-				decision.InvalidIssues = append(decision.InvalidIssues, ToolArgumentIssue{
-					Parameter:    field,
-					Required:     spec.Required,
-					Hidden:       spec.Hidden,
-					HasDefault:   spec.HasDefault,
-					Choices:      append([]string(nil), spec.Choices...),
-					Significance: spec.Significance,
-					Reason:       "argument value is outside allowed choices",
-				})
-			}
-		}
-		for field, spec := range specs {
-			if spec.Required || spec.HasDefault {
-				continue
-			}
-			value, exists := decision.Arguments[field]
-			if !exists || strings.TrimSpace(fmt.Sprint(value)) == "" || fmt.Sprint(value) == "<nil>" {
-				continue
-			}
-			if len(spec.Choices) == 0 {
-				continue
-			}
-			if !stringInSlice(fmt.Sprint(value), spec.Choices) {
-				decision.InvalidArguments = append(decision.InvalidArguments, field)
-				decision.InvalidIssues = append(decision.InvalidIssues, ToolArgumentIssue{
-					Parameter:    field,
-					Required:     false,
-					Hidden:       spec.Hidden,
-					HasDefault:   spec.HasDefault,
-					Choices:      append([]string(nil), spec.Choices...),
-					Significance: spec.Significance,
-					Reason:       "optional argument value is outside allowed choices",
-				})
-			}
-		}
-	}
-	decision.MissingArguments = dedupe(decision.MissingArguments)
-	decision.InvalidArguments = dedupe(decision.InvalidArguments)
-	if len(decision.MissingArguments) > 0 || len(decision.InvalidArguments) > 0 {
-		decision.CanRun = false
-		decision.Rationale = strings.TrimSpace(firstNonEmpty(decision.Rationale, "tool requires additional valid arguments") + "; tool is not runnable yet")
-	}
-	return decision
-}
-
 func runJourneyProgressStructuredARQ(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode) (JourneyDecision, bool) {
 	var structured struct {
 		Action      string   `json:"action"`
@@ -1366,46 +1596,18 @@ func collectTemplates(bundle policy.Bundle, activeJourney *policy.Journey, activ
 	return templates
 }
 
-func projectJourneyNodes(bundle policy.Bundle) []ProjectedJourneyNode {
-	var out []ProjectedJourneyNode
-	for _, j := range bundle.Journeys {
-		for _, state := range j.States {
-			item := ProjectedJourneyNode{
-				ID:          "journey_node:" + j.ID + ":" + state.ID,
-				JourneyID:   j.ID,
-				StateID:     state.ID,
-				Instruction: state.Instruction,
-				FollowUps:   append([]string(nil), state.Next...),
-				Priority:    j.Priority + state.Priority,
-			}
-			if strings.TrimSpace(state.Tool) != "" {
-				item.ToolRefs = append(item.ToolRefs, state.Tool)
-			}
-			if state.MCP != nil {
-				if strings.TrimSpace(state.MCP.Tool) != "" {
-					item.ToolRefs = append(item.ToolRefs, state.MCP.Server+"."+state.MCP.Tool)
-				}
-				for _, toolName := range state.MCP.Tools {
-					item.ToolRefs = append(item.ToolRefs, state.MCP.Server+"."+toolName)
-				}
-			}
-			out = append(out, item)
-		}
-	}
-	return out
-}
-
 func previousState(flow *policy.Journey, stateID string) *policy.JourneyNode {
 	if flow == nil {
 		return nil
 	}
-	for _, state := range flow.States {
-		for _, next := range state.Next {
-			if next == stateID {
-				copied := state
-				return &copied
-			}
+	for _, edge := range flow.Edges {
+		if strings.TrimSpace(edge.Target) != strings.TrimSpace(stateID) {
+			continue
 		}
+		if strings.TrimSpace(edge.Source) == strings.TrimSpace(flow.RootID) {
+			return nil
+		}
+		return findState(*flow, edge.Source)
 	}
 	return nil
 }
@@ -1431,6 +1633,58 @@ func previousVisitedState(flow *policy.Journey, path []string, currentStateID st
 	return findState(*flow, target)
 }
 
+func selectBestBacktrackTarget(ctx MatchingContext, flow *policy.Journey, path []string, currentStateID string, allowRootFallback bool) *policy.JourneyNode {
+	if flow == nil {
+		return nil
+	}
+	candidates := visitedBacktrackCandidates(flow, path, currentStateID)
+	if len(candidates) == 0 {
+		if allowRootFallback {
+			return previousState(flow, currentStateID)
+		}
+		return previousVisitedState(flow, path, currentStateID)
+	}
+	best := candidates[0]
+	bestScore := backtrackTargetScore(ctx, flow, best)
+	for _, candidate := range candidates[1:] {
+		score := backtrackTargetScore(ctx, flow, candidate)
+		if score > bestScore {
+			best = candidate
+			bestScore = score
+		}
+	}
+	return findState(*flow, best)
+}
+
+func visitedBacktrackCandidates(flow *policy.Journey, path []string, currentStateID string) []string {
+	if flow == nil || len(path) == 0 {
+		return nil
+	}
+	lastSeen := -1
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == currentStateID {
+			lastSeen = i
+			break
+		}
+	}
+	if lastSeen <= 0 {
+		if previous := previousState(flow, currentStateID); previous != nil {
+			return []string{previous.ID}
+		}
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	for i := lastSeen - 1; i >= 0; i-- {
+		if _, ok := seen[path[i]]; ok {
+			continue
+		}
+		seen[path[i]] = struct{}{}
+		out = append(out, path[i])
+	}
+	return out
+}
+
 func isLegalBacktrackTarget(path []string, target string, rootID string) bool {
 	target = strings.TrimSpace(target)
 	if target == "" {
@@ -1445,6 +1699,235 @@ func isLegalBacktrackTarget(path []string, target string, rootID string) bool {
 		}
 	}
 	return false
+}
+
+func backtrackTargetScore(ctx MatchingContext, flow *policy.Journey, stateID string) int {
+	score := 0
+	state := findState(*flow, stateID)
+	if state == nil {
+		return score
+	}
+	score += journeyNextStateScore(ctx, *state)
+	if len(state.When) > 0 && matchesAnyCondition(state.When, ctx.LatestCustomerText) {
+		score += 4
+		matchedConditions := 0
+		for _, condition := range state.When {
+			if scoreCondition(condition, ctx.LatestCustomerText) > 0 {
+				matchedConditions++
+			}
+		}
+		score += matchedConditions
+	}
+	if strings.EqualFold(state.Type, "message") || strings.EqualFold(state.Kind, "chat") {
+		score += 1
+	}
+	if strings.Contains(strings.ToLower(ctx.LatestCustomerText), strings.ToLower(state.ID)) {
+		score += 2
+	}
+	if journeyStateSatisfiedByHistory(ctx, *state, "") {
+		score -= 5
+		if nextState := fastForwardJourneyState(ctx, flow, stateID); strings.TrimSpace(nextState) != "" {
+			score += 2
+			score += len(journeyPathBetween(*flow, stateID, nextState))
+		}
+	} else {
+		score += 2
+	}
+	if len(journeyNextStateIDs(*flow, stateID)) > 0 {
+		score += 1
+	}
+	return score
+}
+
+func selectNextJourneyState(ctx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, nextIDs []string) string {
+	bestNextID := ""
+	bestNextScore := 0
+	for _, nextID := range nextIDs {
+		nextID = strings.TrimSpace(nextID)
+		if nextID == "" {
+			continue
+		}
+		score := 0
+		if nextState := findState(*activeJourney, nextID); nextState != nil {
+			score = journeyNextStateScore(ctx, *nextState)
+			if edge := journeyEdgeBetween(*activeJourney, activeState.ID, nextID); edge != nil {
+				score += scoreCondition(strings.TrimSpace(edge.Condition), ctx.LatestCustomerText)
+			}
+			if strings.EqualFold(nextState.Type, "tool") {
+				score -= 1
+			}
+			if strings.EqualFold(nextState.Kind, "fork") {
+				score += 1
+			}
+		} else {
+			score = scoreCondition(nextID, ctx.LatestCustomerText)
+		}
+		if score > bestNextScore {
+			bestNextScore = score
+			bestNextID = nextID
+		}
+	}
+	return bestNextID
+}
+
+func backtrackFastForwardState(ctx MatchingContext, activeJourney *policy.Journey, startStateID string) string {
+	if activeJourney == nil {
+		return ""
+	}
+	startState := findState(*activeJourney, startStateID)
+	if startState == nil || !journeyStateSatisfiedByLatestTurn(ctx, *startState, "") {
+		return ""
+	}
+	return fastForwardJourneyState(ctx, activeJourney, startStateID)
+}
+
+func fastForwardJourneyState(ctx MatchingContext, activeJourney *policy.Journey, startStateID string) string {
+	if activeJourney == nil {
+		return ""
+	}
+	currentID := strings.TrimSpace(startStateID)
+	bestUnresolved := ""
+	for currentID != "" {
+		nextIDs := journeyNextStateIDs(*activeJourney, currentID)
+		if len(nextIDs) == 0 {
+			return bestUnresolved
+		}
+		advanced := false
+		for _, nextID := range nextIDs {
+			nextState := findState(*activeJourney, nextID)
+			if nextState == nil {
+				continue
+			}
+			if strings.EqualFold(nextState.Type, "tool") {
+				return nextState.ID
+			}
+			edgeCondition := ""
+			if edge := journeyEdgeBetween(*activeJourney, currentID, nextID); edge != nil {
+				edgeCondition = edge.Condition
+			}
+			if !journeyStateSatisfiedByLatestTurn(ctx, *nextState, edgeCondition) {
+				if bestUnresolved == "" {
+					bestUnresolved = nextState.ID
+				}
+				continue
+			}
+			bestUnresolved = nextState.ID
+			currentID = nextState.ID
+			advanced = true
+			break
+		}
+		if !advanced {
+			return bestUnresolved
+		}
+	}
+	return bestUnresolved
+}
+
+func journeyStateSatisfiedByLatestTurn(ctx MatchingContext, state policy.JourneyNode, edgeCondition string) bool {
+	return journeyStateSatisfiedByText(ctx.LatestCustomerText, state, edgeCondition)
+}
+
+func journeyStateSatisfiedByHistory(ctx MatchingContext, state policy.JourneyNode, edgeCondition string) bool {
+	return journeyStateSatisfiedByText(firstNonEmpty(ctx.ConversationText, ctx.LatestCustomerText), state, edgeCondition)
+}
+
+func journeyStateSatisfiedByText(text string, state policy.JourneyNode, edgeCondition string) bool {
+	if strings.EqualFold(state.Type, "tool") {
+		return false
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return false
+	}
+	if len(state.When) > 0 && matchesAnyCondition(state.When, text) {
+		return true
+	}
+	if strings.TrimSpace(edgeCondition) != "" && scoreCondition(edgeCondition, text) > 0 {
+		return true
+	}
+	pseudo := policy.Guideline{Then: state.Instruction, Scope: "customer"}
+	return customerSatisfiedGuideline(text, pseudo)
+}
+
+func journeyToolStateExecuted(ctx MatchingContext, state policy.JourneyNode) bool {
+	if !strings.EqualFold(state.Type, "tool") {
+		return false
+	}
+	toolIDs := []string{}
+	if strings.TrimSpace(state.Tool) != "" {
+		toolIDs = append(toolIDs, strings.TrimSpace(state.Tool))
+	}
+	if state.MCP != nil {
+		if strings.TrimSpace(state.MCP.Tool) != "" {
+			toolIDs = append(toolIDs, strings.TrimSpace(state.MCP.Server)+"."+strings.TrimSpace(state.MCP.Tool))
+		}
+		for _, item := range state.MCP.Tools {
+			if strings.TrimSpace(item) == "" {
+				continue
+			}
+			toolIDs = append(toolIDs, strings.TrimSpace(state.MCP.Server)+"."+strings.TrimSpace(item))
+		}
+	}
+	for _, call := range ctx.StagedToolCalls {
+		for _, toolID := range toolIDs {
+			if strings.TrimSpace(toolID) == "" {
+				continue
+			}
+			if stagedToolMatchesToolID(call.ToolID, toolID) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func stagedToolMatchesToolID(callToolID string, expected string) bool {
+	callToolID = strings.TrimSpace(callToolID)
+	expected = strings.TrimSpace(expected)
+	if callToolID == "" || expected == "" {
+		return false
+	}
+	if callToolID == expected {
+		return true
+	}
+	callTail := strings.TrimPrefix(callToolID, "local:")
+	expectedTail := strings.TrimPrefix(expected, "local:")
+	if callTail == expectedTail {
+		return true
+	}
+	callDot := strings.ReplaceAll(callToolID, ":", ".")
+	expectedDot := strings.ReplaceAll(expected, ":", ".")
+	return callDot == expectedDot
+}
+
+func journeyPathBetween(flow policy.Journey, fromID string, toID string) []string {
+	fromID = strings.TrimSpace(fromID)
+	toID = strings.TrimSpace(toID)
+	if fromID == "" || toID == "" || fromID == toID {
+		return nil
+	}
+	type nodePath struct {
+		id   string
+		path []string
+	}
+	queue := []nodePath{{id: fromID, path: nil}}
+	visited := map[string]struct{}{fromID: {}}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for _, nextID := range journeyNextStateIDs(flow, current.id) {
+			if _, ok := visited[nextID]; ok {
+				continue
+			}
+			visited[nextID] = struct{}{}
+			nextPath := append(append([]string(nil), current.path...), nextID)
+			if nextID == toID {
+				return nextPath
+			}
+			queue = append(queue, nodePath{id: nextID, path: nextPath})
+		}
+	}
+	return nil
 }
 
 func trimJourneyPath(path []string, target string) []string {
@@ -1501,6 +1984,31 @@ func collectJourneyGuidelines(bundle policy.Bundle) []policy.Guideline {
 		}
 	}
 	return out
+}
+
+func matchedGuidelinesFromMatches(bundle policy.Bundle, matches []Match, activeJourney *policy.Journey) []policy.Guideline {
+	index := map[string]policy.Guideline{}
+	for _, item := range bundle.Guidelines {
+		index[item.ID] = item
+	}
+	for _, item := range collectJourneyGuidelines(bundle) {
+		index[item.ID] = item
+	}
+	if activeJourney != nil {
+		for _, item := range activeJourney.Guidelines {
+			index[item.ID] = item
+		}
+	}
+	var out []policy.Guideline
+	for _, match := range matches {
+		item, ok := index[match.ID]
+		if !ok {
+			continue
+		}
+		out = append(out, item)
+	}
+	sortGuidelines(out, matches)
+	return dedupeGuidelines(out)
 }
 
 func inferCompositionMode(templates []policy.Template) string {
@@ -1618,17 +2126,18 @@ func buildDisambiguationPrompt(ctx MatchingContext, items []policy.Guideline) st
 }
 
 func buildJourneyPrompt(ctx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode) string {
+	nextIDs := journeyNextStateIDs(*activeJourney, activeState.ID)
 	lines := []string{
 		"Return only JSON.",
 		`Schema: {"action":"continue|advance|backtrack|exit","next_state":"string","backtrack_to":"string","rationale":"string","missing":["string"]}`,
 		"Choose the next journey action based on the latest customer message.",
 		"Latest customer message: " + ctx.LatestCustomerText,
 		"Journey: " + activeJourney.ID,
-		fmt.Sprintf("Current state: id=%s type=%s instruction=%q next=%v", activeState.ID, activeState.Type, activeState.Instruction, activeState.Next),
+		fmt.Sprintf("Current state: id=%s type=%s instruction=%q next=%v", activeState.ID, activeState.Type, activeState.Instruction, nextIDs),
 	}
-	if len(activeState.Next) > 0 {
+	if len(nextIDs) > 0 {
 		lines = append(lines, "Reachable follow-up states:")
-		for _, nextID := range activeState.Next {
+		for _, nextID := range nextIDs {
 			nextState := findState(*activeJourney, nextID)
 			if nextState == nil {
 				lines = append(lines, "- id="+nextID)
@@ -1692,7 +2201,7 @@ func buildToolDecisionPrompt(ctx MatchingContext, guidelines []policy.Guideline,
 func buildResponseAnalysisPrompt(ctx MatchingContext, guidelines []policy.Guideline, templates []policy.Template, mode string, noMatch string) string {
 	lines := []string{
 		"Return only JSON.",
-		`Schema: {"needs_revision":true,"needs_strict_mode":false,"recommended_template":"string","rationale":"string","analyzed_guidelines":[{"id":"string","already_satisfied":false,"requires_response":true,"requires_template":false,"rationale":"string"}]}`,
+		`Schema: {"needs_revision":true,"needs_strict_mode":false,"recommended_template":"string","rationale":"string","analyzed_guidelines":[{"id":"string","already_satisfied":false,"satisfied_by_tool_event":false,"satisfaction_source":"assistant_message|tool_event|customer_answer","applied_degree":"none|partial|full","requires_response":true,"requires_template":false,"rationale":"string"}]}`,
 		"Analyze whether the matched guidelines still require new response content for the latest customer turn.",
 		"Latest customer message: " + ctx.LatestCustomerText,
 		"Previous assistant messages: " + firstNonEmpty(strings.Join(ctx.AssistantHistory, " | "), "none"),
@@ -1788,6 +2297,7 @@ func extractMentionedAge(text string) (int, bool) {
 }
 
 func keywords(input string) []string {
+	input = strings.NewReplacer("_", " ", "/", " ", "-", " ").Replace(input)
 	raw := strings.Fields(strings.ToLower(input))
 	var out []string
 	stop := map[string]struct{}{
@@ -1907,6 +2417,62 @@ func findState(j policy.Journey, stateID string) *policy.JourneyNode {
 	return nil
 }
 
+func journeyRootState(j *policy.Journey) *policy.JourneyNode {
+	if j == nil {
+		return nil
+	}
+	rootID := strings.TrimSpace(j.RootID)
+	if rootID == "" && len(j.States) > 0 {
+		rootID = j.States[0].ID
+	}
+	if rootID == "" {
+		return nil
+	}
+	if state := findState(*j, rootID); state != nil {
+		return state
+	}
+	for _, edge := range j.Edges {
+		if strings.TrimSpace(edge.Source) != rootID {
+			continue
+		}
+		targetID := strings.TrimSpace(edge.Target)
+		if targetID == "" {
+			continue
+		}
+		if state := findState(*j, targetID); state != nil {
+			return state
+		}
+	}
+	return nil
+}
+
+func journeyNextStateIDs(j policy.Journey, stateID string) []string {
+	var out []string
+	for _, edge := range j.Edges {
+		if strings.TrimSpace(edge.Source) != strings.TrimSpace(stateID) {
+			continue
+		}
+		out = append(out, strings.TrimSpace(edge.Target))
+	}
+	if len(out) > 0 {
+		return dedupe(out)
+	}
+	if state := findState(j, stateID); state != nil {
+		return dedupe(append([]string(nil), state.Next...))
+	}
+	return nil
+}
+
+func journeyEdgeBetween(j policy.Journey, sourceID string, targetID string) *policy.JourneyEdge {
+	for i := range j.Edges {
+		edge := &j.Edges[i]
+		if strings.TrimSpace(edge.Source) == strings.TrimSpace(sourceID) && strings.TrimSpace(edge.Target) == strings.TrimSpace(targetID) {
+			return edge
+		}
+	}
+	return nil
+}
+
 func dedupe(items []string) []string {
 	seen := map[string]struct{}{}
 	var out []string
@@ -1997,6 +2563,16 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func matchingSource(ctx MatchingContext) string {
+	if len(ctx.StagedToolText) > 0 && strings.TrimSpace(ctx.ConversationText) != "" {
+		return ctx.ConversationText
+	}
+	if strings.TrimSpace(ctx.LatestCustomerText) != "" {
+		return ctx.LatestCustomerText
+	}
+	return ctx.ConversationText
 }
 
 func maxInt(a, b int) int {

@@ -867,7 +867,46 @@ func (s *Server) listCatalog(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, entries)
+	writeJSON(w, http.StatusOK, catalogEntriesResponse(entries))
+}
+
+func catalogEntriesResponse(entries []tool.CatalogEntry) []map[string]any {
+	out := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		item := map[string]any{
+			"id":               entry.ID,
+			"provider_id":      entry.ProviderID,
+			"name":             entry.Name,
+			"description":      entry.Description,
+			"schema":           entry.Schema,
+			"runtime_protocol": entry.RuntimeProtocol,
+			"metadata_json":    entry.MetadataJSON,
+			"imported_at":      entry.ImportedAt,
+		}
+		metadata := parseCatalogMetadata(entry.MetadataJSON)
+		if len(metadata) > 0 {
+			item["metadata"] = metadata
+			if value, ok := metadata["document_id"]; ok {
+				item["document_id"] = value
+			}
+			if value, ok := metadata["module_path"]; ok {
+				item["module_path"] = value
+			}
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func parseCatalogMetadata(raw string) map[string]any {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
 }
 
 func (s *Server) listExecutions(w http.ResponseWriter, r *http.Request) {

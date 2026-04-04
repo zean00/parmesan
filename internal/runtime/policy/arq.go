@@ -3,6 +3,7 @@ package policyruntime
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"strings"
 
 	"github.com/sahal/parmesan/internal/model"
@@ -41,6 +42,29 @@ func chunkGeneric[T any](items []T, size int) [][]T {
 		out = append(out, items[start:end])
 	}
 	return out
+}
+
+func processBatchesInParallel[T any, R any](ctx context.Context, batches []T, fn func(context.Context, T) (R, bool)) ([]R, bool) {
+	if len(batches) == 0 {
+		return nil, true
+	}
+	results := make([]R, len(batches))
+	ok := make([]bool, len(batches))
+	var wg sync.WaitGroup
+	for i, batch := range batches {
+		wg.Add(1)
+		go func(i int, batch T) {
+			defer wg.Done()
+			results[i], ok[i] = fn(ctx, batch)
+		}(i, batch)
+	}
+	wg.Wait()
+	for _, item := range ok {
+		if !item {
+			return nil, false
+		}
+	}
+	return results, true
 }
 
 func generateStructured(ctx context.Context, router *model.Router, prompt string, out any) bool {

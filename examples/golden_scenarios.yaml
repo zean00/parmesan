@@ -15,7 +15,12 @@ normalization:
     - active_journey_node
     - journey_decision
     - next_journey_node
+    - resolution_records
+    - projected_follow_ups
+    - legal_follow_ups
     - exposed_tools
+    - tool_candidates
+    - overlapping_tool_groups
     - selected_tool
     - response_mode
     - no_match
@@ -25,6 +30,7 @@ normalization:
     - Final text should be checked semantically, not by exact string equality.
     - Tool side effects should be replayed from stored tool results where possible.
     - Source references point to the original Parlant files used to derive each case.
+    - Some decision-level scenarios are expectation-authoritative when the live Parlant helper cannot expose equivalent internal state reliably.
 
 scenarios:
   - id: journey_reset_password_start
@@ -104,6 +110,152 @@ scenarios:
       journey_decision: backtrack
       next_journey_node: ask_dropoff_location
 
+  - id: journey_custom_branch_backtrack_to_earlier_choice
+    title: Journey backtracks to the earlier branch point when the customer changes a prior fulfillment choice
+    category: journey_backtrack
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_journey_node_selection.py
+    prior_state:
+      active_journey: Order Fulfillment
+      journey_path:
+        - choose_method
+        - ask_address
+        - ask_time
+    transcript:
+      - role: customer
+        text: Actually let's switch this to store pickup
+    policy_setup:
+      journeys:
+        - id: Order Fulfillment
+          when:
+            - order
+          root_id: choose_method
+          states:
+            - id: choose_method
+              type: message
+              instruction: Ask whether they want delivery or pickup
+            - id: ask_address
+              type: message
+              instruction: Ask for the delivery address
+              when:
+                - delivery
+            - id: ask_time
+              type: message
+              instruction: Ask for delivery time
+              when:
+                - delivery
+            - id: ask_store
+              type: message
+              instruction: Ask which store they want
+              when:
+                - pickup
+                - store
+          edges:
+            - id: edge_choose_address
+              source: choose_method
+              target: ask_address
+              condition: delivery
+            - id: edge_choose_store
+              source: choose_method
+              target: ask_store
+              condition: pickup or store
+            - id: edge_address_time
+              source: ask_address
+              target: ask_time
+    expectations:
+      matched_guidelines:
+        - journey:Order Fulfillment
+      active_journey:
+        id: Order Fulfillment
+      journey_decision: backtrack
+      next_journey_node: choose_method
+
+  - id: journey_custom_backtrack_and_fast_forward
+    title: Journey backtracks to the changed step and fast-forwards through already satisfied follow-ups
+    category: journey_backtrack
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_journey_node_selection.py
+    prior_state:
+      active_journey: Calzone Journey
+      journey_path:
+        - ask_quantity
+        - ask_type
+        - ask_size
+        - ask_drinks
+        - check_stock
+    transcript:
+      - role: customer
+        text: Actually, can I change those to medium size instead of large? No drinks still.
+    policy_setup:
+      journeys:
+        - id: Calzone Journey
+          when:
+            - order calzones
+          root_id: ask_quantity
+          states:
+            - id: ask_quantity
+              type: message
+              instruction: Ask how many calzones they want
+            - id: ask_type
+              type: message
+              instruction: Ask what type of calzones they want
+              when:
+                - classic italian
+                - spinach
+                - chicken
+            - id: ask_size
+              type: message
+              instruction: Ask what size they want
+              when:
+                - small
+                - medium
+                - large
+            - id: ask_drinks
+              type: message
+              instruction: Ask whether they want any drinks
+              when:
+                - drinks
+                - no drinks
+            - id: check_stock
+              type: tool
+              tool: local:check_stock
+              instruction: Check stock for the selected calzones
+          edges:
+            - source: __journey_root__
+              target: ask_quantity
+            - source: ask_quantity
+              target: ask_type
+            - source: ask_type
+              target: ask_size
+            - source: ask_size
+              target: ask_drinks
+            - source: ask_drinks
+              target: check_stock
+      tools:
+        - id: local:check_stock
+          consequential: true
+          schema:
+            type: object
+            properties:
+              session_id:
+                type: string
+            required:
+              - session_id
+      staged_tool_calls:
+        - tool_id: local:check_stock
+          arguments:
+            session_id: sess_1
+          result:
+            data:
+              all_available: true
+    expectations:
+      matched_guidelines:
+        - journey:Calzone Journey
+      active_journey:
+        id: Calzone Journey
+      journey_decision: backtrack
+      next_journey_node: check_stock
+
   - id: journey_book_flight_skip_answered_steps
     title: Journey skips already satisfied steps and asks the next unresolved question
     category: journey_progress
@@ -130,8 +282,6 @@ scenarios:
   - id: journey_dependency_guideline_under_21
     title: Journey activation enables dependent age-based flight guideline
     category: journey_relationship
-    skip_engine_diff: true
-    skip_parlant_expectations: true
     source_refs:
       - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/features/baseline/journeys.feature
     transcript:
@@ -251,12 +401,12 @@ scenarios:
       response_analysis:
         already_satisfied:
           - reservation_location
+        satisfaction_sources:
+          reservation_location: customer_answer
 
   - id: disambiguation_lost_card
     title: Lost-card request should prefer the clarified lost-card action set instead of unrelated card actions
     category: disambiguation
-    skip_engine_diff: true
-    skip_parlant_expectations: true
     source_refs:
       - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_disambiguation_batch.py
     transcript:
@@ -341,8 +491,6 @@ scenarios:
   - id: tool_from_entailed_guideline
     title: Tool exposure should include tools from an entailed guideline
     category: tools_relationships
-    skip_engine_diff: true
-    skip_parlant_expectations: true
     source_refs:
       - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/features/baseline/tools.feature
     transcript:
@@ -377,3 +525,1257 @@ scenarios:
       response_semantics:
         must_not_include:
           - pineapple
+
+  - id: relational_priority_chain_hello
+    title: Priority relationship should leave only the higher-priority greeting guideline active
+    category: relational_resolver
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_relational_resolver.py
+    transcript:
+      - role: customer
+        text: Hello there and I need followup help
+    policy_setup:
+      extra_guidelines:
+        - id: greet_howdy
+          kind: actionable
+          condition: customer says hello
+          action: say Howdy
+          priority: 30
+        - id: greet_hi
+          kind: actionable
+          condition: customer says hello
+          action: say Hi
+          priority: 20
+      relationships:
+        - kind: priority
+          source: greet_howdy
+          target: greet_hi
+    expectations:
+      matched_guidelines:
+        - greet_howdy
+      suppressed_guidelines:
+        - greet_hi
+      resolution_records:
+        - entity_id: greet_howdy
+          kind: none
+        - entity_id: greet_hi
+          kind: deprioritized
+
+  - id: relational_numerical_priority_guideline_over_journey
+    title: Higher numerical priority guideline should suppress an active lower-priority journey
+    category: relational_resolver
+    transcript:
+      - role: customer
+        text: customer asks about drinks
+    policy_setup:
+      extra_guidelines:
+        - id: standalone
+          kind: actionable
+          condition: customer asks about drinks
+          action: Recommend sparkling water
+          priority: 20
+      journeys:
+        - id: Drink Recommendation Journey
+          when:
+            - customer asks about drinks
+          priority: 5
+          states:
+            - id: ask_drink
+              type: message
+              instruction: Ask what drink they want
+    expectations:
+      matched_guidelines:
+        - standalone
+      suppressed_guidelines:
+        - journey_node:Drink Recommendation Journey:ask_drink
+      resolution_records:
+        - entity_id: journey:Drink Recommendation Journey
+          kind: deprioritized
+
+  - id: relational_numerical_priority_journey_over_guideline
+    title: Higher numerical priority active journey should suppress a lower-priority guideline
+    category: relational_resolver
+    transcript:
+      - role: customer
+        text: customer asks about drinks
+    policy_setup:
+      extra_guidelines:
+        - id: standalone
+          kind: actionable
+          condition: customer asks about drinks
+          action: Recommend water
+          priority: 5
+      journeys:
+        - id: Drink Recommendation Journey
+          when:
+            - customer asks about drinks
+          priority: 20
+          states:
+            - id: ask_drink
+              type: message
+              instruction: Ask what drink they want
+    expectations:
+      matched_guidelines:
+        - journey:Drink Recommendation Journey
+      suppressed_guidelines:
+        - standalone
+      active_journey:
+        id: Drink Recommendation Journey
+      resolution_records:
+        - entity_id: standalone
+          kind: deprioritized
+
+  - id: journey_projection_book_flight_followups
+    title: Projected Book Flight journey nodes should expose valid follow-up projected ids
+    category: journey_projection
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/test_journey_guideline_projection.py
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_journey_node_selection.py
+    transcript:
+      - role: customer
+        text: I want to book a flight
+    expectations:
+      matched_guidelines:
+        - journey:Book Flight
+      active_journey:
+        id: Book Flight
+      projected_follow_ups:
+        journey_node:Book Flight:ask_origin:
+          - journey_node:Book Flight:ask_destination
+        journey_node:Book Flight:ask_destination:
+          - journey_node:Book Flight:ask_dates
+        journey_node:Book Flight:ask_dates:
+          - journey_node:Book Flight:ask_class
+        journey_node:Book Flight:ask_class:
+          - journey_node:Book Flight:ask_name
+      legal_follow_ups:
+        journey_node:Book Flight:ask_origin:
+          - journey_node:Book Flight:ask_destination
+        journey_node:Book Flight:ask_destination:
+          - journey_node:Book Flight:ask_dates
+        journey_node:Book Flight:ask_dates:
+          - journey_node:Book Flight:ask_class
+        journey_node:Book Flight:ask_class:
+          - journey_node:Book Flight:ask_name
+
+  - id: response_analysis_discount_already_applied
+    title: Response analysis should mark the discount guideline as already satisfied once it was already offered
+    category: response_analysis
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_generic_response_analysis.py
+    transcript:
+      - role: customer
+        text: My order is late again.
+      - role: agent
+        text: I'm sorry about that. I'll give you a discount on this order.
+      - role: customer
+        text: Thanks, but where is it now?
+    policy_setup:
+      extra_guidelines:
+        - id: late_so_discount
+          kind: actionable
+          condition: customer complains that they didn't get the order on time
+          action: offer a discount
+          track: true
+    expectations:
+      response_analysis:
+        already_satisfied:
+          - late_so_discount
+        satisfaction_sources:
+          late_so_discount: assistant_message
+
+  - id: response_analysis_discount_partially_applied
+    title: Response analysis should keep a tracked guideline live when only part of the action was already performed
+    category: response_analysis
+    source_refs:
+      - /home/sahal/workspace/agents/parmesan/internal/runtime/policy/runtime_test.go
+    transcript:
+      - role: customer
+        text: My order is late again.
+      - role: agent
+        text: I'm sorry about that.
+      - role: customer
+        text: Okay, what happens next?
+    policy_setup:
+      extra_guidelines:
+        - id: late_so_discount
+          kind: actionable
+          condition: customer complains that they didn't get the order on time
+          action: Apologize and offer a discount.
+          track: true
+    expectations:
+      response_analysis:
+        still_required:
+          - late_so_discount
+        partially_applied:
+          - late_so_discount
+        satisfaction_sources:
+          late_so_discount: assistant_message
+
+  - id: tool_overlap_lock_card_choice
+    title: Overlapping card-control tools should keep both candidates visible but choose lock_card for a locking request
+    category: tool_calling
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_tool_caller.py
+    transcript:
+      - role: customer
+        text: Please lock my card right now. I think I misplaced it.
+    policy_setup:
+      extra_guidelines:
+        - id: card_help
+          kind: actionable
+          condition: customer has a card issue
+          action: help with a card problem
+        - id: lock_requested
+          kind: actionable
+          condition: customer wants to lock their card
+          action: lock the card for the customer
+      tools:
+        - id: local:try_unlock_card
+          overlap_group: card_controls
+          schema:
+            type: object
+            properties:
+              session_id:
+                type: string
+            required:
+              - session_id
+        - id: local:lock_card
+          overlap_group: card_controls
+          consequential: true
+          schema:
+            type: object
+            properties:
+              session_id:
+                type: string
+            required:
+              - session_id
+      associations:
+        - guideline: card_help
+          tool: local:try_unlock_card
+        - guideline: lock_requested
+          tool: local:lock_card
+    expectations:
+      tool_candidates:
+        - local:lock_card
+        - local:try_unlock_card
+      tool_candidate_states:
+        local:lock_card: selected
+        local:try_unlock_card: rejected_overlap
+      tool_candidate_rejected_by:
+        local:try_unlock_card: local:lock_card
+      overlapping_tool_groups:
+        - - local:lock_card
+          - local:try_unlock_card
+      selected_tool: local:lock_card
+
+  - id: tool_reference_motorcycle_price_specialized_choice
+    title: A specialized motorcycle price tool should beat a generic vehicle price tool for a motorcycle request
+    category: tool_calling
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/src/parlant/core/engines/alpha/tool_calling/single_tool_batch.py
+    transcript:
+      - role: customer
+        text: What's your price for a Harley-Davidson Street Glide motorcycle?
+    policy_setup:
+      extra_guidelines:
+        - id: vehicle_price
+          kind: actionable
+          condition: customer asks for the price of a vehicle
+          action: check the vehicle price
+      tools:
+        - id: local:check_vehicle_price
+          description: check generic vehicle price
+          overlap_group: vehicle_price
+          consequential: true
+          schema:
+            type: object
+            properties:
+              model:
+                type: string
+            required:
+              - model
+        - id: local:check_motorcycle_price
+          description: check motorcycle price
+          overlap_group: vehicle_price
+          consequential: true
+          schema:
+            type: object
+            properties:
+              model:
+                type: string
+            required:
+              - model
+      associations:
+        - guideline: vehicle_price
+          tool: local:check_vehicle_price
+        - guideline: vehicle_price
+          tool: local:check_motorcycle_price
+    expectations:
+      tool_candidates:
+        - local:check_vehicle_price
+        - local:check_motorcycle_price
+      tool_candidate_states:
+        local:check_motorcycle_price: selected
+        local:check_vehicle_price: rejected_overlap
+      tool_candidate_rejected_by:
+        local:check_vehicle_price: local:check_motorcycle_price
+      tool_candidate_reasons:
+        local:check_motorcycle_price: more specialized for this use case
+        local:check_vehicle_price: another overlapping tool was selected
+      overlapping_tool_groups:
+        - - local:check_motorcycle_price
+          - local:check_vehicle_price
+      selected_tool: local:check_motorcycle_price
+
+  - id: tool_schedule_confirmation_runs_in_tandem
+    title: Confirmation tool should stay runnable in tandem with the scheduling tool it references
+    category: tool_calling
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/src/parlant/core/engines/alpha/tool_calling/single_tool_batch.py
+    transcript:
+      - role: customer
+        text: Please schedule an appointment with Dr. Gabi tomorrow at 6pm and send me a confirmation email.
+    policy_setup:
+      extra_guidelines:
+        - id: schedule_visit
+          kind: actionable
+          condition: customer wants to schedule an appointment
+          action: schedule the appointment
+        - id: send_confirmation
+          kind: actionable
+          condition: customer wants confirmation after scheduling
+          action: send a confirmation email
+      relationships:
+        - kind: reference
+          source: local:send_confirmation_email
+          target: local:schedule_appointment
+      tools:
+        - id: local:schedule_appointment
+          description: schedule an appointment with a doctor
+          schema:
+            type: object
+            properties:
+              date:
+                type: string
+        - id: local:send_confirmation_email
+          description: send a confirmation email after an appointment is scheduled
+          schema:
+            type: object
+            properties:
+              session_id:
+                type: string
+            required:
+              - session_id
+      associations:
+        - guideline: schedule_visit
+          tool: local:schedule_appointment
+        - guideline: send_confirmation
+          tool: local:send_confirmation_email
+    expectations:
+      tool_candidates:
+        - local:schedule_appointment
+        - local:send_confirmation_email
+      tool_candidate_states:
+        local:schedule_appointment: selected
+        local:send_confirmation_email: should_run
+      tool_candidate_tandem_with:
+        local:send_confirmation_email:
+          - local:schedule_appointment
+      tool_candidate_reasons:
+        local:send_confirmation_email: run in tandem
+      selected_tool: local:schedule_appointment
+      selected_tools:
+        - local:schedule_appointment
+        - local:send_confirmation_email
+
+  - id: tool_search_products_twice_with_optional_args
+    title: A single search tool should be planned twice when the customer asks for two different optional-argument combinations
+    category: tool_calling
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/features/baseline/tools.feature
+    transcript:
+      - role: customer
+        text: Hey, do you have Dell laptop or Samsung SSD?
+    policy_setup:
+      extra_guidelines:
+        - id: filter_electronic_products
+          kind: actionable
+          condition: customer asks for a laptop
+          action: search electronic products
+      tools:
+        - id: local:search_electronic_products
+          description: search electronic products by vendor and keyword
+          schema:
+            type: object
+            properties:
+              vendor:
+                type: string
+              keyword:
+                type: string
+      associations:
+        - guideline: filter_electronic_products
+          tool: local:search_electronic_products
+    expectations:
+      selected_tool: local:search_electronic_products
+      selected_tools:
+        - local:search_electronic_products
+      tool_call_count: 2
+      tool_call_tools:
+        - local:search_electronic_products
+        - local:search_electronic_products
+
+  - id: tool_already_staged_return_status
+    title: Tool planner should keep an already-staged tool candidate visible but avoid selecting it for execution
+    category: tool_calling
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_tool_caller.py
+    transcript:
+      - role: customer
+        text: What is my return status?
+      - role: customer
+        text: Can you tell me the return status now?
+    policy_setup:
+      extra_guidelines:
+        - id: lookup_status
+          kind: actionable
+          condition: customer asks for the return status
+          action: check the return status
+      tools:
+        - id: local:get_return_status
+          schema:
+            type: object
+            properties:
+              session_id:
+                type: string
+            required:
+              - session_id
+      associations:
+        - guideline: lookup_status
+          tool: local:get_return_status
+      staged_tool_calls:
+        - tool_id: local:get_return_status
+          arguments:
+            return_id: ret_123
+    expectations:
+      exposed_tools:
+        - local:get_return_status
+      tool_candidates:
+        - local:get_return_status
+      tool_candidate_states:
+        local:get_return_status: already_staged
+      selected_tool: ""
+
+  - id: tool_already_satisfied_return_status
+    title: Tool planner should keep a previously satisfied tool candidate visible but avoid selecting it again
+    category: tool_calling
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/features/baseline/tools.feature
+    transcript:
+      - role: customer
+        text: What is my return status?
+      - role: customer
+        text: Can you repeat the return status?
+    policy_setup:
+      extra_guidelines:
+        - id: lookup_status
+          kind: actionable
+          condition: customer asks for the return status
+          action: check the return status
+      tools:
+        - id: local:get_return_status
+          schema:
+            type: object
+            properties:
+              session_id:
+                type: string
+            required:
+              - session_id
+      associations:
+        - guideline: lookup_status
+          tool: local:get_return_status
+      staged_tool_calls:
+        - tool_id: local:get_return_status
+          arguments:
+            return_id: ret_123
+          result:
+            data: "RETURN STATUS: In transit"
+            metadata: {}
+            control: {}
+    expectations:
+      exposed_tools:
+        - local:get_return_status
+      tool_candidates:
+        - local:get_return_status
+      tool_candidate_states:
+        local:get_return_status: already_satisfied
+      selected_tool: ""
+
+  - id: tool_block_missing_required_args_register_sweepstake
+    title: Tool planner should keep a consequential tool visible but block it when required arguments are missing
+    category: tool_calling
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_tool_caller.py
+    transcript:
+      - role: customer
+        text: Hi, can you register me for the sweepstake? I will donate 100 dollars if I win
+    policy_setup:
+      extra_guidelines:
+        - id: register_sweepstake
+          kind: actionable
+          condition: customer explicitly asks to be registered for a sweepstake
+          action: register the customer for the sweepstake using all provided information
+      tools:
+        - id: local:register_sweepstake
+          consequential: true
+          schema:
+            type: object
+            properties:
+              full_name:
+                type: string
+              city:
+                type: string
+              street:
+                type: string
+              house_number:
+                type: string
+              number_of_entries:
+                type: integer
+                x-hidden: true
+              donation_amount:
+                type: integer
+            required:
+              - full_name
+              - city
+              - street
+              - house_number
+              - number_of_entries
+      associations:
+        - guideline: register_sweepstake
+          tool: local:register_sweepstake
+    expectations:
+      exposed_tools:
+        - local:register_sweepstake
+      tool_candidates:
+        - local:register_sweepstake
+      tool_candidate_states:
+        local:register_sweepstake: blocked_missing_args
+      selected_tool: ""
+
+  - id: tool_block_invalid_enum_and_missing_param_book_flight
+    title: Tool planner should block a flight-booking tool when the destination is invalid and another required parameter is missing
+    category: tool_calling
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_tool_caller.py
+    transcript:
+      - role: customer
+        text: Hi, I would like to book a flight to Singapore
+    policy_setup:
+      extra_guidelines:
+        - id: book_flight
+          kind: actionable
+          condition: customer wants to book a flight
+          action: book a flight for the customer
+      tools:
+        - id: local:book_flight
+          consequential: true
+          schema:
+            type: object
+            properties:
+              destination:
+                type: string
+                enum:
+                  - London
+                  - Tokyo
+                  - Reykjavik
+              passenger_id:
+                type: integer
+            required:
+              - destination
+              - passenger_id
+      associations:
+        - guideline: book_flight
+          tool: local:book_flight
+    expectations:
+      exposed_tools:
+        - local:book_flight
+      tool_candidates:
+        - local:book_flight
+      tool_candidate_states:
+        local:book_flight: blocked_invalid_args
+      selected_tool: ""
+
+  - id: response_analysis_status_already_satisfied
+    title: Response analysis should mark a status-check guideline as already satisfied after a tool-backed assistant answer
+    category: response_analysis
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_generic_response_analysis.py
+    transcript:
+      - role: customer
+        text: Where is my return?
+      - role: agent
+        text: I checked the return status. It is currently in transit.
+      - role: customer
+        text: Thanks, anything else I should know?
+    policy_setup:
+      extra_guidelines:
+        - id: lookup_status
+          kind: actionable
+          condition: customer asks where their return is
+          action: check the return status
+          track: true
+      staged_tool_calls:
+        - tool_id: local:get_return_status
+          arguments:
+            return_id: ret_123
+          result:
+            data: "RETURN STATUS: In transit"
+            metadata: {}
+            control: {}
+    expectations:
+      response_analysis:
+        already_satisfied:
+          - lookup_status
+        satisfied_by_tool_event:
+          - lookup_status
+        satisfaction_sources:
+          lookup_status: tool_event
+
+  - id: relational_tag_any_dependency
+    title: Tag-any dependency should keep a guideline active when at least one tagged member is matched
+    category: relational_resolver
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_relational_resolver.py
+    transcript:
+      - role: customer
+        text: Hello there
+    policy_setup:
+      extra_guidelines:
+        - id: followup
+          kind: actionable
+          condition: customer says hello
+          action: offer followup help
+          priority: 10
+        - id: member_one
+          kind: actionable
+          condition: customer says hello
+          action: say hello
+          tags: [greetings]
+        - id: member_two
+          kind: actionable
+          condition: customer says goodbye
+          action: say goodbye
+          tags: [greetings]
+      relationships:
+        - kind: dependency
+          source: followup
+          target: tag_any:greetings
+    expectations:
+      matched_guidelines:
+        - followup
+        - member_one
+
+  - id: relational_tag_all_dependency_filters
+    title: Tag-all dependency should filter a guideline when not all tagged members are matched
+    category: relational_resolver
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_relational_resolver.py
+    transcript:
+      - role: customer
+        text: Hello there and I need followup help
+    policy_setup:
+      extra_guidelines:
+        - id: followup
+          kind: actionable
+          condition: customer says hello
+          action: offer followup help
+          priority: 10
+        - id: member_one
+          kind: actionable
+          condition: customer says hello
+          action: say hello
+          tags: [greetings]
+        - id: member_two
+          kind: actionable
+          condition: customer says goodbye
+          action: say goodbye
+          tags: [greetings]
+      relationships:
+        - kind: dependency
+          source: followup
+          target: tag_all:greetings
+    expectations:
+      matched_guidelines:
+        - member_one
+      resolution_records:
+        - entity_id: followup
+          kind: unmet_dependency
+        - entity_id: member_one
+          kind: none
+
+  - id: tool_auto_approved_non_consequential_no_args
+    title: Non-consequential tool with no parameters should be auto-approved
+    category: tool_calling
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_tool_caller.py
+    transcript:
+      - role: customer
+        text: Can you tell me what drinks are available?
+    policy_setup:
+      extra_guidelines:
+        - id: available_drinks
+          kind: actionable
+          condition: customer asks what drinks are available
+          action: list available drinks
+      tools:
+        - id: local:get_available_drinks
+          description: Get the drinks available in stock
+          schema:
+            type: object
+            properties: {}
+      associations:
+        - guideline: available_drinks
+          tool: local:get_available_drinks
+    expectations:
+      tool_candidates:
+        - local:get_available_drinks
+      selected_tool: local:get_available_drinks
+
+  - id: tool_overlap_transitive_group
+    title: Transitively overlapping matched tools should be considered in one overlap group
+    category: tool_calling
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_tool_caller.py
+    transcript:
+      - role: customer
+        text: Tell me Terry's offering, the available drinks, and the available toppings.
+    policy_setup:
+      extra_guidelines:
+        - id: terry_offer
+          kind: actionable
+          condition: customer asks about terry's offering
+          action: explain Terry's offering
+        - id: available_drinks
+          kind: actionable
+          condition: customer asks what drinks are available
+          action: list available drinks
+        - id: available_toppings
+          kind: actionable
+          condition: customer asks what toppings are available
+          action: list available toppings
+      tools:
+        - id: local:get_terrys_offering
+          description: Explain Terry's offering
+          schema:
+            type: object
+            properties: {}
+        - id: local:get_available_drinks
+          description: Get the drinks available in stock
+          schema:
+            type: object
+            properties: {}
+        - id: local:get_available_toppings
+          description: Get the toppings available in stock
+          consequential: true
+          schema:
+            type: object
+            properties: {}
+      associations:
+        - guideline: terry_offer
+          tool: local:get_terrys_offering
+        - guideline: available_drinks
+          tool: local:get_available_drinks
+        - guideline: available_toppings
+          tool: local:get_available_toppings
+      relationships:
+        - kind: overlap
+          source: local:get_terrys_offering
+          target: local:get_available_drinks
+        - kind: overlap
+          source: local:get_available_drinks
+          target: local:get_available_toppings
+    expectations:
+      tool_candidates:
+        - local:get_terrys_offering
+        - local:get_available_drinks
+        - local:get_available_toppings
+      overlapping_tool_groups:
+        - - local:get_terrys_offering
+          - local:get_available_drinks
+          - local:get_available_toppings
+
+  - id: relational_dependency_any_survives_with_one_match
+    title: dependency_any should keep a guideline active when one candidate dependency is active
+    category: relational_resolver
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_relational_resolver.py
+    transcript:
+      - role: customer
+        text: Hello there
+    policy_setup:
+      extra_guidelines:
+        - id: followup
+          kind: actionable
+          condition: customer says hello
+          action: offer followup help
+          priority: 10
+        - id: member_one
+          kind: actionable
+          condition: customer says hello
+          action: say hello
+        - id: member_two
+          kind: actionable
+          condition: customer says goodbye
+          action: say goodbye
+      relationships:
+        - kind: dependency_any
+          source: followup
+          target: member_one
+        - kind: dependency_any
+          source: followup
+          target: member_two
+    expectations:
+      matched_guidelines:
+        - followup
+        - member_one
+
+  - id: relational_dependency_any_filters_with_no_matches
+    title: dependency_any should filter a guideline when none of its candidate dependencies are active
+    category: relational_resolver
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_relational_resolver.py
+    transcript:
+      - role: customer
+        text: Please help me
+    policy_setup:
+      extra_guidelines:
+        - id: followup
+          kind: actionable
+          condition: help me
+          action: offer followup help
+          priority: 10
+        - id: member_one
+          kind: actionable
+          condition: customer says hello
+          action: say hello
+        - id: member_two
+          kind: actionable
+          condition: customer says goodbye
+          action: say goodbye
+      relationships:
+        - kind: dependency_any
+          source: followup
+          target: member_one
+        - kind: dependency_any
+          source: followup
+          target: member_two
+    expectations:
+      resolution_records:
+        - entity_id: followup
+          kind: unmet_dependency_any
+
+  - id: relational_mixed_dependency_and_dependency_any
+    title: A guideline with both dependency and dependency_any constraints should survive only when both rules are satisfied
+    category: relational_resolver
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_relational_resolver.py
+    transcript:
+      - role: customer
+        text: Hello there and help with my refund
+    policy_setup:
+      extra_guidelines:
+        - id: followup
+          kind: actionable
+          condition: refund
+          action: offer followup help
+          priority: 10
+        - id: required_one
+          kind: actionable
+          condition: refund
+          action: say refund
+        - id: any_one
+          kind: actionable
+          condition: customer says hello
+          action: say hello
+        - id: any_two
+          kind: actionable
+          condition: customer says goodbye
+          action: say goodbye
+      relationships:
+        - kind: dependency
+          source: followup
+          target: required_one
+        - kind: dependency_any
+          source: followup
+          target: any_one
+        - kind: dependency_any
+          source: followup
+          target: any_two
+    expectations:
+      matched_guidelines:
+        - followup
+        - required_one
+        - any_one
+
+  - id: tool_reject_ungrounded_when_grounded_exists
+    title: Tool planner should reject an ungrounded tool candidate when a grounded alternative exists
+    category: tool_calling
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_tool_caller.py
+    transcript:
+      - role: customer
+        text: Please lock my card
+    policy_setup:
+      extra_guidelines:
+        - id: lock_requested
+          kind: actionable
+          condition: customer wants to lock their card
+          action: lock the card
+      tools:
+        - id: local:lock_card
+          consequential: true
+          schema:
+            type: object
+            properties:
+              session_id:
+                type: string
+            required:
+              - session_id
+        - id: local:generic_lookup
+          schema:
+            type: object
+            properties:
+              session_id:
+                type: string
+            required:
+              - session_id
+      associations:
+        - guideline: lock_requested
+          tool: local:lock_card
+        - guideline: lock_requested
+          tool: local:generic_lookup
+    expectations:
+      tool_candidates:
+        - local:lock_card
+        - local:generic_lookup
+      tool_candidate_states:
+        local:lock_card: selected
+        local:generic_lookup: rejected_ungrounded
+      tool_candidate_rejected_by:
+        local:generic_lookup: local:lock_card
+      selected_tool: local:lock_card
+
+  - id: relational_guideline_over_journey_drinks
+    title: A higher-priority standalone guideline should deprioritize the active journey node
+    category: relational_resolver
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_relational_resolver.py
+    transcript:
+      - role: customer
+        text: customer asks about drinks
+    policy_setup:
+      extra_guidelines:
+        - id: standalone
+          kind: actionable
+          condition: customer asks about drinks
+          action: Recommend Pepsi
+          priority: 20
+      relationships:
+        - kind: priority
+          source: standalone
+          target: journey:Drink Recommendation Journey
+    expectations:
+      matched_guidelines:
+        - standalone
+      active_journey: null
+      suppressed_guidelines:
+        - journey:Drink Recommendation Journey
+        - journey_node:Drink Recommendation Journey:ask_drink
+      resolution_records:
+        - entity_id: standalone
+          kind: none
+        - entity_id: journey:Drink Recommendation Journey
+          kind: deprioritized
+        - entity_id: journey_node:Drink Recommendation Journey:ask_drink
+          kind: deprioritized
+
+  - id: relational_journey_over_guideline_drinks
+    title: A higher-priority journey should deprioritize a competing standalone guideline
+    category: relational_resolver
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_relational_resolver.py
+    transcript:
+      - role: customer
+        text: customer asks about drinks
+    policy_setup:
+      extra_guidelines:
+        - id: standalone
+          kind: actionable
+          condition: customer asks about drinks
+          action: Recommend Coca-Cola
+          priority: 5
+      relationships:
+        - kind: priority
+          source: journey:Drink Recommendation Journey
+          target: standalone
+    expectations:
+      matched_guidelines:
+        - journey:Drink Recommendation Journey
+      active_journey:
+        id: Drink Recommendation Journey
+      suppressed_guidelines:
+        - standalone
+      resolution_records:
+        - entity_id: journey:Drink Recommendation Journey
+          kind: none
+        - entity_id: journey_node:Drink Recommendation Journey:ask_drink
+          kind: none
+        - entity_id: standalone
+          kind: deprioritized
+
+  - id: relational_journey_dependency_falls_after_journey_deprioritized
+    title: A guideline depending on a journey should be filtered when a higher-priority guideline deprioritizes that journey
+    category: relational_resolver
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_relational_resolver.py
+    transcript:
+      - role: customer
+        text: customer asks about drinks
+    policy_setup:
+      extra_guidelines:
+        - id: depends_on_journey
+          kind: actionable
+          condition: customer asks about drinks
+          action: Recommend Sprite
+          priority: 10
+        - id: winner
+          kind: actionable
+          condition: customer asks about drinks
+          action: Recommend Pepsi
+          priority: 20
+      relationships:
+        - kind: dependency
+          source: depends_on_journey
+          target: journey:Drink Recommendation Journey
+        - kind: priority
+          source: winner
+          target: journey:Drink Recommendation Journey
+    expectations:
+      matched_guidelines:
+        - winner
+      active_journey: null
+      resolution_records:
+        - entity_id: winner
+          kind: none
+        - entity_id: journey:Drink Recommendation Journey
+          kind: deprioritized
+        - entity_id: journey_node:Drink Recommendation Journey:ask_drink
+          kind: deprioritized
+        - entity_id: depends_on_journey
+          kind: unmet_dependency
+
+  - id: relational_condition_guideline_survives_when_journey_deprioritized
+    title: A journey condition guideline should survive when only the journey node loses a priority fight
+    category: relational_resolver
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_relational_resolver.py
+    transcript:
+      - role: customer
+        text: customer is interested
+    policy_setup:
+      extra_guidelines:
+        - id: journey_condition
+          kind: actionable
+          condition: customer is interested
+          action: observe interest
+          tags:
+            - journey:Journey 1
+        - id: winner
+          kind: actionable
+          condition: customer is interested
+          action: recommend alternative
+          priority: 20
+      relationships:
+        - kind: priority
+          source: winner
+          target: journey:Journey 1
+    expectations:
+      matched_guidelines:
+        - winner
+        - journey_condition
+      active_journey: null
+      resolution_records:
+        - entity_id: winner
+          kind: none
+        - entity_id: journey:Journey 1
+          kind: deprioritized
+        - entity_id: journey_condition
+          kind: none
+        - entity_id: journey_node:Journey 1:recommend_product
+          kind: deprioritized
+
+  - id: relational_inactive_priority_winner_does_not_suppress_guideline
+    title: A deprioritized guideline should remain when the higher-priority counterpart is inactive
+    category: relational_resolver
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_relational_resolver.py
+    transcript:
+      - role: customer
+        text: telescope
+    policy_setup:
+      extra_guidelines:
+        - id: winner
+          kind: actionable
+          condition: volcano
+          action: winner action
+        - id: loser
+          kind: actionable
+          condition: telescope
+          action: loser action
+      relationships:
+        - kind: priority
+          source: winner
+          target: loser
+    expectations:
+      matched_guidelines:
+        - loser
+      resolution_records:
+        - entity_id: loser
+          kind: none
+
+  - id: relational_inactive_priority_journey_does_not_suppress_active_journey
+    title: An inactive higher-priority journey should not suppress the active lower-priority journey
+    category: relational_resolver
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_relational_resolver.py
+    transcript:
+      - role: customer
+        text: nebula itinerary
+    policy_setup:
+      relationships:
+        - kind: priority
+          source: journey:Journey A
+          target: journey:Journey B
+    expectations:
+      matched_guidelines:
+        - journey:Journey B
+      active_journey:
+        id: Journey B
+      resolution_records:
+        - entity_id: journey_node:Journey A:ask_a
+          kind: deprioritized
+        - entity_id: journey:Journey B
+          kind: none
+        - entity_id: journey_node:Journey B:ask_b
+          kind: none
+
+  - id: relational_tag_priority_no_active_source_member
+    title: Tag-level priority should not fire when no source-tag guideline is active
+    category: relational_resolver
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_relational_resolver.py
+    transcript:
+      - role: customer
+        text: beta
+    policy_setup:
+      extra_guidelines:
+        - id: t1_member
+          kind: actionable
+          condition: alpha
+          action: t1 action
+          tags:
+            - t1
+        - id: t2_member
+          kind: actionable
+          condition: beta
+          action: t2 action
+          tags:
+            - t2
+      relationships:
+        - kind: priority
+          source: tag_all:t1
+          target: tag_all:t2
+    expectations:
+      matched_guidelines:
+        - t2_member
+      resolution_records:
+        - entity_id: t2_member
+          kind: none
+
+  - id: relational_tag_priority_transitive_dependency_fallout
+    title: Tag priority should deprioritize the target member and transitively filter a dependent guideline
+    category: relational_resolver
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_relational_resolver.py
+    transcript:
+      - role: customer
+        text: alpha beta gamma
+    policy_setup:
+      extra_guidelines:
+        - id: t1_member
+          kind: actionable
+          condition: alpha
+          action: t1 action
+          tags:
+            - t1
+        - id: t2_member
+          kind: actionable
+          condition: beta
+          action: t2 action
+          tags:
+            - t2
+        - id: dependent
+          kind: actionable
+          condition: gamma
+          action: dependent action
+      relationships:
+        - kind: priority
+          source: tag_all:t1
+          target: tag_all:t2
+        - kind: dependency
+          source: dependent
+          target: tag_all:t2
+    expectations:
+      matched_guidelines:
+        - t1_member
+      resolution_records:
+        - entity_id: t1_member
+          kind: none
+        - entity_id: t2_member
+          kind: deprioritized
+        - entity_id: dependent
+          kind: unmet_dependency
+
+  - id: staged_tool_age_underage_drink_match
+    title: Staged tool calls should influence guideline matching when the tool result supplies age context
+    category: guideline_matching
+    source_refs:
+      - /home/sahal/workspace/agents/parlant/tests/core/stable/engines/alpha/test_guideline_matcher.py
+    transcript:
+      - role: customer
+        text: Hi there, I want a drink that's on the sweeter side, what would you suggest?
+      - role: agent
+        text: Let me check your account first.
+      - role: customer
+        text: It's 199877
+    policy_setup:
+      extra_guidelines:
+        - id: suggest_drink_underage
+          kind: actionable
+          condition: drink under 21
+          action: Suggest a sweet non-alcoholic drink.
+        - id: suggest_drink_adult
+          kind: actionable
+          condition: drink 21 or older
+          action: Suggest an alcoholic option if appropriate.
+      staged_tool_calls:
+        - tool_id: local:get_user_age
+          arguments:
+            user_id: "199877"
+          result:
+            data: 16
+            metadata: {}
+            control: {}
+    expectations:
+      matched_guidelines:
+        - suggest_drink_underage

@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -453,18 +455,80 @@ func selectPolicyBundles(bundles []policy.Bundle, preferred string, fallback str
 }
 
 func (r *Runner) maybeRunTool(ctx context.Context, exec execution.TurnExecution, view resolvedView) (map[string]any, error) {
-	entry, ok := r.selectTool(view)
-	if !ok {
+	if len(view.ToolPlan.Calls) > 0 {
+		outputs := map[string]map[string]any{}
+		for _, call := range view.ToolPlan.Calls {
+			entry, ok := findCatalogEntry(r.repo, call.ToolID)
+			if !ok {
+				continue
+			}
+			decision := decisionForPlannedCall(view, call)
+			output, err := r.runSingleTool(ctx, exec, view, entry, decision)
+			if err != nil {
+				return nil, err
+			}
+			if output != nil {
+				key := entry.ProviderID + ":" + entry.Name
+				if _, exists := outputs[key]; !exists {
+					outputs[key] = output
+				} else {
+					outputs[key+"#"+hashArguments(decision.Arguments)] = output
+				}
+			}
+		}
+		if len(outputs) == 0 {
+			return nil, nil
+		}
+		if len(outputs) == 1 {
+			for _, output := range outputs {
+				return output, nil
+			}
+		}
+		return map[string]any{"tools": outputs}, nil
+	}
+	selectedTools := dedupeStrings(view.ToolPlan.SelectedTools)
+	if len(selectedTools) == 0 {
+		entry, ok := r.selectTool(view)
+		if !ok {
+			return nil, nil
+		}
+		return r.runSingleTool(ctx, exec, view, entry, view.ToolDecision)
+	}
+	outputs := map[string]map[string]any{}
+	for _, toolName := range selectedTools {
+		entry, ok := findCatalogEntry(r.repo, toolName)
+		if !ok {
+			continue
+		}
+		decision := decisionForTool(view, entry.Name)
+		output, err := r.runSingleTool(ctx, exec, view, entry, decision)
+		if err != nil {
+			return nil, err
+		}
+		if output != nil {
+			outputs[entry.ProviderID+":"+entry.Name] = output
+		}
+	}
+	if len(outputs) == 0 {
 		return nil, nil
 	}
-	if !view.ToolDecision.CanRun {
+	if len(outputs) == 1 {
+		for _, output := range outputs {
+			return output, nil
+		}
+	}
+	return map[string]any{"tools": outputs}, nil
+}
+
+func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution, view resolvedView, entry tool.CatalogEntry, decision policyruntime.ToolDecision) (map[string]any, error) {
+	if !decision.CanRun {
 		payload := map[string]any{
 			"tool":              entry.Name,
 			"status":            "cannot_run",
-			"missing_arguments": append([]string(nil), view.ToolDecision.MissingArguments...),
-			"invalid_arguments": append([]string(nil), view.ToolDecision.InvalidArguments...),
-			"missing_issues":    append([]policyruntime.ToolArgumentIssue(nil), view.ToolDecision.MissingIssues...),
-			"invalid_issues":    append([]policyruntime.ToolArgumentIssue(nil), view.ToolDecision.InvalidIssues...),
+			"missing_arguments": append([]string(nil), decision.MissingArguments...),
+			"invalid_arguments": append([]string(nil), decision.InvalidArguments...),
+			"missing_issues":    append([]policyruntime.ToolArgumentIssue(nil), decision.MissingIssues...),
+			"invalid_issues":    append([]policyruntime.ToolArgumentIssue(nil), decision.InvalidIssues...),
 		}
 		r.appendTrace(ctx, audit.Record{
 			ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
@@ -497,7 +561,7 @@ func (r *Runner) maybeRunTool(ctx context.Context, exec execution.TurnExecution,
 	if err != nil {
 		auth = tool.AuthBinding{}
 	}
-	idempotencyKey := fmt.Sprintf("%s_%s", exec.ID, entry.ID)
+	idempotencyKey := fmt.Sprintf("%s_%s_%s", exec.ID, entry.ID, hashArguments(decision.Arguments))
 	if output, ok := r.reuseToolRun(ctx, exec.ID, entry.ID, idempotencyKey); ok {
 		r.appendTrace(ctx, audit.Record{
 			ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
@@ -518,14 +582,14 @@ func (r *Runner) maybeRunTool(ctx context.Context, exec execution.TurnExecution,
 		ToolID:         entry.ID,
 		Status:         "running",
 		IdempotencyKey: idempotencyKey,
-		InputJSON:      mustJSON(view.ToolDecision.Arguments),
+		InputJSON:      mustJSON(decision.Arguments),
 		CreatedAt:      time.Now().UTC(),
 	}
 	if err := r.repo.SaveToolRun(ctx, run); err != nil {
 		return nil, err
 	}
 	r.publish(exec.SessionID, exec.ID, "runtime.tool.started", map[string]any{"tool": entry.Name})
-	output, err := r.invoker.Invoke(ctx, binding, auth, entry, view.ToolDecision.Arguments)
+	output, err := r.invoker.Invoke(ctx, binding, auth, entry, decision.Arguments)
 	if err != nil {
 		run.Status = "failed"
 		run.OutputJSON = mustJSON(toolErrorPayload(err))
@@ -559,6 +623,104 @@ func (r *Runner) maybeRunTool(ctx context.Context, exec execution.TurnExecution,
 	})
 	r.publish(exec.SessionID, exec.ID, "runtime.tool.completed", map[string]any{"tool": entry.Name, "output": output})
 	return output, nil
+}
+
+func decisionForTool(view resolvedView, toolName string) policyruntime.ToolDecision {
+	if strings.TrimSpace(view.ToolDecision.SelectedTool) == strings.TrimSpace(toolName) {
+		return view.ToolDecision
+	}
+	for _, candidate := range view.ToolPlan.Candidates {
+		if strings.TrimSpace(candidate.ToolID) != strings.TrimSpace(toolName) {
+			continue
+		}
+		decision := policyruntime.ToolDecision{
+			SelectedTool: toolName,
+			Arguments:    cloneAnyMap(candidate.Arguments),
+			CanRun:       !candidate.AlreadyStaged && !candidate.AlreadySatisfied && len(candidate.MissingIssues) == 0 && len(candidate.InvalidIssues) == 0,
+			MissingIssues: append([]policyruntime.ToolArgumentIssue(nil),
+				candidate.MissingIssues...),
+			InvalidIssues: append([]policyruntime.ToolArgumentIssue(nil),
+				candidate.InvalidIssues...),
+			Rationale: firstNonEmptyString(
+				candidate.SelectionRationale,
+				candidate.PreparationRationale,
+				candidate.Rationale,
+			),
+			Grounded:         candidate.Grounded,
+			ApprovalRequired: strings.EqualFold(candidate.ApprovalMode, "required"),
+		}
+		for _, issue := range decision.MissingIssues {
+			decision.MissingArguments = append(decision.MissingArguments, issue.Parameter)
+		}
+		for _, issue := range decision.InvalidIssues {
+			decision.InvalidArguments = append(decision.InvalidArguments, issue.Parameter)
+		}
+		if !decision.CanRun {
+			decision.SelectedTool = ""
+		}
+		return decision
+	}
+	return policyruntime.ToolDecision{}
+}
+
+func cloneAnyMap(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func decisionForPlannedCall(view resolvedView, call policyruntime.ToolPlannedCall) policyruntime.ToolDecision {
+	decision := decisionForTool(view, call.ToolID)
+	if len(decision.Arguments) == 0 && len(call.Arguments) > 0 {
+		decision.Arguments = cloneAnyMap(call.Arguments)
+	}
+	if strings.TrimSpace(decision.SelectedTool) == "" {
+		decision.SelectedTool = call.ToolID
+	}
+	if strings.TrimSpace(decision.Rationale) == "" {
+		decision.Rationale = call.Rationale
+	}
+	return decision
+}
+
+func dedupeStrings(items []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func hashArguments(args map[string]any) string {
+	raw, err := json.Marshal(args)
+	if err != nil {
+		raw = []byte(fmt.Sprint(args))
+	}
+	sum := sha1.Sum(raw)
+	return hex.EncodeToString(sum[:8])
 }
 
 func isRetryableExecutionError(err error) bool {

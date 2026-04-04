@@ -182,6 +182,54 @@ func TestRegisterProviderPersistsImmediatelyBeforeAsyncSync(t *testing.T) {
 	}
 }
 
+func TestListCatalogIncludesParsedModulePathAndDocumentID(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	err := repo.SaveCatalogEntries(context.Background(), []tool.CatalogEntry{{
+		ID:              "tool_1",
+		ProviderID:      "provider_1",
+		Name:            "lookup_doc",
+		Description:     "lookup",
+		Schema:          `{}`,
+		RuntimeProtocol: "mcp",
+		MetadataJSON:    `{"document_id":"doc_123","module_path":"tests.tool_utilities"}`,
+		ImportedAt:      time.Now().UTC(),
+	}})
+	if err != nil {
+		t.Fatalf("SaveCatalogEntries() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/tools/catalog", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list catalog status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var decoded []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(decoded) != 1 {
+		t.Fatalf("catalog length = %d, want 1", len(decoded))
+	}
+	if got := decoded[0]["document_id"]; got != "doc_123" {
+		t.Fatalf("document_id = %#v, want %q", got, "doc_123")
+	}
+	if got := decoded[0]["module_path"]; got != "tests.tool_utilities" {
+		t.Fatalf("module_path = %#v, want %q", got, "tests.tool_utilities")
+	}
+	metadata, ok := decoded[0]["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata = %#v, want object", decoded[0]["metadata"])
+	}
+	if got := metadata["module_path"]; got != "tests.tool_utilities" {
+		t.Fatalf("metadata.module_path = %#v, want %q", got, "tests.tool_utilities")
+	}
+}
+
 func TestPromoteProposalActiveRetiresExistingActiveAndDisablesCanary(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
