@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
 )
@@ -50,51 +51,6 @@ func TestEvaluateScenarioDetectsExpectationAndParityFailures(t *testing.T) {
 	}
 	if len(report.DiffErrors) == 0 {
 		t.Fatalf("DiffErrors = 0, want > 0")
-	}
-}
-
-func TestEvaluateScenarioCanIgnoreParlantDrift(t *testing.T) {
-	scenario := Scenario{
-		ID:                "example",
-		SkipEngineDiff:    true,
-		SkipParlantExpect: true,
-		Expect: Expectations{
-			MatchedGuidelines: []string{"greet"},
-		},
-	}
-	left := NormalizedResult{
-		MatchedGuidelines: []string{"greet"},
-	}
-	right := NormalizedResult{
-		MatchedGuidelines: []string{"other"},
-	}
-	report := EvaluateScenario(scenario, left, right)
-	if !report.Passed {
-		t.Fatalf("EvaluateScenario() failed, want pass when live Parlant drift is ignored: %#v", report)
-	}
-	if len(report.DiffErrors) != 0 {
-		t.Fatalf("DiffErrors = %#v, want 0", report.DiffErrors)
-	}
-}
-
-func TestAuthoritativeParlantFallbackUsesExpectationSurface(t *testing.T) {
-	scenario := Scenario{
-		ID: "journey_dependency_guideline_under_21",
-		Expect: Expectations{
-			MatchedGuidelines:    []string{"under_21"},
-			SuppressedGuidelines: []string{"age_21_or_older"},
-			ResolutionRecords: []ResolutionExpectation{
-				{EntityID: "age_21_or_older", Kind: "deprioritized"},
-			},
-			ActiveJourney:   &IDExpectation{ID: "Book Flight"},
-			JourneyDecision: "advance",
-			NextJourneyNode: "ask_origin",
-		},
-	}
-	got := authoritativeParlantFallback(scenario)
-	report := EvaluateScenario(scenario, got, got)
-	if !report.Passed {
-		t.Fatalf("authoritativeParlantFallback() failed expectation surface: %#v", report)
 	}
 }
 
@@ -172,7 +128,6 @@ func TestIdsFromSuppressedIncludesProjectedJourneyNodes(t *testing.T) {
 }
 
 func TestRunUsesScenarioTimeout(t *testing.T) {
-	t.Setenv("EMCIE_API_KEY", "")
 	ctx := context.Background()
 	start := time.Now()
 	_, err := Run(ctx, Options{
@@ -186,25 +141,6 @@ func TestRunUsesScenarioTimeout(t *testing.T) {
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Fatalf("Run() took too long, scenario timeout may not be applied")
-	}
-}
-
-func TestRunFallsBackToAuthoritativeWhenParlantLiveUnavailable(t *testing.T) {
-	t.Setenv("EMCIE_API_KEY", "")
-	ctx := context.Background()
-	report, err := Run(ctx, Options{
-		FixturePath: filepath.Join("..", "..", "examples", "golden_scenarios.yaml"),
-		ScenarioID:  "relational_inactive_priority_journey_does_not_suppress_active_journey",
-		ParlantRoot: "/definitely/missing/parlant",
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if len(report.Scenarios) != 1 {
-		t.Fatalf("scenario count = %d, want 1", len(report.Scenarios))
-	}
-	if !report.Scenarios[0].Passed {
-		t.Fatalf("report = %#v, want authoritative fallback to pass", report.Scenarios[0])
 	}
 }
 
@@ -239,6 +175,37 @@ func TestRunFixtureToolIncludesModulePathAndDocumentID(t *testing.T) {
 	}
 	if calls[0].ModulePath != "tests.tool_utilities" {
 		t.Fatalf("ModulePath = %q, want %q", calls[0].ModulePath, "tests.tool_utilities")
+	}
+}
+
+func TestNormalizeParmesanKeepsActiveJourneyNodeAsCurrentState(t *testing.T) {
+	view := policyruntime.ResolvedView{
+		ActiveJourney: &policy.Journey{
+			ID: "Reset Password Journey",
+			States: []policy.JourneyNode{
+				{ID: "ask_account_name", Instruction: "What is the name of your account?"},
+				{ID: "ask_contact", Instruction: "What email or phone is attached to the account?"},
+			},
+		},
+		ActiveJourneyState: &policy.JourneyNode{
+			ID:          "ask_account_name",
+			Instruction: "What is the name of your account?",
+		},
+		JourneyDecision: policyruntime.JourneyDecision{
+			Action:    "start",
+			NextState: "ask_contact",
+		},
+		ResolutionRecords: []policyruntime.ResolutionRecord{
+			{EntityID: "journey:Reset Password Journey", Kind: policyruntime.ResolutionNone},
+		},
+	}
+
+	got := normalizeParmesan(view, nil, "What is the name of your account?", nil, false, "pass")
+	if got.ActiveJourneyNode != "ask_account_name" {
+		t.Fatalf("ActiveJourneyNode = %q, want %q", got.ActiveJourneyNode, "ask_account_name")
+	}
+	if got.NextJourneyNode != "ask_contact" {
+		t.Fatalf("NextJourneyNode = %q, want %q", got.NextJourneyNode, "ask_contact")
 	}
 }
 

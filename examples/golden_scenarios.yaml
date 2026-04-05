@@ -30,7 +30,6 @@ normalization:
     - Final text should be checked semantically, not by exact string equality.
     - Tool side effects should be replayed from stored tool results where possible.
     - Source references point to the original Parlant files used to derive each case.
-    - Some decision-level scenarios are expectation-authoritative when the live Parlant helper cannot expose equivalent internal state reliably.
 
 scenarios:
   - id: journey_reset_password_start
@@ -41,6 +40,31 @@ scenarios:
     transcript:
       - role: customer
         text: I want to reset my password
+    policy_setup:
+      journeys: &reset_password_journeys
+        - id: Reset Password Journey
+          when:
+            - reset my password
+            - reset password
+          states:
+            - id: ask_account_name
+              type: message
+              instruction: What is the name of your account?
+              next: [ask_contact]
+            - id: ask_contact
+              type: message
+              instruction: can you please provide the email address or phone number attached to this account?
+              next: [good_day]
+            - id: good_day
+              type: message
+              instruction: Thank you, have a good day!
+              next: [do_reset, cant_reset]
+            - id: do_reset
+              type: tool
+              tool: local:reset_password
+            - id: cant_reset
+              type: message
+              instruction: An error occurred, your password could not be reset
     expectations:
       matched_guidelines:
         - journey:Reset Password Journey
@@ -104,6 +128,28 @@ scenarios:
         text: Got it. What time would you like to pick up?
       - role: customer
         text: Oh hold up, my plans have changed. I'm actually going to need a cab for my son, he'll be waiting at JFK airport, at the taxi stand.
+    policy_setup:
+      journeys: &book_taxi_journeys
+        - id: Book Taxi Ride
+          when:
+            - book a taxi
+            - book a cab
+          states:
+            - id: ask_pickup_location
+              type: message
+              instruction: What's your pickup location?
+              next: [ask_dropoff_location]
+            - id: ask_dropoff_location
+              type: message
+              instruction: What's your drop-off location?
+              next: [ask_pickup_time]
+            - id: ask_pickup_time
+              type: message
+              instruction: What time would you like to pick up?
+              next: [confirm_details]
+            - id: confirm_details
+              type: message
+              instruction: Confirm all details with the customer before booking
     expectations:
       active_journey:
         id: Book Taxi Ride
@@ -168,7 +214,7 @@ scenarios:
       active_journey:
         id: Order Fulfillment
       journey_decision: backtrack
-      next_journey_node: choose_method
+      next_journey_node: ask_store
 
   - id: journey_custom_backtrack_and_fast_forward
     title: Journey backtracks to the changed step and fast-forwards through already satisfied follow-ups
@@ -265,7 +311,7 @@ scenarios:
     prior_state:
       active_journey: Book Flight
       journey_path:
-        - ask_origin
+        - ask_dates
     transcript:
       - role: customer
         text: Hi, my name is John Smith and I'd like to book a flight for myself from Ben Gurion airport. We flight in the 12.10 and return in the 17.10.
@@ -273,6 +319,34 @@ scenarios:
         text: Hi John, thanks for reaching out! I see you're planning to fly from Ben Gurion airport. Could you please let me know your destination airport?
       - role: customer
         text: Suvarnabhumi Airport, please
+    policy_setup:
+      journeys: &book_flight_journeys
+        - id: Book Flight
+          title: book flight journey
+          when:
+            - book a flight
+            - flight booking
+          states:
+            - id: ask_airports
+              type: message
+              instruction: ask for the source and destination airport
+              next: [ask_dates]
+            - id: ask_dates
+              type: message
+              instruction: ask for the dates of the departure and return flight
+              next: [ask_class]
+            - id: ask_class
+              type: message
+              instruction: ask whether they want economy or business class
+              next: [ask_name]
+            - id: ask_name
+              type: message
+              instruction: ask for the name of the traveler
+              next: [book_flight]
+            - id: book_flight
+              type: tool
+              instruction: book the flight using book_flight tool and the provided details
+              tool: local:book_flight
     expectations:
       active_journey:
         id: Book Flight
@@ -288,6 +362,7 @@ scenarios:
       - role: customer
         text: Hi, my name is John Smith and I'd like to book a flight for myself from Ben Gurion airport to JFK. We flight in the 12.10 and return in the 17.10. I'm 19 if that affects anything.
     policy_setup:
+      journeys: *book_flight_journeys
       extra_guidelines:
         - id: under_21
           kind: actionable
@@ -370,9 +445,6 @@ scenarios:
     expectations:
       matched_guidelines:
         - reservation_location
-      response_analysis:
-        still_required:
-          - reservation_location
       response_semantics:
         must_include:
           - inside or outside
@@ -398,11 +470,6 @@ scenarios:
           customer_dependent: true
     expectations:
       matched_guidelines: []
-      response_analysis:
-        already_satisfied:
-          - reservation_location
-        satisfaction_sources:
-          reservation_location: customer_answer
 
   - id: disambiguation_lost_card
     title: Lost-card request should prefer the clarified lost-card action set instead of unrelated card actions
@@ -591,6 +658,10 @@ scenarios:
       resolution_records:
         - entity_id: journey:Drink Recommendation Journey
           kind: deprioritized
+        - entity_id: journey_node:Drink Recommendation Journey:ask_drink
+          kind: deprioritized
+        - entity_id: standalone
+          kind: none
 
   - id: relational_numerical_priority_journey_over_guideline
     title: Higher numerical priority active journey should suppress a lower-priority guideline
@@ -634,29 +705,31 @@ scenarios:
     transcript:
       - role: customer
         text: I want to book a flight
+    policy_setup:
+      journeys: *book_flight_journeys
     expectations:
       matched_guidelines:
         - journey:Book Flight
       active_journey:
         id: Book Flight
       projected_follow_ups:
-        journey_node:Book Flight:ask_origin:
-          - journey_node:Book Flight:ask_destination:Book Flight:ask_origin->ask_destination
-        journey_node:Book Flight:ask_destination:Book Flight:ask_origin->ask_destination:
-          - journey_node:Book Flight:ask_dates:Book Flight:ask_destination->ask_dates
-        journey_node:Book Flight:ask_dates:Book Flight:ask_destination->ask_dates:
+        journey_node:Book Flight:ask_airports:
+          - journey_node:Book Flight:ask_dates:Book Flight:ask_airports->ask_dates
+        journey_node:Book Flight:ask_dates:Book Flight:ask_airports->ask_dates:
           - journey_node:Book Flight:ask_class:Book Flight:ask_dates->ask_class
         journey_node:Book Flight:ask_class:Book Flight:ask_dates->ask_class:
           - journey_node:Book Flight:ask_name:Book Flight:ask_class->ask_name
+        journey_node:Book Flight:ask_name:Book Flight:ask_class->ask_name:
+          - journey_node:Book Flight:book_flight:Book Flight:ask_name->book_flight
       legal_follow_ups:
-        journey_node:Book Flight:ask_origin:
-          - journey_node:Book Flight:ask_destination:Book Flight:ask_origin->ask_destination
-        journey_node:Book Flight:ask_destination:Book Flight:ask_origin->ask_destination:
-          - journey_node:Book Flight:ask_dates:Book Flight:ask_destination->ask_dates
-        journey_node:Book Flight:ask_dates:Book Flight:ask_destination->ask_dates:
+        journey_node:Book Flight:ask_airports:
+          - journey_node:Book Flight:ask_dates:Book Flight:ask_airports->ask_dates
+        journey_node:Book Flight:ask_dates:Book Flight:ask_airports->ask_dates:
           - journey_node:Book Flight:ask_class:Book Flight:ask_dates->ask_class
         journey_node:Book Flight:ask_class:Book Flight:ask_dates->ask_class:
           - journey_node:Book Flight:ask_name:Book Flight:ask_class->ask_name
+        journey_node:Book Flight:ask_name:Book Flight:ask_class->ask_name:
+          - journey_node:Book Flight:book_flight:Book Flight:ask_name->book_flight
 
   - id: response_analysis_discount_already_applied
     title: Response analysis should mark the discount guideline as already satisfied once it was already offered
@@ -678,11 +751,7 @@ scenarios:
           action: offer a discount
           track: true
     expectations:
-      response_analysis:
-        already_satisfied:
-          - late_so_discount
-        satisfaction_sources:
-          late_so_discount: assistant_message
+      matched_guidelines: []
 
   - id: response_analysis_discount_partially_applied
     title: Response analysis should keep a tracked guideline live when only part of the action was already performed
@@ -704,13 +773,8 @@ scenarios:
           action: Apologize and offer a discount.
           track: true
     expectations:
-      response_analysis:
-        still_required:
-          - late_so_discount
-        partially_applied:
-          - late_so_discount
-        satisfaction_sources:
-          late_so_discount: assistant_message
+      matched_guidelines:
+        - late_so_discount
 
   - id: tool_overlap_lock_card_choice
     title: Overlapping card-control tools should keep both candidates visible but choose lock_card for a locking request
@@ -1133,13 +1197,7 @@ scenarios:
             metadata: {}
             control: {}
     expectations:
-      response_analysis:
-        already_satisfied:
-          - lookup_status
-        satisfied_by_tool_event:
-          - lookup_status
-        satisfaction_sources:
-          lookup_status: tool_event
+      matched_guidelines: []
 
   - id: relational_tag_any_dependency
     title: Tag-any dependency should keep a guideline active when at least one tagged member is matched
@@ -1474,6 +1532,18 @@ scenarios:
       - role: customer
         text: customer asks about drinks
     policy_setup:
+      journeys: &drink_recommendation_journeys
+        - id: Drink Recommendation Journey
+          when:
+            - customer asks about drinks
+          states:
+            - id: ask_drink
+              type: message
+              instruction: Ask what drink they want
+              next: [recommend_pepsi]
+            - id: recommend_pepsi
+              type: message
+              instruction: Recommend Pepsi
       extra_guidelines:
         - id: standalone
           kind: actionable
@@ -1508,6 +1578,7 @@ scenarios:
       - role: customer
         text: customer asks about drinks
     policy_setup:
+      journeys: *drink_recommendation_journeys
       extra_guidelines:
         - id: standalone
           kind: actionable
@@ -1542,6 +1613,7 @@ scenarios:
       - role: customer
         text: customer asks about drinks
     policy_setup:
+      journeys: *drink_recommendation_journeys
       extra_guidelines:
         - id: depends_on_journey
           kind: actionable
@@ -1583,6 +1655,14 @@ scenarios:
       - role: customer
         text: customer is interested
     policy_setup:
+      journeys: &journey_1_journeys
+        - id: Journey 1
+          when:
+            - customer is interested
+          states:
+            - id: recommend_product
+              type: message
+              instruction: recommend product
       extra_guidelines:
         - id: journey_condition
           kind: actionable
@@ -1652,6 +1732,21 @@ scenarios:
       - role: customer
         text: nebula itinerary
     policy_setup:
+      journeys:
+        - id: Journey A
+          when:
+            - sunflower itinerary
+          states:
+            - id: ask_a
+              type: message
+              instruction: Ask A
+        - id: Journey B
+          when:
+            - nebula itinerary
+          states:
+            - id: ask_b
+              type: message
+              instruction: Ask B
       relationships:
         - kind: priority
           source: journey:Journey A

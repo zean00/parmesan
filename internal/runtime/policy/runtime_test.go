@@ -1166,6 +1166,9 @@ func TestResolveAppliesNumericalPriorityOverJourneyEntity(t *testing.T) {
 	if !containsResolutionRecord(view.ResolutionRecords, "journey:Drink Recommendation Journey", ResolutionDeprioritized) {
 		t.Fatalf("resolution records = %#v, want journey entity deprioritized", view.ResolutionRecords)
 	}
+	if !containsResolutionRecord(view.ResolutionRecords, "journey_node:Drink Recommendation Journey:ask_drink", ResolutionDeprioritized) {
+		t.Fatalf("resolution records = %#v, want active journey node deprioritized", view.ResolutionRecords)
+	}
 }
 
 func TestResolveAppliesNumericalPriorityJourneyOverGuideline(t *testing.T) {
@@ -3281,7 +3284,7 @@ func TestSelectBestBacktrackTargetPrefersEarlierUnresolvedBranchPoint(t *testing
 	if selected == nil || selected.ID != "ask_size" {
 		t.Fatalf("selected = %#v, want ask_size", selected)
 	}
-	if next := fastForwardJourneyState(ctx, flow, selected.ID); next != "check_stock" {
+	if next := fastForwardJourneyState(ctx, flow, selected.ID, ""); next != "check_stock" {
 		t.Fatalf("fast-forward next state = %q, want check_stock", next)
 	}
 }
@@ -3320,6 +3323,13 @@ func TestAdvanceJourneyBacktracksAndFastForwards(t *testing.T) {
 	wantPath := []string{"choose_method", "ask_address", "ask_time", "ask_drinks", "check_stock"}
 	if strings.Join(next.Path, ",") != strings.Join(wantPath, ",") {
 		t.Fatalf("journey path = %#v, want %#v", next.Path, wantPath)
+	}
+}
+
+func TestCustomerSatisfiedGuidelineDetectsDeliveryPickupAnswer(t *testing.T) {
+	item := policy.Guideline{Then: "Ask whether they want delivery or pickup"}
+	if !customerSatisfiedGuideline("Actually let's switch this to store pickup", item) {
+		t.Fatalf("customerSatisfiedGuideline() = false, want true for pickup answer")
 	}
 }
 
@@ -3428,17 +3438,35 @@ func TestExtractMentionedAgeRequiresExplicitAgeContext(t *testing.T) {
 	}
 }
 
-func TestResolveDoesNotSkipJourneyStepsFromGenericFixtureHeuristics(t *testing.T) {
+func TestResolveSkipsJourneyStepsAlreadySatisfiedByCustomerHistory(t *testing.T) {
 	now := time.Now().UTC()
 	view, err := Resolve(
-		[]session.Event{{
-			ID:        "evt_1",
-			SessionID: "sess_1",
-			Source:    "customer",
-			Kind:      "message",
-			CreatedAt: now,
-			Content:   []session.ContentPart{{Type: "text", Text: "I want to book a flight from Main Street 1234 to JFK on 12.10"}},
-		}},
+		[]session.Event{
+			{
+				ID:        "evt_1",
+				SessionID: "sess_1",
+				Source:    "customer",
+				Kind:      "message",
+				CreatedAt: now,
+				Content: []session.ContentPart{{Type: "text", Text: "Hi, my name is John Smith and I'd like to book a flight for myself from Ben Gurion airport. We flight in the 12.10 and return in the 17.10."}},
+			},
+			{
+				ID:        "evt_2",
+				SessionID: "sess_1",
+				Source:    "agent",
+				Kind:      "message",
+				CreatedAt: now.Add(time.Second),
+				Content: []session.ContentPart{{Type: "text", Text: "Hi John, thanks for reaching out! I see you're planning to fly from Ben Gurion airport. Could you please let me know your destination airport?"}},
+			},
+			{
+				ID:        "evt_3",
+				SessionID: "sess_1",
+				Source:    "customer",
+				Kind:      "message",
+				CreatedAt: now.Add(2 * time.Second),
+				Content:   []session.ContentPart{{Type: "text", Text: "Suvarnabhumi Airport, please"}},
+			},
+		},
 		[]policy.Bundle{{
 			ID:      "bundle_1",
 			Version: "v1",
@@ -3466,8 +3494,69 @@ func TestResolveDoesNotSkipJourneyStepsFromGenericFixtureHeuristics(t *testing.T
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.JourneyDecision.Action == "advance" && view.JourneyDecision.NextState != "ask_destination" {
-		t.Fatalf("journey decision = %#v, want no heuristic skip beyond immediate next state", view.JourneyDecision)
+	if view.JourneyDecision.Action != "advance" || view.JourneyDecision.NextState != "ask_class" {
+		t.Fatalf("journey decision = %#v, want advance to ask_class after skipping satisfied steps", view.JourneyDecision)
+	}
+}
+
+func TestResolveDoesNotBacktrackWhenCustomerCompletesPriorJourneyStepLate(t *testing.T) {
+	now := time.Now().UTC()
+	view, err := Resolve(
+		[]session.Event{
+			{
+				ID:        "evt_1",
+				SessionID: "sess_1",
+				Source:    "customer",
+				Kind:      "message",
+				CreatedAt: now,
+				Content: []session.ContentPart{{Type: "text", Text: "Hi, my name is John Smith and I'd like to book a flight for myself from Ben Gurion airport. We flight in the 12.10 and return in the 17.10."}},
+			},
+			{
+				ID:        "evt_2",
+				SessionID: "sess_1",
+				Source:    "ai_agent",
+				Kind:      "message",
+				CreatedAt: now.Add(time.Second),
+				Content: []session.ContentPart{{Type: "text", Text: "Hi John, thanks for reaching out! I see you're planning to fly from Ben Gurion airport. Could you please let me know your destination airport?"}},
+			},
+			{
+				ID:        "evt_3",
+				SessionID: "sess_1",
+				Source:    "customer",
+				Kind:      "message",
+				CreatedAt: now.Add(2 * time.Second),
+				Content:   []session.ContentPart{{Type: "text", Text: "Suvarnabhumi Airport, please"}},
+			},
+		},
+		[]policy.Bundle{{
+			ID:      "bundle_1",
+			Version: "v1",
+			Journeys: []policy.Journey{{
+				ID:   "Book Flight",
+				When: []string{"book a flight"},
+				States: []policy.JourneyNode{
+					{ID: "ask_airports", Type: "message", Instruction: "ask for the source and destination airport", Next: []string{"ask_dates"}},
+					{ID: "ask_dates", Type: "message", Instruction: "ask for the dates of the departure and return flight", Next: []string{"ask_class"}},
+					{ID: "ask_class", Type: "message", Instruction: "ask whether they want economy or business class"},
+				},
+			}},
+		}},
+		[]journey.Instance{{
+			ID:        "journey_1",
+			SessionID: "sess_1",
+			JourneyID: "Book Flight",
+			StateID:   "ask_dates",
+			Path:      []string{"ask_dates"},
+			Status:    journey.StatusActive,
+			UpdatedAt: now,
+		}},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if view.JourneyDecision.Action != "advance" || view.JourneyDecision.NextState != "ask_class" {
+		t.Fatalf("journey decision = %#v, want advance to ask_class instead of backtrack", view.JourneyDecision)
 	}
 }
 

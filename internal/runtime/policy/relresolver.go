@@ -134,7 +134,7 @@ func resolveRelationships(bundle policy.Bundle, matchCtx MatchingContext, observ
 			priorityCeiling, hasCeiling := activeGuidelinePriorityCeiling(active, resolutions)
 			if hasCeiling && activeJourney.Priority < priorityCeiling {
 				journeyActive = false
-				suppressJourneyGuidelines(active, activeJourney, activeJourneyState, &suppressed, suppressedIndex, nil, ResolutionDeprioritized, "deprioritized", "active journey lost to a higher numerical priority entity")
+				suppressJourneyGuidelines(active, activeJourney, activeJourneyState, &suppressed, suppressedIndex, resolutions, ResolutionDeprioritized, "deprioritized", "active journey lost to a higher numerical priority entity")
 				appendResolution(resolutions, journeyEntityID, ResolutionDeprioritized, "journey lost to a higher numerical priority entity")
 				changed = true
 			}

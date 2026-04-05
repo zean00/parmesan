@@ -13,20 +13,18 @@ type NormalizationSpec struct {
 }
 
 type Scenario struct {
-	ID                string       `yaml:"id" json:"id"`
-	Title             string       `yaml:"title" json:"title"`
-	Category          string       `yaml:"category" json:"category"`
-	SourceRefs        []string     `yaml:"source_refs" json:"source_refs"`
-	AgentName         string       `yaml:"agent_name" json:"agent_name"`
-	AgentJob          string       `yaml:"agent_job" json:"agent_job"`
-	Mode              string       `yaml:"mode" json:"mode"`
-	SkipEngineDiff    bool         `yaml:"skip_engine_diff" json:"skip_engine_diff"`
-	SkipParlantExpect bool         `yaml:"skip_parlant_expectations" json:"skip_parlant_expectations"`
-	TimeoutSeconds    int          `yaml:"timeout_seconds" json:"timeout_seconds"`
-	Transcript        []Turn       `yaml:"transcript" json:"transcript"`
-	PriorState        PriorState   `yaml:"prior_state" json:"prior_state"`
-	PolicySetup       PolicySetup  `yaml:"policy_setup" json:"policy_setup"`
-	Expect            Expectations `yaml:"expectations" json:"expectations"`
+	ID             string       `yaml:"id" json:"id"`
+	Title          string       `yaml:"title" json:"title"`
+	Category       string       `yaml:"category" json:"category"`
+	SourceRefs     []string     `yaml:"source_refs" json:"source_refs"`
+	AgentName      string       `yaml:"agent_name" json:"agent_name"`
+	AgentJob       string       `yaml:"agent_job" json:"agent_job"`
+	Mode           string       `yaml:"mode" json:"mode"`
+	TimeoutSeconds int          `yaml:"timeout_seconds" json:"timeout_seconds"`
+	Transcript     []Turn       `yaml:"transcript" json:"transcript"`
+	PriorState     PriorState   `yaml:"prior_state" json:"prior_state"`
+	PolicySetup    PolicySetup  `yaml:"policy_setup" json:"policy_setup"`
+	Expect         Expectations `yaml:"expectations" json:"expectations"`
 }
 
 type Turn struct {
@@ -94,6 +92,7 @@ type FixtureToolCall struct {
 
 type FixtureJourney struct {
 	ID              string               `yaml:"id" json:"id"`
+	Title           string               `yaml:"title" json:"title"`
 	When            []string             `yaml:"when" json:"when"`
 	RootID          string               `yaml:"root_id" json:"root_id"`
 	Priority        int                  `yaml:"priority" json:"priority"`

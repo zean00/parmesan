@@ -57,7 +57,7 @@ func ResolveWithRouter(ctx context.Context, router *model.Router, events []sessi
 		}
 	}
 	state.exposedTools, state.toolApprovals = resolveToolExposure(bundle.GuidelineToolAssociations, state.matchedObservations, state.matchedGuidelines, state.activeJourneyState, bundle.ToolPolicies, catalog)
-	state.toolPlan, state.toolDecision = buildToolPlan(ctx, router, matchCtx, state.activeJourney, state.activeJourneyState, state.matchedGuidelines, state.exposedTools, state.toolApprovals, bundle.Relationships, catalog)
+	state.toolPlan, state.toolDecision = buildToolPlan(ctx, router, matchCtx, state.activeJourney, state.activeJourneyState, state.journeyDecision, state.matchedGuidelines, state.exposedTools, state.toolApprovals, bundle.Relationships, catalog)
 
 	mode := strings.ToLower(strings.TrimSpace(bundle.CompositionMode))
 	if mode == "" {
@@ -946,6 +946,15 @@ func customerSatisfiedGuideline(text string, item policy.Guideline) bool {
 	if strings.Contains(loweredAction, "inside or outside") {
 		return containsAnyPhrase(loweredText, "inside", "outside")
 	}
+	if strings.Contains(loweredAction, "delivery") && strings.Contains(loweredAction, "pickup") {
+		return containsAnyPhrase(loweredText, "delivery", "pickup", "pick up", "store pickup")
+	}
+	if strings.Contains(loweredAction, "drinks") {
+		return containsAnyPhrase(loweredText, "drink", "drinks", "no drinks", "without drinks")
+	}
+	if strings.Contains(loweredAction, "store") {
+		return containsAnyPhrase(loweredText, "store", "pickup", "pick up")
+	}
 	if strings.Contains(loweredAction, "email") {
 		return strings.Contains(loweredText, "@")
 	}
@@ -1244,6 +1253,9 @@ func runJourneyBacktrackARQ(ctx context.Context, router *model.Router, matchCtx 
 	if activeJourney == nil || activeState == nil || instance == nil {
 		return JourneyDecision{}
 	}
+	if lateCompletedPreviousJourneyStep(matchCtx, activeJourney, activeState) {
+		return JourneyDecision{}
+	}
 	rootID := ""
 	if root := journeyRootState(activeJourney); root != nil {
 		rootID = root.ID
@@ -1261,7 +1273,7 @@ func runJourneyBacktrackARQ(ctx context.Context, router *model.Router, matchCtx 
 			if structured.BacktrackToSame {
 				if selected := selectBestBacktrackTarget(matchCtx, activeJourney, instance.Path, activeState.ID, false); selected != nil {
 					target = selected.ID
-					nextState = backtrackFastForwardState(matchCtx, activeJourney, selected.ID)
+					nextState = backtrackFastForwardState(matchCtx, activeJourney, selected.ID, activeState)
 				} else if strings.TrimSpace(target) == "" {
 					target = activeState.ID
 				}
@@ -1283,7 +1295,7 @@ func runJourneyBacktrackARQ(ctx context.Context, router *model.Router, matchCtx 
 	newPurposeMarkers := []string{"instead", "different", "another", "new", "start over", "again", "restart"}
 	if containsAnyPhrase(message, sameProcessMarkers...) {
 		if selected := selectBestBacktrackTarget(matchCtx, activeJourney, instance.Path, activeState.ID, false); selected != nil {
-			nextState := backtrackFastForwardState(matchCtx, activeJourney, selected.ID)
+			nextState := backtrackFastForwardState(matchCtx, activeJourney, selected.ID, activeState)
 			if !isLegalBacktrackTarget(instance.Path, selected.ID, rootID) {
 				return JourneyDecision{}
 			}
@@ -1317,6 +1329,20 @@ func runJourneyProgressARQ(ctx context.Context, router *model.Router, matchCtx M
 	if strings.EqualFold(backtrackDecision.Action, "backtrack") {
 		return backtrackDecision
 	}
+	if lateCompletedPreviousJourneyStep(matchCtx, activeJourney, activeState) {
+		nextIDs := journeyNextStateIDs(*activeJourney, activeState.ID)
+		nextState := ""
+		if len(nextIDs) == 1 {
+			nextState = nextIDs[0]
+		}
+		nextState = skipSatisfiedJourneyStates(matchCtx, activeJourney, activeState.ID, nextState, "")
+		return JourneyDecision{
+			Action:       "advance",
+			CurrentState: activeState.ID,
+			NextState:    nextState,
+			Rationale:    "customer completed a prior missing journey step and the journey can continue forward",
+		}
+	}
 	decision := JourneyDecision{
 		Action:       "continue",
 		CurrentState: activeState.ID,
@@ -1333,7 +1359,7 @@ func runJourneyProgressARQ(ctx context.Context, router *model.Router, matchCtx M
 			rootID = root.ID
 		}
 		if selected := selectBestBacktrackTarget(matchCtx, activeJourney, instance.Path, activeState.ID, true); selected != nil && isLegalBacktrackTarget(instance.Path, selected.ID, rootID) {
-			nextState := backtrackFastForwardState(matchCtx, activeJourney, selected.ID)
+			nextState := backtrackFastForwardState(matchCtx, activeJourney, selected.ID, activeState)
 			decision.Action = "backtrack"
 			decision.BacktrackTo = selected.ID
 			decision.NextState = nextState
@@ -1361,6 +1387,7 @@ func runJourneyProgressARQ(ctx context.Context, router *model.Router, matchCtx M
 		if bestNextID == "" && len(nextIDs) == 1 {
 			bestNextID = nextIDs[0]
 		}
+		bestNextID = skipSatisfiedJourneyStates(matchCtx, activeJourney, activeState.ID, bestNextID, "")
 		if bestNextID != "" {
 			decision.Action = "advance"
 			decision.NextState = bestNextID
@@ -1369,6 +1396,10 @@ func runJourneyProgressARQ(ctx context.Context, router *model.Router, matchCtx M
 		}
 	}
 	bestNextID := selectNextJourneyState(matchCtx, activeJourney, activeState, nextIDs)
+	if bestNextID == "" && len(nextIDs) == 1 {
+		bestNextID = nextIDs[0]
+	}
+	bestNextID = skipSatisfiedJourneyStates(matchCtx, activeJourney, activeState.ID, bestNextID, "")
 	if bestNextID != "" {
 		decision.Action = "advance"
 		decision.NextState = bestNextID
@@ -1704,7 +1735,43 @@ func runJourneyProgressStructuredARQ(ctx context.Context, router *model.Router, 
 	if decision.Action == "" {
 		return JourneyDecision{}, false
 	}
+	if strings.EqualFold(decision.Action, "backtrack") && lateCompletedPreviousJourneyStep(matchCtx, activeJourney, activeState) {
+		nextIDs := journeyNextStateIDs(*activeJourney, activeState.ID)
+		nextState := ""
+		if len(nextIDs) == 1 {
+			nextState = nextIDs[0]
+		}
+		nextState = skipSatisfiedJourneyStates(matchCtx, activeJourney, activeState.ID, nextState, "")
+		return JourneyDecision{
+			Action:       "advance",
+			CurrentState: activeState.ID,
+			NextState:    nextState,
+			Rationale:    "customer completed a prior missing journey step and the journey can continue forward",
+		}, true
+	}
+	if strings.EqualFold(decision.Action, "advance") {
+		if decision.NextState == "" {
+			nextIDs := journeyNextStateIDs(*activeJourney, activeState.ID)
+			if len(nextIDs) == 1 {
+				decision.NextState = nextIDs[0]
+			}
+		}
+		decision.NextState = skipSatisfiedJourneyStates(matchCtx, activeJourney, activeState.ID, decision.NextState, "")
+	}
 	return decision, true
+}
+
+func lateCompletedPreviousJourneyStep(ctx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode) bool {
+	if activeJourney == nil || activeState == nil {
+		return false
+	}
+	previous := previousState(activeJourney, activeState.ID)
+	if previous == nil {
+		return false
+	}
+	prevSat := journeyStateSatisfiedByLatestTurn(ctx, *previous, "")
+	activeSat := journeyStateSatisfiedByHistory(ctx, *activeState, "")
+	return prevSat && activeSat
 }
 
 func collectTemplates(bundle policy.Bundle, activeJourney *policy.Journey, activeState *policy.JourneyNode, ctx MatchingContext) []policy.Template {
@@ -1738,7 +1805,7 @@ func previousState(flow *policy.Journey, stateID string) *policy.JourneyNode {
 		if strings.TrimSpace(edge.Target) != strings.TrimSpace(stateID) {
 			continue
 		}
-		if strings.TrimSpace(edge.Source) == strings.TrimSpace(flow.RootID) {
+		if strings.TrimSpace(edge.Source) == strings.TrimSpace(flow.RootID) && findState(*flow, edge.Source) == nil {
 			return nil
 		}
 		return findState(*flow, edge.Source)
@@ -1779,9 +1846,9 @@ func selectBestBacktrackTarget(ctx MatchingContext, flow *policy.Journey, path [
 		return previousVisitedState(flow, path, currentStateID)
 	}
 	best := candidates[0]
-	bestScore := backtrackTargetScore(ctx, flow, best)
+	bestScore := backtrackTargetScore(ctx, flow, path, best)
 	for _, candidate := range candidates[1:] {
-		score := backtrackTargetScore(ctx, flow, candidate)
+		score := backtrackTargetScore(ctx, flow, path, candidate)
 		if score > bestScore {
 			best = candidate
 			bestScore = score
@@ -1835,7 +1902,7 @@ func isLegalBacktrackTarget(path []string, target string, rootID string) bool {
 	return false
 }
 
-func backtrackTargetScore(ctx MatchingContext, flow *policy.Journey, stateID string) int {
+func backtrackTargetScore(ctx MatchingContext, flow *policy.Journey, path []string, stateID string) int {
 	score := 0
 	state := findState(*flow, stateID)
 	if state == nil {
@@ -1860,7 +1927,7 @@ func backtrackTargetScore(ctx MatchingContext, flow *policy.Journey, stateID str
 	}
 	if journeyStateSatisfiedByHistory(ctx, *state, "") {
 		score -= 5
-		if nextState := fastForwardJourneyState(ctx, flow, stateID); strings.TrimSpace(nextState) != "" {
+		if nextState := fastForwardJourneyState(ctx, flow, stateID, ""); strings.TrimSpace(nextState) != "" {
 			score += 2
 			score += len(journeyPathBetween(*flow, stateID, nextState))
 		}
@@ -1870,7 +1937,53 @@ func backtrackTargetScore(ctx MatchingContext, flow *policy.Journey, stateID str
 	if len(journeyNextStateIDs(*flow, stateID)) > 0 {
 		score += 1
 	}
+	score += branchSwitchScore(ctx, flow, path, stateID)
 	return score
+}
+
+func branchSwitchScore(ctx MatchingContext, flow *policy.Journey, path []string, stateID string) int {
+	if flow == nil || len(path) == 0 {
+		return 0
+	}
+	index := -1
+	for i, item := range path {
+		if item == stateID {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return 0
+	}
+	priorNext := ""
+	if index+1 < len(path) {
+		priorNext = path[index+1]
+	}
+	best := 0
+	for _, nextID := range journeyNextStateIDs(*flow, stateID) {
+		if nextID == priorNext {
+			continue
+		}
+		edgeCondition := ""
+		if edge := journeyEdgeBetween(*flow, stateID, nextID); edge != nil {
+			edgeCondition = strings.TrimSpace(edge.Condition)
+		}
+		nextState := findState(*flow, nextID)
+		score := 0
+		if edgeCondition != "" {
+			score += scoreCondition(edgeCondition, ctx.LatestCustomerText)
+		}
+		if nextState != nil {
+			score += journeyNextStateScore(ctx, *nextState)
+		}
+		if score > best {
+			best = score
+		}
+	}
+	if best > 0 {
+		return best + 6
+	}
+	return 0
 }
 
 func selectNextJourneyState(ctx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, nextIDs []string) string {
@@ -1904,7 +2017,7 @@ func selectNextJourneyState(ctx MatchingContext, activeJourney *policy.Journey, 
 	return bestNextID
 }
 
-func backtrackFastForwardState(ctx MatchingContext, activeJourney *policy.Journey, startStateID string) string {
+func backtrackFastForwardState(ctx MatchingContext, activeJourney *policy.Journey, startStateID string, currentActiveState *policy.JourneyNode) string {
 	if activeJourney == nil {
 		return ""
 	}
@@ -1912,10 +2025,14 @@ func backtrackFastForwardState(ctx MatchingContext, activeJourney *policy.Journe
 	if startState == nil || !journeyStateSatisfiedByLatestTurn(ctx, *startState, "") {
 		return ""
 	}
-	return fastForwardJourneyState(ctx, activeJourney, startStateID)
+	rerunToolID := ""
+	if currentActiveState != nil && strings.EqualFold(currentActiveState.Type, "tool") {
+		rerunToolID = strings.TrimSpace(currentActiveState.ID)
+	}
+	return fastForwardJourneyState(ctx, activeJourney, startStateID, rerunToolID)
 }
 
-func fastForwardJourneyState(ctx MatchingContext, activeJourney *policy.Journey, startStateID string) string {
+func fastForwardJourneyState(ctx MatchingContext, activeJourney *policy.Journey, startStateID string, rerunToolStateID string) string {
 	if activeJourney == nil {
 		return ""
 	}
@@ -1933,6 +2050,9 @@ func fastForwardJourneyState(ctx MatchingContext, activeJourney *policy.Journey,
 				continue
 			}
 			if strings.EqualFold(nextState.Type, "tool") {
+				if journeyToolStateExecuted(ctx, *nextState) && nextState.ID != rerunToolStateID {
+					return bestUnresolved
+				}
 				return nextState.ID
 			}
 			edgeCondition := ""
@@ -1957,12 +2077,59 @@ func fastForwardJourneyState(ctx MatchingContext, activeJourney *policy.Journey,
 	return bestUnresolved
 }
 
+func skipSatisfiedJourneyStates(ctx MatchingContext, activeJourney *policy.Journey, previousStateID string, nextStateID string, rerunToolStateID string) string {
+	if activeJourney == nil {
+		return strings.TrimSpace(nextStateID)
+	}
+	currentID := strings.TrimSpace(nextStateID)
+	prevID := strings.TrimSpace(previousStateID)
+	for currentID != "" {
+		state := findState(*activeJourney, currentID)
+		if state == nil {
+			return currentID
+		}
+		if strings.EqualFold(state.Type, "tool") {
+			if journeyToolStateExecuted(ctx, *state) && state.ID != rerunToolStateID {
+				nextIDs := journeyNextStateIDs(*activeJourney, state.ID)
+				if len(nextIDs) == 1 {
+					prevID = state.ID
+					currentID = nextIDs[0]
+					continue
+				}
+			}
+			return state.ID
+		}
+		edgeCondition := ""
+		if edge := journeyEdgeBetween(*activeJourney, prevID, state.ID); edge != nil {
+			edgeCondition = edge.Condition
+		}
+		if !journeyStateSatisfiedByHistory(ctx, *state, edgeCondition) {
+			return state.ID
+		}
+		nextIDs := journeyNextStateIDs(*activeJourney, state.ID)
+		if len(nextIDs) == 0 {
+			return state.ID
+		}
+		nextID := selectNextJourneyState(ctx, activeJourney, state, nextIDs)
+		if nextID == "" && len(nextIDs) == 1 {
+			nextID = nextIDs[0]
+		}
+		if strings.TrimSpace(nextID) == "" {
+			return state.ID
+		}
+		prevID = state.ID
+		currentID = nextID
+	}
+	return ""
+}
+
 func journeyStateSatisfiedByLatestTurn(ctx MatchingContext, state policy.JourneyNode, edgeCondition string) bool {
 	return journeyStateSatisfiedByText(ctx.LatestCustomerText, state, edgeCondition)
 }
 
 func journeyStateSatisfiedByHistory(ctx MatchingContext, state policy.JourneyNode, edgeCondition string) bool {
-	return journeyStateSatisfiedByText(firstNonEmpty(ctx.ConversationText, ctx.LatestCustomerText), state, edgeCondition)
+	text := strings.TrimSpace(strings.Join(append(append([]string(nil), ctx.CustomerHistory...), ctx.LatestCustomerText), "\n"))
+	return journeyStateSatisfiedByText(text, state, edgeCondition)
 }
 
 func journeyStateSatisfiedByText(text string, state policy.JourneyNode, edgeCondition string) bool {
@@ -1979,8 +2146,74 @@ func journeyStateSatisfiedByText(text string, state policy.JourneyNode, edgeCond
 	if strings.TrimSpace(edgeCondition) != "" && scoreCondition(edgeCondition, text) > 0 {
 		return true
 	}
+	if journeyStateSemanticSatisfied(text, state) {
+		return true
+	}
 	pseudo := policy.Guideline{Then: state.Instruction, Scope: "customer"}
 	return customerSatisfiedGuideline(text, pseudo)
+}
+
+func journeyStateSemanticSatisfied(text string, state policy.JourneyNode) bool {
+	loweredText := strings.ToLower(strings.TrimSpace(text))
+	if loweredText == "" {
+		return false
+	}
+	label := strings.ToLower(strings.TrimSpace(state.ID + " " + state.Instruction))
+	switch {
+	case strings.Contains(label, "destination"):
+		return containsAnyPhrase(loweredText, "airport", "station", "terminal", "to ") || likelyLocationAnswer(loweredText)
+	case strings.Contains(label, "origin"), strings.Contains(label, "departure"):
+		return containsAnyPhrase(loweredText, "airport", "station", "terminal", "from ") || likelyLocationAnswer(loweredText)
+	case strings.Contains(label, "date"), strings.Contains(label, "travel"):
+		return containsDateLikeValue(loweredText)
+	case strings.Contains(label, "class"):
+		return containsAnyPhrase(loweredText, "economy", "business", "first class", "premium")
+	case strings.Contains(label, "name"):
+		return containsAnyPhrase(loweredText, "my name is", "i am ", "i'm ")
+	}
+	return false
+}
+
+func likelyLocationAnswer(text string) bool {
+	if containsAnyPhrase(text, "airport", "station", "terminal") {
+		return true
+	}
+	words := strings.Fields(text)
+	return len(words) >= 2
+}
+
+func containsDateLikeValue(text string) bool {
+	for _, token := range strings.FieldsFunc(text, func(r rune) bool {
+		return r == ' ' || r == ',' || r == ';'
+	}) {
+		token = strings.Trim(token, ".!?()[]{}")
+		parts := strings.FieldsFunc(token, func(r rune) bool {
+			return r == '.' || r == '/' || r == '-'
+		})
+		if len(parts) < 2 || len(parts) > 3 {
+			continue
+		}
+		allNumeric := true
+		for _, part := range parts {
+			if part == "" {
+				allNumeric = false
+				break
+			}
+			for _, r := range part {
+				if r < '0' || r > '9' {
+					allNumeric = false
+					break
+				}
+			}
+			if !allNumeric {
+				break
+			}
+		}
+		if allNumeric {
+			return true
+		}
+	}
+	return containsAnyPhrase(text, "today", "tomorrow", "next week", "next month", "return in")
 }
 
 func journeyToolStateExecuted(ctx MatchingContext, state policy.JourneyNode) bool {

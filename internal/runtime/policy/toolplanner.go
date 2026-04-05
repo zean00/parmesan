@@ -13,7 +13,7 @@ import (
 	"github.com/sahal/parmesan/internal/model"
 )
 
-func buildToolPlan(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, guidelines []policy.Guideline, exposedTools []string, approvals map[string]string, relationships []policy.Relationship, catalog []tool.CatalogEntry) (ToolCallPlan, ToolDecision) {
+func buildToolPlan(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, journeyDecision JourneyDecision, guidelines []policy.Guideline, exposedTools []string, approvals map[string]string, relationships []policy.Relationship, catalog []tool.CatalogEntry) (ToolCallPlan, ToolDecision) {
 	decision := ToolDecision{
 		Arguments: map[string]any{
 			"session_id":           matchCtx.SessionID,
@@ -30,7 +30,7 @@ func buildToolPlan(ctx context.Context, router *model.Router, matchCtx MatchingC
 		decision.Arguments["journey_state"] = activeState.ID
 	}
 
-	candidates, groups := buildToolCandidates(matchCtx, activeJourney, activeState, guidelines, exposedTools, relationships, catalog, decision.Arguments)
+	candidates, groups := buildToolCandidates(matchCtx, activeJourney, activeState, journeyDecision, guidelines, exposedTools, relationships, catalog, decision.Arguments)
 	plan := ToolCallPlan{
 		Candidates:        candidates,
 		OverlappingGroups: groups,
@@ -72,11 +72,27 @@ func buildToolPlan(ctx context.Context, router *model.Router, matchCtx MatchingC
 	}
 	if plan.SelectedTool == "" && activeState != nil {
 		if strings.TrimSpace(activeState.Tool) != "" {
-			plan.SelectedTool = strings.TrimSpace(activeState.Tool)
-			plan.Rationale = "current journey node explicitly requires a tool"
+			toolID := firstMatchingCandidateToolID(candidates, strings.TrimSpace(activeState.Tool))
+			if candidate, ok := findCandidate(candidates, toolID); ok {
+				if candidateRunnable(candidate) {
+					plan.SelectedTool = toolID
+					plan.Rationale = "current journey node explicitly requires a tool"
+				}
+			} else if toolID != "" {
+				plan.SelectedTool = toolID
+				plan.Rationale = "current journey node explicitly requires a tool"
+			}
 		} else if activeState.MCP != nil && strings.TrimSpace(activeState.MCP.Tool) != "" {
-			plan.SelectedTool = strings.TrimSpace(activeState.MCP.Tool)
-			plan.Rationale = "current journey node explicitly requires an MCP tool"
+			toolID := firstMatchingCandidateToolID(candidates, strings.TrimSpace(activeState.MCP.Tool))
+			if candidate, ok := findCandidate(candidates, toolID); ok {
+				if candidateRunnable(candidate) {
+					plan.SelectedTool = toolID
+					plan.Rationale = "current journey node explicitly requires an MCP tool"
+				}
+			} else if toolID != "" {
+				plan.SelectedTool = toolID
+				plan.Rationale = "current journey node explicitly requires an MCP tool"
+			}
 		}
 	}
 	if plan.SelectedTool == "" {
@@ -293,7 +309,7 @@ func preferredCandidateForDecision(candidates []ToolCandidate) (ToolCandidate, b
 	return candidates[0], true
 }
 
-func buildToolCandidates(matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, guidelines []policy.Guideline, exposedTools []string, relationships []policy.Relationship, catalog []tool.CatalogEntry, baseArgs map[string]any) ([]ToolCandidate, [][]string) {
+func buildToolCandidates(matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, journeyDecision JourneyDecision, guidelines []policy.Guideline, exposedTools []string, relationships []policy.Relationship, catalog []tool.CatalogEntry, baseArgs map[string]any) ([]ToolCandidate, [][]string) {
 	var candidates []ToolCandidate
 	results, _ := processBatchesInParallel(context.Background(), exposedTools, func(_ context.Context, name string) (ToolCandidate, bool) {
 		entry, ok := findToolCatalogEntry(catalog, name)
@@ -327,6 +343,11 @@ func buildToolCandidates(matchCtx MatchingContext, activeJourney *policy.Journey
 			MissingIssues:        missing,
 			InvalidIssues:        invalid,
 			PreparationRationale: toolCandidatePreparationRationale(activeState, guidelines, entry, references),
+		}
+		if toolCandidateInvalidatedByJourneyBacktrack(entry, activeState, journeyDecision) {
+			candidate.AlreadySatisfied = false
+			candidate.AlreadyStaged = false
+			candidate.SameCallStaged = false
 		}
 		switch {
 		case candidate.AlreadySatisfied:
@@ -736,6 +757,27 @@ func findCandidate(candidates []ToolCandidate, selected string) (ToolCandidate, 
 	return ToolCandidate{}, false
 }
 
+func firstMatchingCandidateToolID(candidates []ToolCandidate, toolRef string) string {
+	toolRef = strings.TrimSpace(toolRef)
+	if toolRef == "" {
+		return ""
+	}
+	if candidate, ok := findCandidate(candidates, toolRef); ok {
+		return candidate.ToolID
+	}
+	trimmed := strings.TrimPrefix(toolRef, "local:")
+	if candidate, ok := findCandidate(candidates, trimmed); ok {
+		return candidate.ToolID
+	}
+	if strings.Contains(toolRef, ":") {
+		parts := strings.SplitN(toolRef, ":", 2)
+		if candidate, ok := findCandidate(candidates, parts[1]); ok {
+			return candidate.ToolID
+		}
+	}
+	return toolRef
+}
+
 func toolCandidateGrounded(matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, guidelines []policy.Guideline, entry tool.CatalogEntry) bool {
 	text := strings.ToLower(matchCtx.LatestCustomerText)
 	if text == "" {
@@ -986,6 +1028,38 @@ func runtimeOnlyToolArgument(field string) bool {
 	default:
 		return false
 	}
+}
+
+func toolCandidateInvalidatedByJourneyBacktrack(entry tool.CatalogEntry, activeState *policy.JourneyNode, journeyDecision JourneyDecision) bool {
+	if activeState == nil || !strings.EqualFold(journeyDecision.Action, "backtrack") {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(activeState.Type), "tool") {
+		return false
+	}
+	stateTool := strings.TrimSpace(activeState.Tool)
+	if stateTool == "" && activeState.MCP != nil {
+		stateTool = strings.TrimSpace(activeState.MCP.Tool)
+	}
+	if stateTool == "" {
+		return false
+	}
+	entryIDs := []string{
+		strings.TrimSpace(entry.ID),
+		strings.TrimSpace(entry.Name),
+	}
+	if strings.TrimSpace(entry.ProviderID) != "" && strings.TrimSpace(entry.Name) != "" {
+		entryIDs = append(entryIDs, strings.TrimSpace(entry.ProviderID)+":"+strings.TrimSpace(entry.Name))
+	}
+	for _, candidateID := range entryIDs {
+		if candidateID == "" {
+			continue
+		}
+		if stagedToolMatchesToolID(candidateID, stateTool) || stagedToolMatchesToolID(stateTool, candidateID) {
+			return true
+		}
+	}
+	return false
 }
 
 func stagedToolMatchesEntry(call StagedToolCall, entry tool.CatalogEntry) bool {

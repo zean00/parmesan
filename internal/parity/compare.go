@@ -24,13 +24,8 @@ func BuildReport(fx Fixture, scenarios []ScenarioReport) Report {
 
 func EvaluateScenario(s Scenario, parmesan NormalizedResult, parlant NormalizedResult) ScenarioReport {
 	expErrs := checkExpectations(s.Expect, parmesan, "parmesan")
-	if !s.SkipParlantExpect {
-		expErrs = append(expErrs, checkExpectations(s.Expect, parlant, "parlant")...)
-	}
-	diffErrs := []string(nil)
-	if !s.SkipEngineDiff {
-		diffErrs = compareResults(s, parmesan, parlant)
-	}
+	expErrs = append(expErrs, checkExpectations(s.Expect, parlant, "parlant")...)
+	diffErrs := compareResults(s, parmesan, parlant)
 	return ScenarioReport{
 		Scenario:          s,
 		Parmesan:          parmesan,
@@ -384,6 +379,22 @@ func sameSemanticStringMap(left, right, keys map[string]string) bool {
 		}
 	}
 	return true
+}
+
+func normalizeExpectedFollowUps(in map[string][]string) map[string][]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(in))
+	for key, values := range in {
+		normalizedKey := normalizeProjectedID(key)
+		normalizedValues := make([]string, 0, len(values))
+		for _, value := range values {
+			normalizedValues = append(normalizedValues, normalizeProjectedID(value))
+		}
+		out[normalizedKey] = dedupeAndSort(normalizedValues)
+	}
+	return out
 }
 
 func sameGroupSet(left, right [][]string) bool {

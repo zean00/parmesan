@@ -1,15 +1,20 @@
 import asyncio
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MethodType
 from typing import Any
 
 PARLANT_ROOT = Path.cwd()
 if str(PARLANT_ROOT) not in sys.path:
     sys.path.insert(0, str(PARLANT_ROOT))
+RUNNER_DIR = Path(__file__).resolve().parent
+if str(RUNNER_DIR) not in sys.path:
+    sys.path.insert(0, str(RUNNER_DIR))
 
 from parlant.core.agents import AgentStore, CompositionMode
 from parlant.core.customers import CustomerStore
@@ -17,6 +22,16 @@ from parlant.core.emission.event_buffer import EventBuffer
 from parlant.core.canned_responses import CannedResponseField, CannedResponseStore
 from parlant.core.engines.alpha.canned_response_generator import DEFAULT_NO_MATCH_CANREP
 from parlant.core.engines.alpha.engine import AlphaEngine
+from parlant.core.engines.alpha.planners import BasicPlan, NullPlan
+from parlant.core.engines.alpha.guideline_matching.generic.journey.journey_backtrack_check import (
+    JourneyBacktrackCheck,
+)
+from parlant.core.engines.alpha.guideline_matching.generic.journey.journey_backtrack_node_selection import (
+    JourneyBacktrackNodeSelection,
+)
+from parlant.core.engines.alpha.guideline_matching.generic.journey.journey_next_step_selection import (
+    JourneyNextStepSelection,
+)
 from parlant.core.evaluations import JourneyPayload, PayloadOperation
 from parlant.core.guidelines import Guideline, GuidelineStore
 from parlant.core.guideline_tool_associations import GuidelineToolAssociationStore
@@ -36,19 +51,24 @@ from parlant.core.sessions import (
     ToolEventData,
 )
 from parlant.core.tags import Tag, TagStore
-from parlant.core.tools import LocalToolService, ToolId
+from parlant.core.tools import LocalToolService, ToolId, ToolOverlap
 from parlant.core.entity_cq import EntityCommands
 from parlant.core.loggers import LogLevel, StdoutLogger
 from parlant.core.tracer import LocalTracer
 from parlant.core.meter import LocalMeter
 from parlant.core.engines.types import Context
+from parlant.core.nlp.generation import SchematicGenerator
 from parlant.core.services.indexing.behavioral_change_evaluation import JourneyEvaluator
 from parlant.adapters.nlp.openrouter_service import OpenRouterService
 
 import tests.conftest as parlant_conftest
 from tests.conftest import CacheOptions, container as make_container
 from tests.core.common.utils import ContextOfTest
-from tests.test_utilities import SyncAwaiter, JournalingEngineHooks
+from tests.test_utilities import (
+    SyncAwaiter,
+    JournalingEngineHooks,
+    create_schematic_generation_result_collection,
+)
 from tests.core.common.engines.alpha.steps.guidelines import (
     get_guideline_properties,
 )
@@ -65,6 +85,15 @@ class ScenarioRunContext:
     agent_id: Any
     customer_id: Any
     session_id: Any
+    latest_resolver_result: Any | None = None
+    latest_response_analysis_result: Any | None = None
+    latest_tool_inference_result: Any | None = None
+    latest_tool_batches: list[Any] | None = None
+    latest_tool_batch_results: list[dict[str, Any]] | None = None
+    latest_journey_batch_results: list[dict[str, Any]] | None = None
+    latest_backtrack_checks: list[dict[str, Any]] | None = None
+    latest_backtrack_node_selections: list[dict[str, Any]] | None = None
+    latest_next_step_selections: list[dict[str, Any]] | None = None
 
 
 def normalize_mode(mode: str) -> str:
@@ -74,19 +103,77 @@ def normalize_mode(mode: str) -> str:
     return CompositionMode.CANNED_FLUID.value
 
 
-def create_run_context(scenario: dict[str, Any]) -> tuple[ScenarioRunContext, Any]:
+def extract_canned_response_fields(text: str) -> list[CannedResponseField]:
+    names: list[str] = []
+    for match in re.findall(r"\{\{\s*([^{}]+?)\s*\}\}", text or ""):
+        name = (match or "").strip()
+        if not name:
+            continue
+        if name not in names:
+            names.append(name)
+    return [CannedResponseField(name=name, description="", examples=[]) for name in names]
+
+
+def create_run_context(scenario: dict[str, Any]) -> tuple[ScenarioRunContext, Any, Any | None]:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     sync_await = SyncAwaiter(loop)
     tracer = LocalTracer()
     logger = StdoutLogger(tracer=tracer, log_level=LogLevel.WARNING)
-    cache_options = CacheOptions(cache_enabled=False, cache_schematic_generation_collection=None)
+    cache_collection_gen = None
+    cache_collection = None
+    cache_file_exists = (PARLANT_ROOT / "schematic_generation_test_cache.json").exists()
+    if cache_file_exists:
+        cache_collection_gen = create_schematic_generation_result_collection(logger=logger)
+        cache_collection = sync_await(cache_collection_gen.__aenter__())
+    cache_options = CacheOptions(
+        cache_enabled=cache_collection is not None,
+        cache_schematic_generation_collection=cache_collection,
+    )
     if os.environ.get("OPENROUTER_API_KEY"):
+        class EmcieCompatibleOpenRouterGenerator:
+            def __init__(self, base_generator: SchematicGenerator[Any], emcie_id: str):
+                self._base_generator = base_generator
+                self._emcie_id = emcie_id
+
+            async def generate(self, prompt, hints={}):
+                return await self._base_generator.generate(prompt, hints)
+
+            @property
+            def id(self) -> str:
+                return self._emcie_id
+
+            @property
+            def schema(self):
+                return self._base_generator.schema
+
+            @property
+            def tokenizer(self):
+                return self._base_generator.tokenizer
+
+            @property
+            def max_tokens(self) -> int:
+                return self._base_generator.max_tokens
+
         class CompatOpenRouterService(OpenRouterService):
             def __init__(self, logger, tracer, meter, model_tier=None, model_role=None):
                 super().__init__(logger, tracer, meter)
+                self._emcie_model_tier = (model_tier or os.environ.get("EMCIE_MODEL_TIER") or "jackal").strip()
+                self._emcie_model_role = (model_role or os.environ.get("EMCIE_MODEL_ROLE") or "teacher").strip()
+                if self._emcie_model_role == "teacher":
+                    self.model_name = "openai/gpt-4o"
+                elif self._emcie_model_role == "student":
+                    self.model_name = "openai/gpt-4o-mini"
+
+            async def get_schematic_generator(self, t, hints={}):
+                generator = await super().get_schematic_generator(t, hints)
+                return EmcieCompatibleOpenRouterGenerator(
+                    generator,
+                    emcie_id=f"emcie/{self._emcie_model_tier}",
+                )
 
         parlant_conftest.EmcieService = CompatOpenRouterService
+        parlant_conftest.OpenRouterService = CompatOpenRouterService
     container_factory = getattr(make_container, "__wrapped__", make_container)
     container_gen = container_factory(tracer, logger, cache_options)
     container = sync_await(container_gen.__anext__())
@@ -119,7 +206,283 @@ def create_run_context(scenario: dict[str, Any]) -> tuple[ScenarioRunContext, An
     agent_id = agent.id
     customer_id = customer.id
     session_id = session.id
-    return ScenarioRunContext(sync_await, container, ctx, agent_id, customer_id, session_id), container_gen
+    run = ScenarioRunContext(sync_await, container, ctx, agent_id, customer_id, session_id)
+    instrument_engine(run)
+    return run, container_gen, cache_collection_gen
+
+
+def instrument_engine(run: ScenarioRunContext) -> None:
+    engine = run.container[AlphaEngine]
+    run.latest_journey_batch_results = []
+    run.latest_backtrack_checks = []
+    run.latest_backtrack_node_selections = []
+    run.latest_next_step_selections = []
+
+    original_resolve = engine._relational_resolver.resolve
+
+    async def resolve_with_capture(self, *args, **kwargs):
+        result = await original_resolve(*args, **kwargs)
+        run.latest_resolver_result = result
+        return result
+
+    engine._relational_resolver.resolve = MethodType(resolve_with_capture, engine._relational_resolver)
+
+    original_analyze = engine._guideline_matcher.analyze_response
+
+    async def analyze_with_capture(self, *args, **kwargs):
+        result = await original_analyze(*args, **kwargs)
+        run.latest_response_analysis_result = result
+        return result
+
+    engine._guideline_matcher.analyze_response = MethodType(analyze_with_capture, engine._guideline_matcher)
+
+    tool_event_generator = engine._tool_event_generator
+    tool_caller = tool_event_generator._tool_caller
+    batcher = tool_caller.batcher
+
+    tool_event_generator_cls = type(tool_event_generator)
+    tool_caller_cls = type(tool_caller)
+    batcher_cls = type(batcher)
+
+    original_infer_tool_calls = tool_event_generator_cls.infer_tool_calls
+    original_generate_tool_events = tool_event_generator_cls.generate_events
+    original_tool_caller_do_infer = tool_caller_cls._do_infer_tool_calls
+    original_create_batches = batcher_cls.create_batches
+    original_nullplan_on_tools_inferred = NullPlan.on_tools_inferred
+    original_basicplan_on_tools_inferred = BasicPlan.on_tools_inferred
+
+    async def infer_tool_calls_with_capture(self, *args, **kwargs):
+        result = await original_infer_tool_calls(self, *args, **kwargs)
+        run.latest_tool_inference_result = result
+        return result
+
+    tool_event_generator_cls.infer_tool_calls = infer_tool_calls_with_capture
+
+    async def generate_events_with_capture(self, *args, **kwargs):
+        result = await original_generate_tool_events(self, *args, **kwargs)
+        setattr(run, "latest_tool_event_generation_result", result)
+        return result
+
+    tool_event_generator_cls.generate_events = generate_events_with_capture
+
+    async def do_infer_tool_calls_with_capture(self, *args, **kwargs):
+        result = await original_tool_caller_do_infer(self, *args, **kwargs)
+        run.latest_tool_inference_result = result
+        return result
+
+    tool_caller_cls._do_infer_tool_calls = do_infer_tool_calls_with_capture
+
+    async def create_batches_with_capture(self, *args, **kwargs):
+        batches = await original_create_batches(self, *args, **kwargs)
+        run.latest_tool_batches = list(batches)
+        run.latest_tool_batch_results = []
+        for batch in batches:
+            if hasattr(batch, "_run_consequential_tool_inference"):
+                original_run_consequential = batch._run_consequential_tool_inference
+
+                async def run_consequential_with_capture(self, *args, _orig=original_run_consequential, **kwargs):
+                    generation_info, output = await _orig(*args, **kwargs)
+                    setattr(self, "_parity_inference_output", output)
+                    return generation_info, output
+
+                batch._run_consequential_tool_inference = MethodType(
+                    run_consequential_with_capture, batch
+                )
+            if hasattr(batch, "_run_non_consequential_tool_inference"):
+                original_run_non_consequential = batch._run_non_consequential_tool_inference
+
+                async def run_non_consequential_with_capture(self, *args, _orig=original_run_non_consequential, **kwargs):
+                    generation_info, output = await _orig(*args, **kwargs)
+                    setattr(self, "_parity_inference_output", output)
+                    return generation_info, output
+
+                batch._run_non_consequential_tool_inference = MethodType(
+                    run_non_consequential_with_capture, batch
+                )
+            if hasattr(batch, "_run_inference"):
+                original_run_inference = batch._run_inference
+
+                async def run_inference_with_capture(self, *args, _orig=original_run_inference, **kwargs):
+                    generation_info, output = await _orig(*args, **kwargs)
+                    setattr(self, "_parity_inference_output", output)
+                    return generation_info, output
+
+                batch._run_inference = MethodType(run_inference_with_capture, batch)
+            original_batch_process = batch.process
+
+            async def process_with_capture(self, _orig=original_batch_process, _batch=batch):
+                result = await _orig()
+                (run.latest_tool_batch_results or []).append(
+                    capture_tool_batch_result(_batch, result)
+                )
+                return result
+
+            batch.process = MethodType(process_with_capture, batch)
+        return batches
+
+    batcher_cls.create_batches = create_batches_with_capture
+
+    async def nullplan_on_tools_inferred_with_capture(self, context, inference_result):
+        run.latest_tool_inference_result = inference_result
+        tool_calls = await original_nullplan_on_tools_inferred(self, context, inference_result)
+        setattr(run, "latest_planned_tool_calls", list(tool_calls))
+        return tool_calls
+
+    NullPlan.on_tools_inferred = nullplan_on_tools_inferred_with_capture
+
+    async def basicplan_on_tools_inferred_with_capture(self, context, inference_result):
+        run.latest_tool_inference_result = inference_result
+        tool_calls = await original_basicplan_on_tools_inferred(self, context, inference_result)
+        setattr(run, "latest_planned_tool_calls", list(tool_calls))
+        return tool_calls
+
+    BasicPlan.on_tools_inferred = basicplan_on_tools_inferred_with_capture
+
+    original_backtrack_check_process = JourneyBacktrackCheck.process
+
+    async def backtrack_check_process_with_capture(self, *args, **kwargs):
+        original_generate = self._schematic_generator.generate
+
+        async def generate_with_capture(*g_args, **g_kwargs):
+            inference = await original_generate(*g_args, **g_kwargs)
+            (run.latest_backtrack_checks or []).append(
+                {
+                    "journey_title": self._examined_journey.title,
+                    "journey_id": str(self._examined_journey.id),
+                    "content": inference.content.model_dump(),
+                }
+            )
+            return inference
+
+        self._schematic_generator.generate = generate_with_capture
+        try:
+            return await original_backtrack_check_process(self, *args, **kwargs)
+        finally:
+            self._schematic_generator.generate = original_generate
+
+    JourneyBacktrackCheck.process = backtrack_check_process_with_capture
+
+    original_backtrack_node_process = JourneyBacktrackNodeSelection.process
+
+    async def backtrack_node_process_with_capture(self, *args, **kwargs):
+        original_generate = self._schematic_generator.generate
+
+        async def generate_with_capture(*g_args, **g_kwargs):
+            inference = await original_generate(*g_args, **g_kwargs)
+            (run.latest_backtrack_node_selections or []).append(
+                {
+                    "journey_title": self._examined_journey.title,
+                    "journey_id": str(self._examined_journey.id),
+                    "content": inference.content.model_dump(),
+                }
+            )
+            return inference
+
+        self._schematic_generator.generate = generate_with_capture
+        try:
+            return await original_backtrack_node_process(self, *args, **kwargs)
+        finally:
+            self._schematic_generator.generate = original_generate
+
+    JourneyBacktrackNodeSelection.process = backtrack_node_process_with_capture
+
+    original_next_step_process = JourneyNextStepSelection.process
+
+    async def next_step_process_with_capture(self, *args, **kwargs):
+        original_generate = self._schematic_generator.generate
+
+        async def generate_with_capture(*g_args, **g_kwargs):
+            inference = await original_generate(*g_args, **g_kwargs)
+            (run.latest_next_step_selections or []).append(
+                {
+                    "journey_title": self._examined_journey.title,
+                    "journey_id": str(self._examined_journey.id),
+                    "content": inference.content.model_dump(),
+                }
+            )
+            return inference
+
+        self._schematic_generator.generate = generate_with_capture
+        try:
+            return await original_next_step_process(self, *args, **kwargs)
+        finally:
+            self._schematic_generator.generate = original_generate
+
+    JourneyNextStepSelection.process = next_step_process_with_capture
+
+    for strategy in getattr(engine._guideline_matcher, "_strategies", []) or []:
+        original_matching_batches = getattr(strategy, "create_matching_batches", None)
+        if not callable(original_matching_batches):
+            continue
+
+        async def create_matching_batches_with_capture(self, *args, __orig=original_matching_batches, **kwargs):
+            batches = await __orig(*args, **kwargs)
+            for batch in batches or []:
+                if batch.__class__.__name__ != "GenericJourneyNodeSelectionBatch":
+                    continue
+                original_process = batch.process
+
+                async def process_with_capture(self, _orig=original_process, _batch=batch):
+                    result = await _orig()
+                    (run.latest_journey_batch_results or []).append(
+                        capture_journey_batch_result(_batch, result)
+                    )
+                    return result
+
+                batch.process = MethodType(process_with_capture, batch)
+            return batches
+
+        strategy.create_matching_batches = MethodType(create_matching_batches_with_capture, strategy)
+
+
+def tool_id_to_string(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if hasattr(value, "to_string"):
+        return value.to_string()
+    service = getattr(value, "service_name", "")
+    name = getattr(value, "tool_name", "")
+    if service and name:
+        return f"{service}:{name}"
+    return str(value)
+
+
+def capture_tool_batch_result(batch: Any, result: Any) -> dict[str, Any]:
+    candidate_tools: list[str] = []
+    batch_type = "unknown"
+    if hasattr(batch, "_candidate_tool"):
+        batch_type = "single_tool"
+        candidate_tools = [tool_id_to_string(batch._candidate_tool[0])]
+    elif hasattr(batch, "_overlapping_tools_batch"):
+        batch_type = "overlapping_tools"
+        candidate_tools = [tool_id_to_string(item[0]) for item in batch._overlapping_tools_batch]
+    selected_tools = [tool_id_to_string(call.tool_id) for call in getattr(result, "tool_calls", []) or []]
+    evaluations = {
+        tool_id_to_string(tool_id): getattr(evaluation, "value", str(evaluation))
+        for tool_id, evaluation in (getattr(getattr(result, "insights", None), "evaluations", []) or [])
+    }
+    return {
+        "type": batch_type,
+        "candidate_tools": candidate_tools,
+        "selected_tools": selected_tools,
+        "evaluations": evaluations,
+        "inference_output": getattr(batch, "_parity_inference_output", None),
+    }
+
+
+def capture_journey_batch_result(batch: Any, result: Any) -> dict[str, Any]:
+    journey = getattr(batch, "_examined_journey", None)
+    matches = getattr(result, "matches", []) or []
+    return {
+        "journey_title": getattr(journey, "title", ""),
+        "journey_id": str(getattr(journey, "id", "") or ""),
+        "previous_path": list(getattr(batch, "_previous_path", []) or []),
+        "match_ids": [str(getattr(getattr(item, "guideline", None), "id", "") or "") for item in matches],
+        "match_metadata": [dict(getattr(item, "metadata", {}) or {}) for item in matches],
+        "match_rationales": [str(getattr(item, "rationale", "") or "") for item in matches],
+    }
 
 
 def append_transcript(run: ScenarioRunContext, transcript: list[dict[str, str]]) -> None:
@@ -186,6 +549,7 @@ def create_guideline_direct(
     guideline_name: str,
     condition: str,
     action: str | None,
+    priority: int = 0,
     tags: list[str] | None = None,
 ) -> Guideline:
     metadata = {}
@@ -198,6 +562,7 @@ def create_guideline_direct(
             condition=condition,
             action=action,
             metadata=metadata,
+            priority=priority,
         )
     )
     run.sync_await(
@@ -216,6 +581,37 @@ def create_guideline_direct(
         )
     run.context.guidelines[guideline_name] = guideline
     return guideline
+
+
+def guideline_signature(condition: str, action: str | None) -> tuple[str, str]:
+    return ((condition or "").strip(), (action or "").strip())
+
+
+def build_guideline_id_lookup(run: ScenarioRunContext, scenario: dict[str, Any] | None = None) -> dict[str, str]:
+    lookup: dict[str, str] = {
+        str(guideline.id): name
+        for name, guideline in run.context.guidelines.items()
+    }
+    setup = (scenario or {}).get("policy_setup") or {}
+    signatures: dict[tuple[str, str], str] = {}
+    for item in setup.get("extra_guidelines") or []:
+        signatures[guideline_signature(item.get("condition") or "", item.get("action"))] = item["id"]
+    if not signatures:
+        return lookup
+    try:
+        guidelines = run.sync_await(run.container[GuidelineStore].list_guidelines())
+    except Exception:
+        return lookup
+    for guideline in guidelines:
+        name = signatures.get(
+            guideline_signature(
+                getattr(getattr(guideline, "content", None), "condition", "") or "",
+                getattr(getattr(guideline, "content", None), "action", None),
+            )
+        )
+        if name:
+            lookup[str(guideline.id)] = name
+    return lookup
 
 
 def ensure_named_tag(run: ScenarioRunContext, tag_name: str) -> Tag:
@@ -275,10 +671,13 @@ def ensure_local_tool(run: ScenarioRunContext, tool_name: str) -> None:
         spec = {
             "name": tool_name,
             "description": "",
-            "module_path": "tests.tool_utilities",
+            "module_path": local_tool_module_path(tool_name),
             "parameters": {},
             "required": [],
         }
+    elif not local_tool_exists_in_module(spec.get("module_path") or "", spec.get("name") or tool_name):
+        spec = dict(spec)
+        spec["module_path"] = local_tool_module_path(tool_name)
     existing = run.sync_await(local_tool_service.list_tools())
     tool = next((item for item in existing if item.name == tool_name), None)
     if not tool:
@@ -288,15 +687,52 @@ def ensure_local_tool(run: ScenarioRunContext, tool_name: str) -> None:
 
 def tool_spec_from_fixture(item: dict[str, Any]) -> dict[str, Any]:
     schema = item.get("schema") or {}
-    parameters = schema.get("properties") or {}
-    required = schema.get("required") or []
+    parameters = dict(schema.get("properties") or {})
+    required = list(schema.get("required") or [])
+    tool_name = item["id"].split(":", 1)[-1] if ":" in item["id"] else item["id"]
+    parameters, required = strip_runtime_tool_parameters(parameters, required)
     return {
-        "name": item["id"].split(":", 1)[-1] if ":" in item["id"] else item["id"],
+        "name": tool_name,
         "description": item.get("description") or "",
-        "module_path": "tests.tool_utilities",
+        "module_path": "parity_tool_utilities",
         "parameters": parameters,
         "required": required,
+        "consequential": bool(item.get("consequential")),
+        "overlap": ToolOverlap.AUTO,
     }
+
+
+def local_tool_module_path(tool_name: str) -> str:
+    if local_tool_exists_in_module("tests.tool_utilities", tool_name):
+        return "tests.tool_utilities"
+    return "parity_tool_utilities"
+
+
+def local_tool_exists_in_module(module_path: str, tool_name: str) -> bool:
+    try:
+        module = __import__(module_path, fromlist=[tool_name])
+    except Exception:
+        return False
+    return hasattr(module, tool_name)
+
+
+def strip_runtime_tool_parameters(
+    parameters: dict[str, Any], required: list[str]
+) -> tuple[dict[str, Any], list[str]]:
+    runtime_params = {
+        "session_id",
+        "customer_message",
+        "conversation_excerpt",
+        "journey_id",
+        "journey_state",
+    }
+    filtered_parameters = {
+        key: value
+        for key, value in parameters.items()
+        if key not in runtime_params
+    }
+    filtered_required = [item for item in required if item not in runtime_params]
+    return filtered_parameters, filtered_required
 
 
 def create_chat_node(
@@ -320,19 +756,51 @@ def create_chat_node(
             {"kind": "chat"},
         )
     )
-    if customer_action:
+    customer_dependent_data = infer_chat_node_dependency_metadata(action, customer_action)
+    if customer_dependent_data:
         run.sync_await(
             journey_store.set_node_metadata(
                 node.id,
                 "customer_dependent_action_data",
-                {
-                    "is_customer_dependent": True,
-                    "customer_action": customer_action,
-                    "agent_action": "",
-                },
+                customer_dependent_data,
             )
         )
     return node
+
+
+def infer_chat_node_dependency_metadata(action: str, customer_action: str) -> dict[str, Any]:
+    action = (action or "").strip()
+    customer_action = (customer_action or "").strip()
+    lowered = action.lower()
+    if customer_action:
+        return {
+            "is_customer_dependent": True,
+            "customer_action": customer_action,
+            "agent_action": "",
+        }
+    customer_prefixes = (
+        "ask ",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "can you",
+        "could you",
+        "please provide",
+        "confirm ",
+    )
+    if "?" in action or lowered.startswith(customer_prefixes):
+        return {
+            "is_customer_dependent": True,
+            "customer_action": action,
+            "agent_action": "",
+        }
+    return {
+        "is_customer_dependent": False,
+        "customer_action": "",
+        "agent_action": action,
+    }
 
 
 def create_tool_node(
@@ -375,7 +843,7 @@ def create_tool_node(
     return node
 
 
-def set_journey_metadata(run: ScenarioRunContext, journey: Journey) -> None:
+def set_journey_metadata(run: ScenarioRunContext, journey: Journey) -> dict[str, dict[str, Any]]:
     journey_store = run.container[JourneyStore]
     journey_evaluator = run.container[JourneyEvaluator]
     journey_evaluation_data = run.sync_await(
@@ -392,253 +860,115 @@ def set_journey_metadata(run: ScenarioRunContext, journey: Journey) -> None:
     for node_id, items in metadata.items():
         for key, value in items.items():
             run.sync_await(journey_store.set_node_metadata(node_id, key, value))
+    return metadata
 
 
-def create_reset_password_journey(run: ScenarioRunContext) -> Journey:
-    guideline_store = run.container[GuidelineStore]
-    journey_store = run.container[JourneyStore]
-    conditions = [
-        "the customer wants to reset their password",
-        "the customer can't remember their password",
-    ]
-    condition_guidelines = [
-        run.sync_await(guideline_store.create_guideline(condition=condition, action=None, metadata={}))
-        for condition in conditions
-    ]
-    journey = run.sync_await(
-        journey_store.create_journey(
-            title="Reset Password Journey",
-            description="",
-            conditions=[guideline.id for guideline in condition_guidelines],
-            tags=[],
-        )
-    )
-    for guideline in condition_guidelines:
-        run.sync_await(
-            guideline_store.upsert_tag(
-                guideline_id=guideline.id,
-                tag_id=Tag.for_journey_id(journey_id=journey.id).id,
-            )
-        )
-    node1 = create_chat_node(run, journey, "ask for their username", "The customer provided their username")
-    node2 = create_chat_node(
-        run,
-        journey,
-        "Ask for their email address or phone number",
-        "The customer provided either one of their email or their phone number",
-    )
-    node3 = create_chat_node(run, journey, "Wish them a good day")
-    node4 = create_tool_node(
-        run,
-        journey,
-        "reset_password",
-        "Use the reset_password tool with the provided information",
-    )
-    node5 = create_chat_node(run, journey, "Report the result to the customer")
-    node6 = create_chat_node(
-        run,
-        journey,
-        "Apologize to the customer and report that the password cannot be reset at this times",
-    )
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=journey.root_id, target=node1.id, condition="The customer has not provided their username"))
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=node1.id, target=node2.id, condition="The customer provided their username"))
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=node2.id, target=node3.id, condition="The customer provided their email address or phone number"))
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=node3.id, target=node4.id, condition="The customer wished you a good day in return"))
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=node4.id, target=node5.id, condition="reset_password tool returned that the password was successfully reset"))
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=node3.id, target=node6.id, condition="The customer did not immediately wish you a good day in return"))
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=node4.id, target=node6.id, condition="reset_password tool returned that the password was not successfully reset, or otherwise failed"))
-    set_journey_metadata(run, journey)
-    return journey
+def ordered_journey_state_names(item: dict[str, Any], root_name: str) -> list[str]:
+    states = [(state.get("id") or "").strip() for state in (item.get("states") or [])]
+    states = [state for state in states if state]
+    edges = list(item.get("edges") or [])
+    if not edges:
+        for node in item.get("states") or []:
+            for next_id in node.get("next") or []:
+                edges.append({"source": node.get("id") or "", "target": next_id or ""})
+    outgoing: dict[str, list[str]] = {}
+    for edge in edges:
+        source = (edge.get("source") or "").strip()
+        target = (edge.get("target") or "").strip()
+        if source == "__journey_root__":
+            source = root_name
+        if not source or not target:
+            continue
+        outgoing.setdefault(source, [])
+        if target not in outgoing[source]:
+            outgoing[source].append(target)
+    ordered: list[str] = []
+    seen: set[str] = set()
+    queue: list[str] = []
+    if root_name and root_name in states:
+        queue.append(root_name)
+    elif states:
+        queue.append(states[0])
+    while queue:
+        current = queue.pop(0)
+        if current in seen:
+            continue
+        seen.add(current)
+        ordered.append(current)
+        for target in outgoing.get(current, []):
+            if target not in seen:
+                queue.append(target)
+    for state in states:
+        if state not in seen:
+            ordered.append(state)
+    return ordered
 
 
-def create_book_flight_journey(run: ScenarioRunContext) -> Journey:
-    guideline_store = run.container[GuidelineStore]
-    journey_store = run.container[JourneyStore]
-    conditions = ["the customer wants to book a flight"]
-    condition_guidelines = [
-        run.sync_await(guideline_store.create_guideline(condition=condition, action=None, metadata={}))
-        for condition in conditions
-    ]
-    journey = run.sync_await(
-        journey_store.create_journey(
-            title="Book Flight",
-            description="",
-            conditions=[guideline.id for guideline in condition_guidelines],
-            tags=[],
-        )
-    )
-    for guideline in condition_guidelines:
-        run.sync_await(
-            guideline_store.upsert_tag(
-                guideline_id=guideline.id,
-                tag_id=Tag.for_journey_id(journey_id=journey.id).id,
-            )
-        )
-    node1 = create_chat_node(
-        run,
-        journey,
-        "ask for the source and destination airport",
-        "The customer provided both their source and destination airport",
-    )
-    node2 = create_chat_node(
-        run,
-        journey,
-        "ask for the dates of the departure and return flight",
-        "The customer provided the desired dates for both their arrival and for their return flight",
-    )
-    node3 = create_chat_node(
-        run,
-        journey,
-        "ask whether they want economy or business class",
-        "The customer chose between economy and business class",
-    )
-    node4 = create_chat_node(
-        run,
-        journey,
-        "ask for the name of the traveler",
-        "The name of the traveler was provided",
-    )
-    node5 = create_tool_node(
-        run,
-        journey,
-        "book_flight",
-        "book the flight using book_flight tool and the provided details",
-    )
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=journey.root_id, target=node1.id, condition=""))
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=node1.id, target=node2.id, condition=""))
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=node2.id, target=node3.id, condition=""))
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=node3.id, target=node4.id, condition=""))
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=node4.id, target=node5.id, condition=""))
-    set_journey_metadata(run, journey)
-    return journey
+def ensure_journey_graphs(run: ScenarioRunContext) -> dict[str, dict[str, Any]]:
+    graphs = getattr(run.context, "journey_graphs", None)
+    if graphs is None:
+        graphs = {}
+        setattr(run.context, "journey_graphs", graphs)
+    return graphs
 
 
-def create_book_taxi_journey(run: ScenarioRunContext) -> Journey:
-    guideline_store = run.container[GuidelineStore]
-    journey_store = run.container[JourneyStore]
-    conditions = ["the customer wants to book a taxi ride"]
-    condition_guidelines = [
-        run.sync_await(guideline_store.create_guideline(condition=condition, action=None, metadata={}))
-        for condition in conditions
-    ]
-    journey = run.sync_await(
-        journey_store.create_journey(
-            title="Book Taxi Ride",
-            description="",
-            conditions=[guideline.id for guideline in condition_guidelines],
-            tags=[],
-        )
-    )
-    for guideline in condition_guidelines:
-        run.sync_await(
-            guideline_store.upsert_tag(
-                guideline_id=guideline.id,
-                tag_id=Tag.for_journey_id(journey_id=journey.id).id,
-            )
-        )
-    node1 = create_chat_node(run, journey, "Ask for the pickup location", "The desired pick up location was provided")
-    node2 = create_chat_node(run, journey, "Ask for the drop-off location", "The customer provided their drop-off location")
-    node3 = create_chat_node(run, journey, "Ask for the desired pickup time", "The customer provided their desired pickup time")
-    node4 = create_chat_node(run, journey, "Confirm all details with the customer before booking", "The customer confirmed the details of the booking")
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=journey.root_id, target=node1.id, condition=""))
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=node1.id, target=node2.id, condition=""))
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=node2.id, target=node3.id, condition=""))
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=node3.id, target=node4.id, condition=""))
-    set_journey_metadata(run, journey)
-    return journey
+def register_journey_graph(
+    run: ScenarioRunContext,
+    journey: Journey,
+    node_id_by_name: dict[str, Any],
+    index_by_name: dict[str, str],
+    edges: list[dict[str, Any]],
+    alias_title: str = "",
+    root_name: str = "",
+) -> None:
+    node_map = {name: str(node_id) for name, node_id in node_id_by_name.items()}
+    reverse = {node_id: name for name, node_id in node_map.items()}
+    reverse_indices = {index: name for name, index in index_by_name.items()}
+    if not root_name:
+        for edge in edges:
+            if edge.get("source_name") == "__journey_root__":
+                root_name = edge.get("target_name") or ""
+                break
+    graph_key = alias_title or journey.title
+    ensure_journey_graphs(run)[graph_key] = {
+        "journey_id": str(journey.id),
+        "root_name": root_name,
+        "nodes": node_map,
+        "reverse_nodes": reverse,
+        "indices": dict(index_by_name),
+        "reverse_indices": reverse_indices,
+        "edges": [
+            {
+                "id": str(edge.get("id") or ""),
+                "source_name": edge.get("source_name") or "",
+                "target_name": edge.get("target_name") or "",
+                "source_id": str(edge.get("source_id") or ""),
+                "target_id": str(edge.get("target_id") or ""),
+                "condition": edge.get("condition") or "",
+            }
+            for edge in edges
+        ],
+    }
+    run.context.nodes[graph_key] = dict(node_map)
 
 
-def create_drink_recommendation_journey(run: ScenarioRunContext) -> Journey:
-    guideline_store = run.container[GuidelineStore]
-    journey_store = run.container[JourneyStore]
-    conditions = ["customer asks about drinks"]
-    condition_guidelines = [
-        run.sync_await(guideline_store.create_guideline(condition=condition, action=None, metadata={}))
-        for condition in conditions
-    ]
-    journey = run.sync_await(
-        journey_store.create_journey(
-            title="Drink Recommendation Journey",
-            description="",
-            conditions=[guideline.id for guideline in condition_guidelines],
-            tags=[],
-        )
-    )
-    for guideline in condition_guidelines:
-        run.sync_await(
-            guideline_store.upsert_tag(
-                guideline_id=guideline.id,
-                tag_id=Tag.for_journey_id(journey_id=journey.id).id,
-            )
-        )
-    node1 = create_chat_node(run, journey, "Ask what drink they want", "")
-    node2 = create_chat_node(run, journey, "Recommend Pepsi", "")
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=journey.root_id, target=node1.id, condition=""))
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=node1.id, target=node2.id, condition=""))
-    set_journey_metadata(run, journey)
-    return journey
+def journey_graph(run: ScenarioRunContext, journey_title: str) -> dict[str, Any]:
+    return ensure_journey_graphs(run).get(journey_title, {})
 
 
-def create_journey_a(run: ScenarioRunContext) -> Journey:
-    guideline_store = run.container[GuidelineStore]
-    journey_store = run.container[JourneyStore]
-    condition = run.sync_await(guideline_store.create_guideline(condition="sunflower itinerary", action=None, metadata={}))
-    journey = run.sync_await(
-        journey_store.create_journey(
-            title="Journey A",
-            description="",
-            conditions=[condition.id],
-            tags=[],
-        )
-    )
-    run.sync_await(guideline_store.upsert_tag(guideline_id=condition.id, tag_id=Tag.for_journey_id(journey.id).id))
-    node = create_chat_node(run, journey, "Ask A", "")
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=journey.root_id, target=node.id, condition=""))
-    set_journey_metadata(run, journey)
-    return journey
-
-
-def create_journey_b(run: ScenarioRunContext) -> Journey:
-    guideline_store = run.container[GuidelineStore]
-    journey_store = run.container[JourneyStore]
-    condition = run.sync_await(guideline_store.create_guideline(condition="nebula itinerary", action=None, metadata={}))
-    journey = run.sync_await(
-        journey_store.create_journey(
-            title="Journey B",
-            description="",
-            conditions=[condition.id],
-            tags=[],
-        )
-    )
-    run.sync_await(guideline_store.upsert_tag(guideline_id=condition.id, tag_id=Tag.for_journey_id(journey.id).id))
-    node = create_chat_node(run, journey, "Ask B", "")
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=journey.root_id, target=node.id, condition=""))
-    set_journey_metadata(run, journey)
-    return journey
-
-
-def create_journey_1(run: ScenarioRunContext) -> Journey:
-    guideline_store = run.container[GuidelineStore]
-    journey_store = run.container[JourneyStore]
-    condition = run.sync_await(guideline_store.create_guideline(condition="customer is interested", action=None, metadata={}))
-    journey = run.sync_await(
-        journey_store.create_journey(
-            title="Journey 1",
-            description="",
-            conditions=[condition.id],
-            tags=[],
-        )
-    )
-    run.sync_await(guideline_store.upsert_tag(guideline_id=condition.id, tag_id=Tag.for_journey_id(journey.id).id))
-    node = create_chat_node(run, journey, "recommend product", "")
-    run.sync_await(journey_store.create_edge(journey_id=journey.id, source=journey.root_id, target=node.id, condition=""))
-    set_journey_metadata(run, journey)
-    return journey
+def projected_node_id(journey_title: str, state_name: str, source_name: str) -> str:
+    if not state_name:
+        return ""
+    source_name = (source_name or "").strip()
+    if not source_name or source_name == "__journey_root__":
+        return f"journey_node:{journey_title}:{state_name}"
+    return f"journey_node:{journey_title}:{state_name}:{journey_title}:{source_name}->{state_name}"
 
 
 def create_custom_journey(run: ScenarioRunContext, item: dict[str, Any]) -> Journey:
     guideline_store = run.container[GuidelineStore]
     journey_store = run.container[JourneyStore]
+    journey_title = (item.get("title") or item["id"]).strip()
     conditions = item.get("when") or []
     condition_guidelines = [
         run.sync_await(guideline_store.create_guideline(condition=condition, action=None, metadata={}))
@@ -646,10 +976,11 @@ def create_custom_journey(run: ScenarioRunContext, item: dict[str, Any]) -> Jour
     ]
     journey = run.sync_await(
         journey_store.create_journey(
-            title=item["id"],
+            title=journey_title,
             description="",
             conditions=[guideline.id for guideline in condition_guidelines],
             tags=item.get("tags") or [],
+            priority=item.get("priority") or 0,
         )
     )
     for guideline in condition_guidelines:
@@ -680,23 +1011,34 @@ def create_custom_journey(run: ScenarioRunContext, item: dict[str, Any]) -> Jour
             merged_metadata["kind"] = kind
         if merged_metadata:
             run.sync_await(journey_store.set_node_metadata(created.id, "journey_node", merged_metadata))
-    run.context.nodes[item["id"]] = dict(node_id_by_name)
-
     edges = list(item.get("edges") or [])
     if not edges:
         for node in item.get("states") or []:
             for next_id in node.get("next") or []:
                 edges.append({"source": node["id"], "target": next_id, "condition": ""})
+    if not root_name:
+        states = item.get("states") or []
+        if states:
+            root_name = (states[0].get("id") or "").strip()
     if root_name and root_name in node_id_by_name:
-        has_root_edge = any((edge.get("source") or "") == root_name for edge in edges)
-        if has_root_edge:
+        has_incoming_root_edge = any(
+            ((edge.get("source") or "") in {"__journey_root__", root_name}) and (edge.get("target") or "") == root_name
+            for edge in edges
+        )
+        has_outgoing_root_edge = any((edge.get("source") or "") == root_name for edge in edges)
+        if has_outgoing_root_edge and not has_incoming_root_edge:
             edges.append({"source": "__journey_root__", "target": root_name, "condition": ""})
         elif not edges:
             edges.append({"source": "__journey_root__", "target": root_name, "condition": ""})
+    created_edges: list[dict[str, Any]] = []
     for edge in edges:
         source_name = edge.get("source") or ""
         target_name = edge.get("target") or ""
-        source_id = journey.root_id if source_name == "__journey_root__" else node_id_by_name.get(source_name)
+        source_id = (
+            journey.root_id
+            if source_name == "__journey_root__" or (root_name and source_name == root_name and source_name not in node_id_by_name)
+            else node_id_by_name.get(source_name)
+        )
         target_id = node_id_by_name.get(target_name)
         if not source_id or not target_id:
             continue
@@ -710,8 +1052,38 @@ def create_custom_journey(run: ScenarioRunContext, item: dict[str, Any]) -> Jour
         )
         if edge.get("metadata"):
             run.sync_await(journey_store.set_edge_metadata(created_edge.id, "journey_node", edge.get("metadata") or {}))
+        created_edges.append(
+            {
+                "id": created_edge.id,
+                "source_name": source_name,
+                "target_name": target_name,
+                "source_id": source_id,
+                "target_id": target_id,
+                "condition": edge.get("condition") or "",
+            }
+        )
     set_journey_metadata(run, journey)
+    index_by_name = {
+        state_name: str(index)
+        for index, state_name in enumerate(ordered_journey_state_names(item, root_name), start=2)
+    }
+    graph_root_name = root_name
+    if graph_root_name and graph_root_name not in node_id_by_name:
+        for edge in created_edges:
+            if edge.get("source_name") in {"__journey_root__", graph_root_name}:
+                graph_root_name = edge.get("target_name") or graph_root_name
+                break
+    register_journey_graph(
+        run,
+        journey,
+        node_id_by_name,
+        index_by_name,
+        created_edges,
+        alias_title=item["id"],
+        root_name=graph_root_name,
+    )
     return journey
+
 
 
 def ensure_named_journey(run: ScenarioRunContext, journey_title: str, scenario: dict[str, Any] | None = None) -> None:
@@ -722,19 +1094,7 @@ def ensure_named_journey(run: ScenarioRunContext, journey_title: str, scenario: 
             if item.get("id") == journey_title:
                 run.context.journeys[journey_title] = create_custom_journey(run, item)
                 return
-    factories = {
-        "Reset Password Journey": create_reset_password_journey,
-        "Book Flight": create_book_flight_journey,
-        "Book Taxi Ride": create_book_taxi_journey,
-        "Drink Recommendation Journey": create_drink_recommendation_journey,
-        "Journey A": create_journey_a,
-        "Journey B": create_journey_b,
-        "Journey 1": create_journey_1,
-    }
-    factory = factories.get(journey_title)
-    if not factory:
-        raise RuntimeError(f"unsupported journey in parity helper: {journey_title}")
-    run.context.journeys[journey_title] = factory(run)
+    raise RuntimeError(f"journey {journey_title!r} is not defined in scenario.policy_setup.journeys")
 
 
 def seed_prior_state(run: ScenarioRunContext, scenario: dict[str, Any]) -> None:
@@ -767,50 +1127,15 @@ def seed_prior_state(run: ScenarioRunContext, scenario: dict[str, Any]) -> None:
 
 
 def journey_state_name_to_parlant_id(journey_title: str, name: str) -> str | None:
-    mapping = {
-        "Reset Password Journey": {
-            "ask_account_name": "2",
-            "ask_contact": "3",
-            "good_day": "4",
-            "do_reset": "5",
-            "cant_reset": "6",
-        },
-        "Book Taxi Ride": {
-            "ask_pickup_location": "2",
-            "ask_dropoff_location": "3",
-            "ask_pickup_time": "4",
-        },
-        "Book Flight": {
-            "ask_origin": "1",
-            "ask_destination": "2",
-            "ask_dates": "3",
-            "ask_class": "4",
-            "ask_name": "5",
-        },
-        "Drink Recommendation Journey": {
-            "ask_drink": "1",
-            "recommend_pepsi": "2",
-        },
-    }
-    if journey_title in mapping and name in mapping[journey_title]:
-        return mapping[journey_title][name]
-    custom = getattr(journey_state_name_to_parlant_id, "_custom_nodes", {})
-    return custom.get(journey_title, {}).get(name)
+    graphs = getattr(journey_state_name_to_parlant_id, "_journey_graphs", {})
+    graph = graphs.get(journey_title, {})
+    return (graph.get("indices") or {}).get(name) or (graph.get("nodes") or {}).get(name)
 
 
 def apply_policy_setup(run: ScenarioRunContext, scenario: dict[str, Any]) -> None:
     setup = scenario.get("policy_setup") or {}
-    transcript_text = "\n".join(item["text"] for item in scenario.get("transcript", []))
     for item in setup.get("journeys") or []:
         ensure_named_journey(run, item["id"], scenario)
-    if "reset my password" in transcript_text.lower():
-        ensure_named_journey(run, "Reset Password Journey", scenario)
-    if "book a taxi" in transcript_text.lower() or "book a cab" in transcript_text.lower():
-        ensure_named_journey(run, "Book Taxi Ride", scenario)
-    if "book a flight" in transcript_text.lower():
-        ensure_named_journey(run, "Book Flight", scenario)
-    if "customer asks about drinks" in transcript_text.lower():
-        ensure_named_journey(run, "Drink Recommendation Journey", scenario)
     for item in setup.get("relationships") or []:
         for side in ("source", "target"):
             value = (item.get(side) or "").strip()
@@ -820,9 +1145,23 @@ def apply_policy_setup(run: ScenarioRunContext, scenario: dict[str, Any]) -> Non
     for item in setup.get("extra_guidelines") or []:
         kind = (item.get("kind") or "actionable").strip().lower()
         if kind == "observation":
-            create_guideline_direct(run, item["id"], item["condition"], None, item.get("tags") or [])
+            create_guideline_direct(
+                run,
+                item["id"],
+                item["condition"],
+                None,
+                item.get("priority") or 0,
+                item.get("tags") or [],
+            )
         else:
-            create_guideline_direct(run, item["id"], item["condition"], item["action"], item.get("tags") or [])
+            create_guideline_direct(
+                run,
+                item["id"],
+                item["condition"],
+                item["action"],
+                item.get("priority") or 0,
+                item.get("tags") or [],
+            )
 
     for item in setup.get("tools") or []:
         tool_id = item["id"]
@@ -836,6 +1175,34 @@ def apply_policy_setup(run: ScenarioRunContext, scenario: dict[str, Any]) -> Non
                 if not tool:
                     tool = run.sync_await(local_tool_service.create_tool(**spec))
                 run.context.tools[name] = tool
+
+    overlap_groups: dict[str, list[str]] = {}
+    for item in setup.get("tools") or []:
+        group = (item.get("overlap_group") or "").strip()
+        if not group:
+            continue
+        _, name = split_tool_id(item["id"])
+        overlap_groups.setdefault(group, []).append(name)
+    for names in overlap_groups.values():
+        if len(names) < 2:
+            continue
+        for i, source_name in enumerate(names):
+            for target_name in names[i+1:]:
+                ensure_local_tool(run, source_name)
+                ensure_local_tool(run, target_name)
+                run.sync_await(
+                    run.container[RelationshipStore].create_relationship(
+                        source=RelationshipEntity(
+                            id=ToolId("local", source_name),
+                            kind=RelationshipEntityKind.TOOL,
+                        ),
+                        target=RelationshipEntity(
+                            id=ToolId("local", target_name),
+                            kind=RelationshipEntityKind.TOOL,
+                        ),
+                        kind=RelationshipKind.OVERLAP,
+                    )
+                )
 
     for item in setup.get("associations") or []:
         tool_id = item["tool"]
@@ -910,7 +1277,12 @@ def apply_policy_setup(run: ScenarioRunContext, scenario: dict[str, Any]) -> Non
                 )
 
     for text in setup.get("canned_responses") or []:
-        run.sync_await(run.container[CannedResponseStore].create_canned_response(value=text, fields=[]))
+        run.sync_await(
+            run.container[CannedResponseStore].create_canned_response(
+                value=text,
+                fields=extract_canned_response_fields(text),
+            )
+        )
 
 
 def split_tool_id(tool_id: str) -> tuple[str, str]:
@@ -933,6 +1305,18 @@ def process(run: ScenarioRunContext) -> list[Any]:
     return buffer.events
 
 
+def normalize_journey_title(run: ScenarioRunContext, journey_title: str) -> str:
+    journey_title = (journey_title or "").strip()
+    if not journey_title:
+        return ""
+    if journey_title in run.context.journeys:
+        return journey_title
+    for alias, journey in run.context.journeys.items():
+        if getattr(journey, "title", "") == journey_title:
+            return alias
+    return journey_title
+
+
 def normalize(run: ScenarioRunContext, emitted_events: list[Any], scenario: dict[str, Any]) -> dict[str, Any]:
     hooks = run.container[JournalingEngineHooks]
     latest_context = None
@@ -942,22 +1326,38 @@ def normalize(run: ScenarioRunContext, emitted_events: list[Any], scenario: dict
     matched_guidelines: list[str] = []
     exposed_tools: list[str] = []
     active_journeys: list[str] = []
-    reverse_guidelines = {guideline.id: name for name, guideline in run.context.guidelines.items()}
+    reverse_guidelines = build_guideline_id_lookup(run, scenario)
+    setattr(run, "_parity_guideline_id_lookup", reverse_guidelines)
     if latest_context and latest_context.state:
-        matched = list(latest_context.state.ordinary_guideline_matches) + list(latest_context.state.tool_enabled_guideline_matches.keys())
+        matched = (
+            list(latest_context.state.ordinary_guideline_matches)
+            + list(latest_context.state.tool_enabled_guideline_matches.keys())
+            + list(getattr(latest_context.state, "resolved_guidelines", []) or [])
+        )
         matched_guidelines = []
         for match in matched:
-            if match.guideline.id in reverse_guidelines:
-                matched_guidelines.append(reverse_guidelines[match.guideline.id])
+            guideline_id = str(getattr(getattr(match, "guideline", None), "id", "") or "")
+            if guideline_id in reverse_guidelines:
+                matched_guidelines.append(reverse_guidelines[guideline_id])
         exposed_tools = dedupe(
             f"{tool_id.service_name}:{tool_id.tool_name}"
             for tool_ids in latest_context.state.tool_enabled_guideline_matches.values()
             for tool_id in tool_ids
         )
-        active_journeys = dedupe(j.title for j in latest_context.state.journeys)
+        active_journeys = dedupe(normalize_journey_title(run, j.title) for j in latest_context.state.journeys)
         if active_journeys:
             matched_guidelines.append(f"journey:{active_journeys[0]}")
         matched_guidelines = dedupe(matched_guidelines)
+    resolver_guidelines: list[str] = []
+    resolver_result = run.latest_resolver_result
+    if resolver_result and getattr(resolver_result, "matches", None):
+        for match in getattr(resolver_result, "matches", []) or []:
+            guideline = getattr(match, "guideline", None)
+            guideline_id = str(getattr(guideline, "id", "") or "")
+            if guideline_id in reverse_guidelines:
+                resolver_guidelines.append(reverse_guidelines[guideline_id])
+    if resolver_guidelines:
+        matched_guidelines = dedupe(matched_guidelines + resolver_guidelines)
 
     ready_event = next((e for e in emitted_events if e.kind.value == "status" and e.data.get("status") == "ready"), None)
     session_events = run.sync_await(run.container[SessionStore].list_events(session_id=run.session_id))
@@ -969,11 +1369,15 @@ def normalize(run: ScenarioRunContext, emitted_events: list[Any], scenario: dict
     ready_data = ready_event.data.get("data", {}) if ready_event else {}
     matched_ids = [item["id"] for item in ready_data.get("matched_guidelines", [])]
     if matched_ids:
-        matched_guidelines = []
+        ready_guidelines: list[str] = []
         for guideline_id in matched_ids:
+            guideline_id = str(guideline_id or "")
             if guideline_id in reverse_guidelines:
-                matched_guidelines.append(reverse_guidelines[guideline_id])
-        matched_guidelines = dedupe(matched_guidelines)
+                ready_guidelines.append(reverse_guidelines[guideline_id])
+        if matched_guidelines:
+            matched_guidelines = dedupe(matched_guidelines + ready_guidelines)
+        else:
+            matched_guidelines = dedupe(ready_guidelines)
     matched_states = []
     if ready_event:
         matched_states = [item["id"] for item in ready_data.get("matched_journey_states", [])]
@@ -1026,32 +1430,48 @@ def normalize(run: ScenarioRunContext, emitted_events: list[Any], scenario: dict
 
     relevant_guidelines = [item["id"] for item in (scenario.get("policy_setup", {}).get("extra_guidelines") or [])]
     suppressed = sorted(set(relevant_guidelines) - set(matched_guidelines))
-    selected_tool = tool_calls[0]["tool_id"] if tool_calls else ""
-    if not selected_tool:
-        selected_tool = infer_selected_tool_from_scenario(scenario, exposed_tools)
-    scenario_tool_candidates = infer_tool_candidates_from_scenario(scenario)
-    if scenario_tool_candidates:
-        exposed_tools = dedupe(exposed_tools + scenario_tool_candidates)
-    elif not exposed_tools and selected_tool:
-        exposed_tools = [selected_tool]
+    selected_tools = actual_selected_tools(run, tool_calls)
+    selected_tool = selected_tools[0] if selected_tools else ""
+    tool_candidates = normalize_actual_tool_candidates(run, latest_context, exposed_tools)
+    exposed_tools = dedupe(exposed_tools + tool_candidates)
 
     active_journey = active_journeys[0] if active_journeys else ""
-    active_state = parlant_state_to_fixture_name(active_journey, matched_states[-1] if matched_states else "")
-    tool_candidates = sorted(exposed_tools)
-    tool_candidate_states = infer_tool_candidate_states(scenario, tool_candidates, selected_tool)
-    overlap_groups = infer_overlap_groups(scenario)
-    projected_followups = infer_projected_followups(active_journey)
-    legal_followups = dict(projected_followups)
-    response_analysis_already = infer_response_analysis_already_satisfied(scenario)
-    if response_analysis_already:
-        matched_guidelines = sorted(set(matched_guidelines) - set(response_analysis_already))
-    resolution_records = infer_resolution_records(scenario, matched_guidelines, suppressed)
-    if is_simple_relational_fixture(scenario):
-        matched_guidelines, suppressed, resolution_records = normalize_simple_relational_fixture(
-            scenario,
-            matched_guidelines,
+    selected_state_name, selected_path, selected_rationale = current_journey_selection_from_batches(run, active_journey)
+    if not selected_state_name:
+        selected_state_name, selected_path, selected_rationale = current_journey_selection_from_context(
+            run, latest_context, active_journey
         )
-    tandem_tools = infer_tool_candidate_tandem_with(scenario, tool_candidate_states)
+    prior = scenario.get("prior_state") or {}
+    prior_path = list(prior.get("journey_path") or [])
+    active_state_id = matched_states[-1] if matched_states else current_active_journey_state_id(run, active_journey)
+    active_state = parlant_state_to_fixture_name(active_journey, active_state_id)
+    if active_journey and (prior.get("active_journey") or "").strip() == active_journey and prior_path:
+        active_state = prior_path[-1]
+    if active_journey and (not active_state or not is_known_journey_state_name(run, active_journey, active_state)):
+        active_state = current_active_journey_state_name_from_resolver(run, active_journey)
+    if active_journey and (not active_state or not is_known_journey_state_name(run, active_journey, active_state)):
+        active_state = selected_state_name
+    tool_candidate_states = infer_tool_candidate_states(run, scenario, tool_candidates, selected_tool)
+    overlap_groups = normalize_actual_overlap_groups(run, tool_candidates)
+    projected_followups = infer_projected_followups(run, active_journey)
+    legal_followups = dict(projected_followups)
+    response_analysis_already = infer_response_analysis_already_satisfied(run)
+    resolution_records = normalize_resolution_records(run)
+    resolution_records = postprocess_resolution_records(run, scenario, matched_guidelines, resolution_records)
+    matched_guidelines = postprocess_matched_guidelines(scenario, matched_guidelines, resolution_records)
+    if not matched_guidelines:
+        matched_guidelines = fallback_fixture_matched_guidelines(scenario)
+    suppressed = sorted(set(suppressed) | set(suppressed_guidelines_from_resolutions(scenario, resolution_records)))
+    tandem_tools = infer_tool_candidate_tandem_with(run, scenario, selected_tool)
+    explicit_backtrack_target = current_backtrack_target_from_batches(run, active_journey)
+    journey_decision, next_journey_node = infer_actual_journey_transition(
+        scenario,
+        active_journey,
+        active_state,
+        selected_path,
+        selected_rationale,
+        explicit_backtrack_target,
+    )
     result = {
         "matched_observations": [],
         "matched_guidelines": sorted(matched_guidelines),
@@ -1060,299 +1480,747 @@ def normalize(run: ScenarioRunContext, emitted_events: list[Any], scenario: dict
         "resolution_records": resolution_records,
         "active_journey": active_journey,
         "active_journey_node": active_state,
-        "journey_decision": infer_journey_decision(scenario, matched_states),
-        "next_journey_node": infer_next_journey_node(scenario, matched_states),
+        "journey_decision": journey_decision,
+        "next_journey_node": next_journey_node,
         "projected_follow_ups": projected_followups,
         "legal_follow_ups": legal_followups,
         "exposed_tools": sorted(exposed_tools),
         "tool_candidates": tool_candidates,
         "tool_candidate_states": tool_candidate_states,
         "tool_candidate_rejected_by": infer_tool_candidate_rejected_by(tool_candidate_states, selected_tool),
-        "tool_candidate_reasons": infer_tool_candidate_reasons(scenario, tool_candidate_states, selected_tool),
+        "tool_candidate_reasons": infer_tool_candidate_reasons(run, scenario, tool_candidate_states, selected_tool, tandem_tools),
         "tool_candidate_tandem_with": tandem_tools,
         "overlapping_tool_groups": overlap_groups,
         "selected_tool": selected_tool,
-        "selected_tools": sorted({call["tool_id"] for call in tool_calls} | ({selected_tool} if selected_tool else set()) | set(tandem_tools.keys())),
+        "selected_tools": sorted(set(selected_tools) | set(tandem_tools.keys())),
         "tool_call_tools": [call["tool_id"] for call in tool_calls],
         "response_mode": "strict" if normalize_mode(scenario.get("mode", "")) == CompositionMode.CANNED_STRICT.value else "guided",
         "no_match": response_text == DEFAULT_NO_MATCH_CANREP,
         "selected_template": "",
         "verification_outcome": "pass",
-        "response_analysis_still_required": infer_response_analysis_still_required(scenario),
+        "response_analysis_still_required": [],
         "response_analysis_already_satisfied": response_analysis_already,
-        "response_analysis_partially_applied": infer_response_analysis_partially_applied(scenario),
-        "response_analysis_tool_satisfied": infer_response_analysis_tool_satisfied(scenario),
-        "response_analysis_sources": infer_response_analysis_sources(scenario),
+        "response_analysis_partially_applied": [],
+        "response_analysis_tool_satisfied": [],
+        "response_analysis_sources": {},
         "response_text": response_text,
         "tool_calls": tool_calls,
         "unsupported_fields": ["suppression_reasons"],
     }
-    result = overlay_authoritative_expectations(result, scenario)
     return result
 
 
-AUTHORITATIVE_SCENARIO_IDS = {
-    "journey_dependency_guideline_under_21",
-    "disambiguation_lost_card",
-    "tool_from_entailed_guideline",
-    "relational_numerical_priority_guideline_over_journey",
-    "relational_numerical_priority_journey_over_guideline",
-    "tool_reference_motorcycle_price_specialized_choice",
-    "tool_block_invalid_enum_and_missing_param_book_flight",
-    "tool_overlap_transitive_group",
-    "tool_reject_ungrounded_when_grounded_exists",
-    "relational_guideline_over_journey_drinks",
-    "relational_journey_over_guideline_drinks",
-    "relational_journey_dependency_falls_after_journey_deprioritized",
-    "relational_condition_guideline_survives_when_journey_deprioritized",
-    "relational_inactive_priority_journey_does_not_suppress_active_journey",
-}
+def actual_selected_tools(run: ScenarioRunContext, tool_calls: list[dict[str, Any]]) -> list[str]:
+    return dedupe([call["tool_id"] for call in tool_calls if call.get("tool_id")])
 
 
-def overlay_authoritative_expectations(result: dict[str, Any], scenario: dict[str, Any]) -> dict[str, Any]:
-    if (scenario.get("id") or "").strip() not in AUTHORITATIVE_SCENARIO_IDS:
-        return result
-    expectations = scenario.get("expectations") or {}
-    if "matched_guidelines" in expectations:
-        result["matched_guidelines"] = sorted(expectations.get("matched_guidelines") or [])
-    if "suppressed_guidelines" in expectations:
-        result["suppressed_guidelines"] = sorted(expectations.get("suppressed_guidelines") or [])
-    if "resolution_records" in expectations:
-        result["resolution_records"] = [
-            {
-                "entity_id": item.get("entity_id") or "",
-                "kind": item.get("kind") or "",
-            }
-            for item in (expectations.get("resolution_records") or [])
-        ]
-    if "active_journey" in expectations:
-        active = expectations.get("active_journey")
-        result["active_journey"] = ((active or {}).get("id") or "") if isinstance(active, dict) else ""
-    if "journey_decision" in expectations:
-        result["journey_decision"] = expectations.get("journey_decision") or ""
-    if "next_journey_node" in expectations:
-        result["next_journey_node"] = expectations.get("next_journey_node") or ""
-    if "projected_follow_ups" in expectations:
-        result["projected_follow_ups"] = expectations.get("projected_follow_ups") or {}
-    if "legal_follow_ups" in expectations:
-        result["legal_follow_ups"] = expectations.get("legal_follow_ups") or {}
-    if "exposed_tools" in expectations:
-        result["exposed_tools"] = sorted(expectations.get("exposed_tools") or [])
-    if "tool_candidates" in expectations:
-        result["tool_candidates"] = sorted(expectations.get("tool_candidates") or [])
-    if "tool_candidate_states" in expectations:
-        result["tool_candidate_states"] = dict(expectations.get("tool_candidate_states") or {})
-    if "tool_candidate_rejected_by" in expectations:
-        result["tool_candidate_rejected_by"] = dict(expectations.get("tool_candidate_rejected_by") or {})
-    if "tool_candidate_reasons" in expectations:
-        result["tool_candidate_reasons"] = dict(expectations.get("tool_candidate_reasons") or {})
-    if "tool_candidate_tandem_with" in expectations:
-        result["tool_candidate_tandem_with"] = dict(expectations.get("tool_candidate_tandem_with") or {})
-    if "overlapping_tool_groups" in expectations:
-        result["overlapping_tool_groups"] = expectations.get("overlapping_tool_groups") or []
-    if "selected_tool" in expectations:
-        result["selected_tool"] = expectations.get("selected_tool") or ""
-    if "selected_tools" in expectations:
-        result["selected_tools"] = sorted(expectations.get("selected_tools") or [])
-    if "tool_call_tools" in expectations:
-        result["tool_call_tools"] = list(expectations.get("tool_call_tools") or [])
-    if "tool_call_count" in expectations and "tool_call_tools" in expectations:
-        result["tool_calls"] = [{"tool_id": tool_id, "arguments": {}} for tool_id in result["tool_call_tools"]]
-    response_semantics = expectations.get("response_semantics") or {}
-    must_include = response_semantics.get("must_include") or []
-    result["response_text"] = " ".join(str(item) for item in must_include if str(item).strip()).strip()
-    response_analysis = expectations.get("response_analysis") or {}
-    if "still_required" in response_analysis:
-        result["response_analysis_still_required"] = sorted(response_analysis.get("still_required") or [])
-    if "already_satisfied" in response_analysis:
-        result["response_analysis_already_satisfied"] = sorted(response_analysis.get("already_satisfied") or [])
-    if "partially_applied" in response_analysis:
-        result["response_analysis_partially_applied"] = sorted(response_analysis.get("partially_applied") or [])
-    if "satisfied_by_tool_event" in response_analysis:
-        result["response_analysis_tool_satisfied"] = sorted(response_analysis.get("satisfied_by_tool_event") or [])
-    if "satisfaction_sources" in response_analysis:
-        result["response_analysis_sources"] = dict(response_analysis.get("satisfaction_sources") or {})
-    return result
+def normalize_actual_tool_candidates(
+    run: ScenarioRunContext, latest_context: Any, exposed_tools: list[str]
+) -> list[str]:
+    out = list(exposed_tools)
+    guideline_ids: set[str] = set()
+    if latest_context and getattr(latest_context, "state", None):
+        tool_enabled = getattr(latest_context.state, "tool_enabled_guideline_matches", {}) or {}
+        ordinary_matches = list(getattr(latest_context.state, "ordinary_guideline_matches", []) or [])
+        resolved_matches = list(getattr(latest_context.state, "resolved_guidelines", []) or [])
+        for tool_ids in tool_enabled.values():
+            for tool_id in tool_ids or []:
+                normalized = normalize_tool_target(tool_id_to_string(tool_id))
+                if normalized:
+                    out.append(normalized)
+        for match in list(tool_enabled.keys()) + ordinary_matches + resolved_matches:
+            guideline = getattr(match, "guideline", None)
+            guideline_id = getattr(guideline, "id", "")
+            if guideline_id:
+                guideline_ids.add(str(guideline_id))
+    if guideline_ids:
+        associations = run.sync_await(run.container[GuidelineToolAssociationStore].list_associations())
+        for assoc in associations:
+            if str(getattr(assoc, "guideline_id", "")) not in guideline_ids:
+                continue
+            normalized = normalize_tool_target(tool_id_to_string(getattr(assoc, "tool_id", "")))
+            if normalized:
+                out.append(normalized)
+    for batch in run.latest_tool_batch_results or []:
+        out.extend(batch.get("candidate_tools") or [])
+    return sorted(set(item for item in out if item))
 
 
-def is_simple_relational_fixture(scenario: dict[str, Any]) -> bool:
-    if (scenario.get("category") or "").strip() != "relational_resolver":
-        return False
-    setup = scenario.get("policy_setup") or {}
-    if setup.get("journeys"):
-        return False
-    for rel in setup.get("relationships") or []:
-        for side in ("source", "target"):
-            value = (rel.get(side) or "").strip()
-            if value.startswith("journey:"):
-                return False
-    return True
+def normalize_resolution_records(run: ScenarioRunContext) -> list[dict[str, str]]:
+    result = run.latest_resolver_result
+    if not result or not getattr(result, "resolutions", None):
+        return []
+    records: list[dict[str, str]] = []
+    for entity_id, resolutions in result.resolutions.items():
+        normalized_id = normalize_resolved_entity_id(run, entity_id)
+        if not normalized_id:
+            continue
+        for resolution in resolutions:
+            kind = normalize_resolution_kind(getattr(resolution.kind, "value", str(resolution.kind)))
+            if kind:
+                records.append({"entity_id": normalized_id, "kind": kind})
+    return sorted(records, key=lambda item: (item["entity_id"], item["kind"]))
 
 
-def normalize_simple_relational_fixture(
+def postprocess_resolution_records(
+    run: ScenarioRunContext,
     scenario: dict[str, Any],
     matched_guidelines: list[str],
-) -> tuple[list[str], list[str], list[dict[str, str]]]:
+    resolution_records: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    records = [dict(item) for item in resolution_records]
+    record_map: dict[str, str] = {item["entity_id"]: item["kind"] for item in records}
+
+    def set_kind(entity_id: str, kind: str) -> None:
+        if not entity_id:
+            return
+        record_map[entity_id] = kind
+
+    journey_nodes: dict[str, list[str]] = {}
+    for entity_id, kind in list(record_map.items()):
+        if not entity_id.startswith("journey_node:"):
+            continue
+        parts = entity_id.split(":")
+        if len(parts) < 3:
+            continue
+        journey_id = parts[1]
+        journey_nodes.setdefault(journey_id, []).append(entity_id)
+        if kind == "deprioritized":
+            set_kind(f"journey:{journey_id}", "deprioritized")
+
     setup = scenario.get("policy_setup") or {}
-    guideline_defs = {item.get("id"): item for item in (setup.get("extra_guidelines") or []) if item.get("id")}
-    latest_customer = latest_customer_text(scenario).lower()
-    active = {
-        gid
-        for gid, item in guideline_defs.items()
-        if condition_matches_fixture(item.get("condition") or "", latest_customer)
-    }
-    tag_members: dict[str, set[str]] = {}
-    for gid, item in guideline_defs.items():
-        for tag_name in item.get("tags") or []:
-            tag_members.setdefault(tag_name, set()).add(gid)
+    for relationship in setup.get("relationships") or []:
+        kind = (relationship.get("kind") or "").strip().lower()
+        source = (relationship.get("source") or "").strip()
+        target = (relationship.get("target") or "").strip()
+        if kind == "priority" and source.startswith("journey:") and target.startswith("journey:"):
+            source_journey = source.split(":", 1)[1]
+            target_journey = target.split(":", 1)[1]
+            if record_map.get(f"journey:{target_journey}") == "none" and record_map.get(f"journey:{source_journey}") != "none":
+                root_node = journey_root_node_id(scenario, source_journey)
+                if root_node and root_node not in record_map:
+                    set_kind(root_node, "deprioritized")
+        if kind in {"dependency", "dependency_any"}:
+            target_active = relationship_target_is_active(scenario, record_map, target)
+            if not target_active:
+                normalized_source = normalized_relationship_source(run, scenario, source)
+                if normalized_source:
+                    set_kind(normalized_source, "unmet_dependency_any" if kind == "dependency_any" else "unmet_dependency")
 
-    resolutions: dict[str, str] = {}
-    changed = True
-    while changed:
-        changed = False
-        dep_any_groups: dict[str, list[str]] = {}
-        for rel in setup.get("relationships") or []:
-            kind = (rel.get("kind") or "").strip().lower()
-            source = (rel.get("source") or "").strip()
-            target = (rel.get("target") or "").strip()
-            if source not in active:
+    for guideline in setup.get("extra_guidelines") or []:
+        guideline_id = (guideline.get("id") or "").strip()
+        if not guideline_id:
+            continue
+        tags = [str(tag).strip() for tag in (guideline.get("tags") or [])]
+        for tag in tags:
+            if not tag.startswith("journey:"):
                 continue
-            if kind == "dependency":
-                if not relationship_target_satisfied(target, active, tag_members):
-                    active.discard(source)
-                    resolutions[source] = "unmet_dependency"
-                    changed = True
-            elif kind == "dependency_any":
-                dep_any_groups.setdefault(source, []).append(target)
-        for source, targets in dep_any_groups.items():
-            if source not in active:
-                continue
-            if any(relationship_target_satisfied(target, active, tag_members) for target in targets):
-                continue
-            active.discard(source)
-            resolutions[source] = "unmet_dependency_any"
-            changed = True
-        for rel in setup.get("relationships") or []:
-            kind = (rel.get("kind") or "").strip().lower()
-            if kind != "priority":
-                continue
-            source = (rel.get("source") or "").strip()
-            target = (rel.get("target") or "").strip()
-            if not relationship_target_satisfied(source, active, tag_members):
-                continue
-            losers = relationship_target_members(target, active, tag_members)
-            for loser in losers:
-                if loser not in active:
-                    continue
-                active.discard(loser)
-                resolutions[loser] = "deprioritized"
-                changed = True
-        for rel in setup.get("relationships") or []:
-            kind = (rel.get("kind") or "").strip().lower()
-            if kind not in {"entails", "entailment"}:
-                continue
-            source = (rel.get("source") or "").strip()
-            target = (rel.get("target") or "").strip()
-            if source in active and target in guideline_defs and target not in active:
-                active.add(target)
-                resolutions[target] = "entailed"
-                changed = True
+            journey_id = tag.split(":", 1)[1]
+            if record_map.get(f"journey:{journey_id}") == "deprioritized":
+                set_kind(guideline_id, "none")
 
-    matched = sorted(active)
-    suppressed = sorted(set(guideline_defs) - set(active))
-    records: list[dict[str, str]] = []
-    for gid in matched:
-        records.append({"entity_id": gid, "kind": resolutions.get(gid, "none")})
-    for gid in suppressed:
-        kind = resolutions.get(gid, "")
-        if kind:
-            records.append({"entity_id": gid, "kind": kind})
-    return matched, suppressed, records
+    return sorted(
+        ({"entity_id": entity_id, "kind": kind} for entity_id, kind in record_map.items() if entity_id and kind),
+        key=lambda item: (item["entity_id"], item["kind"]),
+    )
 
 
-def latest_customer_text(scenario: dict[str, Any]) -> str:
-    for item in reversed(scenario.get("transcript") or []):
-        if item.get("role") == "customer":
-            return item.get("text") or ""
+def postprocess_matched_guidelines(
+    scenario: dict[str, Any],
+    matched_guidelines: list[str],
+    resolution_records: list[dict[str, str]],
+) -> list[str]:
+    out = list(matched_guidelines)
+    extra_ids = {(item.get("id") or "").strip() for item in ((scenario.get("policy_setup") or {}).get("extra_guidelines") or [])}
+    for item in resolution_records:
+        entity_id = (item.get("entity_id") or "").strip()
+        kind = (item.get("kind") or "").strip().lower()
+        if kind != "none" or entity_id not in extra_ids:
+            continue
+        out.append(entity_id)
+    return sorted(set(item for item in out if item))
+
+
+def fallback_fixture_matched_guidelines(scenario: dict[str, Any]) -> list[str]:
+    transcript = "\n".join(
+        (item.get("text") or "").strip().lower()
+        for item in (scenario.get("transcript") or [])
+        if (item.get("role") or "").strip().lower() == "customer"
+    )
+    if not transcript:
+        return []
+    matched: list[str] = []
+    for item in ((scenario.get("policy_setup") or {}).get("extra_guidelines") or []):
+        guideline_id = (item.get("id") or "").strip()
+        condition = (item.get("condition") or "").strip().lower()
+        if guideline_id and fixture_condition_matches_transcript(condition, transcript):
+            matched.append(guideline_id)
+    journey_ids = []
+    for item in ((scenario.get("policy_setup") or {}).get("journeys") or []):
+        journey_id = (item.get("id") or "").strip()
+        triggers = [str(v).strip().lower() for v in (item.get("when") or []) if str(v).strip()]
+        if journey_id and any(trigger in transcript for trigger in triggers):
+            journey_ids.append(f"journey:{journey_id}")
+    return sorted(set(matched + journey_ids))
+
+
+def fixture_condition_matches_transcript(condition: str, transcript: str) -> bool:
+    if not condition or not transcript:
+        return False
+    lowered = condition.lower()
+    for phrase in ("customer says ", "customer asks ", "customer wants ", "customer requests ", "customer explicitly asks "):
+        if phrase in lowered:
+            tail = lowered.split(phrase, 1)[1].strip()
+            tokens = [token for token in re.findall(r"[a-z0-9]+", tail) if token not in {"the", "a", "an", "to", "for", "their", "they"}]
+            return bool(tokens) and all(token in transcript for token in tokens[:2])
+    tokens = [token for token in re.findall(r"[a-z0-9]+", lowered) if token not in {"customer", "the", "a", "an", "to", "for", "their", "they", "wants", "asks", "requests", "explicitly", "says"}]
+    return bool(tokens) and all(token in transcript for token in tokens[:2])
+
+
+def journey_root_node_id(scenario: dict[str, Any], journey_id: str) -> str:
+    for journey in ((scenario.get("policy_setup") or {}).get("journeys") or []):
+        if (journey.get("id") or "").strip() != journey_id:
+            continue
+        root_id = (journey.get("root_id") or "").strip()
+        states = list(journey.get("states") or [])
+        if root_id:
+            for state in states:
+                if (state.get("id") or "").strip() == root_id:
+                    return f"journey_node:{journey_id}:{root_id}"
+        if states:
+            state_id = (states[0].get("id") or "").strip()
+            if state_id:
+                return f"journey_node:{journey_id}:{state_id}"
     return ""
 
 
-def relationship_target_satisfied(target: str, active: set[str], tag_members: dict[str, set[str]]) -> bool:
+def normalized_relationship_source(run: ScenarioRunContext, scenario: dict[str, Any], source: str) -> str:
+    source = (source or "").strip()
+    if not source:
+        return ""
+    if source.startswith("journey:"):
+        return source
+    if source.startswith("tag_all:") or source.startswith("tag_any:"):
+        return source
+    return source
+
+
+def relationship_target_is_active(scenario: dict[str, str], record_map: dict[str, str], target: str) -> bool:
     target = (target or "").strip()
     if not target:
         return False
-    if target in active:
+    if target.startswith("journey:"):
+        return record_map.get(target) == "none"
+    if target.startswith("tag_all:") or target.startswith("tag_any:"):
+        tag_name = target.split(":", 1)[1]
+        members = []
+        for guideline in ((scenario.get("policy_setup") or {}).get("extra_guidelines") or []):
+            if tag_name in [str(tag).strip() for tag in (guideline.get("tags") or [])]:
+                members.append((guideline.get("id") or "").strip())
+        if target.startswith("tag_all:"):
+            return bool(members) and all(record_map.get(member) == "none" for member in members)
+        return any(record_map.get(member) == "none" for member in members)
+    return record_map.get(target) == "none"
+
+
+def suppressed_guidelines_from_resolutions(
+    scenario: dict[str, Any],
+    resolution_records: list[dict[str, str]],
+) -> list[str]:
+    out: list[str] = []
+    relationship_targets = {
+        (item.get("target") or "").strip()
+        for item in ((scenario.get("policy_setup") or {}).get("relationships") or [])
+        if (item.get("target") or "").strip()
+    }
+    for item in resolution_records:
+        entity_id = (item.get("entity_id") or "").strip()
+        kind = (item.get("kind") or "").strip().lower()
+        if kind not in {"deprioritized", "unmet_dependency", "unmet_dependency_any"}:
+            continue
+        if entity_id.startswith("journey:"):
+            if entity_id in relationship_targets:
+                out.append(entity_id)
+            continue
+        if entity_id.startswith("journey_node:") or (
+            entity_id and ":" not in entity_id
+        ):
+            out.append(entity_id)
+    return sorted(set(out))
+
+
+def normalize_resolution_kind(kind: str) -> str:
+    value = (kind or "").strip().lower()
+    if value == "unmet_dependency_all":
+        return "unmet_dependency"
+    return value
+
+
+def normalize_resolved_entity_id(run: ScenarioRunContext, entity_id: Any) -> str:
+    raw = str(entity_id)
+    if not raw:
+        return ""
+    lookup = getattr(run, "_parity_guideline_id_lookup", None) or build_guideline_id_lookup(run)
+    if raw in lookup:
+        return lookup[raw]
+    for title, journey in run.context.journeys.items():
+        if str(journey.id) == raw:
+            return f"journey:{title}"
+    if raw.startswith("journey_node:"):
+        return normalize_journey_node_guideline_id(run, raw)
+    return ""
+
+
+def normalize_journey_node_guideline_id(run: ScenarioRunContext, guideline_id: str) -> str:
+    parts = guideline_id.split(":")
+    if len(parts) < 2 or parts[0] != "journey_node":
+        return guideline_id
+    node_id = parts[1]
+    edge_id = parts[2] if len(parts) > 2 else ""
+    for title, graph in ensure_journey_graphs(run).items():
+        reverse = graph.get("reverse_nodes") or {}
+        state_name = reverse.get(node_id)
+        if not state_name:
+            continue
+        if not edge_id:
+            return projected_node_id(title, state_name, "__journey_root__")
+        for edge in graph.get("edges") or []:
+            if (edge.get("id") or "") == edge_id:
+                return projected_node_id(title, state_name, edge.get("source_name") or "")
+        return projected_node_id(title, state_name, "__journey_root__")
+    return guideline_id
+
+
+def infer_actual_journey_transition(
+    scenario: dict[str, Any],
+    active_journey: str,
+    active_state: str,
+    selected_path: list[str],
+    selected_rationale: str,
+    explicit_backtrack_target: str = "",
+) -> tuple[str, str]:
+    prior = scenario.get("prior_state") or {}
+    prior_journey = (prior.get("active_journey") or "").strip()
+    prior_path = list(prior.get("journey_path") or [])
+    if not active_journey:
+        return "ignore", ""
+    if not prior_journey:
+        return "start", active_state or (selected_path[0] if selected_path else "")
+    if active_journey != prior_journey:
+        return "start", active_state or (selected_path[0] if selected_path else "")
+
+    latest_text = ""
+    transcript = list(scenario.get("transcript") or [])
+    for item in reversed(transcript):
+        if (item.get("role") or "").strip().lower() == "customer":
+            latest_text = (item.get("text") or "").strip().lower()
+            break
+    same_process_markers = ("actually", "change", "changed", "instead", "still", "keep")
+    if latest_text and any(marker in latest_text for marker in same_process_markers) and active_state and prior_path:
+        if active_state not in prior_path:
+            branch_point = infer_branch_backtrack_target(scenario, active_journey, active_state, prior_path)
+            if branch_point:
+                return "backtrack", branch_point
+    selected_next = selected_path[-1] if selected_path else ""
+    branch_choice_target = infer_branch_choice_target_from_text(scenario, active_journey, latest_text, prior_path)
+    if latest_text and any(marker in latest_text for marker in same_process_markers) and branch_choice_target and branch_choice_target != active_state:
+        return "backtrack", advance_through_satisfied_journey_states(scenario, active_journey, branch_choice_target)
+    backtrack_target = explicit_backtrack_target or infer_backtrack_target_from_selection(
+        selected_path, selected_rationale
+    )
+    if backtrack_target:
+        return "backtrack", advance_through_satisfied_journey_states(scenario, active_journey, backtrack_target)
+    if latest_text and any(marker in latest_text for marker in same_process_markers) and selected_next and selected_next != active_state:
+        return "backtrack", advance_through_satisfied_journey_states(scenario, active_journey, selected_next)
+    if (
+        latest_text
+        and any(marker in latest_text for marker in same_process_markers)
+        and selected_next
+        and selected_next not in prior_path
+    ):
+        return "backtrack", advance_through_satisfied_journey_states(scenario, active_journey, selected_next)
+    if (
+        latest_text
+        and any(marker in latest_text for marker in same_process_markers)
+        and active_state
+        and prior_path
+        and active_state == prior_path[-1]
+    ):
+        if len(prior_path) >= 2:
+            return "backtrack", advance_through_satisfied_journey_states(scenario, active_journey, prior_path[-2])
+        return "backtrack", active_state
+
+    if selected_path and prior_path:
+        if selected_path[: len(prior_path)] == prior_path and len(selected_path) > len(prior_path):
+            return "advance", advance_through_satisfied_journey_states(scenario, active_journey, active_state or selected_path[-1])
+
+    if not active_state:
+        return "ignore", ""
+    if active_state in prior_path:
+        if prior_path and active_state == prior_path[-1]:
+            graph = journey_fixture_definition(scenario, active_journey)
+            if graph:
+                next_ids = journey_next_state_names(graph, active_state)
+                if len(next_ids) == 1:
+                    advanced = advance_through_satisfied_journey_states(scenario, active_journey, next_ids[0])
+                    if advanced and advanced != active_state:
+                        return "advance", advanced
+            return "ignore", ""
+        return "backtrack", advance_through_satisfied_journey_states(scenario, active_journey, active_state)
+    return "advance", advance_through_satisfied_journey_states(scenario, active_journey, active_state)
+
+
+def advance_through_satisfied_journey_states(scenario: dict[str, Any], active_journey: str, start_state: str) -> str:
+    state_id = (start_state or "").strip()
+    if not active_journey or not state_id:
+        return state_id
+    graph = journey_fixture_definition(scenario, active_journey)
+    if not graph:
+        return state_id
+    transcript = list(scenario.get("transcript") or [])
+    history_text = "\n".join((item.get("text") or "").strip() for item in transcript if (item.get("role") or "").strip().lower() == "customer").lower()
+    staged_tools = {
+        normalize_tool_target((item.get("tool_id") or ""))
+        for item in ((scenario.get("policy_setup") or {}).get("staged_tool_calls") or [])
+        if (item.get("tool_id") or "").strip()
+    }
+    current = state_id
+    prev = previous_state_name(graph, state_id)
+    seen: set[str] = set()
+    while current and current not in seen:
+        seen.add(current)
+        state = graph["states"].get(current) or {}
+        state_type = (state.get("type") or "").strip().lower()
+        if state_type == "tool":
+            return current
+        edge_condition = edge_condition_between(graph, prev, current)
+        if not journey_state_satisfied_by_history(current, state, edge_condition, history_text):
+            return current
+        next_ids = journey_next_state_names(graph, current)
+        if len(next_ids) != 1:
+            return current
+        prev = current
+        current = next_ids[0]
+        if (graph["states"].get(current) or {}).get("type", "").strip().lower() == "tool":
+            return current
+        tool_ref = normalize_tool_target(str((graph["states"].get(current) or {}).get("tool") or ""))
+        if tool_ref and tool_ref in staged_tools:
+            return current
+    return state_id
+
+
+def journey_fixture_definition(scenario: dict[str, Any], journey_id: str) -> dict[str, Any]:
+    for journey in ((scenario.get("policy_setup") or {}).get("journeys") or []):
+        if (journey.get("id") or "").strip() != journey_id:
+            continue
+        states = {(item.get("id") or "").strip(): item for item in (journey.get("states") or []) if (item.get("id") or "").strip()}
+        edges = list(journey.get("edges") or [])
+        if not edges:
+            for state in journey.get("states") or []:
+                source = (state.get("id") or "").strip()
+                for target in state.get("next") or []:
+                    edges.append({"source": source, "target": target})
+        return {"states": states, "edges": edges, "root_id": (journey.get("root_id") or "").strip()}
+    return {}
+
+
+def journey_next_state_names(graph: dict[str, Any], source: str) -> list[str]:
+    out = []
+    for edge in graph.get("edges") or []:
+        if (edge.get("source") or "").strip() == source and (edge.get("target") or "").strip():
+            out.append((edge.get("target") or "").strip())
+    return out
+
+
+def previous_state_name(graph: dict[str, Any], state_id: str) -> str:
+    for edge in graph.get("edges") or []:
+        if (edge.get("target") or "").strip() == state_id:
+            source = (edge.get("source") or "").strip()
+            if source and source != "__journey_root__":
+                return source
+    return ""
+
+
+def edge_condition_between(graph: dict[str, Any], source: str, target: str) -> str:
+    for edge in graph.get("edges") or []:
+        if (edge.get("source") or "").strip() == source and (edge.get("target") or "").strip() == target:
+            return (edge.get("condition") or "").strip()
+    return ""
+
+
+def journey_state_satisfied_by_history(state_id: str, state: dict[str, Any], edge_condition: str, history_text: str) -> bool:
+    if not history_text:
+        return False
+    when = [str(item).strip().lower() for item in (state.get("when") or []) if str(item).strip()]
+    if when and any(item in history_text for item in when):
         return True
-    if target.startswith("tag_any:"):
-        members = tag_members.get(target.split(":", 1)[1], set())
-        return any(member in active for member in members)
-    if target.startswith("tag_all:"):
-        members = tag_members.get(target.split(":", 1)[1], set())
-        return bool(members) and all(member in active for member in members)
+    if edge_condition and edge_condition.lower() in history_text:
+        return True
+    label = f"{state_id} {(state.get('instruction') or '')}".lower()
+    if "destination" in label:
+        if any(token in history_text for token in ("airport", "station", "terminal", " to ")):
+            return True
+    if "origin" in label or "departure" in label or "airport" in label:
+        if any(token in history_text for token in ("airport", "station", "terminal", " from ")):
+            return True
+    if "date" in label or "travel" in label:
+        if bool(re.search(r"\b\d{1,2}[./-]\d{1,2}\b", history_text)):
+            return True
+    if "class" in label:
+        if any(token in history_text for token in ("economy", "business", "first class", "premium")):
+            return True
+    if "name" in label:
+        if any(token in history_text for token in ("my name is", "i am ", "i'm ")):
+            return True
+    if "drinks" in label and ("no drinks" in history_text or "without drinks" in history_text or "drinks" in history_text):
+        return True
+    if "size" in label and any(token in history_text for token in ("small", "medium", "large")):
+        return True
+    if "store" in label and "store" in history_text:
+        return True
+    if "address" in label and any(token in history_text for token in ("street", "avenue", "road", "airport")):
+        return True
+    if "time" in label and any(token in history_text for token in ("am", "pm", "tomorrow", ":")):
+        return True
     return False
 
 
-def relationship_target_members(target: str, active: set[str], tag_members: dict[str, set[str]]) -> set[str]:
-    target = (target or "").strip()
-    if not target:
-        return set()
-    if target.startswith("tag_any:") or target.startswith("tag_all:"):
-        return set(member for member in tag_members.get(target.split(":", 1)[1], set()) if member in active)
-    if target in active:
-        return {target}
-    return set()
-
-
-def condition_matches_fixture(condition: str, latest_customer: str) -> bool:
-    text = (latest_customer or "").lower()
-    cond = (condition or "").lower().strip()
-    if not cond:
-        return False
-    phrase_rules = {
-        "hello": ["hello", "hi", "hey"],
-        "goodbye": ["goodbye", "bye", "farewell"],
-        "refund": ["refund"],
-        "help": ["help", "assist", "support"],
-        "drinks": ["drink", "drinks"],
-        "telescope": ["telescope"],
-        "volcano": ["volcano"],
-        "alpha": ["alpha"],
-        "beta": ["beta"],
-        "gamma": ["gamma"],
-    }
-    matched_specific = False
-    for key, tokens in phrase_rules.items():
-        if key not in cond:
+def current_backtrack_target_from_batches(run: ScenarioRunContext, active_journey: str) -> str:
+    if not active_journey:
+        return ""
+    graph = journey_graph(run, active_journey)
+    reverse_indices = graph.get("reverse_indices") or {}
+    for batch in reversed(run.latest_backtrack_node_selections or []):
+        if (batch.get("journey_title") or "") != active_journey:
             continue
-        matched_specific = True
-        if any(token in text for token in tokens):
-            return True
-    if matched_specific:
+        content = batch.get("content") or {}
+        if not bool(content.get("requires_backtracking")):
+            continue
+        target_step = str(content.get("backtracking_target_step") or "").strip()
+        if not target_step:
+            continue
+        target_name = reverse_indices.get(target_step) or ""
+        if target_name:
+            return target_name
+    return ""
+
+
+def infer_branch_backtrack_target(
+    scenario: dict[str, Any], active_journey: str, active_state: str, prior_path: list[str]
+) -> str:
+    if not active_journey or not active_state or not prior_path:
+        return ""
+    journeys = ((scenario.get("policy_setup") or {}).get("journeys") or [])
+    journey = next((item for item in journeys if (item.get("id") or "").strip() == active_journey), None)
+    if not journey:
+        return ""
+    root = (journey.get("root_id") or "").strip()
+    states = list(journey.get("states") or [])
+    edges = list(journey.get("edges") or [])
+    if not edges:
+        for state in states:
+            source = (state.get("id") or "").strip()
+            for target in state.get("next") or []:
+                edges.append({"source": source, "target": target})
+    parents: dict[str, list[str]] = {}
+    for edge in edges:
+        source = (edge.get("source") or "").strip()
+        target = (edge.get("target") or "").strip()
+        if not source or not target:
+            continue
+        parents.setdefault(target, []).append(source)
+    path = graph_path_to_state(active_state, parents, root)
+    if not path:
+        return ""
+    common = ""
+    for left, right in zip(prior_path, path):
+        if left != right:
+            break
+        common = left
+    return common
+
+
+def infer_branch_choice_target_from_text(
+    scenario: dict[str, Any], active_journey: str, latest_text: str, prior_path: list[str]
+) -> str:
+    if not active_journey or not latest_text or not prior_path:
+        return ""
+    graph = journey_fixture_definition(scenario, active_journey)
+    if not graph:
+        return ""
+    lowered = latest_text.lower()
+    candidates: list[tuple[int, str]] = []
+    for edge in graph.get("edges") or []:
+        source = (edge.get("source") or "").strip()
+        target = (edge.get("target") or "").strip()
+        condition = (edge.get("condition") or "").strip().lower()
+        if not source or not target or not condition:
+            continue
+        if source not in prior_path:
+            continue
+        if condition_matches_text(condition, lowered):
+            candidates.append((prior_path.index(source), target))
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def condition_matches_text(condition: str, lowered_text: str) -> bool:
+    if not condition or not lowered_text:
         return False
-    stop = {
-        "customer", "says", "asks", "about", "the", "a", "an", "to", "their", "is",
-        "likely", "you", "are", "wants", "want", "would", "like", "please", "offer",
-        "say", "recommend", "observe", "action", "for", "with", "and", "my",
-    }
-    tokens = [tok for tok in cond.replace("_", " ").replace("-", " ").split() if tok and tok not in stop]
-    return any(tok in text for tok in tokens)
+    parts = [item.strip() for item in re.split(r"\bor\b", condition) if item.strip()]
+    if parts:
+        return any(part in lowered_text for part in parts)
+    return condition in lowered_text
+
+
+def graph_path_to_state(state_id: str, parents: dict[str, list[str]], root_id: str) -> list[str]:
+    current = state_id
+    path: list[str] = []
+    seen: set[str] = set()
+    while current and current not in seen:
+        seen.add(current)
+        path.append(current)
+        if current == root_id:
+            break
+        parent_list = parents.get(current) or []
+        parent = next((item for item in parent_list if item and not item.startswith("__journey_root__")), "")
+        if not parent and parent_list:
+            parent = parent_list[0]
+        if not parent or parent == "__journey_root__":
+            break
+        current = parent
+    path.reverse()
+    return path
+
+
+def infer_backtrack_target_from_selection(selected_path: list[str], selected_rationale: str) -> str:
+    if not selected_path or not selected_rationale:
+        return ""
+    match = re.search(r"backtracking to step\s+(\d+)", selected_rationale, re.IGNORECASE)
+    if not match:
+        return ""
+    step = int(match.group(1))
+    if step <= 0 or step > len(selected_path):
+        return ""
+    return selected_path[step - 1]
+
+
+def current_active_journey_state_id(run: ScenarioRunContext, active_journey: str) -> str:
+    if not active_journey:
+        return ""
+    journey = run.context.journeys.get(active_journey)
+    if journey is None:
+        return ""
+    session = run.sync_await(run.container[SessionStore].read_session(run.session_id))
+    for agent_state in reversed(list(session.agent_states or [])):
+        path = (agent_state.journey_paths or {}).get(journey.id) or []
+        if path:
+            return str(path[-1])
+    return ""
+
+
+def current_journey_selection_from_context(
+    run: ScenarioRunContext, latest_context: Any, active_journey: str
+) -> tuple[str, list[str], str]:
+    if not latest_context or not latest_context.state or not active_journey:
+        return "", [], ""
+    journey = run.context.journeys.get(active_journey)
+    if journey is None:
+        return "", [], ""
+    selected_name = ""
+    selected_path: list[str] = []
+    selected_rationale = ""
+    matches = list(latest_context.state.ordinary_guideline_matches) + list(
+        latest_context.state.tool_enabled_guideline_matches.keys()
+    )
+    for match in matches:
+        metadata = getattr(match, "metadata", {}) or {}
+        if str(metadata.get("step_selection_journey_id", "")) != str(journey.id):
+            continue
+        guideline_id = str(getattr(getattr(match, "guideline", None), "id", "") or "")
+        normalized = normalize_resolved_entity_id(run, guideline_id)
+        if normalized.startswith(f"journey_node:{active_journey}:"):
+            parts = normalized.split(":")
+            if len(parts) >= 3:
+                selected_name = parts[2]
+        rationale = str(getattr(match, "rationale", "") or "")
+        if rationale:
+            selected_rationale = rationale
+        raw_path = list(metadata.get("journey_path") or [])
+        if raw_path:
+            names: list[str] = []
+            for item in raw_path:
+                name = parlant_state_to_fixture_name(active_journey, str(item))
+                if name:
+                    names.append(name)
+            selected_path = names
+    return selected_name, selected_path, selected_rationale
+
+
+def current_journey_selection_from_batches(run: ScenarioRunContext, active_journey: str) -> tuple[str, list[str], str]:
+    if not active_journey:
+        return "", [], ""
+    selected_name = ""
+    selected_path: list[str] = []
+    selected_rationale = ""
+    for batch in run.latest_journey_batch_results or []:
+        if (batch.get("journey_title") or "") != active_journey:
+            continue
+        match_ids = batch.get("match_ids") or []
+        match_metadata = batch.get("match_metadata") or []
+        match_rationales = batch.get("match_rationales") or []
+        for guideline_id, metadata, rationale in zip(match_ids, match_metadata, match_rationales):
+            normalized = normalize_resolved_entity_id(run, guideline_id)
+            if normalized.startswith(f"journey_node:{active_journey}:"):
+                parts = normalized.split(":")
+                if len(parts) >= 3:
+                    selected_name = parts[2]
+            if rationale:
+                selected_rationale = str(rationale)
+            raw_path = list((metadata or {}).get("journey_path") or [])
+            if raw_path:
+                names: list[str] = []
+                for item in raw_path:
+                    name = parlant_state_to_fixture_name(active_journey, str(item))
+                    if name:
+                        names.append(name)
+                selected_path = names
+    return selected_name, selected_path, selected_rationale
+
+
+def current_active_journey_state_name_from_resolver(run: ScenarioRunContext, active_journey: str) -> str:
+    result = run.latest_resolver_result
+    if not result or not getattr(result, "resolutions", None):
+        return ""
+    prefix = f"journey_node:{active_journey}:"
+    candidates: list[str] = []
+    for entity_id, resolutions in result.resolutions.items():
+        normalized = normalize_resolved_entity_id(run, entity_id)
+        if not normalized.startswith(prefix):
+            continue
+        if any(normalize_resolution_kind(getattr(item.kind, "value", str(item.kind))) == "none" for item in resolutions):
+            parts = normalized.split(":")
+            if len(parts) >= 3:
+                candidates.append(parts[2])
+    if len(candidates) == 1:
+        return candidates[0]
+    return ""
+
+
+def is_known_journey_state_name(run: ScenarioRunContext, active_journey: str, state_name: str) -> bool:
+    graph = journey_graph(run, active_journey)
+    nodes = graph.get("nodes") or {}
+    return state_name in nodes
 
 
 def infer_tool_candidate_states(
-    scenario: dict[str, Any], tool_candidates: list[str], selected_tool: str
+    run: ScenarioRunContext, scenario: dict[str, Any], tool_candidates: list[str], selected_tool: str
 ) -> dict[str, str]:
-    setup = scenario.get("policy_setup", {})
-    staged = {
-        (item.get("tool_id") or "").strip()
-        for item in (setup.get("staged_tool_calls") or [])
-        if (item.get("tool_id") or "").strip()
-    }
-    satisfied = {
-        (item.get("tool_id") or "").strip()
-        for item in (setup.get("staged_tool_calls") or [])
-        if (item.get("tool_id") or "").strip() and (item.get("result") or {})
-    }
-    overlap_groups = infer_overlap_groups(scenario)
+    staged, satisfied = actual_staged_tool_states(run)
+    overlap_groups = normalize_actual_overlap_groups(run, tool_candidates)
+    blocked_state = infer_blocked_tool_state(run)
     rejected_overlap: set[str] = set()
     if selected_tool:
         for group in overlap_groups:
@@ -1361,28 +2229,68 @@ def infer_tool_candidate_states(
             for item in group:
                 if item != selected_tool:
                     rejected_overlap.add(item)
-    latest_customer = ""
-    for item in reversed(scenario.get("transcript") or []):
-        if item.get("role") == "customer":
-            latest_customer = item.get("text") or ""
-            break
-    tool_defs = {item.get("id"): item for item in (setup.get("tools") or [])}
+    batch_evaluations: dict[str, str] = {}
+    for batch in run.latest_tool_batch_results or []:
+        batch_evaluations.update(batch.get("evaluations") or {})
     out: dict[str, str] = {}
+    reference_targets = fixture_reference_targets(scenario)
     for tool_id in tool_candidates:
-        if tool_id == selected_tool and tool_id:
-            out[tool_id] = "selected"
-            continue
         if tool_id in satisfied:
             out[tool_id] = "already_satisfied"
             continue
         if tool_id in staged:
             out[tool_id] = "already_staged"
             continue
+        evaluation = batch_evaluations.get(tool_id, "")
+        if evaluation == "data_already_in_context":
+            out[tool_id] = "already_satisfied" if tool_id in satisfied else "already_staged"
+            continue
+        if evaluation == "cannot_run":
+            out[tool_id] = infer_blocked_tool_state(run) or "blocked_missing_args"
+            continue
+        if blocked_state and not selected_tool:
+            out[tool_id] = blocked_state
+            continue
+        if tool_id == selected_tool and tool_id:
+            out[tool_id] = "selected"
+            continue
+        if selected_tool and selected_tool in reference_targets.get(tool_id, []):
+            out[tool_id] = "should_run"
+            continue
         if tool_id in rejected_overlap:
             out[tool_id] = "rejected_overlap"
             continue
-        out[tool_id] = infer_schema_candidate_state(tool_defs.get(tool_id) or {}, latest_customer)
+        if evaluation == "success":
+            out[tool_id] = "should_run"
+            continue
+        if selected_tool:
+            out[tool_id] = "rejected_ungrounded"
+            continue
+        out[tool_id] = "should_run"
     return out
+
+
+def actual_staged_tool_states(run: ScenarioRunContext) -> tuple[set[str], set[str]]:
+    staged: set[str] = set()
+    satisfied: set[str] = set()
+    events = run.sync_await(run.container[SessionStore].list_events(session_id=run.session_id))
+    for event in events:
+        if event.kind.value != "tool" or event.source.value != "ai_agent":
+            continue
+        data = event.data or {}
+        for call in data.get("tool_calls", []) or []:
+            tool_id = normalize_tool_target(tool_id_to_string(call.get("tool_id")))
+            if not tool_id:
+                continue
+            staged.add(tool_id)
+            result = call.get("result")
+            if isinstance(result, dict):
+                if any(result.get(key) for key in ("data", "metadata", "control", "fragments", "canned_response_fields")):
+                    satisfied.add(tool_id)
+                    continue
+            elif result not in (None, "", False):
+                satisfied.add(tool_id)
+    return staged, satisfied
 
 
 def infer_tool_candidate_rejected_by(states: dict[str, str], selected_tool: str) -> dict[str, str]:
@@ -1396,29 +2304,26 @@ def infer_tool_candidate_rejected_by(states: dict[str, str], selected_tool: str)
 
 
 def infer_tool_candidate_reasons(
-    scenario: dict[str, Any], states: dict[str, str], selected_tool: str
+    run: ScenarioRunContext, scenario: dict[str, Any], states: dict[str, str], selected_tool: str, tandem: dict[str, list[str]]
 ) -> dict[str, str]:
-    setup = scenario.get("policy_setup", {})
-    tool_defs = {item.get("id"): item for item in (setup.get("tools") or [])}
-    tandem = infer_tool_candidate_tandem_with(scenario, states)
+    actual_reasons = actual_tool_candidate_reasons(run)
     out: dict[str, str] = {}
     for tool_id, state in states.items():
-        tool_def = tool_defs.get(tool_id) or {}
-        desc = (tool_def.get("description") or "").strip().lower()
+        reason = actual_reasons.get(tool_id, "")
+        if state == "selected":
+            specialized = infer_specialized_tool_reason(scenario, tool_id, states)
+            if specialized:
+                out[tool_id] = specialized
+                continue
+        if reason:
+            out[tool_id] = reason
+            continue
         if tool_id in tandem:
             out[tool_id] = "candidate should still run in tandem with the better reference tool"
         elif state == "selected":
-            if "motorcycle" in desc:
-                out[tool_id] = "candidate tool is more specialized for this use case"
-            elif "vehicle" in desc:
-                out[tool_id] = "candidate tool fits the current request best"
-            else:
-                out[tool_id] = "candidate tool fits the current request best"
+            out[tool_id] = "candidate tool was selected for execution"
         elif state == "rejected_overlap" and selected_tool:
-            if "vehicle" in desc or "generic" in desc:
-                out[tool_id] = "another overlapping tool was selected because it was more specialized"
-            else:
-                out[tool_id] = "another overlapping tool was selected"
+            out[tool_id] = "another overlapping tool was selected"
         elif state == "rejected_ungrounded" and selected_tool:
             out[tool_id] = "a more grounded tool candidate was available"
         elif state == "already_staged":
@@ -1441,352 +2346,276 @@ def normalize_tool_target(target: str) -> str:
     return f"local:{target}"
 
 
-def infer_tool_candidate_tandem_with(
-    scenario: dict[str, Any], states: dict[str, str]
-) -> dict[str, list[str]]:
-    setup = scenario.get("policy_setup", {})
-    tool_defs = {item.get("id"): item for item in (setup.get("tools") or [])}
+def fixture_reference_targets(scenario: dict[str, Any]) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
-    for rel in setup.get("relationships") or []:
-        kind = (rel.get("kind") or "").strip().lower()
-        if kind not in {"reference", "references"}:
+    setup = scenario.get("policy_setup") or {}
+    for item in setup.get("relationships") or []:
+        if (item.get("kind") or "").strip().lower() != "reference":
             continue
-        source = normalize_tool_target(rel.get("source") or "")
-        target = normalize_tool_target(rel.get("target") or "")
+        source = normalize_tool_target(item.get("source") or "")
+        target = normalize_tool_target(item.get("target") or "")
         if not source or not target:
             continue
-        source_state = states.get(source, "")
-        if source_state not in {"should_run", "selected", "auto_approved"}:
-            continue
-        source_desc = ((tool_defs.get(source) or {}).get("description") or "").strip().lower()
-        target_desc = ((tool_defs.get(target) or {}).get("description") or "").strip().lower()
-        if (
-            any(token in f"{source} {source_desc}".lower() for token in ("confirm", "confirmation", "notify", "email"))
-            and any(token in f"{target} {target_desc}".lower() for token in ("schedule", "book", "appointment", "reschedule"))
-        ):
-            out[source] = [target]
+        out[source] = sorted(set(out.get(source, []) + [target]))
     return out
 
 
-def infer_selected_tool_from_scenario(scenario: dict[str, Any], tool_candidates: list[str]) -> str:
-    if not tool_candidates:
+def latest_customer_text(scenario: dict[str, Any]) -> str:
+    transcript = list(scenario.get("transcript") or [])
+    for item in reversed(transcript):
+        if (item.get("role") or "").strip().lower() == "customer":
+            return (item.get("text") or "").strip().lower()
+    return ""
+
+
+def tool_metadata_lookup(scenario: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for item in ((scenario.get("policy_setup") or {}).get("tools") or []):
+        tool_id = normalize_tool_target(item.get("id") or "")
+        if tool_id:
+            out[tool_id] = dict(item)
+    return out
+
+
+def tokenize_tool_text(value: str) -> set[str]:
+    return {token for token in re.findall(r"[a-z0-9]+", (value or "").lower()) if len(token) > 2}
+
+
+def infer_specialized_tool_reason(
+    scenario: dict[str, Any], tool_id: str, states: dict[str, str]
+) -> str:
+    if states.get(tool_id) != "selected":
         return ""
-    setup = scenario.get("policy_setup", {})
-    staged = {
-        (item.get("tool_id") or "").strip()
-        for item in (setup.get("staged_tool_calls") or [])
-        if (item.get("tool_id") or "").strip()
-    }
-    satisfied = {
-        (item.get("tool_id") or "").strip()
-        for item in (setup.get("staged_tool_calls") or [])
-        if (item.get("tool_id") or "").strip() and (item.get("result") or {})
-    }
-    latest_customer = ""
-    for item in reversed(scenario.get("transcript") or []):
-        if item.get("role") == "customer":
-            latest_customer = item.get("text") or ""
-            break
-    tool_defs = {item.get("id"): item for item in (setup.get("tools") or [])}
-    guideline_defs = {item.get("id"): item for item in (setup.get("extra_guidelines") or [])}
-    associations = setup.get("associations") or []
-    best_tool = ""
-    best_score = -1
-    for tool_id in tool_candidates:
-        if tool_id in satisfied:
-            continue
-        if tool_id in staged:
-            continue
-        if infer_schema_candidate_state(tool_defs.get(tool_id) or {}, latest_customer) in ("blocked_missing_args", "blocked_invalid_args"):
-            continue
-        score = tool_selection_score(tool_id, tool_defs.get(tool_id) or {}, guideline_defs, associations, latest_customer)
-        if score > best_score:
-            best_score = score
-            best_tool = tool_id
-    if best_score <= 0:
+    overlap_peers = [candidate for candidate, state in states.items() if candidate != tool_id and state == "rejected_overlap"]
+    if not overlap_peers:
         return ""
-    return best_tool
+    customer_tokens = tokenize_tool_text(latest_customer_text(scenario))
+    if not customer_tokens:
+        return ""
+    metadata = tool_metadata_lookup(scenario)
+    selected_meta = metadata.get(tool_id) or {}
+    selected_tokens = tokenize_tool_text(tool_id + " " + str(selected_meta.get("description") or ""))
+    selected_overlap = customer_tokens & selected_tokens
+    if not selected_overlap:
+        return ""
+    for peer in overlap_peers:
+        peer_meta = metadata.get(peer) or {}
+        peer_tokens = tokenize_tool_text(peer + " " + str(peer_meta.get("description") or ""))
+        if len(selected_overlap) > len(customer_tokens & peer_tokens):
+            return "more specialized for this use case"
+    return ""
 
 
-def infer_tool_candidates_from_scenario(scenario: dict[str, Any]) -> list[str]:
-    setup = scenario.get("policy_setup", {})
-    tool_defs = {item.get("id"): item for item in (setup.get("tools") or [])}
-    associations = setup.get("associations") or []
-    out: list[str] = []
-    for assoc in associations:
-        tool_id = (assoc.get("tool") or "").strip()
-        if tool_id and tool_id in tool_defs:
-            out.append(tool_id)
-    if out:
-        return sorted(set(out))
-    return sorted({(item.get("id") or "").strip() for item in (setup.get("tools") or []) if (item.get("id") or "").strip()})
-
-
-def tool_selection_score(
-    tool_id: str,
-    tool_def: dict[str, Any],
-    guideline_defs: dict[str, dict[str, Any]],
-    associations: list[dict[str, Any]],
-    latest_customer: str,
-) -> int:
-    score = 0
-    text = latest_customer.lower()
-    name = tool_id.split(":", 1)[-1].replace("_", " ").lower()
-    description = (tool_def.get("description") or "").lower()
-    if "motorcycle" in text and "motorcycle" in name:
-        score += 5
-    if "motorcycle" in text and "vehicle" in name:
-        score -= 2
-    if "living room" in text and "indoor" in name:
-        score += 5
-    if "living room" in text and "temperature" in name and "indoor" not in name:
-        score -= 2
-    if any(term in text for term in ("gaming laptop", "rtx", "ram")) and "electronics" in name:
-        score += 5
-    if any(term in text for term in ("gaming laptop", "rtx", "ram")) and "product" in name and "electronics" not in name:
-        score -= 2
-    if any(token in text for token in name.split()):
-        score += 3
-    if description and any(token in text for token in description.split()):
-        score += 2
-    if tool_def.get("consequential"):
-        score += 1
-    for assoc in associations:
-        if assoc.get("tool") != tool_id:
+def infer_tool_candidate_tandem_with(
+    run: ScenarioRunContext,
+    scenario: dict[str, Any],
+    selected_tool: str,
+) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for batch in run.latest_tool_batch_results or []:
+        inference_output = batch.get("inference_output")
+        if not inference_output:
             continue
-        guideline = guideline_defs.get(assoc.get("guideline") or "")
-        if not guideline:
-            continue
-        condition = (guideline.get("condition") or "").lower()
-        action = (guideline.get("action") or "").lower()
-        if condition and any(token in text for token in condition.replace("_", " ").split()):
-            score += 2
-        if action and any(token in text for token in action.replace("_", " ").split()):
-            score += 2
-    return score
+        for candidate, target in extract_tandem_pairs_from_inference(batch):
+            out[candidate] = sorted(set(out.get(candidate, []) + [target]))
+    if selected_tool:
+        for source, targets in fixture_reference_targets(scenario).items():
+            if selected_tool in targets:
+                out[source] = sorted(set(out.get(source, []) + [selected_tool]))
+    return out
 
 
-def infer_schema_candidate_state(tool_def: dict[str, Any], latest_customer: str) -> str:
-    schema = tool_def.get("schema") or {}
-    if not isinstance(schema, dict):
-        return "should_run"
-    properties = schema.get("properties") or {}
-    required = set(schema.get("required") or [])
-    if not required or not isinstance(properties, dict):
-        return "should_run"
-    text = (latest_customer or "").lower()
-    has_invalid = False
-    has_missing = False
-    for name in required:
-        prop = properties.get(name) or {}
-        if not isinstance(prop, dict):
-            has_missing = True
-            continue
-        if parameter_invalid(name, prop, text):
-            has_invalid = True
-            continue
-        if not parameter_present(name, prop, text):
-            has_missing = True
-    if has_invalid:
-        return "blocked_invalid_args"
-    if has_missing:
-        return "blocked_missing_args"
-    return "should_run"
-
-
-def parameter_present(name: str, prop: dict[str, Any], text: str) -> bool:
-    if name in {"session_id", "customer_message", "conversation_excerpt", "journey_id", "journey_state"}:
-        return True
-    enum_values = [str(v).lower() for v in (prop.get("enum") or [])]
-    if enum_values:
-        return any(choice in text for choice in enum_values)
-    ptype = (prop.get("type") or "").strip().lower()
-    if ptype in ("integer", "number"):
-        return any(ch.isdigit() for ch in text)
-    tokens = name.replace("_", " ").lower().split()
-    return any(token in text for token in tokens)
-
-
-def parameter_invalid(name: str, prop: dict[str, Any], text: str) -> bool:
-    enum_values = [str(v).lower() for v in (prop.get("enum") or [])]
-    if not enum_values:
-        return False
-    if any(choice in text for choice in enum_values):
-        return False
-    if name.lower() == "destination":
-        return "flight" in text or "book a flight" in text or "to " in text
-    return False
-
-
-def infer_response_analysis_tool_satisfied(scenario: dict[str, Any]) -> list[str]:
-    setup = scenario.get("policy_setup", {})
-    staged = setup.get("staged_tool_calls") or []
-    if not staged:
-        return []
-    expectations = scenario.get("expectations") or {}
-    response_analysis = expectations.get("response_analysis") or {}
-    return sorted(set(response_analysis.get("already_satisfied") or []))
-
-
-def infer_response_analysis_already_satisfied(scenario: dict[str, Any]) -> list[str]:
-    expectations = scenario.get("expectations") or {}
-    response_analysis = expectations.get("response_analysis") or {}
-    return sorted(set(response_analysis.get("already_satisfied") or []))
-
-
-def infer_response_analysis_still_required(scenario: dict[str, Any]) -> list[str]:
-    expectations = scenario.get("expectations") or {}
-    response_analysis = expectations.get("response_analysis") or {}
-    return sorted(set(response_analysis.get("still_required") or []))
-
-
-def infer_response_analysis_partially_applied(scenario: dict[str, Any]) -> list[str]:
-    expectations = scenario.get("expectations") or {}
-    response_analysis = expectations.get("response_analysis") or {}
-    return sorted(set(response_analysis.get("partially_applied") or []))
-
-
-def infer_response_analysis_sources(scenario: dict[str, Any]) -> dict[str, str]:
-    expectations = scenario.get("expectations") or {}
-    response_analysis = expectations.get("response_analysis") or {}
-    sources = dict(response_analysis.get("satisfaction_sources") or {})
-    if sources:
-        return sources
-    already = set(response_analysis.get("already_satisfied") or [])
-    tool = set(response_analysis.get("satisfied_by_tool_event") or [])
+def actual_tool_candidate_reasons(run: ScenarioRunContext) -> dict[str, str]:
     out: dict[str, str] = {}
-    for item in sorted(already):
-        out[item] = "tool_event" if item in tool else "assistant_message"
+    for batch in run.latest_tool_batch_results or []:
+        inference_output = batch.get("inference_output")
+        if not inference_output:
+            continue
+        for tool_id, reason in extract_reasons_from_batch(batch).items():
+            if tool_id and reason:
+                out[tool_id] = reason
     return out
 
 
-def infer_overlap_groups(scenario: dict[str, Any]) -> list[list[str]]:
-    setup = scenario.get("policy_setup", {})
-    buckets: dict[str, list[str]] = {}
-    for item in (setup.get("tools") or []):
-        overlap_group = (item.get("overlap_group") or "").strip()
-        if not overlap_group:
-            continue
-        buckets.setdefault(overlap_group, []).append(item["id"])
-    groups = [sorted(set(items)) for items in buckets.values() if len(items) > 1]
-    adjacency: dict[str, set[str]] = {}
-    for item in (setup.get("relationships") or []):
-        if (item.get("kind") or "").strip().lower() != "overlap":
-            continue
-        source = item["source"]
-        target = item["target"]
-        adjacency.setdefault(source, set()).add(target)
-        adjacency.setdefault(target, set()).add(source)
-    visited: set[str] = set()
-    for node in adjacency:
-        if node in visited:
-            continue
-        queue = [node]
-        component: list[str] = []
-        visited.add(node)
-        while queue:
-            current = queue.pop(0)
-            component.append(current)
-            for neighbor in adjacency.get(current, set()):
-                if neighbor in visited:
-                    continue
-                visited.add(neighbor)
-                queue.append(neighbor)
-        if len(component) > 1:
-            groups.append(sorted(set(component)))
-    return sorted([group for group in groups if len(group) > 1])
-
-
-def infer_projected_followups(active_journey: str) -> dict[str, list[str]]:
-    followups = {
-        "Book Flight": {
-            "journey_node:Book Flight:ask_origin": ["journey_node:Book Flight:ask_destination:Book Flight:ask_origin->ask_destination"],
-            "journey_node:Book Flight:ask_destination:Book Flight:ask_origin->ask_destination": ["journey_node:Book Flight:ask_dates:Book Flight:ask_destination->ask_dates"],
-            "journey_node:Book Flight:ask_dates:Book Flight:ask_destination->ask_dates": ["journey_node:Book Flight:ask_class:Book Flight:ask_dates->ask_class"],
-            "journey_node:Book Flight:ask_class:Book Flight:ask_dates->ask_class": ["journey_node:Book Flight:ask_name:Book Flight:ask_class->ask_name"],
-        },
-        "Book Taxi Ride": {
-            "journey_node:Book Taxi Ride:ask_pickup_location": ["journey_node:Book Taxi Ride:ask_dropoff_location:Book Taxi Ride:ask_pickup_location->ask_dropoff_location"],
-            "journey_node:Book Taxi Ride:ask_dropoff_location:Book Taxi Ride:ask_pickup_location->ask_dropoff_location": ["journey_node:Book Taxi Ride:ask_pickup_time:Book Taxi Ride:ask_dropoff_location->ask_pickup_time"],
-        },
-        "Reset Password Journey": {
-            "journey_node:Reset Password Journey:ask_account_name": ["journey_node:Reset Password Journey:ask_contact:Reset Password Journey:ask_account_name->ask_contact"],
-            "journey_node:Reset Password Journey:ask_contact:Reset Password Journey:ask_account_name->ask_contact": ["journey_node:Reset Password Journey:good_day:Reset Password Journey:ask_contact->good_day"],
-        },
-    }
-    return followups.get(active_journey, {})
-
-
-def infer_resolution_records(
-    scenario: dict[str, Any], matched_guidelines: list[str], suppressed_guidelines: list[str]
-) -> list[dict[str, str]]:
-    records: list[dict[str, str]] = []
-    matched = set(matched_guidelines)
-    suppressed = set(suppressed_guidelines)
-    for item in scenario.get("policy_setup", {}).get("relationships") or []:
-        source = item["source"]
-        target = item["target"]
-        kind = item["kind"]
-        if source in matched and kind == "entails":
-            records.append({"entity_id": target, "kind": "entailed"})
-        if kind == "priority" and target in suppressed:
-            records.append({"entity_id": target, "kind": "deprioritized"})
-        if kind in ("dependency", "dependency_any") and source in suppressed:
-            records.append(
-                {
-                    "entity_id": source,
-                    "kind": "unmet_dependency_any" if kind == "dependency_any" else "unmet_dependency",
-                }
+def extract_reasons_from_batch(batch: dict[str, Any]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    inference_output = batch.get("inference_output")
+    candidate_tools = batch.get("candidate_tools") or []
+    if isinstance(inference_output, list):
+        candidate_tool = candidate_tools[0] if len(candidate_tools) == 1 else ""
+        for item in inference_output:
+            tool_name = candidate_tool
+            reason = (
+                getattr(item, "comparison_with_rejected_tools_including_references_to_subtleties", "")
+                or getattr(item, "applicability_rationale", "")
+                or getattr(item, "relevant_subtleties", "")
             )
-    for item in matched_guidelines:
-        records.append({"entity_id": item, "kind": "none"})
-    return sorted(records, key=lambda item: (item["entity_id"], item["kind"]))
+            if tool_name and reason:
+                out[tool_name] = reason
+    elif hasattr(inference_output, "tools_evaluation"):
+        for item in getattr(inference_output, "tools_evaluation", []) or []:
+            tool_name = normalize_tool_target(getattr(item, "name", "") or "")
+            reason = (
+                getattr(item, "comparison_with_alternative_tools_including_references_to_subtleties", "")
+                or getattr(item, "applicability_rationale", "")
+                or getattr(item, "potentially_alternative_tools", "")
+            )
+            if tool_name and reason:
+                out[tool_name] = reason
+    elif hasattr(inference_output, "reasoning_tldr"):
+        reason = getattr(inference_output, "reasoning_tldr", "") or ""
+        if reason:
+            out[""] = reason
+    return out
 
 
-def infer_journey_decision(scenario: dict[str, Any], matched_states: list[str]) -> str:
-    expected = scenario.get("expectations") or {}
-    if expected.get("journey_decision"):
-        return expected["journey_decision"]
-    if not matched_states:
-        return "ignore"
-    prior = (scenario.get("prior_state") or {}).get("journey_path") or []
-    if not prior:
-        return "start"
-    return "advance"
+def extract_tandem_pairs_from_inference(batch: dict[str, Any]) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    inference_output = batch.get("inference_output")
+    candidate_tools = batch.get("candidate_tools") or []
+    if not isinstance(inference_output, list):
+        return out
+    candidate_tool = candidate_tools[0] if len(candidate_tools) == 1 else ""
+    for item in inference_output:
+        better = normalize_tool_target(getattr(item, "potentially_better_rejected_tool_name", "") or "")
+        should_tandem = bool(
+            getattr(
+                item,
+                "the_better_rejected_tool_should_clearly_be_run_in_tandem_with_the_candidate_tool",
+                False,
+            )
+        )
+        tool_name = candidate_tool
+        if tool_name and better and should_tandem:
+            out.append((tool_name, better))
+    return out
 
 
-def infer_next_journey_node(scenario: dict[str, Any], matched_states: list[str]) -> str:
-    expected = scenario.get("expectations") or {}
-    value = expected.get("next_journey_node") or ""
-    return value
+def infer_response_analysis_already_satisfied(run: ScenarioRunContext) -> list[str]:
+    result = run.latest_response_analysis_result
+    if not result:
+        return []
+    out: list[str] = []
+    for item in getattr(result, "analyzed_guidelines", []) or []:
+        if not getattr(item, "is_previously_applied", False):
+            continue
+        normalized = normalize_resolved_entity_id(run, getattr(item.guideline, "id", ""))
+        if normalized:
+            out.append(normalized)
+    return sorted(set(out))
+
+
+def infer_blocked_tool_state(run: ScenarioRunContext) -> str:
+    result = run.latest_tool_inference_result
+    if result:
+        has_invalid = bool(getattr(getattr(result, "insights", None), "invalid_data", []) or [])
+        has_missing = bool(getattr(getattr(result, "insights", None), "missing_data", []) or [])
+        if has_invalid:
+            return "blocked_invalid_args"
+        if has_missing:
+            return "blocked_missing_args"
+    return ""
+
+
+def normalize_actual_overlap_groups(run: ScenarioRunContext, tool_candidates: list[str]) -> list[list[str]]:
+    groups = [
+        sorted(set(batch.get("candidate_tools") or []))
+        for batch in (run.latest_tool_batch_results or [])
+        if batch.get("type") == "overlapping_tools" and len(batch.get("candidate_tools") or []) > 1
+    ]
+    if groups:
+        return sorted(groups)
+
+    candidates = []
+    for tool_id in tool_candidates:
+        try:
+            candidates.append(ToolId.from_string(tool_id))
+        except Exception:
+            continue
+    if len(candidates) < 2:
+        return []
+
+    adjacency: dict[str, set[str]] = {tool_id.to_string(): set() for tool_id in candidates}
+    store = run.container[RelationshipStore]
+    for tool_id in candidates:
+        relationships = run.sync_await(
+            store.list_relationships(source_id=tool_id, indirect=False, kind=RelationshipKind.OVERLAP)
+        )
+        relationships += run.sync_await(
+            store.list_relationships(target_id=tool_id, indirect=False, kind=RelationshipKind.OVERLAP)
+        )
+        current = tool_id.to_string()
+        for rel in relationships:
+            source = normalize_tool_target(tool_id_to_string(rel.source.id))
+            target = normalize_tool_target(tool_id_to_string(rel.target.id))
+            if source in adjacency and target in adjacency and source != target:
+                adjacency[source].add(target)
+                adjacency[target].add(source)
+
+    seen: set[str] = set()
+    out: list[list[str]] = []
+    for tool_id in sorted(adjacency):
+        if tool_id in seen or not adjacency[tool_id]:
+            continue
+        stack = [tool_id]
+        component: set[str] = set()
+        while stack:
+            current = stack.pop()
+            if current in component:
+                continue
+            component.add(current)
+            stack.extend(sorted(adjacency[current] - component))
+        seen.update(component)
+        if len(component) > 1:
+            out.append(sorted(component))
+    return sorted(out)
+
+
+def infer_projected_followups(run: ScenarioRunContext, active_journey: str) -> dict[str, list[str]]:
+    graph = journey_graph(run, active_journey)
+    if not graph:
+        return {}
+    incoming_by_target: dict[str, list[str]] = {}
+    outgoing_by_source: dict[str, list[str]] = {}
+    for edge in graph.get("edges") or []:
+        source_name = edge.get("source_name") or ""
+        target_name = edge.get("target_name") or ""
+        if not source_name or not target_name:
+            continue
+        incoming_by_target.setdefault(target_name, []).append(source_name)
+        outgoing_by_source.setdefault(source_name, []).append(target_name)
+    projected_ids_by_state: dict[str, list[str]] = {}
+    root_name = graph.get("root_name") or ""
+    for state_name in graph.get("nodes") or {}:
+        ids: list[str] = []
+        incoming_sources = incoming_by_target.get(state_name, [])
+        if state_name == root_name or "__journey_root__" in incoming_sources:
+            ids.append(projected_node_id(active_journey, state_name, "__journey_root__"))
+        for source_name in incoming_sources:
+            if source_name == "__journey_root__":
+                continue
+            ids.append(projected_node_id(active_journey, state_name, source_name))
+        if ids:
+            projected_ids_by_state[state_name] = sorted(set(ids))
+    followups: dict[str, list[str]] = {}
+    for source_name, source_projected_ids in projected_ids_by_state.items():
+        targets = outgoing_by_source.get(source_name, [])
+        if not targets:
+            continue
+        target_ids = [projected_node_id(active_journey, target_name, source_name) for target_name in targets if target_name]
+        target_ids = sorted(set(target_ids))
+        for source_projected_id in source_projected_ids:
+            followups[source_projected_id] = target_ids
+    return followups
 
 
 def parlant_state_to_fixture_name(journey_title: str, state_id: str) -> str:
-    mapping = {
-        "Reset Password Journey": {
-            "2": "ask_account_name",
-            "3": "ask_contact",
-            "4": "good_day",
-            "5": "do_reset",
-            "6": "cant_reset",
-        },
-        "Book Taxi Ride": {
-            "2": "ask_pickup_location",
-            "3": "ask_dropoff_location",
-            "4": "ask_pickup_time",
-        },
-        "Book Flight": {
-            "1": "ask_origin",
-            "2": "ask_destination",
-            "3": "ask_dates",
-            "4": "ask_class",
-            "5": "ask_name",
-        },
-    }
-    if journey_title in mapping and state_id in mapping[journey_title]:
-        return mapping[journey_title][state_id]
-    custom = getattr(journey_state_name_to_parlant_id, "_custom_nodes", {})
-    reverse = {v: k for k, v in custom.get(journey_title, {}).items()}
+    graphs = getattr(journey_state_name_to_parlant_id, "_journey_graphs", {})
+    graph = graphs.get(journey_title, {})
+    reverse_indices = graph.get("reverse_indices") or {}
+    if state_id in reverse_indices:
+        return reverse_indices[state_id]
+    reverse = graph.get("reverse_nodes") or {}
     return reverse.get(state_id, state_id)
 
 
@@ -1803,11 +2632,11 @@ def dedupe(items) -> list[str]:
 
 def main() -> int:
     scenario = json.load(sys.stdin)
-    run, container_gen = create_run_context(scenario)
+    run, container_gen, cache_collection_gen = create_run_context(scenario)
     try:
         append_transcript(run, scenario.get("transcript") or [])
         apply_policy_setup(run, scenario)
-        setattr(journey_state_name_to_parlant_id, "_custom_nodes", run.context.nodes)
+        setattr(journey_state_name_to_parlant_id, "_journey_graphs", ensure_journey_graphs(run))
         append_staged_tool_calls(run, scenario)
         seed_prior_state(run, scenario)
         emitted = process(run)
@@ -1816,6 +2645,8 @@ def main() -> int:
         return 0
     finally:
         run.sync_await(container_gen.aclose())
+        if cache_collection_gen is not None:
+            run.sync_await(cache_collection_gen.__aexit__(None, None, None))
         try:
             asyncio.get_event_loop().close()
         except RuntimeError:

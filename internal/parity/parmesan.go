@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -48,63 +49,8 @@ func RunParmesan(ctx context.Context, s Scenario) (NormalizedResult, error) {
 	if strings.TrimSpace(s.PriorState.ActiveJourney) == "" && out.ActiveJourney != "" && out.ActiveJourneyNode != "" {
 		out.JourneyDecision = "start"
 		out.NextJourneyNode = out.ActiveJourneyNode
-		out.ActiveJourneyNode = ""
-		out.MatchedGuidelines = normalizeJourneyStartGuidelines(out.MatchedGuidelines, out.ActiveJourney)
-	}
-	if out.ActiveJourney != "" && (hasMatchedJourneyNode(view.MatchedGuidelines, out.ActiveJourney) || scenarioWantsJourneyMatch(s)) {
-		out.ActiveJourneyNode = ""
-		out.MatchedGuidelines = ensureJourneyGuideline(out.MatchedGuidelines, out.ActiveJourney)
-	}
-	if !scenarioExpectsJourneyNodeSuppressions(s) {
-		out.SuppressedGuidelines = filterNonJourneyNodeIDs(out.SuppressedGuidelines)
-	}
-	if next := inferParityNextJourneyNode(s, bundle); next != "" {
-		out.JourneyDecision = "advance"
-		out.NextJourneyNode = next
 	}
 	return out, nil
-}
-
-func scenarioWantsJourneyMatch(s Scenario) bool {
-	if strings.TrimSpace(s.PriorState.ActiveJourney) != "" {
-		return true
-	}
-	for _, item := range s.Expect.MatchedGuidelines {
-		if strings.HasPrefix(item, "journey:") {
-			return true
-		}
-	}
-	return false
-}
-
-func scenarioExpectsJourneyNodeSuppressions(s Scenario) bool {
-	for _, item := range s.Expect.SuppressedGuidelines {
-		if strings.HasPrefix(item, "journey_node:") {
-			return true
-		}
-	}
-	return false
-}
-
-func filterNonJourneyNodeIDs(items []string) []string {
-	var out []string
-	for _, item := range items {
-		if strings.HasPrefix(strings.TrimSpace(item), "journey_node:") {
-			continue
-		}
-		out = append(out, item)
-	}
-	return dedupeAndSort(out)
-}
-
-func hasMatchedJourneyNode(items []policy.Guideline, journeyID string) bool {
-	prefix := "journey_node:" + strings.TrimSpace(journeyID) + ":"
-	for _, item := range items {
-		if strings.HasPrefix(item.ID, prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 func hasProviderEnv() bool {
@@ -114,9 +60,10 @@ func hasProviderEnv() bool {
 func normalizeParmesan(view policyruntime.ResolvedView, catalog []tool.CatalogEntry, response string, toolCalls []ToolCall, noMatch bool, verification string) NormalizedResult {
 	exposed := normalizeToolNames(view.ExposedTools, catalog)
 	selected := normalizeSelectedTool(view.ToolDecision.SelectedTool, toolCalls, catalog)
+	effectiveJourneyState := effectiveJourneyState(view)
 	out := NormalizedResult{
 		MatchedObservations:              idsFromObservations(view.MatchedObservations),
-		MatchedGuidelines:                idsFromGuidelines(view.MatchedGuidelines),
+		MatchedGuidelines:                normalizeMatchedGuidelines(view),
 		SuppressedGuidelines:             normalizedSuppressedGuidelines(view.SuppressedGuidelines, view.ResolutionRecords),
 		SuppressionReasons:               suppressionReasons(view.SuppressedGuidelines),
 		ResolutionRecords:                normalizeResolutionRecords(view.ResolutionRecords),
@@ -146,8 +93,8 @@ func normalizeParmesan(view policyruntime.ResolvedView, catalog []tool.CatalogEn
 	if view.ActiveJourney != nil {
 		out.ActiveJourney = view.ActiveJourney.ID
 	}
-	if view.ActiveJourneyState != nil {
-		out.ActiveJourneyNode = view.ActiveJourneyState.ID
+	if effectiveJourneyState != nil {
+		out.ActiveJourneyNode = effectiveJourneyState.ID
 	}
 	if view.JourneyDecision.Action != "" {
 		out.JourneyDecision = view.JourneyDecision.Action
@@ -168,13 +115,70 @@ func normalizeParmesan(view policyruntime.ResolvedView, catalog []tool.CatalogEn
 	return out
 }
 
+func normalizeMatchedGuidelines(view policyruntime.ResolvedView) []string {
+	ids := idsFromGuidelines(view.MatchedGuidelines)
+	if view.ActiveJourney == nil {
+		return ids
+	}
+	journeyEntityID := "journey:" + view.ActiveJourney.ID
+	journeyActive := false
+	for _, item := range view.ResolutionRecords {
+		if item.EntityID == journeyEntityID && item.Kind == policyruntime.ResolutionNone {
+			journeyActive = true
+			break
+		}
+	}
+	var out []string
+	for _, id := range ids {
+		if strings.HasPrefix(id, "journey_node:"+view.ActiveJourney.ID+":") {
+			continue
+		}
+		out = append(out, id)
+	}
+	if journeyActive {
+		out = append(out, journeyEntityID)
+	}
+	return dedupeAndSort(out)
+}
+
+func effectiveJourneyState(view policyruntime.ResolvedView) *policy.JourneyNode {
+	return view.ActiveJourneyState
+}
+
 func normalizedSuppressedGuidelines(items []policyruntime.SuppressedGuideline, resolutions []policyruntime.ResolutionRecord) []string {
 	out := idsFromSuppressed(items)
+	activeJourneys := map[string]struct{}{}
+	for _, item := range resolutions {
+		if strings.HasPrefix(strings.TrimSpace(item.EntityID), "journey:") && item.Kind == policyruntime.ResolutionNone {
+			activeJourneys[strings.TrimSpace(strings.TrimPrefix(item.EntityID, "journey:"))] = struct{}{}
+		}
+	}
+	filtered := out[:0]
+	for _, id := range out {
+		if strings.HasPrefix(id, "journey_node:") {
+			parts := strings.SplitN(strings.TrimSpace(id), ":", 3)
+			if len(parts) >= 3 {
+				if _, ok := activeJourneys[parts[1]]; ok {
+					continue
+				}
+			}
+		}
+		filtered = append(filtered, id)
+	}
+	out = filtered
 	for _, item := range resolutions {
 		switch item.Kind {
 		case policyruntime.ResolutionDeprioritized, policyruntime.ResolutionUnmetDependency, policyruntime.ResolutionUnmetDependencyAny:
 			if strings.HasPrefix(strings.TrimSpace(item.EntityID), "journey:") && strings.Contains(strings.ToLower(item.Details.Description), "higher numerical priority entity") {
 				continue
+			}
+			if strings.HasPrefix(strings.TrimSpace(item.EntityID), "journey_node:") {
+				parts := strings.SplitN(strings.TrimSpace(item.EntityID), ":", 3)
+				if len(parts) >= 3 {
+					if _, ok := activeJourneys[parts[1]]; ok {
+						continue
+					}
+				}
 			}
 			out = append(out, strings.TrimSpace(item.EntityID))
 		}
@@ -245,7 +249,6 @@ func buildJourneyInstancesForScenario(s Scenario, bundle policy.Bundle) []journe
 			stateID = s.PriorState.JourneyPath[len(s.PriorState.JourneyPath)-1]
 		}
 		path := append([]string(nil), s.PriorState.JourneyPath...)
-		stateID, path = inferJourneyStateFromTranscript(item, s.Transcript, stateID, path)
 		return []journey.Instance{{
 			ID:        "journey_" + s.ID,
 			SessionID: scenarioSessionID(s),
@@ -257,134 +260,6 @@ func buildJourneyInstancesForScenario(s Scenario, bundle policy.Bundle) []journe
 		}}
 	}
 	return nil
-}
-
-func inferJourneyStateFromTranscript(item policy.Journey, transcript []Turn, stateID string, path []string) (string, []string) {
-	if strings.TrimSpace(stateID) == "" {
-		return stateID, path
-	}
-	index := map[string]policy.JourneyNode{}
-	for _, state := range item.States {
-		index[state.ID] = state
-	}
-	current, ok := index[stateID]
-	if !ok {
-		return stateID, path
-	}
-	for {
-		next := firstNextState(item, current)
-		if next == nil {
-			break
-		}
-		if !parityJourneyStateSatisfied(*next, transcript) {
-			break
-		}
-		stateID = next.ID
-		path = appendJourneyParityPath(path, next.ID)
-		current = *next
-	}
-	return stateID, path
-}
-
-func inferParityNextJourneyNode(s Scenario, bundle policy.Bundle) string {
-	if strings.TrimSpace(s.Category) != "journey_progress" || strings.TrimSpace(s.PriorState.ActiveJourney) == "" {
-		return ""
-	}
-	var item *policy.Journey
-	for i := range bundle.Journeys {
-		if bundle.Journeys[i].ID == s.PriorState.ActiveJourney {
-			item = &bundle.Journeys[i]
-			break
-		}
-	}
-	if item == nil {
-		return ""
-	}
-	completed := map[string]struct{}{}
-	for _, id := range s.PriorState.JourneyPath {
-		completed[id] = struct{}{}
-	}
-	for _, state := range item.States {
-		if _, ok := completed[state.ID]; ok {
-			continue
-		}
-		if parityJourneyStateSatisfied(state, s.Transcript) {
-			completed[state.ID] = struct{}{}
-			continue
-		}
-		return state.ID
-	}
-	return ""
-}
-
-func firstNextState(item policy.Journey, current policy.JourneyNode) *policy.JourneyNode {
-	if len(current.Next) == 0 {
-		return nil
-	}
-	nextID := strings.TrimSpace(current.Next[0])
-	if nextID == "" {
-		return nil
-	}
-	for _, state := range item.States {
-		if state.ID == nextID {
-			copied := state
-			return &copied
-		}
-	}
-	return nil
-}
-
-func parityJourneyStateSatisfied(state policy.JourneyNode, transcript []Turn) bool {
-	text := strings.ToLower(joinCustomerTranscript(transcript))
-	switch strings.TrimSpace(state.ID) {
-	case "ask_origin":
-		return parityContainsAnyPhrase(text, "from ", "ben gurion", "jfk", "airport")
-	case "ask_destination":
-		return parityContainsAnyPhrase(text, "destination", "to ", "suvarnabhumi", "jfk airport", "airport, please")
-	case "ask_dates":
-		return parityContainsAnyPhrase(text, "12.10", "17.10", "return in", "travel on", "tomorrow", "today")
-	case "ask_class":
-		return parityContainsAnyPhrase(text, "economy", "business class", "business")
-	case "ask_name", "ask_account_name":
-		return parityContainsAnyPhrase(text, "my name is", "john smith")
-	case "ask_pickup_location":
-		return parityContainsAnyPhrase(text, "pickup", "main street", "jfk airport")
-	case "ask_dropoff_location":
-		return parityContainsAnyPhrase(text, "drop-off", "dropoff", "3rd avenue", "by the river")
-	case "ask_pickup_time":
-		return parityContainsAnyPhrase(text, "pm", "am", "pickup time", ":")
-	}
-	return false
-}
-
-func appendJourneyParityPath(path []string, stateID string) []string {
-	for _, item := range path {
-		if item == stateID {
-			return path
-		}
-	}
-	return append(path, stateID)
-}
-
-func joinCustomerTranscript(items []Turn) string {
-	parts := make([]string, 0, len(items))
-	for _, item := range items {
-		if item.Role != "customer" {
-			continue
-		}
-		parts = append(parts, item.Text)
-	}
-	return strings.Join(parts, "\n")
-}
-
-func parityContainsAnyPhrase(text string, phrases ...string) bool {
-	text = strings.ToLower(text)
-	for _, phrase := range phrases {
-		if strings.Contains(text, strings.ToLower(phrase)) {
-			return true
-		}
-	}
-	return false
 }
 
 func buildCatalogForScenario(s Scenario) []tool.CatalogEntry {
@@ -505,112 +380,8 @@ func buildBundleForScenario(s Scenario) policy.Bundle {
 
 func scenarioJourneys(s Scenario) []policy.Journey {
 	var out []policy.Journey
-	seen := map[string]struct{}{}
 	for _, item := range s.PolicySetup.Journeys {
-		journey := fixtureJourneyToPolicy(item)
-		out = append(out, journey)
-		seen[journey.ID] = struct{}{}
-	}
-	needed := map[string]struct{}{}
-	if strings.TrimSpace(s.PriorState.ActiveJourney) != "" {
-		needed[s.PriorState.ActiveJourney] = struct{}{}
-	}
-	for _, item := range s.Expect.MatchedGuidelines {
-		if strings.HasPrefix(item, "journey:") {
-			needed[strings.TrimPrefix(item, "journey:")] = struct{}{}
-		}
-	}
-	for _, rel := range s.PolicySetup.Relationships {
-		if strings.HasPrefix(rel.Source, "journey:") {
-			needed[strings.TrimPrefix(rel.Source, "journey:")] = struct{}{}
-		}
-		if strings.HasPrefix(rel.Target, "journey:") {
-			needed[strings.TrimPrefix(rel.Target, "journey:")] = struct{}{}
-		}
-	}
-	if strings.Contains(strings.ToLower(joinTranscript(s.Transcript)), "reset my password") {
-		needed["Reset Password Journey"] = struct{}{}
-	}
-	if strings.Contains(strings.ToLower(joinTranscript(s.Transcript)), "book a taxi") {
-		needed["Book Taxi Ride"] = struct{}{}
-	}
-	if strings.Contains(strings.ToLower(joinTranscript(s.Transcript)), "book a flight") {
-		needed["Book Flight"] = struct{}{}
-	}
-	for id := range needed {
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		switch id {
-		case "Reset Password Journey":
-			out = append(out, policy.Journey{
-				ID:   id,
-				When: []string{"reset my password", "reset password"},
-				States: []policy.JourneyNode{
-					{ID: "ask_account_name", Type: "message", Instruction: "What is the name of your account?", Next: []string{"ask_contact"}},
-					{ID: "ask_contact", Type: "message", Instruction: "can you please provide the email address or phone number attached to this account?", Next: []string{"good_day"}},
-					{ID: "good_day", Type: "message", Instruction: "Thank you, have a good day!", Next: []string{"do_reset", "cant_reset"}},
-					{ID: "do_reset", Type: "tool", Tool: "get_qualification_info", Next: []string{}},
-					{ID: "cant_reset", Type: "message", Instruction: "An error occurred, your password could not be reset", Next: []string{}},
-				},
-			})
-		case "Book Taxi Ride":
-			out = append(out, policy.Journey{
-				ID:   id,
-				When: []string{"book a taxi", "book a cab"},
-				States: []policy.JourneyNode{
-					{ID: "ask_pickup_location", Type: "message", Instruction: "What's your pickup location?", Next: []string{"ask_dropoff_location"}},
-					{ID: "ask_dropoff_location", Type: "message", Instruction: "What's your drop-off location?", Next: []string{"ask_pickup_time"}},
-					{ID: "ask_pickup_time", Type: "message", Instruction: "What time would you like to pick up?", Next: []string{}},
-				},
-			})
-		case "Book Flight":
-			out = append(out, policy.Journey{
-				ID:   id,
-				When: []string{"book a flight", "flight booking"},
-				States: []policy.JourneyNode{
-					{ID: "ask_origin", Type: "message", Instruction: "From where are you looking to fly?", Next: []string{"ask_destination"}},
-					{ID: "ask_destination", Type: "message", Instruction: "What is the destination?", Next: []string{"ask_dates"}},
-					{ID: "ask_dates", Type: "message", Instruction: "When are you looking to travel?", Next: []string{"ask_class"}},
-					{ID: "ask_class", Type: "message", Instruction: "Do you want economy or business class?", Next: []string{"ask_name"}},
-					{ID: "ask_name", Type: "message", Instruction: "What is the name of the person traveling?", Next: []string{}},
-				},
-			})
-		case "Drink Recommendation Journey":
-			out = append(out, policy.Journey{
-				ID:   id,
-				When: []string{"customer asks about drinks"},
-				States: []policy.JourneyNode{
-					{ID: "ask_drink", Type: "message", Instruction: "Ask what drink they want", Next: []string{"recommend_pepsi"}},
-					{ID: "recommend_pepsi", Type: "message", Instruction: "Recommend Pepsi", Next: []string{}},
-				},
-			})
-		case "Journey A":
-			out = append(out, policy.Journey{
-				ID:   id,
-				When: []string{"sunflower itinerary"},
-				States: []policy.JourneyNode{
-					{ID: "ask_a", Type: "message", Instruction: "Ask A", Next: []string{}},
-				},
-			})
-		case "Journey B":
-			out = append(out, policy.Journey{
-				ID:   id,
-				When: []string{"nebula itinerary"},
-				States: []policy.JourneyNode{
-					{ID: "ask_b", Type: "message", Instruction: "Ask B", Next: []string{}},
-				},
-			})
-		case "Journey 1":
-			out = append(out, policy.Journey{
-				ID:   id,
-				When: []string{"customer is interested"},
-				States: []policy.JourneyNode{
-					{ID: "recommend_product", Type: "message", Instruction: "recommend product", Next: []string{}},
-				},
-			})
-		}
-		seen[id] = struct{}{}
+		out = append(out, fixtureJourneyToPolicy(item))
 	}
 	return out
 }
@@ -652,6 +423,39 @@ func fixtureJourneyToPolicy(item FixtureJourney) policy.Journey {
 			Metadata:  cloneMap(edge.Metadata),
 		})
 	}
+	if strings.TrimSpace(out.RootID) == "" && len(out.States) > 0 {
+		out.RootID = strings.TrimSpace(out.States[0].ID)
+	}
+	if len(out.Edges) == 0 {
+		for _, state := range out.States {
+			for _, nextID := range state.Next {
+				out.Edges = append(out.Edges, policy.JourneyEdge{
+					Source: strings.TrimSpace(state.ID),
+					Target: strings.TrimSpace(nextID),
+				})
+			}
+		}
+	}
+	if strings.TrimSpace(out.RootID) != "" {
+		hasIncomingRootEdge := false
+		hasOutgoingRootEdge := false
+		for _, edge := range out.Edges {
+			source := strings.TrimSpace(edge.Source)
+			target := strings.TrimSpace(edge.Target)
+			if (source == "__journey_root__" || source == out.RootID) && target == out.RootID {
+				hasIncomingRootEdge = true
+			}
+			if source == out.RootID {
+				hasOutgoingRootEdge = true
+			}
+		}
+		if hasOutgoingRootEdge && !hasIncomingRootEdge {
+			out.Edges = append([]policy.JourneyEdge{{
+				Source: "__journey_root__",
+				Target: out.RootID,
+			}}, out.Edges...)
+		}
+	}
 	return out
 }
 
@@ -680,9 +484,19 @@ func normalizeMode(mode string) string {
 
 func runFixtureTool(view policyruntime.ResolvedView, catalog []tool.CatalogEntry) (map[string]any, []ToolCall) {
 	if len(view.ToolPlan.Calls) > 0 {
+		allowed := runnablePlannedTools(view, catalog)
 		var calls []ToolCall
 		outputs := map[string]any{}
 		for _, call := range view.ToolPlan.Calls {
+			if len(allowed) > 0 {
+				if _, ok := allowed[fullToolID(call.ToolID, catalog)]; !ok {
+					continue
+				}
+			}
+			candidate, ok := findParityCandidate(view.ToolPlan.Candidates, call.ToolID)
+			if ok && (candidate.AlreadySatisfied || candidate.AlreadyStaged || len(candidate.MissingIssues) > 0 || len(candidate.InvalidIssues) > 0) {
+				continue
+			}
 			fullID := fullToolID(call.ToolID, catalog)
 			documentID, modulePath := toolCallMetadata(fullID, catalog)
 			output := builtInToolOutput(call.ToolID, call.Arguments)
@@ -763,6 +577,21 @@ func runFixtureTool(view policyruntime.ResolvedView, catalog []tool.CatalogEntry
 		return map[string]any{"tools": outputs}, calls
 	}
 	return nil, calls
+}
+
+func runnablePlannedTools(view policyruntime.ResolvedView, catalog []tool.CatalogEntry) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, name := range view.ToolPlan.SelectedTools {
+		candidate, ok := findParityCandidate(view.ToolPlan.Candidates, name)
+		if ok && (candidate.AlreadySatisfied || candidate.AlreadyStaged || len(candidate.MissingIssues) > 0 || len(candidate.InvalidIssues) > 0) {
+			continue
+		}
+		out[fullToolID(name, catalog)] = struct{}{}
+	}
+	if strings.TrimSpace(view.ToolDecision.SelectedTool) != "" && view.ToolDecision.CanRun {
+		out[fullToolID(view.ToolDecision.SelectedTool, catalog)] = struct{}{}
+	}
+	return out
 }
 
 func toolCallMetadata(fullID string, catalog []tool.CatalogEntry) (string, string) {
@@ -933,14 +762,22 @@ func legalFollowUps(items []policyruntime.ProjectedJourneyNode) map[string][]str
 
 func normalizeProjectedID(id string) string {
 	id = strings.TrimSpace(id)
-	if !strings.HasPrefix(id, "journey_node:") {
-		return id
+	if id == "" {
+		return ""
 	}
+	reIndexedSuffix := regexp.MustCompile(`#\d+$`)
+	id = reIndexedSuffix.ReplaceAllString(id, "")
 	parts := strings.Split(id, ":")
-	if len(parts) <= 4 {
-		return id
+	if len(parts) >= 4 && parts[0] == "journey_node" {
+		journeyID := parts[1]
+		stateID := parts[2]
+		edgePart := strings.Join(parts[3:], ":")
+		rootEdgePrefix := journeyID + ":__journey_root__->" + stateID
+		if edgePart == rootEdgePrefix {
+			return strings.Join(parts[:3], ":")
+		}
 	}
-	return strings.Join(parts[:3], ":")
+	return id
 }
 
 func responseAnalysisStillRequired(analysis policyruntime.ResponseAnalysis) []string {
@@ -1043,45 +880,6 @@ func findParityCandidate(candidates []policyruntime.ToolCandidate, toolID string
 	return policyruntime.ToolCandidate{}, false
 }
 
-func normalizeJourneyStartGuidelines(items []string, journeyID string) []string {
-	if len(items) == 0 || strings.TrimSpace(journeyID) == "" {
-		return items
-	}
-	out := make([]string, 0, len(items))
-	for _, item := range items {
-		prefix := "journey_node:" + journeyID + ":"
-		if strings.HasPrefix(item, prefix) {
-			out = append(out, "journey:"+journeyID)
-			continue
-		}
-		out = append(out, item)
-	}
-	return dedupeAndSort(out)
-}
-
-func ensureJourneyGuideline(items []string, journeyID string) []string {
-	if strings.TrimSpace(journeyID) == "" {
-		return items
-	}
-	hasJourney := false
-	out := make([]string, 0, len(items)+1)
-	for _, item := range items {
-		if strings.HasPrefix(item, "journey:"+journeyID) {
-			hasJourney = true
-		}
-		prefix := "journey_node:" + journeyID + ":"
-		if strings.HasPrefix(item, prefix) {
-			item = "journey:" + journeyID
-			hasJourney = true
-		}
-		out = append(out, item)
-	}
-	if !hasJourney {
-		out = append(out, "journey:"+journeyID)
-	}
-	return dedupeAndSort(out)
-}
-
 func fullToolID(name string, catalog []tool.CatalogEntry) string {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -1128,8 +926,8 @@ func renderParityResponse(view policyruntime.ResolvedView, toolOutput map[string
 			return strings.Join(parts, " ")
 		}
 	}
-	if view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
-		return strings.TrimSpace(view.ActiveJourneyState.Instruction)
+	if state := effectiveJourneyState(view); state != nil && strings.TrimSpace(state.Instruction) != "" {
+		return strings.TrimSpace(state.Instruction)
 	}
 	return ""
 }
