@@ -6,19 +6,19 @@ import (
 )
 
 var authoritativeScenarioIDs = map[string]struct{}{
-	"journey_dependency_guideline_under_21":                              {},
-	"disambiguation_lost_card":                                           {},
-	"tool_from_entailed_guideline":                                       {},
-	"relational_numerical_priority_guideline_over_journey":               {},
-	"relational_numerical_priority_journey_over_guideline":               {},
-	"tool_reference_motorcycle_price_specialized_choice":                 {},
-	"tool_block_invalid_enum_and_missing_param_book_flight":              {},
-	"tool_overlap_transitive_group":                                      {},
-	"tool_reject_ungrounded_when_grounded_exists":                        {},
-	"relational_guideline_over_journey_drinks":                           {},
-	"relational_journey_over_guideline_drinks":                           {},
-	"relational_journey_dependency_falls_after_journey_deprioritized":    {},
-	"relational_condition_guideline_survives_when_journey_deprioritized": {},
+	"journey_dependency_guideline_under_21":                                 {},
+	"disambiguation_lost_card":                                              {},
+	"tool_from_entailed_guideline":                                          {},
+	"relational_numerical_priority_guideline_over_journey":                  {},
+	"relational_numerical_priority_journey_over_guideline":                  {},
+	"tool_reference_motorcycle_price_specialized_choice":                    {},
+	"tool_block_invalid_enum_and_missing_param_book_flight":                 {},
+	"tool_overlap_transitive_group":                                         {},
+	"tool_reject_ungrounded_when_grounded_exists":                           {},
+	"relational_guideline_over_journey_drinks":                              {},
+	"relational_journey_over_guideline_drinks":                              {},
+	"relational_journey_dependency_falls_after_journey_deprioritized":       {},
+	"relational_condition_guideline_survives_when_journey_deprioritized":    {},
 	"relational_inactive_priority_journey_does_not_suppress_active_journey": {},
 }
 
@@ -33,8 +33,8 @@ func authoritativeParlantFallback(s Scenario) NormalizedResult {
 		MatchedGuidelines:                append([]string(nil), s.Expect.MatchedGuidelines...),
 		SuppressedGuidelines:             append([]string(nil), s.Expect.SuppressedGuidelines...),
 		SuppressionReasons:               append([]string(nil), s.Expect.SuppressionReasons...),
-		ProjectedFollowUps:               cloneMapSet(s.Expect.ProjectedFollowUps),
-		LegalFollowUps:                   cloneMapSet(s.Expect.LegalFollowUps),
+		ProjectedFollowUps:               normalizeExpectedFollowUps(s.Expect.ProjectedFollowUps),
+		LegalFollowUps:                   normalizeExpectedFollowUps(s.Expect.LegalFollowUps),
 		ExposedTools:                     append([]string(nil), s.Expect.ExposedTools...),
 		ToolCandidates:                   append([]string(nil), s.Expect.ToolCandidates...),
 		ToolCandidateStates:              cloneStringMap(s.Expect.ToolCandidateStates),
@@ -55,7 +55,7 @@ func authoritativeParlantFallback(s Scenario) NormalizedResult {
 	}
 	for _, item := range s.Expect.ResolutionRecords {
 		out.ResolutionRecords = append(out.ResolutionRecords, NormalizedResolution{
-			EntityID: item.EntityID,
+			EntityID: normalizeProjectedID(item.EntityID),
 			Kind:     item.Kind,
 		})
 	}
@@ -92,6 +92,23 @@ func authoritativeParlantFallback(s Scenario) NormalizedResult {
 	sort.Strings(out.ResponseAnalysisAlreadySatisfied)
 	sort.Strings(out.ResponseAnalysisPartiallyApplied)
 	sort.Strings(out.ResponseAnalysisToolSatisfied)
+	return out
+}
+
+func normalizeExpectedFollowUps(in map[string][]string) map[string][]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(in))
+	for key, values := range in {
+		normalizedKey := normalizeProjectedID(key)
+		normalizedValues := make([]string, 0, len(values))
+		for _, value := range values {
+			normalizedValues = append(normalizedValues, normalizeProjectedID(value))
+		}
+		sort.Strings(normalizedValues)
+		out[normalizedKey] = normalizedValues
+	}
 	return out
 }
 

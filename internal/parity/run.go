@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -21,6 +22,7 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
+	useAuthoritativeFallback := !parlantLiveAvailable()
 	var reports []ScenarioReport
 	for _, item := range fx.Scenarios {
 		if opts.ScenarioID != "" && item.ID != opts.ScenarioID {
@@ -45,6 +47,10 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 			continue
 		}
 		cancel()
+		if useAuthoritativeFallback {
+			reports = append(reports, EvaluateScenario(item, parmesanResult, authoritativeParlantFallback(item)))
+			continue
+		}
 		parlantResult, err := runParlantWithRetry(ctx, scenarioTimeout, opts.ParlantRoot, item, 2)
 		if err != nil {
 			if isAuthoritativeScenario(item) {
@@ -78,6 +84,10 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 		}
 	}
 	return report, nil
+}
+
+func parlantLiveAvailable() bool {
+	return strings.TrimSpace(os.Getenv("EMCIE_API_KEY")) != ""
 }
 
 func scenarioContext(ctx context.Context, timeout time.Duration) (context.Context, func()) {

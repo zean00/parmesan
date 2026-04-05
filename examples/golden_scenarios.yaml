@@ -641,22 +641,22 @@ scenarios:
         id: Book Flight
       projected_follow_ups:
         journey_node:Book Flight:ask_origin:
-          - journey_node:Book Flight:ask_destination
-        journey_node:Book Flight:ask_destination:
-          - journey_node:Book Flight:ask_dates
-        journey_node:Book Flight:ask_dates:
-          - journey_node:Book Flight:ask_class
-        journey_node:Book Flight:ask_class:
-          - journey_node:Book Flight:ask_name
+          - journey_node:Book Flight:ask_destination:Book Flight:ask_origin->ask_destination
+        journey_node:Book Flight:ask_destination:Book Flight:ask_origin->ask_destination:
+          - journey_node:Book Flight:ask_dates:Book Flight:ask_destination->ask_dates
+        journey_node:Book Flight:ask_dates:Book Flight:ask_destination->ask_dates:
+          - journey_node:Book Flight:ask_class:Book Flight:ask_dates->ask_class
+        journey_node:Book Flight:ask_class:Book Flight:ask_dates->ask_class:
+          - journey_node:Book Flight:ask_name:Book Flight:ask_class->ask_name
       legal_follow_ups:
         journey_node:Book Flight:ask_origin:
-          - journey_node:Book Flight:ask_destination
-        journey_node:Book Flight:ask_destination:
-          - journey_node:Book Flight:ask_dates
-        journey_node:Book Flight:ask_dates:
-          - journey_node:Book Flight:ask_class
-        journey_node:Book Flight:ask_class:
-          - journey_node:Book Flight:ask_name
+          - journey_node:Book Flight:ask_destination:Book Flight:ask_origin->ask_destination
+        journey_node:Book Flight:ask_destination:Book Flight:ask_origin->ask_destination:
+          - journey_node:Book Flight:ask_dates:Book Flight:ask_destination->ask_dates
+        journey_node:Book Flight:ask_dates:Book Flight:ask_destination->ask_dates:
+          - journey_node:Book Flight:ask_class:Book Flight:ask_dates->ask_class
+        journey_node:Book Flight:ask_class:Book Flight:ask_dates->ask_class:
+          - journey_node:Book Flight:ask_name:Book Flight:ask_class->ask_name
 
   - id: response_analysis_discount_already_applied
     title: Response analysis should mark the discount guideline as already satisfied once it was already offered

@@ -64,10 +64,10 @@ func checkExpectations(exp Expectations, got NormalizedResult, label string) []s
 	if exp.NextJourneyNode != "" && exp.NextJourneyNode != got.NextJourneyNode {
 		out = append(out, fmt.Sprintf("%s next_journey_node = %q, want %q", label, got.NextJourneyNode, exp.NextJourneyNode))
 	}
-	if len(exp.ProjectedFollowUps) > 0 && !sameMapSet(exp.ProjectedFollowUps, got.ProjectedFollowUps) {
+	if normalized := normalizeExpectedFollowUps(exp.ProjectedFollowUps); len(normalized) > 0 && !sameMapSet(normalized, got.ProjectedFollowUps) {
 		out = append(out, fmt.Sprintf("%s projected_follow_ups = %v, want %v", label, got.ProjectedFollowUps, exp.ProjectedFollowUps))
 	}
-	if len(exp.LegalFollowUps) > 0 && !sameMapSet(exp.LegalFollowUps, got.LegalFollowUps) {
+	if normalized := normalizeExpectedFollowUps(exp.LegalFollowUps); len(normalized) > 0 && !sameMapSet(normalized, got.LegalFollowUps) {
 		out = append(out, fmt.Sprintf("%s legal_follow_ups = %v, want %v", label, got.LegalFollowUps, exp.LegalFollowUps))
 	}
 	if len(exp.ExposedTools) > 0 && !sameSet(exp.ExposedTools, got.ExposedTools) {
@@ -404,7 +404,7 @@ func sameGroupSet(left, right [][]string) bool {
 func sameResolutionSet(exp []ResolutionExpectation, got []NormalizedResolution) bool {
 	want := make([]NormalizedResolution, 0, len(exp))
 	for _, item := range exp {
-		want = append(want, NormalizedResolution{EntityID: item.EntityID, Kind: item.Kind})
+		want = append(want, NormalizedResolution{EntityID: normalizeProjectedID(item.EntityID), Kind: item.Kind})
 	}
 	return sameResolutionSetForScenario(exp, want, got)
 }
@@ -417,7 +417,7 @@ func sameResolutionSetForScenario(exp []ResolutionExpectation, left, right []Nor
 		expectedNone := map[string]struct{}{}
 		for _, item := range exp {
 			if strings.EqualFold(strings.TrimSpace(item.Kind), "none") {
-				expectedNone[strings.TrimSpace(item.EntityID)] = struct{}{}
+				expectedNone[normalizeProjectedID(strings.TrimSpace(item.EntityID))] = struct{}{}
 			}
 		}
 		out := make([]NormalizedResolution, 0, len(items))

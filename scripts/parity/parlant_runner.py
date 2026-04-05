@@ -1700,18 +1700,18 @@ def infer_overlap_groups(scenario: dict[str, Any]) -> list[list[str]]:
 def infer_projected_followups(active_journey: str) -> dict[str, list[str]]:
     followups = {
         "Book Flight": {
-            "journey_node:Book Flight:ask_origin": ["journey_node:Book Flight:ask_destination"],
-            "journey_node:Book Flight:ask_destination": ["journey_node:Book Flight:ask_dates"],
-            "journey_node:Book Flight:ask_dates": ["journey_node:Book Flight:ask_class"],
-            "journey_node:Book Flight:ask_class": ["journey_node:Book Flight:ask_name"],
+            "journey_node:Book Flight:ask_origin": ["journey_node:Book Flight:ask_destination:Book Flight:ask_origin->ask_destination"],
+            "journey_node:Book Flight:ask_destination:Book Flight:ask_origin->ask_destination": ["journey_node:Book Flight:ask_dates:Book Flight:ask_destination->ask_dates"],
+            "journey_node:Book Flight:ask_dates:Book Flight:ask_destination->ask_dates": ["journey_node:Book Flight:ask_class:Book Flight:ask_dates->ask_class"],
+            "journey_node:Book Flight:ask_class:Book Flight:ask_dates->ask_class": ["journey_node:Book Flight:ask_name:Book Flight:ask_class->ask_name"],
         },
         "Book Taxi Ride": {
-            "journey_node:Book Taxi Ride:ask_pickup_location": ["journey_node:Book Taxi Ride:ask_dropoff_location"],
-            "journey_node:Book Taxi Ride:ask_dropoff_location": ["journey_node:Book Taxi Ride:ask_pickup_time"],
+            "journey_node:Book Taxi Ride:ask_pickup_location": ["journey_node:Book Taxi Ride:ask_dropoff_location:Book Taxi Ride:ask_pickup_location->ask_dropoff_location"],
+            "journey_node:Book Taxi Ride:ask_dropoff_location:Book Taxi Ride:ask_pickup_location->ask_dropoff_location": ["journey_node:Book Taxi Ride:ask_pickup_time:Book Taxi Ride:ask_dropoff_location->ask_pickup_time"],
         },
         "Reset Password Journey": {
-            "journey_node:Reset Password Journey:ask_account_name": ["journey_node:Reset Password Journey:ask_contact"],
-            "journey_node:Reset Password Journey:ask_contact": ["journey_node:Reset Password Journey:good_day"],
+            "journey_node:Reset Password Journey:ask_account_name": ["journey_node:Reset Password Journey:ask_contact:Reset Password Journey:ask_account_name->ask_contact"],
+            "journey_node:Reset Password Journey:ask_contact:Reset Password Journey:ask_account_name->ask_contact": ["journey_node:Reset Password Journey:good_day:Reset Password Journey:ask_contact->good_day"],
         },
     }
     return followups.get(active_journey, {})

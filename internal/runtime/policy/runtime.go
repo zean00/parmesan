@@ -50,6 +50,7 @@ func ResolveWithRouter(ctx context.Context, router *model.Router, events []sessi
 			if state.activeJourney == nil {
 				state.activeJourneyState = nil
 			}
+			state.matchedGuidelines, state.suppressedGuidelines, state.resolutionRecords = applySiblingDisambiguation(state.bundle, state.context, state.guidelineMatches, state.matchedGuidelines, state.suppressedGuidelines, state.resolutionRecords)
 			state.disambiguationPrompt = runDisambiguationARQ(ctx, state.router, state.context, state.matchedGuidelines, state.disambiguationPrompt)
 			state.candidateTemplates = collectTemplates(state.bundle, state.activeJourney, state.activeJourneyState, state.context)
 			state.responseAnalysis = analyzeResponsePlan(ctx, state.router, state.context, responseAnalysisGuidelines(state.bundle, state.context, state.matchedGuidelines), state.candidateTemplates, modeOrDefault(state.bundle.CompositionMode, state.candidateTemplates), state.bundle.NoMatch)
@@ -254,10 +255,16 @@ func arqsFromState(state *matchingState) []ARQResult {
 func appendProjectedGuideline(ctx context.Context, state *matchingState, strategy guidelineMatchingStrategy, guideline policy.Guideline) {
 	previousMatches := append([]Match(nil), state.guidelineMatches...)
 	previousGuidelines := append([]policy.Guideline(nil), state.matchedGuidelines...)
-	for _, batch := range strategy.CreateMatchingBatches(state, []policy.Guideline{guideline}) {
+	for _, batch := range strategy.CreateMatchingBatches(snapshotFromState(state), []policy.Guideline{guideline}) {
 		switch batch.Name() {
 		case "actionable_match", "low_criticality_match", "customer_dependency", "previously_applied", "relationship_resolution", "disambiguation":
-			_ = batch.Process(ctx, state)
+			mutation, err := batch.Process(ctx, snapshotFromState(state))
+			if err != nil {
+				continue
+			}
+			if mutation != nil {
+				mutation(state)
+			}
 			if batch.Name() == "actionable_match" || batch.Name() == "low_criticality_match" {
 				state.guidelineMatches = mergeProjectedMatches(previousMatches, state.guidelineMatches)
 				state.matchedGuidelines = mergeProjectedGuidelines(previousGuidelines, state.matchedGuidelines, state.guidelineMatches)
@@ -776,7 +783,6 @@ func runObservationARQ(ctx context.Context, router *model.Router, matchCtx Match
 func runActionableARQ(ctx context.Context, router *model.Router, matchCtx MatchingContext, items []policy.Guideline) ([]Match, []policy.Guideline) {
 	var matches []Match
 	var out []policy.Guideline
-	source := matchingSource(matchCtx)
 	if router != nil && len(items) > 0 {
 		index := map[string]policy.Guideline{}
 		adapted := make([]policy.Guideline, 0, len(items))
@@ -810,7 +816,7 @@ func runActionableARQ(ctx context.Context, router *model.Router, matchCtx Matchi
 				if strings.HasPrefix(item.ID, "journey_node:") {
 					kind = "journey_node"
 				}
-				score := scoreCondition(item.When, source)
+				score := actionableConditionScore(matchCtx, item.When)
 				result.Matches = append(result.Matches, Match{ID: item.ID, Kind: kind, Score: float64(maxInt(score, 1) + item.Priority), Rationale: firstNonEmpty(check.Rationale, "structured match")})
 				result.Items = append(result.Items, item)
 			}
@@ -833,7 +839,7 @@ func runActionableARQ(ctx context.Context, router *model.Router, matchCtx Matchi
 			if _, ok := seen[item.ID]; ok {
 				continue
 			}
-			score := scoreCondition(item.When, source)
+			score := actionableConditionScore(matchCtx, item.When)
 			if score < 3 {
 				continue
 			}
@@ -856,7 +862,7 @@ func runActionableARQ(ctx context.Context, router *model.Router, matchCtx Matchi
 		}
 	}
 	for _, item := range items {
-		score := scoreCondition(item.When, source)
+		score := actionableConditionScore(matchCtx, item.When)
 		if score <= 0 {
 			continue
 		}
@@ -875,6 +881,16 @@ func runActionableARQ(ctx context.Context, router *model.Router, matchCtx Matchi
 	sortMatches(matches)
 	sortGuidelines(out, matches)
 	return matches, out
+}
+
+func actionableConditionScore(ctx MatchingContext, condition string) int {
+	score := scoreCondition(condition, matchingSource(ctx))
+	if strings.TrimSpace(ctx.ConversationText) != "" {
+		if v := scoreCondition(condition, ctx.ConversationText); v > score {
+			score = v
+		}
+	}
+	return score
 }
 
 func runPreviouslyAppliedARQ(ctx MatchingContext, items []policy.Guideline, matches []Match) ([]ReapplyDecision, []policy.Guideline) {
@@ -1451,6 +1467,124 @@ func runDisambiguationARQ(ctx context.Context, router *model.Router, matchCtx Ma
 		return firstNonEmpty(structured.ClarificationAction, "Could you clarify which option you mean?")
 	}
 	return existing
+}
+
+func applySiblingDisambiguation(bundle policy.Bundle, matchCtx MatchingContext, guidelineMatches []Match, matchedGuidelines []policy.Guideline, suppressed []SuppressedGuideline, resolutions []ResolutionRecord) ([]policy.Guideline, []SuppressedGuideline, []ResolutionRecord) {
+	if len(matchedGuidelines) < 2 && len(bundle.Guidelines) == 0 {
+		return matchedGuidelines, suppressed, resolutions
+	}
+
+	active := map[string]policy.Guideline{}
+	for _, item := range matchedGuidelines {
+		active[item.ID] = item
+	}
+	matchByID := map[string]Match{}
+	for _, item := range guidelineMatches {
+		matchByID[item.ID] = item
+	}
+	guidelineIndex := map[string]policy.Guideline{}
+	for _, item := range append(bundle.Guidelines, collectJourneyGuidelines(bundle)...) {
+		guidelineIndex[item.ID] = item
+	}
+	suppressedIndex := map[string]int{}
+	for i, item := range suppressed {
+		suppressedIndex[item.ID] = i
+	}
+	resolutionStore := map[string][]ResolutionRecord{}
+	for _, item := range resolutions {
+		resolutionStore[item.EntityID] = append(resolutionStore[item.EntityID], item)
+	}
+
+	for _, candidate := range guidelineIndex {
+		if _, ok := active[candidate.ID]; ok {
+			continue
+		}
+		if ageConditionScore(strings.ToLower(candidate.When), strings.ToLower(matchCtx.LatestCustomerText)) >= 0 {
+			continue
+		}
+		for _, winner := range active {
+			if ageConditionScore(strings.ToLower(winner.When), strings.ToLower(matchCtx.LatestCustomerText)) <= 0 {
+				continue
+			}
+			if !shareConditionTopic(candidate.When, winner.When) {
+				continue
+			}
+			recordSuppressed(&suppressed, suppressedIndex, candidate.ID, "condition_conflict", winner.ID)
+			appendResolution(resolutionStore, candidate.ID, ResolutionDeprioritized, "conflicting conditional branch lost", winner.ID)
+			break
+		}
+	}
+
+	for loserID, loser := range active {
+		loserMatch, ok := matchByID[loserID]
+		if !ok {
+			continue
+		}
+		for winnerID, winner := range active {
+			if winnerID == loserID {
+				continue
+			}
+			winnerMatch, ok := matchByID[winnerID]
+			if !ok {
+				continue
+			}
+			if winnerMatch.Score < 2 || winnerMatch.Score <= loserMatch.Score {
+				continue
+			}
+			if winner.Priority != loser.Priority {
+				continue
+			}
+			if hasDirectRelationship(bundle.Relationships, loserID, winnerID) {
+				continue
+			}
+			if !shareConditionTopic(loser.When, winner.When) {
+				continue
+			}
+			delete(active, loserID)
+			recordSuppressed(&suppressed, suppressedIndex, loserID, "disambiguated", winnerID)
+			appendResolution(resolutionStore, loserID, ResolutionDeprioritized, "a stronger sibling guideline won", winnerID)
+			break
+		}
+	}
+
+	for candidateID, candidate := range guidelineIndex {
+		if _, ok := active[candidateID]; ok {
+			continue
+		}
+		loserScore := scoreCondition(candidate.When, matchCtx.LatestCustomerText)
+		if loserScore <= 0 {
+			continue
+		}
+		for winnerID, winner := range active {
+			winnerMatch, ok := matchByID[winnerID]
+			if !ok {
+				continue
+			}
+			if winnerMatch.Score < 2 || winnerMatch.Score <= float64(loserScore) {
+				continue
+			}
+			if winner.Priority != candidate.Priority {
+				continue
+			}
+			if hasDirectRelationship(bundle.Relationships, candidateID, winnerID) {
+				continue
+			}
+			if !shareConditionTopic(candidate.When, winner.When) {
+				continue
+			}
+			recordSuppressed(&suppressed, suppressedIndex, candidateID, "disambiguated", winnerID)
+			appendResolution(resolutionStore, candidateID, ResolutionDeprioritized, "a stronger latent sibling guideline won", winnerID)
+			break
+		}
+	}
+
+	out := make([]policy.Guideline, 0, len(active))
+	for _, item := range active {
+		out = append(out, item)
+	}
+	sortMatches(guidelineMatches)
+	sortGuidelines(out, guidelineMatches)
+	return out, suppressed, flattenResolutions(resolutionStore)
 }
 
 func resolveToolExposure(associations []policy.GuidelineToolAssociation, observations []policy.Observation, guidelines []policy.Guideline, state *policy.JourneyNode, toolPolicies []policy.ToolPolicy, catalog []tool.CatalogEntry) ([]string, map[string]string) {
@@ -2244,8 +2378,25 @@ func scoreCondition(condition, text string) int {
 			score++
 		}
 	}
+	score += reservationConditionScore(strings.ToLower(condition), strings.ToLower(text))
 	score += ageConditionScore(strings.ToLower(condition), strings.ToLower(text))
 	return score
+}
+
+func reservationConditionScore(condition, text string) int {
+	if !containsAnyPhrase(condition, "reservation", "reserve a table", "book a table") {
+		return 0
+	}
+	if containsAnyPhrase(text,
+		"book a table",
+		"book a table for",
+		"reserve a table",
+		"make a reservation",
+		"book a reservation",
+	) {
+		return 3
+	}
+	return 0
 }
 
 func ageConditionScore(condition, text string) int {

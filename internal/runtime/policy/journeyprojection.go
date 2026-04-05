@@ -1,6 +1,7 @@
 package policyruntime
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/sahal/parmesan/internal/domain/policy"
@@ -8,19 +9,21 @@ import (
 
 func projectJourneyNodes(bundle policy.Bundle) []ProjectedJourneyNode {
 	var out []ProjectedJourneyNode
-	for _, j := range bundle.Journeys {
+	for _, raw := range bundle.Journeys {
+		j := normalizeJourneyForProjection(raw)
 		indexByState := map[string]int{}
 		for i, state := range journeyOrderedStates(j) {
 			indexByState[state.ID] = i + 1
 		}
-		for _, state := range j.States {
+		for _, entry := range journeyProjectionEntries(j) {
+			state := entry.State
 			nodeKind := projectedJourneyNodeKind(state)
 			customerDependent, agentDependent := projectedJourneyDependencyFlags(state, nodeKind)
 			item := ProjectedJourneyNode{
-				ID:              projectedStateID(j.ID, state.ID),
+				ID:              projectedStateID(j.ID, state.ID, entry.SourceEdgeID),
 				JourneyID:       j.ID,
 				StateID:         state.ID,
-				SourceEdgeID:    projectedSourceEdgeID(j, state.ID),
+				SourceEdgeID:    entry.SourceEdgeID,
 				Index:           indexByState[state.ID],
 				Instruction:     state.Instruction,
 				FollowUps:       projectFollowUps(j, state.ID),
@@ -48,8 +51,7 @@ func projectJourneyNodes(bundle policy.Bundle) []ProjectedJourneyNode {
 			}
 			mergeJourneyMetadata(item.Metadata, j.Metadata)
 			mergeJourneyMetadata(item.Metadata, state.Metadata)
-			if edge := incomingEdge(j, state.ID); edge != nil {
-				item.SourceEdgeID = edge.ID
+			if edge := edgeByID(j, entry.SourceEdgeID); edge != nil {
 				mergeJourneyMetadata(item.Metadata, edge.Metadata)
 				if nodeMeta, ok := item.Metadata["journey_node"].(map[string]any); ok {
 					nodeMeta["source_edge_id"] = edge.ID
@@ -103,8 +105,12 @@ func projectedJourneyDependencyFlags(state policy.JourneyNode, kind string) (cus
 	}
 }
 
-func projectedStateID(journeyID string, stateID string) string {
-	return "journey_node:" + journeyID + ":" + stateID
+func projectedStateID(journeyID string, stateID string, sourceEdgeID string) string {
+	base := "journey_node:" + journeyID + ":" + stateID
+	if strings.TrimSpace(sourceEdgeID) == "" {
+		return base
+	}
+	return base + ":" + strings.TrimSpace(sourceEdgeID)
 }
 
 func projectFollowUps(j policy.Journey, stateID string) []string {
@@ -113,26 +119,19 @@ func projectFollowUps(j policy.Journey, stateID string) []string {
 		if strings.TrimSpace(edge.Target) == "" {
 			continue
 		}
-		out = append(out, projectedStateID(j.ID, edge.Target))
+		out = append(out, projectedStateID(j.ID, edge.Target, edge.ID))
 	}
 	if len(out) == 0 {
 		if state := findJourneyState(j, stateID); state != nil {
 			for _, next := range state.Next {
 				next = strings.TrimSpace(next)
 				if next != "" {
-					out = append(out, projectedStateID(j.ID, next))
+					out = append(out, projectedStateID(j.ID, next, ""))
 				}
 			}
 		}
 	}
 	return dedupe(out)
-}
-
-func projectedSourceEdgeID(j policy.Journey, stateID string) string {
-	if edge := incomingEdge(j, stateID); edge != nil {
-		return edge.ID
-	}
-	return ""
 }
 
 func jMode(j policy.Journey) string {
@@ -147,6 +146,20 @@ func jMode(j policy.Journey) string {
 func incomingEdge(j policy.Journey, stateID string) *policy.JourneyEdge {
 	for _, edge := range j.Edges {
 		if strings.TrimSpace(edge.Target) == strings.TrimSpace(stateID) {
+			copied := edge
+			return &copied
+		}
+	}
+	return nil
+}
+
+func edgeByID(j policy.Journey, edgeID string) *policy.JourneyEdge {
+	edgeID = strings.TrimSpace(edgeID)
+	if edgeID == "" {
+		return nil
+	}
+	for _, edge := range j.Edges {
+		if strings.TrimSpace(edge.ID) == edgeID {
 			copied := edge
 			return &copied
 		}
@@ -209,6 +222,77 @@ func journeyOrderedStates(j policy.Journey) []policy.JourneyNode {
 	return out
 }
 
+type projectedJourneyEntry struct {
+	State        policy.JourneyNode
+	SourceEdgeID string
+}
+
+func journeyProjectionEntries(j policy.Journey) []projectedJourneyEntry {
+	if len(j.Edges) == 0 || strings.TrimSpace(j.RootID) == "" {
+		out := make([]projectedJourneyEntry, 0, len(j.States))
+		for _, state := range j.States {
+			out = append(out, projectedJourneyEntry{State: state})
+		}
+		return out
+	}
+
+	stateIndex := map[string]policy.JourneyNode{}
+	for _, state := range j.States {
+		stateIndex[state.ID] = state
+	}
+
+	type queuedNode struct {
+		StateID      string
+		SourceEdgeID string
+	}
+
+	queue := []queuedNode{}
+	rootID := strings.TrimSpace(j.RootID)
+	if incoming := incomingEdges(j, rootID); len(incoming) > 0 {
+		for _, edge := range incoming {
+			queue = append(queue, queuedNode{StateID: edge.Target, SourceEdgeID: edge.ID})
+		}
+	} else if _, ok := stateIndex[rootID]; ok {
+		queue = append(queue, queuedNode{StateID: rootID})
+	}
+	for _, edge := range outgoingEdges(j, rootID) {
+		queue = append(queue, queuedNode{StateID: edge.Target, SourceEdgeID: edge.ID})
+	}
+
+	seen := map[string]struct{}{}
+	seenState := map[string]struct{}{}
+	var out []projectedJourneyEntry
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		key := strings.TrimSpace(current.StateID) + "::" + strings.TrimSpace(current.SourceEdgeID)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		state, ok := stateIndex[strings.TrimSpace(current.StateID)]
+		if !ok {
+			continue
+		}
+		seenState[state.ID] = struct{}{}
+		out = append(out, projectedJourneyEntry{State: state, SourceEdgeID: current.SourceEdgeID})
+		for _, edge := range outgoingEdges(j, state.ID) {
+			queue = append(queue, queuedNode{StateID: edge.Target, SourceEdgeID: edge.ID})
+		}
+	}
+
+	for _, state := range journeyOrderedStates(j) {
+		if _, ok := seenState[state.ID]; ok {
+			continue
+		}
+		out = append(out, projectedJourneyEntry{State: state})
+	}
+
+	return out
+}
+
 func mergeJourneyMetadata(dst map[string]any, src map[string]any) {
 	if len(src) == 0 {
 		return
@@ -229,4 +313,73 @@ func mergeJourneyMetadata(dst map[string]any, src map[string]any) {
 		}
 		dst[key] = value
 	}
+}
+
+func normalizeJourneyForProjection(j policy.Journey) policy.Journey {
+	if len(j.States) > 0 && strings.TrimSpace(j.RootID) == "" {
+		j.RootID = strings.TrimSpace(j.States[0].ID)
+	}
+	if len(j.Edges) == 0 {
+		j.Edges = synthesizeJourneyEdges(j)
+	} else {
+		j.Edges = normalizeJourneyEdges(j)
+	}
+	return j
+}
+
+func normalizeJourneyEdges(j policy.Journey) []policy.JourneyEdge {
+	out := make([]policy.JourneyEdge, 0, len(j.Edges))
+	for i, edge := range j.Edges {
+		if strings.TrimSpace(edge.ID) == "" {
+			edge.ID = fmt.Sprintf("%s:%s->%s#%d", j.ID, strings.TrimSpace(edge.Source), strings.TrimSpace(edge.Target), i+1)
+		}
+		out = append(out, edge)
+	}
+	return out
+}
+
+func synthesizeJourneyEdges(j policy.Journey) []policy.JourneyEdge {
+	var out []policy.JourneyEdge
+	seen := map[string]struct{}{}
+	rootID := strings.TrimSpace(j.RootID)
+	for i, state := range j.States {
+		if i == 0 && rootID != "" && strings.TrimSpace(state.ID) != rootID {
+			edgeID := fmt.Sprintf("%s:root->%s", j.ID, state.ID)
+			if _, ok := seen[edgeID]; !ok {
+				seen[edgeID] = struct{}{}
+				out = append(out, policy.JourneyEdge{
+					ID:     edgeID,
+					Source: rootID,
+					Target: state.ID,
+				})
+			}
+		}
+		for _, next := range state.Next {
+			next = strings.TrimSpace(next)
+			if next == "" {
+				continue
+			}
+			edgeID := fmt.Sprintf("%s:%s->%s", j.ID, state.ID, next)
+			if _, ok := seen[edgeID]; ok {
+				continue
+			}
+			seen[edgeID] = struct{}{}
+			out = append(out, policy.JourneyEdge{
+				ID:     edgeID,
+				Source: state.ID,
+				Target: next,
+			})
+		}
+	}
+	return out
+}
+
+func incomingEdges(j policy.Journey, stateID string) []policy.JourneyEdge {
+	var out []policy.JourneyEdge
+	for _, edge := range j.Edges {
+		if strings.TrimSpace(edge.Target) == strings.TrimSpace(stateID) {
+			out = append(out, edge)
+		}
+	}
+	return out
 }

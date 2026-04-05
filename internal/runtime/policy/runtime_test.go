@@ -707,10 +707,10 @@ func TestResolveProjectsJourneyMetadataAndLegalFollowUps(t *testing.T) {
 	if first.ID != "journey_node:reset_password:ask_email" || first.Index != 1 {
 		t.Fatalf("first projected node = %#v, want stable projected id and index", first)
 	}
-	if len(first.FollowUps) != 1 || first.FollowUps[0] != "journey_node:reset_password:verify_code" {
+	if len(first.FollowUps) != 1 || first.FollowUps[0] != "journey_node:reset_password:verify_code:reset_password:ask_email->verify_code" {
 		t.Fatalf("follow ups = %#v, want projected follow-up ids", first.FollowUps)
 	}
-	if len(first.LegalFollowUps) != 1 || first.LegalFollowUps[0] != "journey_node:reset_password:verify_code" {
+	if len(first.LegalFollowUps) != 1 || first.LegalFollowUps[0] != "journey_node:reset_password:verify_code:reset_password:ask_email->verify_code" {
 		t.Fatalf("legal follow ups = %#v, want projected legal follow-up ids", first.LegalFollowUps)
 	}
 	if first.Metadata["journey_node"] == nil {
@@ -840,6 +840,9 @@ func TestResolveProjectsExplicitJourneyEdges(t *testing.T) {
 		t.Fatalf("projected nodes = %#v, want 2", view.ProjectedNodes)
 	}
 	first := view.ProjectedNodes[0]
+	if first.ID != "journey_node:reset_password:ask_email:edge_root_email" {
+		t.Fatalf("first projected node = %#v, want edge-aware projected id", first)
+	}
 	if first.SourceEdgeID != "edge_root_email" {
 		t.Fatalf("first projected node = %#v, want source edge id", first)
 	}
@@ -852,12 +855,124 @@ func TestResolveProjectsExplicitJourneyEdges(t *testing.T) {
 		t.Fatalf("metadata = %#v, want customer-dependent projection metadata", first.Metadata)
 	}
 	second := view.ProjectedNodes[1]
+	if second.ID != "journey_node:reset_password:verify_code:edge_email_code" {
+		t.Fatalf("second projected node = %#v, want edge-aware projected id", second)
+	}
 	meta2, _ := second.Metadata["journey_node"].(map[string]any)
 	if meta2["edge_label"] != "after_email" {
 		t.Fatalf("metadata = %#v, want downstream merged edge metadata", second.Metadata)
 	}
 	if meta2["kind"] != "chat" {
 		t.Fatalf("metadata = %#v, want projected node kind metadata", second.Metadata)
+	}
+}
+
+func TestResolvePreservesIncomingRootEdgeMetadataForProjectedRootState(t *testing.T) {
+	view, err := Resolve(
+		[]session.Event{{
+			ID:        "evt_1",
+			SessionID: "sess_1",
+			Source:    "customer",
+			Kind:      "message",
+			CreatedAt: time.Now().UTC(),
+			Content:   []session.ContentPart{{Type: "text", Text: "I want to order pizza"}},
+		}},
+		[]policy.Bundle{{
+			ID:      "bundle_1",
+			Version: "v1",
+			Journeys: []policy.Journey{{
+				ID:     "pizza_order",
+				When:   []string{"order pizza"},
+				RootID: "ask_quantity",
+				States: []policy.JourneyNode{
+					{ID: "ask_quantity", Type: "message", Instruction: "How many pizzas do you want?"},
+					{ID: "confirm_order", Type: "message", Instruction: "Confirm the order."},
+				},
+				Edges: []policy.JourneyEdge{
+					{ID: "edge_root_quantity", Source: "__journey_root__", Target: "ask_quantity", Condition: "pizza order requested", Metadata: map[string]any{"journey_node": map[string]any{"edge_label": "entry"}}},
+					{ID: "edge_quantity_confirm", Source: "ask_quantity", Target: "confirm_order"},
+				},
+			}},
+		}},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if len(view.ProjectedNodes) == 0 {
+		t.Fatalf("projected nodes = %#v, want at least 1", view.ProjectedNodes)
+	}
+	first := view.ProjectedNodes[0]
+	if first.ID != "journey_node:pizza_order:ask_quantity:edge_root_quantity" {
+		t.Fatalf("first projected node = %#v, want root-edge-aware projected id", first)
+	}
+	if first.SourceEdgeID != "edge_root_quantity" {
+		t.Fatalf("first projected node = %#v, want root source edge id", first)
+	}
+	meta, _ := first.Metadata["journey_node"].(map[string]any)
+	if meta["edge_label"] != "entry" {
+		t.Fatalf("metadata = %#v, want incoming root edge metadata", first.Metadata)
+	}
+	if meta["edge_condition"] != "pizza order requested" {
+		t.Fatalf("metadata = %#v, want incoming root edge condition", first.Metadata)
+	}
+}
+
+func TestResolveSynthesizesIDsForExplicitEdgesWithoutID(t *testing.T) {
+	view, err := Resolve(
+		[]session.Event{{
+			ID:        "evt_1",
+			SessionID: "sess_1",
+			Source:    "customer",
+			Kind:      "message",
+			CreatedAt: time.Now().UTC(),
+			Content:   []session.ContentPart{{Type: "text", Text: "help me reset my password"}},
+		}},
+		[]policy.Bundle{{
+			ID:      "bundle_1",
+			Version: "v1",
+			Journeys: []policy.Journey{{
+				ID:     "reset_password",
+				When:   []string{"reset password"},
+				RootID: "root",
+				States: []policy.JourneyNode{
+					{ID: "ask_email", Type: "message", Instruction: "What email is on the account?"},
+					{ID: "verify_code", Type: "message", Instruction: "What code did you receive?"},
+				},
+				Edges: []policy.JourneyEdge{
+					{Source: "root", Target: "ask_email", Metadata: map[string]any{"journey_node": map[string]any{"kind": "chat"}}},
+					{Source: "ask_email", Target: "verify_code", Condition: "customer provided email", Metadata: map[string]any{"journey_node": map[string]any{"edge_label": "after_email"}}},
+				},
+			}},
+		}},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if len(view.ProjectedNodes) != 2 {
+		t.Fatalf("projected nodes = %#v, want 2", view.ProjectedNodes)
+	}
+	first := view.ProjectedNodes[0]
+	if first.SourceEdgeID == "" {
+		t.Fatalf("first projected node = %#v, want synthesized source edge id", first)
+	}
+	if !strings.HasPrefix(first.ID, "journey_node:reset_password:ask_email:reset_password:root->ask_email#") {
+		t.Fatalf("first projected node = %#v, want synthesized edge-aware projected id", first)
+	}
+	meta, _ := first.Metadata["journey_node"].(map[string]any)
+	if meta["kind"] != "chat" {
+		t.Fatalf("metadata = %#v, want synthesized edge metadata preserved", first.Metadata)
+	}
+	second := view.ProjectedNodes[1]
+	meta2, _ := second.Metadata["journey_node"].(map[string]any)
+	if meta2["edge_label"] != "after_email" {
+		t.Fatalf("metadata = %#v, want downstream synthesized edge metadata preserved", second.Metadata)
+	}
+	if meta2["edge_condition"] != "customer provided email" {
+		t.Fatalf("metadata = %#v, want synthesized edge condition preserved", second.Metadata)
 	}
 }
 
@@ -1230,6 +1345,9 @@ func TestResolveDoesNotSuppressJourneyNodeWhenPriorityJourneyIsInactive(t *testi
 	}
 	if !containsResolutionRecord(view.ResolutionRecords, "journey_node:Journey B:ask_b", ResolutionNone) {
 		t.Fatalf("resolution records = %#v, want Journey B node to remain active", view.ResolutionRecords)
+	}
+	if !containsResolutionRecord(view.ResolutionRecords, "journey_node:Journey A:ask_a", ResolutionDeprioritized) {
+		t.Fatalf("resolution records = %#v, want inactive Journey A root node recorded as deprioritized", view.ResolutionRecords)
 	}
 }
 

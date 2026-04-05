@@ -199,89 +199,6 @@ func resolveRelationships(bundle policy.Bundle, matchCtx MatchingContext, observ
 		}
 	}
 
-	for _, candidate := range guidelineIndex {
-		if _, ok := active[candidate.ID]; ok {
-			continue
-		}
-		if ageConditionScore(strings.ToLower(candidate.When), strings.ToLower(matchCtx.LatestCustomerText)) >= 0 {
-			continue
-		}
-		for _, winner := range active {
-			if ageConditionScore(strings.ToLower(winner.When), strings.ToLower(matchCtx.LatestCustomerText)) <= 0 {
-				continue
-			}
-			if !shareConditionTopic(candidate.When, winner.When) {
-				continue
-			}
-			recordSuppressed(&suppressed, suppressedIndex, candidate.ID, "condition_conflict", winner.ID)
-			appendResolution(resolutions, candidate.ID, ResolutionDeprioritized, "conflicting conditional branch lost", winner.ID)
-			break
-		}
-	}
-
-	for loserID, loser := range active {
-		loserMatch, ok := matchByID[loserID]
-		if !ok {
-			continue
-		}
-		for winnerID, winner := range active {
-			if winnerID == loserID {
-				continue
-			}
-			winnerMatch, ok := matchByID[winnerID]
-			if !ok {
-				continue
-			}
-			if winnerMatch.Score < 2 || winnerMatch.Score <= loserMatch.Score {
-				continue
-			}
-			if winner.Priority != loser.Priority {
-				continue
-			}
-			if hasDirectRelationship(bundle.Relationships, loserID, winnerID) {
-				continue
-			}
-			if !shareConditionTopic(loser.When, winner.When) {
-				continue
-			}
-			delete(active, loserID)
-			recordSuppressed(&suppressed, suppressedIndex, loserID, "disambiguated", winnerID)
-			appendResolution(resolutions, loserID, ResolutionDeprioritized, "a stronger sibling guideline won", winnerID)
-			break
-		}
-	}
-
-	for candidateID, candidate := range guidelineIndex {
-		if _, ok := active[candidateID]; ok {
-			continue
-		}
-		loserScore := scoreCondition(candidate.When, matchCtx.LatestCustomerText)
-		if loserScore <= 0 {
-			continue
-		}
-		for winnerID, winner := range active {
-			winnerMatch, ok := matchByID[winnerID]
-			if !ok {
-				continue
-			}
-			if winnerMatch.Score < 2 || winnerMatch.Score <= float64(loserScore) {
-				continue
-			}
-			if winner.Priority != candidate.Priority {
-				continue
-			}
-			if hasDirectRelationship(bundle.Relationships, candidateID, winnerID) {
-				continue
-			}
-			if !shareConditionTopic(candidate.When, winner.When) {
-				continue
-			}
-			recordSuppressed(&suppressed, suppressedIndex, candidateID, "disambiguated", winnerID)
-			appendResolution(resolutions, candidateID, ResolutionDeprioritized, "a stronger latent sibling guideline won", winnerID)
-			break
-		}
-	}
-
 	out := make([]policy.Guideline, 0, len(active))
 	for _, item := range active {
 		out = append(out, item)
@@ -289,6 +206,7 @@ func resolveRelationships(bundle policy.Bundle, matchCtx MatchingContext, observ
 	}
 	if journeyEntityID != "" {
 		if journeyActive {
+			recordInactivePrioritySourceJourneyNodes(bundle, active, activeJourney, journeyActive, resolutions)
 			appendResolution(resolutions, journeyEntityID, ResolutionNone, "journey remained active")
 		}
 		if !journeyActive {
@@ -308,6 +226,53 @@ func resolveRelationships(bundle policy.Bundle, matchCtx MatchingContext, observ
 		disambiguation: disambiguation,
 		activeJourney:  activeJourney,
 	}
+}
+
+func recordInactivePrioritySourceJourneyNodes(bundle policy.Bundle, active map[string]policy.Guideline, activeJourney *policy.Journey, journeyActive bool, resolutions map[string][]ResolutionRecord) {
+	if activeJourney == nil || !journeyActive {
+		return
+	}
+	activeJourneyEntityID := "journey:" + activeJourney.ID
+	for _, rel := range bundle.Relationships {
+		kind := strings.ToLower(strings.TrimSpace(rel.Kind))
+		if kind != "priority" && kind != "overrides" {
+			continue
+		}
+		sourceID := strings.TrimSpace(rel.Source)
+		targetID := strings.TrimSpace(rel.Target)
+		if targetID != activeJourneyEntityID || !strings.HasPrefix(sourceID, "journey:") {
+			continue
+		}
+		if relationshipEntityActive(sourceID, active, activeJourney, journeyActive) {
+			continue
+		}
+		sourceJourneyID := strings.TrimSpace(strings.TrimPrefix(sourceID, "journey:"))
+		if sourceJourneyID == "" || sourceJourneyID == activeJourney.ID {
+			continue
+		}
+		sourceJourney := findJourneyByID(bundle, sourceJourneyID)
+		if sourceJourney == nil {
+			continue
+		}
+		rootState := journeyRootState(sourceJourney)
+		if rootState == nil {
+			continue
+		}
+		journeyNodeID := projectedNodeGuideline(*sourceJourney, *rootState).ID
+		if relationshipEntityActive(journeyNodeID, active, activeJourney, journeyActive) || entityHasResolutionKind(resolutions, journeyNodeID, ResolutionDeprioritized) {
+			continue
+		}
+		appendResolution(resolutions, journeyNodeID, ResolutionDeprioritized, "inactive competing journey node lost to the active priority target journey", activeJourneyEntityID)
+	}
+}
+
+func findJourneyByID(bundle policy.Bundle, journeyID string) *policy.Journey {
+	for i := range bundle.Journeys {
+		if strings.TrimSpace(bundle.Journeys[i].ID) == strings.TrimSpace(journeyID) {
+			return &bundle.Journeys[i]
+		}
+	}
+	return nil
 }
 
 func activePrioritySources(rels []policy.Relationship, source string, active map[string]policy.Guideline, activeJourney *policy.Journey, journeyActive bool) []string {

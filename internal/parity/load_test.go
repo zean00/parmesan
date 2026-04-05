@@ -172,6 +172,7 @@ func TestIdsFromSuppressedIncludesProjectedJourneyNodes(t *testing.T) {
 }
 
 func TestRunUsesScenarioTimeout(t *testing.T) {
+	t.Setenv("EMCIE_API_KEY", "")
 	ctx := context.Background()
 	start := time.Now()
 	_, err := Run(ctx, Options{
@@ -185,6 +186,25 @@ func TestRunUsesScenarioTimeout(t *testing.T) {
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Fatalf("Run() took too long, scenario timeout may not be applied")
+	}
+}
+
+func TestRunFallsBackToAuthoritativeWhenParlantLiveUnavailable(t *testing.T) {
+	t.Setenv("EMCIE_API_KEY", "")
+	ctx := context.Background()
+	report, err := Run(ctx, Options{
+		FixturePath: filepath.Join("..", "..", "examples", "golden_scenarios.yaml"),
+		ScenarioID:  "relational_inactive_priority_journey_does_not_suppress_active_journey",
+		ParlantRoot: "/definitely/missing/parlant",
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(report.Scenarios) != 1 {
+		t.Fatalf("scenario count = %d, want 1", len(report.Scenarios))
+	}
+	if !report.Scenarios[0].Passed {
+		t.Fatalf("report = %#v, want authoritative fallback to pass", report.Scenarios[0])
 	}
 }
 

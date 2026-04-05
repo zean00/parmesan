@@ -69,20 +69,30 @@ func (m *guidelineMatcher) Run(ctx context.Context, router *model.Router, bundle
 			}
 			continue
 		}
-		for _, batch := range strategy.CreateMatchingBatches(state, strategyGroups[name]) {
+		for _, batch := range strategy.CreateMatchingBatches(snapshotFromState(state), strategyGroups[name]) {
 			start := time.Now()
-			if err := batch.Process(ctx, state); err != nil {
+			mutation, err := batch.Process(ctx, snapshotFromState(state))
+			if err != nil {
 				return nil, err
+			}
+			if mutation != nil {
+				mutation(state)
 			}
 			recordBatchResult(state, batch.Name(), batch.Strategy(), batch.PromptVersion(), 0, len(strategyGroups[name]), time.Since(start), state)
 		}
 		start := time.Now()
-		strategy.TransformMatches(state)
+		if mutation := strategy.TransformMatches(snapshotFromState(state)); mutation != nil {
+			mutation(state)
+		}
 		recordBatchResult(state, "match_finalize", strategy.Name(), promptVersion("match_finalize"), 0, len(state.matchedGuidelines), time.Since(start), state)
-		for _, batch := range strategy.CreateResponseAnalysisBatches(state) {
+		for _, batch := range strategy.CreateResponseAnalysisBatches(snapshotFromState(state)) {
 			start := time.Now()
-			if err := batch.Process(ctx, state); err != nil {
+			mutation, err := batch.Process(ctx, snapshotFromState(state))
+			if err != nil {
 				return nil, err
+			}
+			if mutation != nil {
+				mutation(state)
 			}
 			recordBatchResult(state, batch.Name(), batch.Strategy(), batch.PromptVersion(), 0, len(state.matchedGuidelines), time.Since(start), state)
 		}
@@ -205,58 +215,79 @@ func runGenericStrategyConcurrently(ctx context.Context, state *matchingState, i
 	sequential := []struct {
 		name string
 		size int
-		run  func()
+		run  func() stateMutation
 	}{
 		{
 			name: "customer_dependency",
 			size: len(state.matchedGuidelines),
-			run: func() {
-				state.customerDecisions, state.matchedGuidelines = runCustomerDependentARQ(state.context, state.matchedGuidelines)
+			run: func() stateMutation {
+				decisions, guidelines := runCustomerDependentARQ(state.context, state.matchedGuidelines)
+				return func(s *matchingState) {
+					s.customerDecisions, s.matchedGuidelines = decisions, guidelines
+				}
 			},
 		},
 		{
 			name: "previously_applied",
 			size: len(state.matchedGuidelines),
-			run: func() {
-				state.reapplyDecisions, state.matchedGuidelines = runPreviouslyAppliedARQ(state.context, state.matchedGuidelines, state.guidelineMatches)
+			run: func() stateMutation {
+				decisions, guidelines := runPreviouslyAppliedARQ(state.context, state.matchedGuidelines, state.guidelineMatches)
+				return func(s *matchingState) {
+					s.reapplyDecisions, s.matchedGuidelines = decisions, guidelines
+				}
 			},
 		},
 		{
 			name: "relationship_resolution",
 			size: len(state.matchedGuidelines),
-			run: func() {
+			run: func() stateMutation {
 				resolved := resolveRelationships(state.bundle, state.context, state.matchedObservations, state.guidelineMatches, state.matchedGuidelines, state.activeJourney, state.activeJourneyState)
-				state.matchedGuidelines = resolved.guidelines
-				state.suppressedGuidelines = resolved.suppressed
-				state.disambiguationPrompt = resolved.disambiguation
-				state.resolutionRecords = resolved.resolutions
-				state.activeJourney = resolved.activeJourney
-				if state.activeJourney == nil {
-					state.activeJourneyState = nil
+				return func(s *matchingState) {
+					s.matchedGuidelines = resolved.guidelines
+					s.suppressedGuidelines = resolved.suppressed
+					s.disambiguationPrompt = resolved.disambiguation
+					s.resolutionRecords = resolved.resolutions
+					s.activeJourney = resolved.activeJourney
+					if s.activeJourney == nil {
+						s.activeJourneyState = nil
+					}
 				}
 			},
 		},
 		{
 			name: "disambiguation",
 			size: len(state.matchedGuidelines),
-			run: func() {
-				state.disambiguationPrompt = runDisambiguationARQ(ctx, state.router, state.context, state.matchedGuidelines, state.disambiguationPrompt)
+			run: func() stateMutation {
+				guidelines, suppressed, resolutions := applySiblingDisambiguation(state.bundle, state.context, state.guidelineMatches, state.matchedGuidelines, state.suppressedGuidelines, state.resolutionRecords)
+				prompt := runDisambiguationARQ(ctx, state.router, state.context, guidelines, state.disambiguationPrompt)
+				return func(s *matchingState) {
+					s.matchedGuidelines, s.suppressedGuidelines, s.resolutionRecords = guidelines, suppressed, resolutions
+					s.disambiguationPrompt = prompt
+				}
 			},
 		},
 	}
 	for _, step := range sequential {
 		start := time.Now()
-		step.run()
+		if mutation := step.run(); mutation != nil {
+			mutation(state)
+		}
 		recordBatchResult(state, step.name, "generic", promptVersion(step.name), 0, step.size, time.Since(start), state)
 	}
 	start := time.Now()
-	genericStrategy{}.TransformMatches(state)
+	if mutation := (genericStrategy{}).TransformMatches(snapshotFromState(state)); mutation != nil {
+		mutation(state)
+	}
 	recordBatchResult(state, "match_finalize", "generic", promptVersion("match_finalize"), 0, len(state.matchedGuidelines), time.Since(start), state)
 	responseStart := time.Now()
-	state.candidateTemplates = collectTemplates(state.bundle, state.activeJourney, state.activeJourneyState, state.context)
-	mode := modeOrDefault(state.bundle.CompositionMode, state.candidateTemplates)
+	templates := collectTemplates(state.bundle, state.activeJourney, state.activeJourneyState, state.context)
+	mode := modeOrDefault(state.bundle.CompositionMode, templates)
 	analysisGuidelines := responseAnalysisGuidelines(state.bundle, state.context, state.matchedGuidelines)
-	state.responseAnalysis = analyzeResponsePlan(ctx, state.router, state.context, analysisGuidelines, state.candidateTemplates, mode, state.bundle.NoMatch)
+	analysis := analyzeResponsePlan(ctx, state.router, state.context, analysisGuidelines, templates, mode, state.bundle.NoMatch)
+	func(s *matchingState) {
+		s.candidateTemplates = templates
+		s.responseAnalysis = analysis
+	}(state)
 	recordBatchResult(state, "response_analysis", "generic", promptVersion("response_analysis"), 0, len(analysisGuidelines), time.Since(responseStart), state)
 	return nil
 }

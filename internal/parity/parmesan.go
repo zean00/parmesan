@@ -886,7 +886,7 @@ func normalizeResolutionRecords(items []policyruntime.ResolutionRecord) []Normal
 	out := make([]NormalizedResolution, 0, len(items))
 	for _, item := range items {
 		out = append(out, NormalizedResolution{
-			EntityID: strings.TrimSpace(item.EntityID),
+			EntityID: normalizeProjectedID(strings.TrimSpace(item.EntityID)),
 			Kind:     strings.TrimSpace(string(item.Kind)),
 		})
 	}
@@ -899,7 +899,12 @@ func projectedFollowUps(items []policyruntime.ProjectedJourneyNode) map[string][
 		if len(item.FollowUps) == 0 {
 			continue
 		}
-		out[item.ID] = dedupeAndSort(item.FollowUps)
+		key := normalizeProjectedID(item.ID)
+		values := make([]string, 0, len(item.FollowUps))
+		for _, followUp := range item.FollowUps {
+			values = append(values, normalizeProjectedID(followUp))
+		}
+		out[key] = dedupeAndSort(values)
 	}
 	if len(out) == 0 {
 		return nil
@@ -913,12 +918,29 @@ func legalFollowUps(items []policyruntime.ProjectedJourneyNode) map[string][]str
 		if len(item.LegalFollowUps) == 0 {
 			continue
 		}
-		out[item.ID] = dedupeAndSort(item.LegalFollowUps)
+		key := normalizeProjectedID(item.ID)
+		values := make([]string, 0, len(item.LegalFollowUps))
+		for _, followUp := range item.LegalFollowUps {
+			values = append(values, normalizeProjectedID(followUp))
+		}
+		out[key] = dedupeAndSort(values)
 	}
 	if len(out) == 0 {
 		return nil
 	}
 	return out
+}
+
+func normalizeProjectedID(id string) string {
+	id = strings.TrimSpace(id)
+	if !strings.HasPrefix(id, "journey_node:") {
+		return id
+	}
+	parts := strings.Split(id, ":")
+	if len(parts) <= 4 {
+		return id
+	}
+	return strings.Join(parts[:3], ":")
 }
 
 func responseAnalysisStillRequired(analysis policyruntime.ResponseAnalysis) []string {
