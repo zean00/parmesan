@@ -1,0 +1,21 @@
+{
+  "scenario_id": "relational_dependency_any_filters_with_no_matches",
+  "result": {
+    "suppressed_guidelines": [
+      "followup"
+    ],
+    "suppression_reasons": [
+      "dependency_any_unmet"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "followup",
+        "kind": "unmet_dependency_any"
+      }
+    ],
+    "journey_decision": "ignore",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass"
+  }
+}

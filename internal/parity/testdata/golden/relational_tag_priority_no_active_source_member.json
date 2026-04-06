@@ -1,0 +1,22 @@
+{
+  "scenario_id": "relational_tag_priority_no_active_source_member",
+  "result": {
+    "matched_guidelines": [
+      "t2_member"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "t2_member",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "t2_member"
+    ],
+    "response_text": "t2 action"
+  }
+}

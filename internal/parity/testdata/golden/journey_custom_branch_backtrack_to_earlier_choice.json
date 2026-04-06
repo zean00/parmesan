@@ -1,0 +1,40 @@
+{
+  "scenario_id": "journey_custom_branch_backtrack_to_earlier_choice",
+  "result": {
+    "matched_guidelines": [
+      "journey:Order Fulfillment"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "journey:Order Fulfillment",
+        "kind": "none"
+      }
+    ],
+    "active_journey": "Order Fulfillment",
+    "active_journey_node": "ask_time",
+    "journey_decision": "backtrack",
+    "next_journey_node": "ask_store",
+    "projected_follow_ups": {
+      "journey_node:Order Fulfillment:ask_address:edge_choose_address": [
+        "journey_node:Order Fulfillment:ask_time:edge_address_time"
+      ],
+      "journey_node:Order Fulfillment:choose_method": [
+        "journey_node:Order Fulfillment:ask_address:edge_choose_address",
+        "journey_node:Order Fulfillment:ask_store:edge_choose_store"
+      ]
+    },
+    "legal_follow_ups": {
+      "journey_node:Order Fulfillment:ask_address:edge_choose_address": [
+        "journey_node:Order Fulfillment:ask_time:edge_address_time"
+      ],
+      "journey_node:Order Fulfillment:choose_method": [
+        "journey_node:Order Fulfillment:ask_address:edge_choose_address",
+        "journey_node:Order Fulfillment:ask_store:edge_choose_store"
+      ]
+    },
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_text": "Ask for delivery time"
+  }
+}

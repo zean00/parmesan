@@ -1,0 +1,37 @@
+{
+  "scenario_id": "tool_block_missing_required_args_register_sweepstake",
+  "result": {
+    "matched_guidelines": [
+      "register_sweepstake"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "register_sweepstake",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "exposed_tools": [
+      "local:register_sweepstake"
+    ],
+    "tool_candidates": [
+      "local:register_sweepstake"
+    ],
+    "tool_candidate_states": {
+      "local:register_sweepstake": "blocked_missing_args"
+    },
+    "tool_candidate_reasons": {
+      "local:register_sweepstake": "candidate selected as best tool for the current request"
+    },
+    "selected_tools": [
+      "local:register_sweepstake"
+    ],
+    "tool_can_run": false,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "register_sweepstake"
+    ],
+    "response_text": "register the customer for the sweepstake using all provided information"
+  }
+}

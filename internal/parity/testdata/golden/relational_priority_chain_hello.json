@@ -1,0 +1,32 @@
+{
+  "scenario_id": "relational_priority_chain_hello",
+  "result": {
+    "matched_guidelines": [
+      "greet_howdy"
+    ],
+    "suppressed_guidelines": [
+      "greet_hi"
+    ],
+    "suppression_reasons": [
+      "deprioritized"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "greet_hi",
+        "kind": "deprioritized"
+      },
+      {
+        "entity_id": "greet_howdy",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "greet_howdy"
+    ],
+    "response_text": "say Howdy"
+  }
+}

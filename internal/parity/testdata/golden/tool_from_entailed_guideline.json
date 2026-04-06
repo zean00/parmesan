@@ -1,0 +1,57 @@
+{
+  "scenario_id": "tool_from_entailed_guideline",
+  "result": {
+    "matched_guidelines": [
+      "check_stock",
+      "suggest_toppings"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "check_stock",
+        "kind": "entailed"
+      },
+      {
+        "entity_id": "suggest_toppings",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "exposed_tools": [
+      "local:get_available_toppings"
+    ],
+    "tool_candidates": [
+      "local:get_available_toppings"
+    ],
+    "tool_candidate_states": {
+      "local:get_available_toppings": "selected"
+    },
+    "tool_candidate_reasons": {
+      "local:get_available_toppings": "auto-approved non-consequential tool with no parameters"
+    },
+    "selected_tool": "local:get_available_toppings",
+    "selected_tools": [
+      "local:get_available_toppings"
+    ],
+    "tool_call_tools": [
+      "local:get_available_toppings"
+    ],
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "revise",
+    "response_analysis_still_required": [
+      "check_stock",
+      "suggest_toppings"
+    ],
+    "response_text": "You might consider trying Pepperoni, Mushrooms, or Olives as your pizza toppings. They are all available!",
+    "tool_calls": [
+      {
+        "tool_id": "local:get_available_toppings",
+        "arguments": {
+          "conversation_excerpt": "What pizza topping should I take?",
+          "customer_message": "What pizza topping should I take?",
+          "session_id": "session_tool_from_entailed_guideline"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "scenario_id": "tool_reference_motorcycle_price_specialized_choice",
+  "result": {
+    "matched_guidelines": [
+      "vehicle_price"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "vehicle_price",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "exposed_tools": [
+      "local:check_motorcycle_price",
+      "local:check_vehicle_price"
+    ],
+    "tool_candidates": [
+      "local:check_motorcycle_price",
+      "local:check_vehicle_price"
+    ],
+    "tool_candidate_states": {
+      "local:check_motorcycle_price": "selected",
+      "local:check_vehicle_price": "rejected_overlap"
+    },
+    "tool_candidate_rejected_by": {
+      "local:check_vehicle_price": "local:check_motorcycle_price"
+    },
+    "tool_candidate_reasons": {
+      "local:check_motorcycle_price": "candidate tool is more specialized for this use case than the reference tool",
+      "local:check_vehicle_price": "candidate rejected because another overlapping tool was selected"
+    },
+    "overlapping_tool_groups": [
+      [
+        "local:check_motorcycle_price",
+        "local:check_vehicle_price"
+      ]
+    ],
+    "selected_tool": "local:check_motorcycle_price",
+    "selected_tools": [
+      "local:check_motorcycle_price"
+    ],
+    "tool_call_tools": [
+      "local:check_motorcycle_price"
+    ],
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "vehicle_price"
+    ],
+    "response_text": "check the vehicle price",
+    "tool_calls": [
+      {
+        "tool_id": "local:check_motorcycle_price",
+        "arguments": {
+          "conversation_excerpt": "What's your price for a Harley-Davidson Street Glide motorcycle?",
+          "customer_message": "What's your price for a Harley-Davidson Street Glide motorcycle?",
+          "model": "harley-davidson street glide motorcycle",
+          "session_id": "session_tool_reference_motorcycle_price_specialized_choice"
+        }
+      }
+    ]
+  }
+}

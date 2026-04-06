@@ -1,0 +1,36 @@
+{
+  "scenario_id": "relational_inactive_priority_journey_does_not_suppress_active_journey",
+  "result": {
+    "matched_guidelines": [
+      "journey:Journey B"
+    ],
+    "suppressed_guidelines": [
+      "journey_node:Journey A:ask_a"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "journey:Journey B",
+        "kind": "none"
+      },
+      {
+        "entity_id": "journey_node:Journey A:ask_a",
+        "kind": "deprioritized"
+      },
+      {
+        "entity_id": "journey_node:Journey B:ask_b",
+        "kind": "none"
+      }
+    ],
+    "active_journey": "Journey B",
+    "active_journey_node": "ask_b",
+    "journey_decision": "start",
+    "next_journey_node": "ask_b",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "journey_node:Journey B:ask_b"
+    ],
+    "response_text": "Ask B"
+  }
+}

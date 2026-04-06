@@ -1,0 +1,28 @@
+{
+  "scenario_id": "relationship_entailment_howdy_good_sir",
+  "result": {
+    "matched_guidelines": [
+      "good_sir",
+      "howdy"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "good_sir",
+        "kind": "entailed"
+      },
+      {
+        "entity_id": "howdy",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "good_sir",
+      "howdy"
+    ],
+    "response_text": "greet the customer with \"Howdy\" add \"good sir\""
+  }
+}

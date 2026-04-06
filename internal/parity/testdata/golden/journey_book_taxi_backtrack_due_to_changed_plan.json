@@ -1,0 +1,54 @@
+{
+  "scenario_id": "journey_book_taxi_backtrack_due_to_changed_plan",
+  "result": {
+    "matched_guidelines": [
+      "journey:Book Taxi Ride"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "journey:Book Taxi Ride",
+        "kind": "none"
+      },
+      {
+        "entity_id": "journey_node:Book Taxi Ride:ask_pickup_time",
+        "kind": "none"
+      }
+    ],
+    "active_journey": "Book Taxi Ride",
+    "active_journey_node": "ask_pickup_time",
+    "journey_decision": "backtrack",
+    "next_journey_node": "ask_dropoff_location",
+    "projected_follow_ups": {
+      "journey_node:Book Taxi Ride:ask_dropoff_location:Book Taxi Ride:ask_pickup_location-\u003eask_dropoff_location": [
+        "journey_node:Book Taxi Ride:ask_pickup_time:Book Taxi Ride:ask_dropoff_location-\u003eask_pickup_time"
+      ],
+      "journey_node:Book Taxi Ride:ask_pickup_location": [
+        "journey_node:Book Taxi Ride:ask_dropoff_location:Book Taxi Ride:ask_pickup_location-\u003eask_dropoff_location"
+      ],
+      "journey_node:Book Taxi Ride:ask_pickup_time:Book Taxi Ride:ask_dropoff_location-\u003eask_pickup_time": [
+        "journey_node:Book Taxi Ride:confirm_details:Book Taxi Ride:ask_pickup_time-\u003econfirm_details"
+      ]
+    },
+    "legal_follow_ups": {
+      "journey_node:Book Taxi Ride:ask_dropoff_location:Book Taxi Ride:ask_pickup_location-\u003eask_dropoff_location": [
+        "journey_node:Book Taxi Ride:ask_pickup_time:Book Taxi Ride:ask_dropoff_location-\u003eask_pickup_time"
+      ],
+      "journey_node:Book Taxi Ride:ask_pickup_location": [
+        "journey_node:Book Taxi Ride:ask_dropoff_location:Book Taxi Ride:ask_pickup_location-\u003eask_dropoff_location"
+      ],
+      "journey_node:Book Taxi Ride:ask_pickup_time:Book Taxi Ride:ask_dropoff_location-\u003eask_pickup_time": [
+        "journey_node:Book Taxi Ride:confirm_details:Book Taxi Ride:ask_pickup_time-\u003econfirm_details"
+      ]
+    },
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_already_satisfied": [
+      "journey_node:Book Taxi Ride:ask_pickup_time"
+    ],
+    "response_analysis_sources": {
+      "journey_node:Book Taxi Ride:ask_pickup_time": "assistant_message"
+    },
+    "response_text": "What time would you like to pick up?"
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "scenario_id": "tool_auto_approved_non_consequential_no_args",
+  "result": {
+    "matched_guidelines": [
+      "available_drinks"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "available_drinks",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "exposed_tools": [
+      "local:get_available_drinks"
+    ],
+    "tool_candidates": [
+      "local:get_available_drinks"
+    ],
+    "tool_candidate_states": {
+      "local:get_available_drinks": "selected"
+    },
+    "tool_candidate_reasons": {
+      "local:get_available_drinks": "auto-approved non-consequential tool with no parameters"
+    },
+    "selected_tool": "local:get_available_drinks",
+    "selected_tools": [
+      "local:get_available_drinks"
+    ],
+    "tool_call_tools": [
+      "local:get_available_drinks"
+    ],
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "available_drinks"
+    ],
+    "response_text": "list available drinks",
+    "tool_calls": [
+      {
+        "tool_id": "local:get_available_drinks",
+        "arguments": {
+          "conversation_excerpt": "Can you tell me what drinks are available?",
+          "customer_message": "Can you tell me what drinks are available?",
+          "session_id": "session_tool_auto_approved_non_consequential_no_args"
+        }
+      }
+    ]
+  }
+}

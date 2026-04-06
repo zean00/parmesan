@@ -1,0 +1,33 @@
+{
+  "scenario_id": "relational_numerical_priority_guideline_over_journey",
+  "result": {
+    "matched_guidelines": [
+      "standalone"
+    ],
+    "suppressed_guidelines": [
+      "journey_node:Drink Recommendation Journey:ask_drink"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "journey:Drink Recommendation Journey",
+        "kind": "deprioritized"
+      },
+      {
+        "entity_id": "journey_node:Drink Recommendation Journey:ask_drink",
+        "kind": "deprioritized"
+      },
+      {
+        "entity_id": "standalone",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "continue",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "standalone"
+    ],
+    "response_text": "Recommend sparkling water"
+  }
+}

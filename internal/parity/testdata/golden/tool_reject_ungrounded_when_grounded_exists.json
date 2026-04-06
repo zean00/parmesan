@@ -1,0 +1,58 @@
+{
+  "scenario_id": "tool_reject_ungrounded_when_grounded_exists",
+  "result": {
+    "matched_guidelines": [
+      "lock_requested"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "lock_requested",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "exposed_tools": [
+      "local:generic_lookup",
+      "local:lock_card"
+    ],
+    "tool_candidates": [
+      "local:generic_lookup",
+      "local:lock_card"
+    ],
+    "tool_candidate_states": {
+      "local:generic_lookup": "rejected_ungrounded",
+      "local:lock_card": "selected"
+    },
+    "tool_candidate_rejected_by": {
+      "local:generic_lookup": "local:lock_card"
+    },
+    "tool_candidate_reasons": {
+      "local:generic_lookup": "candidate rejected because a more grounded tool candidate was available",
+      "local:lock_card": "tool is grounded and has enough valid data to run"
+    },
+    "selected_tool": "local:lock_card",
+    "selected_tools": [
+      "local:lock_card"
+    ],
+    "tool_call_tools": [
+      "local:lock_card"
+    ],
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "lock_requested"
+    ],
+    "response_text": "lock the card",
+    "tool_calls": [
+      {
+        "tool_id": "local:lock_card",
+        "arguments": {
+          "conversation_excerpt": "Please lock my card",
+          "customer_message": "Please lock my card",
+          "session_id": "session_tool_reject_ungrounded_when_grounded_exists"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "scenario_id": "relational_numerical_priority_journey_over_guideline",
+  "result": {
+    "matched_guidelines": [
+      "journey:Drink Recommendation Journey"
+    ],
+    "suppressed_guidelines": [
+      "standalone"
+    ],
+    "suppression_reasons": [
+      "deprioritized"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "journey:Drink Recommendation Journey",
+        "kind": "none"
+      },
+      {
+        "entity_id": "journey_node:Drink Recommendation Journey:ask_drink",
+        "kind": "none"
+      },
+      {
+        "entity_id": "standalone",
+        "kind": "deprioritized"
+      }
+    ],
+    "active_journey": "Drink Recommendation Journey",
+    "active_journey_node": "ask_drink",
+    "journey_decision": "start",
+    "next_journey_node": "ask_drink",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_already_satisfied": [
+      "journey_node:Drink Recommendation Journey:ask_drink"
+    ],
+    "response_analysis_sources": {
+      "journey_node:Drink Recommendation Journey:ask_drink": "customer_answer"
+    },
+    "response_text": "Ask what drink they want"
+  }
+}

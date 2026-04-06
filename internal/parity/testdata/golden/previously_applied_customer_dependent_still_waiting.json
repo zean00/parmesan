@@ -1,0 +1,22 @@
+{
+  "scenario_id": "previously_applied_customer_dependent_still_waiting",
+  "result": {
+    "matched_guidelines": [
+      "reservation_location"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "reservation_location",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "reservation_location"
+    ],
+    "response_text": "check if they prefer inside or outside"
+  }
+}

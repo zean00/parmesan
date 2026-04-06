@@ -1,0 +1,53 @@
+{
+  "scenario_id": "relational_journey_dependency_falls_after_journey_deprioritized",
+  "result": {
+    "matched_guidelines": [
+      "winner"
+    ],
+    "suppressed_guidelines": [
+      "depends_on_journey",
+      "journey:Drink Recommendation Journey",
+      "journey_node:Drink Recommendation Journey:ask_drink"
+    ],
+    "suppression_reasons": [
+      "dependency_unmet"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "depends_on_journey",
+        "kind": "unmet_dependency"
+      },
+      {
+        "entity_id": "journey:Drink Recommendation Journey",
+        "kind": "deprioritized"
+      },
+      {
+        "entity_id": "journey_node:Drink Recommendation Journey:ask_drink",
+        "kind": "deprioritized"
+      },
+      {
+        "entity_id": "winner",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "advance",
+    "next_journey_node": "recommend_pepsi",
+    "projected_follow_ups": {
+      "journey_node:Drink Recommendation Journey:ask_drink": [
+        "journey_node:Drink Recommendation Journey:recommend_pepsi:Drink Recommendation Journey:ask_drink-\u003erecommend_pepsi"
+      ]
+    },
+    "legal_follow_ups": {
+      "journey_node:Drink Recommendation Journey:ask_drink": [
+        "journey_node:Drink Recommendation Journey:recommend_pepsi:Drink Recommendation Journey:ask_drink-\u003erecommend_pepsi"
+      ]
+    },
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "winner"
+    ],
+    "response_text": "Recommend Pepsi"
+  }
+}

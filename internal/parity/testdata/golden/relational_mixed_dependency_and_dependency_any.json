@@ -1,0 +1,34 @@
+{
+  "scenario_id": "relational_mixed_dependency_and_dependency_any",
+  "result": {
+    "matched_guidelines": [
+      "any_one",
+      "followup",
+      "required_one"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "any_one",
+        "kind": "none"
+      },
+      {
+        "entity_id": "followup",
+        "kind": "none"
+      },
+      {
+        "entity_id": "required_one",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "any_one",
+      "followup",
+      "required_one"
+    ],
+    "response_text": "offer followup help say hello say refund"
+  }
+}

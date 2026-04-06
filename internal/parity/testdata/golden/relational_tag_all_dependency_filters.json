@@ -1,0 +1,32 @@
+{
+  "scenario_id": "relational_tag_all_dependency_filters",
+  "result": {
+    "matched_guidelines": [
+      "member_one"
+    ],
+    "suppressed_guidelines": [
+      "followup"
+    ],
+    "suppression_reasons": [
+      "dependency_unmet"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "followup",
+        "kind": "unmet_dependency"
+      },
+      {
+        "entity_id": "member_one",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "member_one"
+    ],
+    "response_text": "say hello"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "scenario_id": "staged_tool_age_underage_drink_match",
+  "result": {
+    "matched_guidelines": [
+      "suggest_drink_underage"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "suggest_drink_underage",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "suggest_drink_underage"
+    ],
+    "response_text": "Suggest a sweet non-alcoholic drink."
+  }
+}

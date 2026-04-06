@@ -306,6 +306,30 @@ func TestNormalizeParmesanDropsSuppressionForFinallyMatchedGuideline(t *testing.
 	}
 }
 
+func TestNormalizeResolutionRecordsDedupesIdenticalEntries(t *testing.T) {
+	got := normalizeResolutionRecords([]policyruntime.ResolutionRecord{
+		{EntityID: "under_21", Kind: policyruntime.ResolutionNone},
+		{EntityID: "under_21", Kind: policyruntime.ResolutionNone},
+		{EntityID: "under_21", Kind: policyruntime.ResolutionUnmetDependency},
+		{EntityID: "under_21", Kind: policyruntime.ResolutionUnmetDependency},
+	})
+	want := []NormalizedResolution{
+		{EntityID: "under_21", Kind: string(policyruntime.ResolutionNone)},
+		{EntityID: "under_21", Kind: string(policyruntime.ResolutionUnmetDependency)},
+	}
+	if !sameResolutionSet(wantToResolutionExpectations(want), got) {
+		t.Fatalf("normalizeResolutionRecords() = %#v, want %#v", got, want)
+	}
+}
+
+func wantToResolutionExpectations(items []NormalizedResolution) []ResolutionExpectation {
+	out := make([]ResolutionExpectation, 0, len(items))
+	for _, item := range items {
+		out = append(out, ResolutionExpectation{EntityID: item.EntityID, Kind: item.Kind})
+	}
+	return out
+}
+
 func boolPtr(v bool) *bool {
 	return &v
 }

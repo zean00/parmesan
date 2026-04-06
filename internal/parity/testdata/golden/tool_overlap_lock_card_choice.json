@@ -1,0 +1,78 @@
+{
+  "scenario_id": "tool_overlap_lock_card_choice",
+  "result": {
+    "matched_guidelines": [
+      "lock_requested"
+    ],
+    "suppressed_guidelines": [
+      "card_help"
+    ],
+    "suppression_reasons": [
+      "disambiguated"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "card_help",
+        "kind": "deprioritized"
+      },
+      {
+        "entity_id": "card_help",
+        "kind": "none"
+      },
+      {
+        "entity_id": "lock_requested",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "exposed_tools": [
+      "local:lock_card",
+      "local:try_unlock_card"
+    ],
+    "tool_candidates": [
+      "local:lock_card",
+      "local:try_unlock_card"
+    ],
+    "tool_candidate_states": {
+      "local:lock_card": "selected",
+      "local:try_unlock_card": "rejected_overlap"
+    },
+    "tool_candidate_rejected_by": {
+      "local:try_unlock_card": "local:lock_card"
+    },
+    "tool_candidate_reasons": {
+      "local:lock_card": "tool is grounded and has enough valid data to run",
+      "local:try_unlock_card": "candidate rejected because another overlapping tool was selected"
+    },
+    "overlapping_tool_groups": [
+      [
+        "local:lock_card",
+        "local:try_unlock_card"
+      ]
+    ],
+    "selected_tool": "local:lock_card",
+    "selected_tools": [
+      "local:lock_card"
+    ],
+    "tool_call_tools": [
+      "local:lock_card"
+    ],
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "lock_requested"
+    ],
+    "response_text": "lock the card for the customer",
+    "tool_calls": [
+      {
+        "tool_id": "local:lock_card",
+        "arguments": {
+          "conversation_excerpt": "Please lock my card right now. I think I misplaced it.",
+          "customer_message": "Please lock my card right now. I think I misplaced it.",
+          "session_id": "session_tool_overlap_lock_card_choice"
+        }
+      }
+    ]
+  }
+}

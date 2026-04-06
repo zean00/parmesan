@@ -1,0 +1,77 @@
+{
+  "scenario_id": "journey_dependency_guideline_under_21",
+  "result": {
+    "matched_guidelines": [
+      "journey:Book Flight",
+      "under_21"
+    ],
+    "suppressed_guidelines": [
+      "age_21_or_older"
+    ],
+    "suppression_reasons": [
+      "condition_conflict"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "age_21_or_older",
+        "kind": "deprioritized"
+      },
+      {
+        "entity_id": "journey:Book Flight",
+        "kind": "none"
+      },
+      {
+        "entity_id": "journey_node:Book Flight:ask_airports",
+        "kind": "none"
+      },
+      {
+        "entity_id": "under_21",
+        "kind": "none"
+      },
+      {
+        "entity_id": "under_21",
+        "kind": "unmet_dependency"
+      }
+    ],
+    "active_journey": "Book Flight",
+    "active_journey_node": "ask_airports",
+    "journey_decision": "start",
+    "next_journey_node": "ask_airports",
+    "projected_follow_ups": {
+      "journey_node:Book Flight:ask_airports": [
+        "journey_node:Book Flight:ask_dates:Book Flight:ask_airports-\u003eask_dates"
+      ],
+      "journey_node:Book Flight:ask_class:Book Flight:ask_dates-\u003eask_class": [
+        "journey_node:Book Flight:ask_name:Book Flight:ask_class-\u003eask_name"
+      ],
+      "journey_node:Book Flight:ask_dates:Book Flight:ask_airports-\u003eask_dates": [
+        "journey_node:Book Flight:ask_class:Book Flight:ask_dates-\u003eask_class"
+      ],
+      "journey_node:Book Flight:ask_name:Book Flight:ask_class-\u003eask_name": [
+        "journey_node:Book Flight:book_flight:Book Flight:ask_name-\u003ebook_flight"
+      ]
+    },
+    "legal_follow_ups": {
+      "journey_node:Book Flight:ask_airports": [
+        "journey_node:Book Flight:ask_dates:Book Flight:ask_airports-\u003eask_dates"
+      ],
+      "journey_node:Book Flight:ask_class:Book Flight:ask_dates-\u003eask_class": [
+        "journey_node:Book Flight:ask_name:Book Flight:ask_class-\u003eask_name"
+      ],
+      "journey_node:Book Flight:ask_dates:Book Flight:ask_airports-\u003eask_dates": [
+        "journey_node:Book Flight:ask_class:Book Flight:ask_dates-\u003eask_class"
+      ],
+      "journey_node:Book Flight:ask_name:Book Flight:ask_class-\u003eask_name": [
+        "journey_node:Book Flight:book_flight:Book Flight:ask_name-\u003ebook_flight"
+      ]
+    },
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "journey_node:Book Flight:ask_airports",
+      "under_21"
+    ],
+    "response_text": "ask for the source and destination airport inform the customer that only economy class is available"
+  }
+}

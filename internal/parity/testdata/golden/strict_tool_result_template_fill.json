@@ -1,0 +1,52 @@
+{
+  "scenario_id": "strict_tool_result_template_fill",
+  "result": {
+    "matched_guidelines": [
+      "retrieve_qualification_info"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "retrieve_qualification_info",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "exposed_tools": [
+      "local:get_qualification_info"
+    ],
+    "tool_candidates": [
+      "local:get_qualification_info"
+    ],
+    "tool_candidate_states": {
+      "local:get_qualification_info": "selected"
+    },
+    "tool_candidate_reasons": {
+      "local:get_qualification_info": "auto-approved non-consequential tool with no parameters"
+    },
+    "selected_tool": "local:get_qualification_info",
+    "selected_tools": [
+      "local:get_qualification_info"
+    ],
+    "tool_call_tools": [
+      "local:get_qualification_info"
+    ],
+    "tool_can_run": true,
+    "response_mode": "strict",
+    "selected_template": "In terms of years of experience, the requirement is {{qualification_info}}.",
+    "verification_outcome": "revise",
+    "response_analysis_still_required": [
+      "retrieve_qualification_info"
+    ],
+    "response_text": "In terms of years of experience, the requirement is {{qualification_info}}.",
+    "tool_calls": [
+      {
+        "tool_id": "local:get_qualification_info",
+        "arguments": {
+          "conversation_excerpt": "What are the requirements for the developer position?",
+          "customer_message": "What are the requirements for the developer position?",
+          "session_id": "session_strict_tool_result_template_fill"
+        }
+      }
+    ]
+  }
+}

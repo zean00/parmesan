@@ -1,0 +1,85 @@
+{
+  "scenario_id": "tool_schedule_confirmation_runs_in_tandem",
+  "result": {
+    "matched_guidelines": [
+      "schedule_visit"
+    ],
+    "suppressed_guidelines": [
+      "send_confirmation"
+    ],
+    "suppression_reasons": [
+      "disambiguated"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "schedule_visit",
+        "kind": "none"
+      },
+      {
+        "entity_id": "send_confirmation",
+        "kind": "deprioritized"
+      },
+      {
+        "entity_id": "send_confirmation",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "exposed_tools": [
+      "local:schedule_appointment",
+      "local:send_confirmation_email"
+    ],
+    "tool_candidates": [
+      "local:schedule_appointment",
+      "local:send_confirmation_email"
+    ],
+    "tool_candidate_states": {
+      "local:schedule_appointment": "selected",
+      "local:send_confirmation_email": "should_run"
+    },
+    "tool_candidate_reasons": {
+      "local:schedule_appointment": "tool is grounded and has enough valid data to run",
+      "local:send_confirmation_email": "candidate should still run in tandem with the better reference tool"
+    },
+    "tool_candidate_tandem_with": {
+      "local:send_confirmation_email": [
+        "local:schedule_appointment"
+      ]
+    },
+    "selected_tool": "local:schedule_appointment",
+    "selected_tools": [
+      "local:schedule_appointment",
+      "local:send_confirmation_email"
+    ],
+    "tool_call_tools": [
+      "local:schedule_appointment",
+      "local:send_confirmation_email"
+    ],
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "schedule_visit"
+    ],
+    "response_text": "schedule the appointment",
+    "tool_calls": [
+      {
+        "tool_id": "local:schedule_appointment",
+        "arguments": {
+          "conversation_excerpt": "Please schedule an appointment with Dr. Gabi tomorrow at 6pm and send me a confirmation email.",
+          "customer_message": "Please schedule an appointment with Dr. Gabi tomorrow at 6pm and send me a confirmation email.",
+          "date": "tomorrow",
+          "session_id": "session_tool_schedule_confirmation_runs_in_tandem"
+        }
+      },
+      {
+        "tool_id": "local:send_confirmation_email",
+        "arguments": {
+          "conversation_excerpt": "Please schedule an appointment with Dr. Gabi tomorrow at 6pm and send me a confirmation email.",
+          "customer_message": "Please schedule an appointment with Dr. Gabi tomorrow at 6pm and send me a confirmation email.",
+          "session_id": "session_tool_schedule_confirmation_runs_in_tandem"
+        }
+      }
+    ]
+  }
+}

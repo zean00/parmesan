@@ -1,0 +1,37 @@
+{
+  "scenario_id": "tool_block_invalid_enum_and_missing_param_book_flight",
+  "result": {
+    "matched_guidelines": [
+      "book_flight"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "book_flight",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "exposed_tools": [
+      "local:book_flight"
+    ],
+    "tool_candidates": [
+      "local:book_flight"
+    ],
+    "tool_candidate_states": {
+      "local:book_flight": "blocked_invalid_args"
+    },
+    "tool_candidate_reasons": {
+      "local:book_flight": "candidate selected as best tool for the current request"
+    },
+    "selected_tools": [
+      "local:book_flight"
+    ],
+    "tool_can_run": false,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "book_flight"
+    ],
+    "response_text": "book a flight for the customer"
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "scenario_id": "journey_custom_backtrack_and_fast_forward",
+  "result": {
+    "matched_guidelines": [
+      "journey:Calzone Journey"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "journey:Calzone Journey",
+        "kind": "none"
+      }
+    ],
+    "active_journey": "Calzone Journey",
+    "active_journey_node": "check_stock",
+    "journey_decision": "backtrack",
+    "next_journey_node": "check_stock",
+    "projected_follow_ups": {
+      "journey_node:Calzone Journey:ask_drinks:Calzone Journey:ask_size-\u003eask_drinks": [
+        "journey_node:Calzone Journey:check_stock:Calzone Journey:ask_drinks-\u003echeck_stock"
+      ],
+      "journey_node:Calzone Journey:ask_quantity": [
+        "journey_node:Calzone Journey:ask_type:Calzone Journey:ask_quantity-\u003eask_type"
+      ],
+      "journey_node:Calzone Journey:ask_size:Calzone Journey:ask_type-\u003eask_size": [
+        "journey_node:Calzone Journey:ask_drinks:Calzone Journey:ask_size-\u003eask_drinks"
+      ],
+      "journey_node:Calzone Journey:ask_type:Calzone Journey:ask_quantity-\u003eask_type": [
+        "journey_node:Calzone Journey:ask_size:Calzone Journey:ask_type-\u003eask_size"
+      ]
+    },
+    "legal_follow_ups": {
+      "journey_node:Calzone Journey:ask_drinks:Calzone Journey:ask_size-\u003eask_drinks": [
+        "journey_node:Calzone Journey:check_stock:Calzone Journey:ask_drinks-\u003echeck_stock"
+      ],
+      "journey_node:Calzone Journey:ask_quantity": [
+        "journey_node:Calzone Journey:ask_type:Calzone Journey:ask_quantity-\u003eask_type"
+      ],
+      "journey_node:Calzone Journey:ask_size:Calzone Journey:ask_type-\u003eask_size": [
+        "journey_node:Calzone Journey:ask_drinks:Calzone Journey:ask_size-\u003eask_drinks"
+      ],
+      "journey_node:Calzone Journey:ask_type:Calzone Journey:ask_quantity-\u003eask_type": [
+        "journey_node:Calzone Journey:ask_size:Calzone Journey:ask_type-\u003eask_size"
+      ]
+    },
+    "exposed_tools": [
+      "local:check_stock"
+    ],
+    "tool_candidates": [
+      "local:check_stock"
+    ],
+    "tool_candidate_states": {
+      "local:check_stock": "selected"
+    },
+    "tool_candidate_reasons": {
+      "local:check_stock": "tool is grounded and has enough valid data to run"
+    },
+    "selected_tool": "local:check_stock",
+    "selected_tools": [
+      "local:check_stock"
+    ],
+    "tool_call_tools": [
+      "local:check_stock"
+    ],
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_text": "Check stock for the selected calzones",
+    "tool_calls": [
+      {
+        "tool_id": "local:check_stock",
+        "arguments": {
+          "conversation_excerpt": "Actually, can I change those to medium size instead of large? No drinks still.",
+          "customer_message": "Actually, can I change those to medium size instead of large? No drinks still.",
+          "journey_id": "Calzone Journey",
+          "journey_state": "check_stock",
+          "session_id": "session_journey_custom_backtrack_and_fast_forward"
+        }
+      }
+    ]
+  }
+}

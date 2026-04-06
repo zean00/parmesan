@@ -1,0 +1,12 @@
+{
+  "scenario_id": "strict_no_match_without_valid_template",
+  "result": {
+    "journey_decision": "ignore",
+    "tool_can_run": true,
+    "response_mode": "strict",
+    "no_match": true,
+    "selected_template": "Your account balance is {{balance}}",
+    "verification_outcome": "block",
+    "response_text": "I'm sorry but I have no information about that"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "scenario_id": "response_analysis_discount_partially_applied",
+  "result": {
+    "matched_guidelines": [
+      "late_so_discount"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "late_so_discount",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "late_so_discount"
+    ],
+    "response_analysis_partially_applied": [
+      "late_so_discount"
+    ],
+    "response_analysis_sources": {
+      "late_so_discount": "assistant_message"
+    },
+    "response_text": "Apologize and offer a discount."
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "scenario_id": "relational_condition_guideline_survives_when_journey_deprioritized",
+  "result": {
+    "matched_guidelines": [
+      "journey_condition",
+      "winner"
+    ],
+    "suppressed_guidelines": [
+      "journey:Journey 1",
+      "journey_node:Journey 1:recommend_product"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "journey:Journey 1",
+        "kind": "deprioritized"
+      },
+      {
+        "entity_id": "journey_condition",
+        "kind": "none"
+      },
+      {
+        "entity_id": "journey_node:Journey 1:recommend_product",
+        "kind": "deprioritized"
+      },
+      {
+        "entity_id": "winner",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "continue",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "journey_condition",
+      "winner"
+    ],
+    "response_text": "recommend alternative observe interest"
+  }
+}

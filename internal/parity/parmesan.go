@@ -19,12 +19,20 @@ import (
 )
 
 func RunParmesan(ctx context.Context, s Scenario) (NormalizedResult, error) {
+	return runParmesan(ctx, s, true)
+}
+
+func RunParmesanLocal(ctx context.Context, s Scenario) (NormalizedResult, error) {
+	return runParmesan(ctx, s, false)
+}
+
+func runParmesan(ctx context.Context, s Scenario, allowProviderRouter bool) (NormalizedResult, error) {
 	bundle := buildBundleForScenario(s)
 	journeyInstances := buildJourneyInstancesForScenario(s, bundle)
 	catalog := buildCatalogForScenario(s)
 	events := buildEventsForScenario(s)
 	var router *model.Router
-	if hasProviderEnv() {
+	if allowProviderRouter && hasProviderEnv() {
 		router = model.NewRouter(config.Load("parity").Provider)
 	}
 
@@ -740,11 +748,17 @@ func normalizeToolGroups(groups [][]string, catalog []tool.CatalogEntry) [][]str
 
 func normalizeResolutionRecords(items []policyruntime.ResolutionRecord) []NormalizedResolution {
 	out := make([]NormalizedResolution, 0, len(items))
+	seen := map[NormalizedResolution]struct{}{}
 	for _, item := range items {
-		out = append(out, NormalizedResolution{
+		record := NormalizedResolution{
 			EntityID: normalizeProjectedID(strings.TrimSpace(item.EntityID)),
 			Kind:     strings.TrimSpace(string(item.Kind)),
-		})
+		}
+		if _, ok := seen[record]; ok {
+			continue
+		}
+		seen[record] = struct{}{}
+		out = append(out, record)
 	}
 	return out
 }

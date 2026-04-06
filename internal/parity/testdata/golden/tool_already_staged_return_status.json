@@ -1,0 +1,42 @@
+{
+  "scenario_id": "tool_already_staged_return_status",
+  "result": {
+    "matched_guidelines": [
+      "lookup_status"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "lookup_status",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "exposed_tools": [
+      "local:get_return_status"
+    ],
+    "tool_candidates": [
+      "local:get_return_status"
+    ],
+    "tool_candidate_states": {
+      "local:get_return_status": "already_staged"
+    },
+    "tool_candidate_reasons": {
+      "local:get_return_status": "candidate selected as best tool for the current request"
+    },
+    "selected_tools": [
+      "local:get_return_status"
+    ],
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_already_satisfied": [
+      "lookup_status"
+    ],
+    "response_analysis_tool_satisfied": [
+      "lookup_status"
+    ],
+    "response_analysis_sources": {
+      "lookup_status": "tool_event"
+    },
+    "response_text": "check the return status"
+  }
+}

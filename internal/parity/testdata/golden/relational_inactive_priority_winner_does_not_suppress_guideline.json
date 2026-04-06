@@ -1,0 +1,22 @@
+{
+  "scenario_id": "relational_inactive_priority_winner_does_not_suppress_guideline",
+  "result": {
+    "matched_guidelines": [
+      "loser"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "loser",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "loser"
+    ],
+    "response_text": "loser action"
+  }
+}

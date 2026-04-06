@@ -1,0 +1,38 @@
+{
+  "scenario_id": "relational_tag_priority_transitive_dependency_fallout",
+  "result": {
+    "matched_guidelines": [
+      "t1_member"
+    ],
+    "suppressed_guidelines": [
+      "dependent",
+      "t2_member"
+    ],
+    "suppression_reasons": [
+      "dependency_unmet",
+      "deprioritized"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "dependent",
+        "kind": "unmet_dependency"
+      },
+      {
+        "entity_id": "t1_member",
+        "kind": "none"
+      },
+      {
+        "entity_id": "t2_member",
+        "kind": "deprioritized"
+      }
+    ],
+    "journey_decision": "ignore",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "t1_member"
+    ],
+    "response_text": "t1 action"
+  }
+}

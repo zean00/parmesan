@@ -1,0 +1,57 @@
+{
+  "scenario_id": "journey_book_flight_skip_answered_steps",
+  "result": {
+    "matched_guidelines": [
+      "journey:Book Flight"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "journey:Book Flight",
+        "kind": "none"
+      },
+      {
+        "entity_id": "journey_node:Book Flight:ask_dates",
+        "kind": "none"
+      }
+    ],
+    "active_journey": "Book Flight",
+    "active_journey_node": "ask_dates",
+    "journey_decision": "advance",
+    "next_journey_node": "ask_class",
+    "projected_follow_ups": {
+      "journey_node:Book Flight:ask_airports": [
+        "journey_node:Book Flight:ask_dates:Book Flight:ask_airports-\u003eask_dates"
+      ],
+      "journey_node:Book Flight:ask_class:Book Flight:ask_dates-\u003eask_class": [
+        "journey_node:Book Flight:ask_name:Book Flight:ask_class-\u003eask_name"
+      ],
+      "journey_node:Book Flight:ask_dates:Book Flight:ask_airports-\u003eask_dates": [
+        "journey_node:Book Flight:ask_class:Book Flight:ask_dates-\u003eask_class"
+      ],
+      "journey_node:Book Flight:ask_name:Book Flight:ask_class-\u003eask_name": [
+        "journey_node:Book Flight:book_flight:Book Flight:ask_name-\u003ebook_flight"
+      ]
+    },
+    "legal_follow_ups": {
+      "journey_node:Book Flight:ask_airports": [
+        "journey_node:Book Flight:ask_dates:Book Flight:ask_airports-\u003eask_dates"
+      ],
+      "journey_node:Book Flight:ask_class:Book Flight:ask_dates-\u003eask_class": [
+        "journey_node:Book Flight:ask_name:Book Flight:ask_class-\u003eask_name"
+      ],
+      "journey_node:Book Flight:ask_dates:Book Flight:ask_airports-\u003eask_dates": [
+        "journey_node:Book Flight:ask_class:Book Flight:ask_dates-\u003eask_class"
+      ],
+      "journey_node:Book Flight:ask_name:Book Flight:ask_class-\u003eask_name": [
+        "journey_node:Book Flight:book_flight:Book Flight:ask_name-\u003ebook_flight"
+      ]
+    },
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "journey_node:Book Flight:ask_dates"
+    ],
+    "response_text": "ask for the dates of the departure and return flight"
+  }
+}

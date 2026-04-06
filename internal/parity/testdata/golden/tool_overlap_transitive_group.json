@@ -1,0 +1,89 @@
+{
+  "scenario_id": "tool_overlap_transitive_group",
+  "result": {
+    "matched_guidelines": [
+      "available_drinks"
+    ],
+    "suppressed_guidelines": [
+      "available_toppings",
+      "terry_offer"
+    ],
+    "suppression_reasons": [
+      "disambiguated"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "available_drinks",
+        "kind": "none"
+      },
+      {
+        "entity_id": "available_toppings",
+        "kind": "deprioritized"
+      },
+      {
+        "entity_id": "available_toppings",
+        "kind": "none"
+      },
+      {
+        "entity_id": "terry_offer",
+        "kind": "deprioritized"
+      },
+      {
+        "entity_id": "terry_offer",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "exposed_tools": [
+      "local:get_available_drinks",
+      "local:get_available_toppings",
+      "local:get_terrys_offering"
+    ],
+    "tool_candidates": [
+      "local:get_available_drinks",
+      "local:get_available_toppings",
+      "local:get_terrys_offering"
+    ],
+    "tool_candidate_states": {
+      "local:get_available_drinks": "selected",
+      "local:get_available_toppings": "should_run",
+      "local:get_terrys_offering": "auto_approved"
+    },
+    "tool_candidate_reasons": {
+      "local:get_available_drinks": "non-consequential tool with no parameters is auto-approved",
+      "local:get_available_toppings": "tool is grounded and has enough valid data to run",
+      "local:get_terrys_offering": "non-consequential tool with no parameters is auto-approved"
+    },
+    "overlapping_tool_groups": [
+      [
+        "local:get_available_drinks",
+        "local:get_available_toppings",
+        "local:get_terrys_offering"
+      ]
+    ],
+    "selected_tool": "local:get_available_drinks",
+    "selected_tools": [
+      "local:get_available_drinks"
+    ],
+    "tool_call_tools": [
+      "local:get_available_drinks"
+    ],
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "available_drinks"
+    ],
+    "response_text": "list available drinks",
+    "tool_calls": [
+      {
+        "tool_id": "local:get_available_drinks",
+        "arguments": {
+          "conversation_excerpt": "Tell me Terry's offering, the available drinks, and the available toppings.",
+          "customer_message": "Tell me Terry's offering, the available drinks, and the available toppings.",
+          "session_id": "session_tool_overlap_transitive_group"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "scenario_id": "tool_search_products_twice_with_optional_args",
+  "result": {
+    "matched_guidelines": [
+      "filter_electronic_products"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "filter_electronic_products",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "exposed_tools": [
+      "local:search_electronic_products"
+    ],
+    "tool_candidates": [
+      "local:search_electronic_products"
+    ],
+    "tool_candidate_states": {
+      "local:search_electronic_products": "selected"
+    },
+    "tool_candidate_reasons": {
+      "local:search_electronic_products": "tool is grounded and has enough valid data to run"
+    },
+    "selected_tool": "local:search_electronic_products",
+    "selected_tools": [
+      "local:search_electronic_products"
+    ],
+    "tool_call_tools": [
+      "local:search_electronic_products",
+      "local:search_electronic_products"
+    ],
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "filter_electronic_products"
+    ],
+    "response_text": "search electronic products",
+    "tool_calls": [
+      {
+        "tool_id": "local:search_electronic_products",
+        "arguments": {
+          "conversation_excerpt": "Hey, do you have Dell laptop or Samsung SSD?",
+          "customer_message": "Hey, do you have Dell laptop or Samsung SSD?",
+          "keyword": "Laptop",
+          "session_id": "session_tool_search_products_twice_with_optional_args",
+          "vendor": "Dell"
+        }
+      },
+      {
+        "tool_id": "local:search_electronic_products",
+        "arguments": {
+          "conversation_excerpt": "Hey, do you have Dell laptop or Samsung SSD?",
+          "customer_message": "Hey, do you have Dell laptop or Samsung SSD?",
+          "keyword": "Ssd",
+          "session_id": "session_tool_search_products_twice_with_optional_args",
+          "vendor": "Samsung"
+        }
+      }
+    ]
+  }
+}

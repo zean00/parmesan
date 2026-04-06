@@ -1,0 +1,15 @@
+{
+  "scenario_id": "previously_applied_customer_dependent_completed",
+  "result": {
+    "journey_decision": "ignore",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_already_satisfied": [
+      "reservation_location"
+    ],
+    "response_analysis_sources": {
+      "reservation_location": "customer_answer"
+    }
+  }
+}

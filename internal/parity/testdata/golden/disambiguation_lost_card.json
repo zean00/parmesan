@@ -1,0 +1,45 @@
+{
+  "scenario_id": "disambiguation_lost_card",
+  "result": {
+    "matched_guidelines": [
+      "report_lost"
+    ],
+    "suppressed_guidelines": [
+      "lock_card",
+      "replacement_card"
+    ],
+    "suppression_reasons": [
+      "disambiguated"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "lock_card",
+        "kind": "deprioritized"
+      },
+      {
+        "entity_id": "lock_card",
+        "kind": "none"
+      },
+      {
+        "entity_id": "replacement_card",
+        "kind": "deprioritized"
+      },
+      {
+        "entity_id": "replacement_card",
+        "kind": "none"
+      },
+      {
+        "entity_id": "report_lost",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "report_lost"
+    ],
+    "response_text": "report card lost"
+  }
+}

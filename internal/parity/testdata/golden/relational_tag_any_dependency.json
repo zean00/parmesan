@@ -1,0 +1,28 @@
+{
+  "scenario_id": "relational_tag_any_dependency",
+  "result": {
+    "matched_guidelines": [
+      "followup",
+      "member_one"
+    ],
+    "resolution_records": [
+      {
+        "entity_id": "followup",
+        "kind": "none"
+      },
+      {
+        "entity_id": "member_one",
+        "kind": "none"
+      }
+    ],
+    "journey_decision": "ignore",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_still_required": [
+      "followup",
+      "member_one"
+    ],
+    "response_text": "offer followup help say hello"
+  }
+}

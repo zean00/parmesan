@@ -1,0 +1,18 @@
+{
+  "scenario_id": "response_analysis_status_already_satisfied",
+  "result": {
+    "journey_decision": "ignore",
+    "tool_can_run": true,
+    "response_mode": "guided",
+    "verification_outcome": "pass",
+    "response_analysis_already_satisfied": [
+      "lookup_status"
+    ],
+    "response_analysis_tool_satisfied": [
+      "lookup_status"
+    ],
+    "response_analysis_sources": {
+      "lookup_status": "tool_event"
+    }
+  }
+}
