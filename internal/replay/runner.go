@@ -102,26 +102,32 @@ func (r *Runner) process(ctx context.Context, run replaydomain.Run) error {
 			return r.fail(ctx, run, err)
 		}
 		result["shadow"] = summarizeView(shadowView)
+		activeJourneyDecision := activeView.JourneyProgressStage.Decision
+		shadowJourneyDecision := shadowView.JourneyProgressStage.Decision
+		activeToolDecision := activeView.ToolDecisionStage.Decision
+		shadowToolDecision := shadowView.ToolDecisionStage.Decision
+		activeMatchedGuidelines := activeView.MatchFinalizeStage.MatchedGuidelines
+		shadowMatchedGuidelines := shadowView.MatchFinalizeStage.MatchedGuidelines
 		diff = map[string]any{
-			"guidelines":          changedStrings(guidelineIDs(activeView.MatchedGuidelines), guidelineIDs(shadowView.MatchedGuidelines)),
-			"tools":               changedStrings(activeView.ExposedTools, shadowView.ExposedTools),
+			"guidelines":          changedStrings(guidelineIDs(activeMatchedGuidelines), guidelineIDs(shadowMatchedGuidelines)),
+			"tools":               changedStrings(activeView.ToolExposureStage.ExposedTools, shadowView.ToolExposureStage.ExposedTools),
 			"templates":           changedStrings(templateIDs(activeView), templateIDs(shadowView)),
 			"composition_mode":    changedScalar(activeView.CompositionMode, shadowView.CompositionMode),
 			"no_match":            changedScalar(activeView.NoMatch, shadowView.NoMatch),
 			"journey_id":          changedScalar(journeyID(activeView), journeyID(shadowView)),
 			"journey_state":       changedScalar(journeyStateID(activeView), journeyStateID(shadowView)),
-			"journey_decision":    changedScalar(activeView.JourneyDecision.Action, shadowView.JourneyDecision.Action),
-			"selected_tool":       changedScalar(activeView.ToolDecision.SelectedTool, shadowView.ToolDecision.SelectedTool),
-			"tool_can_run":        changedBool(activeView.ToolDecision.CanRun, shadowView.ToolDecision.CanRun),
-			"tool_missing_args":   changedStrings(activeView.ToolDecision.MissingArguments, shadowView.ToolDecision.MissingArguments),
-			"tool_invalid_args":   changedStrings(activeView.ToolDecision.InvalidArguments, shadowView.ToolDecision.InvalidArguments),
-			"tool_missing_issues": changedArgumentIssues(activeView.ToolDecision.MissingIssues, shadowView.ToolDecision.MissingIssues),
-			"tool_invalid_issues": changedArgumentIssues(activeView.ToolDecision.InvalidIssues, shadowView.ToolDecision.InvalidIssues),
+			"journey_decision":    changedScalar(activeJourneyDecision.Action, shadowJourneyDecision.Action),
+			"selected_tool":       changedScalar(activeToolDecision.SelectedTool, shadowToolDecision.SelectedTool),
+			"tool_can_run":        changedBool(activeToolDecision.CanRun, shadowToolDecision.CanRun),
+			"tool_missing_args":   changedStrings(activeToolDecision.MissingArguments, shadowToolDecision.MissingArguments),
+			"tool_invalid_args":   changedStrings(activeToolDecision.InvalidArguments, shadowToolDecision.InvalidArguments),
+			"tool_missing_issues": changedArgumentIssues(activeToolDecision.MissingIssues, shadowToolDecision.MissingIssues),
+			"tool_invalid_issues": changedArgumentIssues(activeToolDecision.InvalidIssues, shadowToolDecision.InvalidIssues),
 			"suppressed":          changedStrings(suppressedIDs(activeView), suppressedIDs(shadowView)),
 			"reapply":             changedStrings(reapplyIDs(activeView), reapplyIDs(shadowView)),
 			"customer_blocked":    changedStrings(customerBlockedIDs(activeView), customerBlockedIDs(shadowView)),
-			"response_revision":   changedBool(activeView.ResponseAnalysis.NeedsRevision, shadowView.ResponseAnalysis.NeedsRevision),
-			"response_strict":     changedBool(activeView.ResponseAnalysis.NeedsStrictMode, shadowView.ResponseAnalysis.NeedsStrictMode),
+			"response_revision":   changedBool(activeView.ResponseAnalysisStage.Analysis.NeedsRevision, shadowView.ResponseAnalysisStage.Analysis.NeedsRevision),
+			"response_strict":     changedBool(activeView.ResponseAnalysisStage.Analysis.NeedsStrictMode, shadowView.ResponseAnalysisStage.Analysis.NeedsStrictMode),
 			"arqs":                changedStrings(arqNames(activeView), arqNames(shadowView)),
 		}
 	}
@@ -197,25 +203,29 @@ func selectBundles(bundles []policy.Bundle, explicit string, fallback string) []
 	return []policy.Bundle{bundles[0]}
 }
 
-func summarizeView(view policyruntime.ResolvedView) map[string]any {
+func summarizeView(view policyruntime.EngineResult) map[string]any {
+	toolDecision := view.ToolDecisionStage.Decision
+	journeyDecision := view.JourneyProgressStage.Decision
+	matchedObservations := view.ObservationStage.Observations
+	matchedGuidelines := view.MatchFinalizeStage.MatchedGuidelines
 	out := map[string]any{
 		"composition_mode":    view.CompositionMode,
 		"no_match":            view.NoMatch,
-		"observations":        observationIDs(view.MatchedObservations),
-		"guidelines":          guidelineIDs(view.MatchedGuidelines),
+		"observations":        observationIDs(matchedObservations),
+		"guidelines":          guidelineIDs(matchedGuidelines),
 		"suppressed":          suppressedIDs(view),
 		"reapply":             reapplyIDs(view),
 		"customer_blocked":    customerBlockedIDs(view),
-		"response_analysis":   view.ResponseAnalysis,
+		"response_analysis":   view.ResponseAnalysisStage.Analysis,
 		"batch_results":       view.BatchResults,
 		"prompt_set_versions": view.PromptSetVersions,
-		"tools":               view.ExposedTools,
-		"selected_tool":       view.ToolDecision.SelectedTool,
-		"tool_can_run":        view.ToolDecision.CanRun,
-		"tool_missing_args":   view.ToolDecision.MissingArguments,
-		"tool_invalid_args":   view.ToolDecision.InvalidArguments,
-		"tool_missing_issues": view.ToolDecision.MissingIssues,
-		"tool_invalid_issues": view.ToolDecision.InvalidIssues,
+		"tools":               view.ToolExposureStage.ExposedTools,
+		"selected_tool":       toolDecision.SelectedTool,
+		"tool_can_run":        toolDecision.CanRun,
+		"tool_missing_args":   toolDecision.MissingArguments,
+		"tool_invalid_args":   toolDecision.InvalidArguments,
+		"tool_missing_issues": toolDecision.MissingIssues,
+		"tool_invalid_issues": toolDecision.InvalidIssues,
 		"templates":           templateIDs(view),
 		"arqs":                arqNames(view),
 	}
@@ -228,8 +238,8 @@ func summarizeView(view policyruntime.ResolvedView) map[string]any {
 	if view.ActiveJourneyState != nil {
 		out["journey_state"] = view.ActiveJourneyState.ID
 	}
-	if view.JourneyDecision.Action != "" {
-		out["journey_decision"] = view.JourneyDecision
+	if journeyDecision.Action != "" {
+		out["journey_decision"] = journeyDecision
 	}
 	return out
 }
@@ -250,15 +260,16 @@ func guidelineIDs(items []policy.Guideline) []string {
 	return out
 }
 
-func templateIDs(view policyruntime.ResolvedView) []string {
-	out := make([]string, 0, len(view.CandidateTemplates))
-	for _, item := range view.CandidateTemplates {
+func templateIDs(view policyruntime.EngineResult) []string {
+	templates := view.ResponseAnalysisStage.CandidateTemplates
+	out := make([]string, 0, len(templates))
+	for _, item := range templates {
 		out = append(out, item.ID)
 	}
 	return out
 }
 
-func suppressedIDs(view policyruntime.ResolvedView) []string {
+func suppressedIDs(view policyruntime.EngineResult) []string {
 	out := make([]string, 0, len(view.SuppressedGuidelines))
 	for _, item := range view.SuppressedGuidelines {
 		out = append(out, item.ID)
@@ -266,7 +277,7 @@ func suppressedIDs(view policyruntime.ResolvedView) []string {
 	return out
 }
 
-func arqNames(view policyruntime.ResolvedView) []string {
+func arqNames(view policyruntime.EngineResult) []string {
 	out := make([]string, 0, len(view.ARQResults))
 	for _, item := range view.ARQResults {
 		out = append(out, item.Name)
@@ -274,9 +285,9 @@ func arqNames(view policyruntime.ResolvedView) []string {
 	return out
 }
 
-func reapplyIDs(view policyruntime.ResolvedView) []string {
-	out := make([]string, 0, len(view.ReapplyDecisions))
-	for _, item := range view.ReapplyDecisions {
+func reapplyIDs(view policyruntime.EngineResult) []string {
+	out := make([]string, 0, len(view.PreviouslyAppliedStage.Decisions))
+	for _, item := range view.PreviouslyAppliedStage.Decisions {
 		if item.ShouldReapply {
 			out = append(out, item.ID)
 		}
@@ -284,9 +295,9 @@ func reapplyIDs(view policyruntime.ResolvedView) []string {
 	return out
 }
 
-func customerBlockedIDs(view policyruntime.ResolvedView) []string {
-	out := make([]string, 0, len(view.CustomerDecisions))
-	for _, item := range view.CustomerDecisions {
+func customerBlockedIDs(view policyruntime.EngineResult) []string {
+	out := make([]string, 0, len(view.CustomerDependencyStage.Decisions))
+	for _, item := range view.CustomerDependencyStage.Decisions {
 		if len(item.MissingCustomerData) > 0 {
 			out = append(out, item.ID)
 		}
@@ -331,14 +342,14 @@ func changedArgumentIssues(left, right []policyruntime.ToolArgumentIssue) map[st
 	}
 }
 
-func journeyID(view policyruntime.ResolvedView) string {
+func journeyID(view policyruntime.EngineResult) string {
 	if view.ActiveJourney == nil {
 		return ""
 	}
 	return view.ActiveJourney.ID
 }
 
-func journeyStateID(view policyruntime.ResolvedView) string {
+func journeyStateID(view policyruntime.EngineResult) string {
 	if view.ActiveJourneyState == nil {
 		return ""
 	}

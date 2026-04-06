@@ -202,7 +202,9 @@ func resolveRelationships(bundle policy.Bundle, matchCtx MatchingContext, observ
 	out := make([]policy.Guideline, 0, len(active))
 	for _, item := range active {
 		out = append(out, item)
-		appendResolution(resolutions, item.ID, ResolutionNone, "guideline remained active")
+		if len(resolutions[item.ID]) == 0 {
+			appendResolution(resolutions, item.ID, ResolutionNone, "guideline remained active")
+		}
 	}
 	if journeyEntityID != "" {
 		if journeyActive {

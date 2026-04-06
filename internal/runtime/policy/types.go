@@ -5,6 +5,7 @@ import (
 
 	"github.com/sahal/parmesan/internal/domain/journey"
 	"github.com/sahal/parmesan/internal/domain/policy"
+	"github.com/sahal/parmesan/internal/runtime/semantics"
 )
 
 type MatchingContext struct {
@@ -35,6 +36,16 @@ type Match struct {
 	Rationale string  `json:"rationale,omitempty"`
 }
 
+type argumentSlotKind = semantics.SlotKind
+
+const (
+	argumentSlotUnknown     = semantics.SlotUnknown
+	argumentSlotDestination = semantics.SlotDestination
+	argumentSlotProductLike = semantics.SlotProductLike
+)
+
+type ConditionEvidence = semantics.ConditionEvidence
+
 type ReapplyDecision struct {
 	ID            string  `json:"id"`
 	ShouldReapply bool    `json:"should_reapply"`
@@ -48,6 +59,10 @@ type CustomerDependencyDecision struct {
 	MissingCustomerData []string `json:"missing_customer_data,omitempty"`
 	Rationale           string   `json:"rationale,omitempty"`
 }
+
+type CustomerDependencyEvidence = semantics.CustomerDependencyEvidence
+
+type ActionCoverageEvidence = semantics.ActionCoverageEvidence
 
 type PolicyAttention struct {
 	CriticalInstructionIDs []string `json:"critical_instruction_ids,omitempty"`
@@ -107,6 +122,66 @@ type JourneyDecision struct {
 	Missing      []string `json:"missing,omitempty"`
 }
 
+type JourneyStateSatisfaction = semantics.JourneyStateSatisfaction
+
+type JourneyBacktrackIntent = semantics.JourneyBacktrackIntent
+
+type JourneyNodeSelection = semantics.JourneyNodeSelection
+
+type JourneyNodeEvidence struct {
+	RelevanceScore      int                       `json:"relevance_score,omitempty"`
+	RelevanceConditions []ConditionEvidence       `json:"relevance_conditions,omitempty"`
+	LatestSatisfaction  JourneyStateSatisfaction  `json:"latest_satisfaction,omitempty"`
+	HistorySatisfaction JourneyStateSatisfaction  `json:"history_satisfaction,omitempty"`
+	EdgeCondition       ConditionEvidence         `json:"edge_condition,omitempty"`
+}
+
+type BacktrackCandidateEvaluation struct {
+	Selection           JourneyNodeSelection `json:"selection"`
+	Evidence            JourneyNodeEvidence  `json:"evidence,omitempty"`
+	RelevanceScore      int                  `json:"relevance_score,omitempty"`
+	LatestSatisfied     bool                 `json:"latest_satisfied,omitempty"`
+	HistorySatisfied    bool                 `json:"history_satisfied,omitempty"`
+	BranchSwitchScore   int                  `json:"branch_switch_score,omitempty"`
+	FastForwardPathSize int                  `json:"fast_forward_path_size,omitempty"`
+}
+
+type BacktrackSelectionEvaluation struct {
+	Candidate  BacktrackCandidateEvaluation `json:"candidate"`
+	FallbackID string                       `json:"fallback_id,omitempty"`
+}
+
+type JourneyBacktrackEvaluation struct {
+	ActiveJourney        *policy.Journey                      `json:"active_journey,omitempty"`
+	ActiveJourneyState   *policy.JourneyNode                  `json:"active_journey_state,omitempty"`
+	JourneyInstance      *journey.Instance                    `json:"journey_instance,omitempty"`
+	BacktrackIntent      JourneyBacktrackIntent               `json:"backtrack_intent,omitempty"`
+	BacktrackEvaluations map[string]BacktrackCandidateEvaluation `json:"backtrack_evaluations,omitempty"`
+	SelectedBacktrack    BacktrackSelectionEvaluation         `json:"selected_backtrack,omitempty"`
+}
+
+type JourneyNextNodeEvaluation struct {
+	Selection      JourneyNodeSelection `json:"selection"`
+	Evidence       JourneyNodeEvidence  `json:"evidence,omitempty"`
+	RelevanceScore int                  `json:"relevance_score,omitempty"`
+	EdgeScore      int                  `json:"edge_score,omitempty"`
+	LatestSatisfied bool                `json:"latest_satisfied,omitempty"`
+}
+
+type JourneyProgressEvaluation struct {
+	JourneySatisfactions map[string]JourneyStateSatisfaction `json:"journey_satisfactions,omitempty"`
+	NextNodeEvaluations  map[string]JourneyNextNodeEvaluation `json:"next_node_evaluations,omitempty"`
+	SelectedNextNode     JourneyNextNodeEvaluation          `json:"selected_next_node,omitempty"`
+}
+
+type SiblingSuppressionDecision struct {
+	LoserID    string `json:"loser_id,omitempty"`
+	WinnerID   string `json:"winner_id,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	Rationale  string `json:"rationale,omitempty"`
+	ShouldDrop bool   `json:"should_drop,omitempty"`
+}
+
 type ToolDecision struct {
 	SelectedTool     string              `json:"selected_tool,omitempty"`
 	Arguments        map[string]any      `json:"arguments,omitempty"`
@@ -120,28 +195,56 @@ type ToolDecision struct {
 	Grounded         bool                `json:"grounded"`
 }
 
-type ToolCandidate struct {
-	ToolID               string              `json:"tool_id"`
-	GroupKey             string              `json:"group_key,omitempty"`
-	ReferenceTools       []string            `json:"reference_tools,omitempty"`
-	RunInTandemWith      []string            `json:"run_in_tandem_with,omitempty"`
-	Consequential        bool                `json:"consequential,omitempty"`
-	AutoApproved         bool                `json:"auto_approved,omitempty"`
-	Grounded             bool                `json:"grounded"`
-	ShouldRun            bool                `json:"should_run,omitempty"`
-	AlreadyStaged        bool                `json:"already_staged,omitempty"`
-	SameCallStaged       bool                `json:"same_call_staged,omitempty"`
-	AlreadySatisfied     bool                `json:"already_satisfied,omitempty"`
-	DecisionState        string              `json:"decision_state,omitempty"`
-	ApprovalMode         string              `json:"approval_mode,omitempty"`
-	Arguments            map[string]any      `json:"arguments,omitempty"`
-	MissingIssues        []ToolArgumentIssue `json:"missing_issues,omitempty"`
-	InvalidIssues        []ToolArgumentIssue `json:"invalid_issues,omitempty"`
-	RejectedBy           string              `json:"rejected_by,omitempty"`
-	PreparationRationale string              `json:"preparation_rationale,omitempty"`
-	SelectionRationale   string              `json:"selection_rationale,omitempty"`
-	Rationale            string              `json:"rationale,omitempty"`
+type ToolDecisionEvaluation struct {
+	PlannedSelectedTool string              `json:"planned_selected_tool,omitempty"`
+	SelectedTools       []string            `json:"selected_tools,omitempty"`
+	FinalSelectedTool   string              `json:"final_selected_tool,omitempty"`
+	ApprovalRequired    bool                `json:"approval_required,omitempty"`
+	CanRun              bool                `json:"can_run"`
+	Grounded            bool                `json:"grounded"`
+	MissingIssues       []ToolArgumentIssue `json:"missing_issues,omitempty"`
+	InvalidIssues       []ToolArgumentIssue `json:"invalid_issues,omitempty"`
+	Rationale           string              `json:"rationale,omitempty"`
 }
+
+type ToolPlanEvaluation struct {
+	Candidates        []ToolCandidate                   `json:"candidates,omitempty"`
+	Batches           []ToolCallBatchResult            `json:"batches,omitempty"`
+	Grounding         map[string]ToolGroundingEvidence `json:"grounding,omitempty"`
+	SelectionEvidence map[string]ToolSelectionEvidence `json:"selection_evidence,omitempty"`
+	SelectedTool      string                           `json:"selected_tool,omitempty"`
+	SelectedTools     []string                         `json:"selected_tools,omitempty"`
+	OverlappingGroups [][]string                       `json:"overlapping_groups,omitempty"`
+	Rationale         string                           `json:"rationale,omitempty"`
+}
+
+type ToolCandidate struct {
+	ToolID               string                `json:"tool_id"`
+	GroupKey             string                `json:"group_key,omitempty"`
+	ReferenceTools       []string              `json:"reference_tools,omitempty"`
+	RunInTandemWith      []string              `json:"run_in_tandem_with,omitempty"`
+	Consequential        bool                  `json:"consequential,omitempty"`
+	AutoApproved         bool                  `json:"auto_approved,omitempty"`
+	Grounded             bool                  `json:"grounded"`
+	GroundingEvidence    ToolGroundingEvidence `json:"grounding_evidence,omitempty"`
+	ShouldRun            bool                  `json:"should_run,omitempty"`
+	AlreadyStaged        bool                  `json:"already_staged,omitempty"`
+	SameCallStaged       bool                  `json:"same_call_staged,omitempty"`
+	AlreadySatisfied     bool                  `json:"already_satisfied,omitempty"`
+	DecisionState        string                `json:"decision_state,omitempty"`
+	ApprovalMode         string                `json:"approval_mode,omitempty"`
+	Arguments            map[string]any        `json:"arguments,omitempty"`
+	MissingIssues        []ToolArgumentIssue   `json:"missing_issues,omitempty"`
+	InvalidIssues        []ToolArgumentIssue   `json:"invalid_issues,omitempty"`
+	RejectedBy           string                `json:"rejected_by,omitempty"`
+	PreparationRationale string                `json:"preparation_rationale,omitempty"`
+	SelectionRationale   string                `json:"selection_rationale,omitempty"`
+	Rationale            string                `json:"rationale,omitempty"`
+}
+
+type ToolGroundingEvidence = semantics.ToolGroundingEvidence
+
+type ToolSelectionEvidence = semantics.ToolSelectionEvidence
 
 type ToolCallBatchResult struct {
 	Kind            string   `json:"kind"`
@@ -199,6 +302,15 @@ type ResponseAnalysis struct {
 	Rationale           string              `json:"rationale,omitempty"`
 }
 
+type ResponseAnalysisEvaluation struct {
+	Coverage            map[string]ActionCoverageEvidence `json:"coverage,omitempty"`
+	AnalyzedGuidelines  []AnalyzedGuideline               `json:"analyzed_guidelines,omitempty"`
+	NeedsRevision       bool                              `json:"needs_revision,omitempty"`
+	NeedsStrictMode     bool                              `json:"needs_strict_mode,omitempty"`
+	RecommendedTemplate string                            `json:"recommended_template,omitempty"`
+	Rationale           string                            `json:"rationale,omitempty"`
+}
+
 type VerificationResult struct {
 	Status      string   `json:"status"`
 	Reasons     []string `json:"reasons,omitempty"`
@@ -221,29 +333,29 @@ type BatchResult struct {
 	Output        map[string]any `json:"output,omitempty"`
 }
 
-type ResolvedView struct {
+type EngineResult struct {
 	Bundle               *policy.Bundle
 	Context              MatchingContext
 	Attention            PolicyAttention
-	ObservationMatches   []Match
-	GuidelineMatches     []Match
-	ReapplyDecisions     []ReapplyDecision
-	CustomerDecisions    []CustomerDependencyDecision
-	MatchedObservations  []policy.Observation
-	MatchedGuidelines    []policy.Guideline
+	ObservationStage     ObservationMatchStageResult
+	MatchFinalizeStage   FinalizeStageResult
+	PreviouslyAppliedStage PreviouslyAppliedStageResult
 	SuppressedGuidelines []SuppressedGuideline
 	ActiveJourney        *policy.Journey
 	ActiveJourneyState   *policy.JourneyNode
 	JourneyInstance      *journey.Instance
 	ProjectedNodes       []ProjectedJourneyNode
-	JourneyDecision      JourneyDecision
 	ResolutionRecords    []ResolutionRecord
-	ExposedTools         []string
-	ToolApprovals        map[string]string
-	ToolPlan             ToolCallPlan
-	ToolDecision         ToolDecision
-	ResponseAnalysis     ResponseAnalysis
-	CandidateTemplates   []policy.Template
+	ConditionArtifactsStage ConditionArtifactsStageResult
+	JourneyBacktrackStage JourneyBacktrackStageResult
+	JourneyProgressStage  JourneyProgressStageResult
+	CustomerDependencyStage CustomerDependencyStageResult
+	RelationshipResolutionStage RelationshipResolutionStageResult
+	DisambiguationStage DisambiguationStageResult
+	ResponseAnalysisStage ResponseAnalysisStageResult
+	ToolExposureStage    ToolExposureStageResult
+	ToolPlanStage        ToolPlanStageResult
+	ToolDecisionStage    ToolDecisionStageResult
 	CompositionMode      string
 	NoMatch              string
 	DisambiguationPrompt string

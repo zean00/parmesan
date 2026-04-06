@@ -145,11 +145,13 @@ func TestRunUsesScenarioTimeout(t *testing.T) {
 }
 
 func TestRunFixtureToolIncludesModulePathAndDocumentID(t *testing.T) {
-	view := policyruntime.ResolvedView{
-		ToolDecision: policyruntime.ToolDecision{
-			SelectedTool: "lookup_doc",
-			CanRun:       true,
-			Arguments:    map[string]any{"query": "refund policy"},
+	view := policyruntime.EngineResult{
+		ToolDecisionStage: policyruntime.ToolDecisionStageResult{
+			Decision: policyruntime.ToolDecision{
+				SelectedTool: "lookup_doc",
+				CanRun:       true,
+				Arguments:    map[string]any{"query": "refund policy"},
+			},
 		},
 	}
 	metadata, err := json.Marshal(map[string]any{
@@ -179,7 +181,7 @@ func TestRunFixtureToolIncludesModulePathAndDocumentID(t *testing.T) {
 }
 
 func TestNormalizeParmesanKeepsActiveJourneyNodeAsCurrentState(t *testing.T) {
-	view := policyruntime.ResolvedView{
+	view := policyruntime.EngineResult{
 		ActiveJourney: &policy.Journey{
 			ID: "Reset Password Journey",
 			States: []policy.JourneyNode{
@@ -191,9 +193,14 @@ func TestNormalizeParmesanKeepsActiveJourneyNodeAsCurrentState(t *testing.T) {
 			ID:          "ask_account_name",
 			Instruction: "What is the name of your account?",
 		},
-		JourneyDecision: policyruntime.JourneyDecision{
-			Action:    "start",
-			NextState: "ask_contact",
+		JourneyProgressStage: policyruntime.JourneyProgressStageResult{
+			Decision: policyruntime.JourneyDecision{
+				Action:    "start",
+				NextState: "ask_contact",
+			},
+		},
+		ResponseAnalysisStage: policyruntime.ResponseAnalysisStageResult{
+			CandidateTemplates: nil,
 		},
 		ResolutionRecords: []policyruntime.ResolutionRecord{
 			{EntityID: "journey:Reset Password Journey", Kind: policyruntime.ResolutionNone},
@@ -206,6 +213,96 @@ func TestNormalizeParmesanKeepsActiveJourneyNodeAsCurrentState(t *testing.T) {
 	}
 	if got.NextJourneyNode != "ask_contact" {
 		t.Fatalf("NextJourneyNode = %q, want %q", got.NextJourneyNode, "ask_contact")
+	}
+}
+
+func TestEvaluateScenarioMustNotIncludeAllowsNegatedMention(t *testing.T) {
+	scenario := Scenario{
+		ID: "negated_mention",
+		Expect: Expectations{
+			ResponseSemantics: ResponseSemantics{
+				MustNotInclude: []string{"pineapple"},
+			},
+		},
+	}
+	got := NormalizedResult{
+		ResponseText: "Unfortunately, pineapple isn't available right now.",
+	}
+	report := EvaluateScenario(scenario, got, got)
+	if !report.Passed {
+		t.Fatalf("EvaluateScenario() = %#v, want pass for negated mention", report)
+	}
+}
+
+func TestEvaluateScenarioMustNotIncludeRejectsAffirmativeMention(t *testing.T) {
+	scenario := Scenario{
+		ID: "affirmative_mention",
+		Expect: Expectations{
+			ResponseSemantics: ResponseSemantics{
+				MustNotInclude: []string{"pineapple"},
+			},
+		},
+	}
+	got := NormalizedResult{
+		ResponseText: "You should try pineapple on your pizza.",
+	}
+	report := EvaluateScenario(scenario, got, got)
+	if report.Passed {
+		t.Fatalf("EvaluateScenario() passed, want failure for affirmative mention")
+	}
+}
+
+func TestEvaluateScenarioMustNotIncludeRejectsAffirmativeMentionAfterNegatedMention(t *testing.T) {
+	scenario := Scenario{
+		ID: "mixed_mention",
+		Expect: Expectations{
+			ResponseSemantics: ResponseSemantics{
+				MustNotInclude: []string{"pineapple"},
+			},
+		},
+	}
+	got := NormalizedResult{
+		ResponseText: "Pineapple isn't available, but pineapple juice is available.",
+	}
+	report := EvaluateScenario(scenario, got, got)
+	if report.Passed {
+		t.Fatalf("EvaluateScenario() passed, want failure when a later affirmative mention exists")
+	}
+}
+
+func TestNormalizeParmesanKeepsSuppressionWhenLaterResolutionDeprioritizesEntity(t *testing.T) {
+	got := normalizedSuppressedGuidelines(
+		[]policyruntime.SuppressedGuideline{
+			{ID: "winner", Reason: "deprioritized"},
+		},
+		[]policyruntime.ResolutionRecord{
+			{EntityID: "winner", Kind: policyruntime.ResolutionNone},
+			{EntityID: "winner", Kind: policyruntime.ResolutionDeprioritized},
+		},
+		nil,
+	)
+	if len(got) != 1 || got[0] != "winner" {
+		t.Fatalf("normalizedSuppressedGuidelines() = %#v, want winner suppression preserved", got)
+	}
+}
+
+func TestNormalizeParmesanDropsSuppressionForFinallyMatchedGuideline(t *testing.T) {
+	got := normalizedSuppressedGuidelines(
+		[]policyruntime.SuppressedGuideline{
+			{ID: "under_21", Reason: "unmet_dependency"},
+			{ID: "age_21_or_older", Reason: "deprioritized"},
+		},
+		[]policyruntime.ResolutionRecord{
+			{EntityID: "under_21", Kind: policyruntime.ResolutionNone},
+			{EntityID: "under_21", Kind: policyruntime.ResolutionUnmetDependency},
+			{EntityID: "age_21_or_older", Kind: policyruntime.ResolutionDeprioritized},
+		},
+		[]policy.Guideline{
+			{ID: "under_21"},
+		},
+	)
+	if len(got) != 1 || got[0] != "age_21_or_older" {
+		t.Fatalf("normalizedSuppressedGuidelines() = %#v, want only age_21_or_older", got)
 	}
 }
 

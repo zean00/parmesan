@@ -9,14 +9,15 @@ import (
 )
 
 func renderResponse(view resolvedView, toolOutput map[string]any) string {
+	analysis := view.ResponseAnalysisStage.Analysis
 	if view.DisambiguationPrompt != "" {
 		return view.DisambiguationPrompt
 	}
-	if rendered := renderTemplateText(view.ResponseAnalysis.RecommendedTemplate, toolOutput); rendered != "" {
+	if rendered := renderTemplateText(analysis.RecommendedTemplate, toolOutput); rendered != "" {
 		return rendered
 	}
 	if strings.EqualFold(view.CompositionMode, "strict") {
-		if rendered := renderTemplate(view.CandidateTemplates, toolOutput); rendered != "" {
+		if rendered := renderTemplate(view.ResponseAnalysisStage.CandidateTemplates, toolOutput); rendered != "" {
 			return rendered
 		}
 		if view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
@@ -24,12 +25,13 @@ func renderResponse(view resolvedView, toolOutput map[string]any) string {
 		}
 		return strictNoMatchText(view.NoMatch)
 	}
-	if rendered := renderTemplate(view.CandidateTemplates, toolOutput); rendered != "" {
+	if rendered := renderTemplate(view.ResponseAnalysisStage.CandidateTemplates, toolOutput); rendered != "" {
 		return rendered
 	}
-	if len(view.MatchedGuidelines) > 0 {
-		parts := make([]string, 0, len(view.MatchedGuidelines))
-		for _, item := range view.MatchedGuidelines {
+	guidelines := view.MatchFinalizeStage.MatchedGuidelines
+	if len(guidelines) > 0 {
+		parts := make([]string, 0, len(guidelines))
+		for _, item := range guidelines {
 			if strings.TrimSpace(item.Then) != "" {
 				parts = append(parts, item.Then)
 			}

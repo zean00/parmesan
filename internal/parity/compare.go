@@ -158,7 +158,7 @@ func checkExpectations(exp Expectations, got NormalizedResult, label string) []s
 		}
 	}
 	for _, needle := range exp.ResponseSemantics.MustNotInclude {
-		if containsFold(got.ResponseText, needle) {
+		if violatesMustNotInclude(got.ResponseText, needle) {
 			out = append(out, fmt.Sprintf("%s response unexpectedly contains %q", label, needle))
 		}
 	}
@@ -246,12 +246,92 @@ func containsFold(haystack, needle string) bool {
 	return strings.Contains(strings.ToLower(haystack), strings.ToLower(needle))
 }
 
+func violatesMustNotInclude(haystack, needle string) bool {
+	lowerHaystack := strings.ToLower(haystack)
+	lowerNeedle := strings.ToLower(strings.TrimSpace(needle))
+	if lowerNeedle == "" || !strings.Contains(lowerHaystack, lowerNeedle) {
+		return false
+	}
+	for _, sentence := range splitSentences(lowerHaystack) {
+		searchFrom := 0
+		for {
+			relativeIdx := strings.Index(sentence[searchFrom:], lowerNeedle)
+			if relativeIdx < 0 {
+				break
+			}
+			idx := searchFrom + relativeIdx
+			if !sentenceNegatesNeedleAt(sentence, lowerNeedle, idx) {
+				return true
+			}
+			searchFrom = idx + len(lowerNeedle)
+			if searchFrom >= len(sentence) {
+				break
+			}
+		}
+	}
+	return false
+}
+
 func semanticContains(haystack, needle string) bool {
 	if containsFold(haystack, needle) {
 		return true
 	}
 	for _, alt := range splitAlternatives(needle) {
 		if semanticContainsAlternative(haystack, alt) {
+			return true
+		}
+	}
+	return false
+}
+
+func splitSentences(text string) []string {
+	replacer := strings.NewReplacer("!", ".", "?", ".", "\n", ".")
+	parts := strings.Split(replacer.Replace(text), ".")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	if len(out) == 0 {
+		return []string{text}
+	}
+	return out
+}
+
+func sentenceNegatesNeedleAt(sentence, needle string, idx int) bool {
+	if idx < 0 || idx+len(needle) > len(sentence) {
+		return false
+	}
+	start := idx - 24
+	if start < 0 {
+		start = 0
+	}
+	end := idx + len(needle) + 40
+	if end > len(sentence) {
+		end = len(sentence)
+	}
+	window := sentence[start:end]
+	negations := []string{
+		"not " + needle,
+		"no " + needle,
+		"without " + needle,
+		needle + " isn't",
+		needle + " is not",
+		needle + " wasn't",
+		needle + " was not",
+		needle + " aren't",
+		needle + " are not",
+		needle + " unavailable",
+		needle + " not available",
+		needle + " isn't available",
+		needle + " is not available",
+		"don't " + needle,
+		"do not " + needle,
+	}
+	for _, negation := range negations {
+		if strings.Contains(window, negation) {
 			return true
 		}
 	}

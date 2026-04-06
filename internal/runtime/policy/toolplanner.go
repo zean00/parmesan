@@ -11,6 +11,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/model"
+	semantics "github.com/sahal/parmesan/internal/runtime/semantics"
 )
 
 func buildToolPlan(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, journeyDecision JourneyDecision, guidelines []policy.Guideline, exposedTools []string, approvals map[string]string, relationships []policy.Relationship, catalog []tool.CatalogEntry) (ToolCallPlan, ToolDecision) {
@@ -328,13 +329,33 @@ func buildToolCandidates(matchCtx MatchingContext, activeJourney *policy.Journey
 			approvalMode = "auto"
 		}
 		references := referenceToolsForEntry(entry, relationships, exposedTools, catalog)
+		var activeStateTool, activeStateMCPTool, activeJourneyID string
+		if activeState != nil {
+			activeStateTool = activeState.Tool
+			if activeState.MCP != nil {
+				activeStateMCPTool = activeState.MCP.Tool
+			}
+		}
+		if activeJourney != nil {
+			activeJourneyID = activeJourney.ID
+		}
+		grounding := semantics.DefaultToolGroundingEvaluator{}.Evaluate(semantics.ToolGroundingContext{
+			LatestCustomerText: matchCtx.LatestCustomerText,
+			ActiveJourneyID:    activeJourneyID,
+			ActiveStateTool:    activeStateTool,
+			ActiveStateMCPTool: activeStateMCPTool,
+			Guidelines:         guidelines,
+			ToolName:           entry.Name,
+			ToolDescription:    entry.Description,
+		})
 		candidate := ToolCandidate{
 			ToolID:               entry.Name,
 			GroupKey:             toolOverlapGroup(entry),
 			ReferenceTools:       references,
 			Consequential:        toolConsequential(entry),
 			AutoApproved:         toolAutoApproved(entry),
-			Grounded:             toolCandidateGrounded(matchCtx, activeJourney, activeState, guidelines, entry),
+			Grounded:             grounding.Grounded,
+			GroundingEvidence:    grounding,
 			AlreadyStaged:        toolCandidateAlreadyStaged(matchCtx, entry, args, specs),
 			SameCallStaged:       toolCandidateSameCallAlreadyStaged(matchCtx, entry, args, specs),
 			AlreadySatisfied:     alreadySatisfied,
@@ -342,7 +363,7 @@ func buildToolCandidates(matchCtx MatchingContext, activeJourney *policy.Journey
 			Arguments:            args,
 			MissingIssues:        missing,
 			InvalidIssues:        invalid,
-			PreparationRationale: toolCandidatePreparationRationale(activeState, guidelines, entry, references),
+			PreparationRationale: firstNonEmpty(grounding.Rationale, toolCandidatePreparationRationale(activeState, guidelines, entry, references)),
 		}
 		if toolCandidateInvalidatedByJourneyBacktrack(entry, activeState, journeyDecision) {
 			candidate.AlreadySatisfied = false
@@ -490,15 +511,17 @@ func evaluateSingleToolBatch(ctx context.Context, router *model.Router, matchCtx
 		selected, rationale := selectToolCandidate(ctx, router, matchCtx, activeJourney, activeState, guidelines, pool)
 		if strings.TrimSpace(selected) == candidate.ToolID {
 			batch.SelectedTool = candidate.ToolID
-			batch.Rationale = firstNonEmpty(rationale, toolSpecializationRationale(candidate, candidates), candidate.PreparationRationale)
+			selection := semantics.DefaultToolSelectionEvaluator{}.Evaluate(semantics.ToolSelectionContextFromIDs(candidate.ToolID, candidate.ReferenceTools, selected, candidateToolIDs(candidates)))
+			batch.Rationale = firstNonEmpty(rationale, selection.Rationale, candidate.PreparationRationale)
 			return batch
 		}
 		if strings.TrimSpace(selected) != "" {
-			if shouldRunToolInTandem(candidate, selected, candidates) {
+			selection := semantics.DefaultToolSelectionEvaluator{}.Evaluate(semantics.ToolSelectionContextFromIDs(candidate.ToolID, candidate.ReferenceTools, selected, candidateToolIDs(candidates)))
+			if selection.RunInTandem {
 				batch.SelectedTool = candidate.ToolID
 				batch.RunInTandemWith = []string{strings.TrimSpace(selected)}
 				batch.Rationale = firstNonEmpty(
-					"candidate should still run in tandem with the better reference tool",
+					selection.Rationale,
 					candidate.PreparationRationale,
 					rationale,
 				)
@@ -510,14 +533,15 @@ func evaluateSingleToolBatch(ctx context.Context, router *model.Router, matchCtx
 	}
 	if len(candidate.ReferenceTools) > 0 {
 		for _, ref := range candidate.ReferenceTools {
-			if !shouldRunToolInTandem(candidate, ref, candidates) {
+			selection := semantics.DefaultToolSelectionEvaluator{}.Evaluate(semantics.ToolSelectionContextFromIDs(candidate.ToolID, candidate.ReferenceTools, ref, candidateToolIDs(candidates)))
+			if !selection.RunInTandem {
 				continue
 			}
 			if refCandidate, ok := findCandidate(candidates, ref); ok && candidateRunnable(refCandidate) {
 				batch.SelectedTool = candidate.ToolID
 				batch.RunInTandemWith = []string{ref}
 				batch.Rationale = firstNonEmpty(
-					"candidate should still run in tandem with the better reference tool",
+					selection.Rationale,
 					candidate.PreparationRationale,
 				)
 				return batch
@@ -527,7 +551,7 @@ func evaluateSingleToolBatch(ctx context.Context, router *model.Router, matchCtx
 	if candidate.ShouldRun && (candidate.Grounded || !hasGroundedRunnableCandidate(candidates)) {
 		batch.SelectedTool = candidate.ToolID
 	}
-	batch.Rationale = firstNonEmpty(toolSpecializationRationale(candidate, candidates), candidate.PreparationRationale, candidate.Rationale)
+	batch.Rationale = firstNonEmpty(semantics.DefaultToolSelectionEvaluator{}.Evaluate(semantics.ToolSelectionContextFromIDs(candidate.ToolID, candidate.ReferenceTools, "", candidateToolIDs(candidates))).Rationale, candidate.PreparationRationale, candidate.Rationale)
 	return batch
 }
 
@@ -548,7 +572,7 @@ func evaluateOverlappingToolBatch(ctx context.Context, router *model.Router, mat
 	if strings.TrimSpace(selected) != "" {
 		batch.SelectedTool = strings.TrimSpace(selected)
 		if candidate, ok := findCandidate(candidates, batch.SelectedTool); ok {
-			rationale = firstNonEmpty(toolSpecializationRationale(candidate, candidates), rationale)
+			rationale = firstNonEmpty(semantics.DefaultToolSelectionEvaluator{}.Evaluate(semantics.ToolSelectionContextFromIDs(candidate.ToolID, candidate.ReferenceTools, "", candidateToolIDs(candidates))).Rationale, rationale)
 		}
 	}
 	batch.Rationale = firstNonEmpty(rationale, "choose the most specialized overlapping tool for the request")
@@ -778,29 +802,6 @@ func firstMatchingCandidateToolID(candidates []ToolCandidate, toolRef string) st
 	return toolRef
 }
 
-func toolCandidateGrounded(matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, guidelines []policy.Guideline, entry tool.CatalogEntry) bool {
-	text := strings.ToLower(matchCtx.LatestCustomerText)
-	if text == "" {
-		return false
-	}
-	if activeState != nil && (strings.EqualFold(strings.TrimSpace(activeState.Tool), entry.Name) || (activeState.MCP != nil && strings.EqualFold(strings.TrimSpace(activeState.MCP.Tool), entry.Name))) {
-		return true
-	}
-	for _, guideline := range guidelines {
-		if containsAnyKeyword(text, entry.Name, entry.Description) {
-			return true
-		}
-		guidelineText := strings.TrimSpace(guideline.When + " " + guideline.Then)
-		if containsAnyKeyword(strings.ToLower(guidelineText), entry.Name, entry.Description) {
-			return true
-		}
-	}
-	if activeJourney != nil && containsAnyKeyword(text, activeJourney.ID) {
-		return true
-	}
-	return containsAnyKeyword(text, entry.Name, entry.Description)
-}
-
 func toolCandidatePreparationRationale(activeState *policy.JourneyNode, guidelines []policy.Guideline, entry tool.CatalogEntry, references []string) string {
 	if activeState != nil && strings.EqualFold(strings.TrimSpace(activeState.Tool), entry.Name) {
 		return "journey state explicitly requires the tool"
@@ -816,27 +817,15 @@ func toolCandidatePreparationRationale(activeState *policy.JourneyNode, guidelin
 	return "tool is exposed by active policy"
 }
 
-func toolSpecializationRationale(candidate ToolCandidate, candidates []ToolCandidate) string {
-	if len(candidate.ReferenceTools) == 0 {
-		return ""
-	}
-	candidateName := strings.ToLower(strings.ReplaceAll(candidate.ToolID, "_", " "))
-	for _, ref := range candidate.ReferenceTools {
-		refCandidate, ok := findCandidate(candidates, ref)
-		if !ok {
+func candidateToolIDs(candidates []ToolCandidate) []string {
+	out := make([]string, 0, len(candidates))
+	for _, item := range candidates {
+		if strings.TrimSpace(item.ToolID) == "" {
 			continue
 		}
-		refName := strings.ToLower(strings.ReplaceAll(refCandidate.ToolID, "_", " "))
-		switch {
-		case strings.Contains(candidateName, "motorcycle") && strings.Contains(refName, "vehicle"):
-			return "candidate tool is more specialized for this use case than the reference tool"
-		case strings.Contains(candidateName, "indoor") && strings.Contains(refName, "temperature"):
-			return "candidate tool is more specialized for this use case than the reference tool"
-		case strings.Contains(candidateName, "product") && strings.Contains(refName, "search"):
-			return "candidate tool is more specialized for this use case than the reference tool"
-		}
+		out = append(out, item.ToolID)
 	}
-	return ""
+	return out
 }
 
 func shouldRunToolInTandem(candidate ToolCandidate, selected string, candidates []ToolCandidate) bool {
@@ -844,15 +833,28 @@ func shouldRunToolInTandem(candidate ToolCandidate, selected string, candidates 
 	if !ok {
 		return false
 	}
-	candidateName := strings.ToLower(strings.ReplaceAll(candidate.ToolID, "_", " "))
-	selectedName := strings.ToLower(strings.ReplaceAll(selectedCandidate.ToolID, "_", " "))
-	switch {
-	case containsAnyKeyword(candidateName, "confirm", "confirmation", "notify", "email") &&
-		containsAnyKeyword(selectedName, "schedule", "book", "appointment", "reschedule"):
-		return true
-	default:
-		return false
+	candidateCats := semantics.Categories(semantics.Signals(strings.ToLower(strings.ReplaceAll(candidate.ToolID, "_", " "))))
+	selectedCats := semantics.Categories(semantics.Signals(strings.ToLower(strings.ReplaceAll(selectedCandidate.ToolID, "_", " "))))
+	_, candidateIsConfirmation := candidateCats["confirmation"]
+	_, selectedIsScheduling := selectedCats["scheduling"]
+	return candidateIsConfirmation && selectedIsScheduling
+}
+
+func matchedSemanticTerms(text string, terms []string) []string {
+	if strings.TrimSpace(text) == "" || len(terms) == 0 {
+		return nil
 	}
+	textTerms := map[string]struct{}{}
+	for _, term := range semantics.Signals(text) {
+		textTerms[term] = struct{}{}
+	}
+	var matched []string
+	for _, term := range terms {
+		if _, ok := textTerms[term]; ok {
+			matched = append(matched, term)
+		}
+	}
+	return dedupe(matched)
 }
 
 func inferToolArgumentsFromContext(matchCtx MatchingContext, specs map[string]toolArgumentSpec) map[string]any {
@@ -874,65 +876,118 @@ func inferToolArgumentsFromText(lower string, specs map[string]toolArgumentSpec)
 }
 
 func inferArgumentFromText(field string, spec toolArgumentSpec, lower string) (any, bool) {
-	if len(spec.Choices) > 0 {
-		for _, choice := range spec.Choices {
-			if strings.Contains(lower, strings.ToLower(choice)) {
-				return choice, true
-			}
-		}
-		if field == "destination" {
-			if value := inferPhraseAfter(lower, "to"); value != "" {
-				return strings.Title(value), true
-			}
-		}
+	result := semantics.DefaultArgumentExtractor{}.Extract(semantics.ArgumentExtractionContext{
+		Field:        field,
+		Choices:      spec.Choices,
+		Text:         lower,
+		TextEvidence: semantics.AnalyzeText(lower),
+	})
+	if strings.TrimSpace(result.Value) == "" {
+		return nil, false
 	}
-	switch field {
-	case "vendor", "brand", "manufacturer":
-		for _, marker := range []string{"dell", "samsung", "apple", "lenovo", "hp", "asus"} {
-			if strings.Contains(lower, marker) {
-				return strings.Title(marker), true
-			}
-		}
-	case "keyword":
-		for _, marker := range []string{"laptop", "ssd", "phone", "tablet"} {
-			if strings.Contains(lower, marker) {
-				return strings.ToUpper(marker[:1]) + marker[1:], true
-			}
-		}
-	case "model", "product_name", "query":
-		if value := inferPhraseAfter(lower, "for a"); value != "" {
-			return strings.TrimSpace(value), true
-		}
-		if value := inferPhraseAfter(lower, "for"); value != "" {
-			return strings.TrimSpace(value), true
-		}
+	if field == "destination" {
+		return strings.Title(result.Value), true
 	}
-	return nil, false
+	return strings.TrimSpace(result.Value), true
 }
 
-func inferPhraseAfter(text string, marker string) string {
-	text = strings.TrimSpace(text)
-	marker = strings.TrimSpace(marker)
-	if text == "" || marker == "" {
+func inferDateLikePhrase(text string, evidence semanticTextSnapshot) string {
+	if marker := semantics.RelativeDateTerm(text); marker != "" && marker != "return in" {
+		return marker
+	}
+	if evidence.HasDate {
+		return text
+	}
+	return ""
+}
+
+func extractArgumentEntity(text string, kind argumentSlotKind) string {
+	extractor, ok := semantics.SlotExtractorForKind(semantics.SlotKind(kind))
+	if !ok {
 		return ""
 	}
-	if idx := strings.Index(text, marker+" "); idx >= 0 {
-		remainder := strings.TrimSpace(text[idx+len(marker):])
-		remainder = strings.TrimLeft(remainder, " ")
-		remainder = strings.Trim(remainder, ".,!?;:\"'()[]{}")
-		return remainder
-	}
+	return extractEntityAfterMarkers(text, extractor.Markers, extractor.StopTokens)
+}
+
+func trimArgumentEntity(text string, stopTokens []string) string {
 	parts := strings.Fields(text)
-	for i := 0; i < len(parts)-1; i++ {
-		if parts[i] != marker {
+	if len(parts) == 0 {
+		return ""
+	}
+	var kept []string
+stopLoop:
+	for i, part := range parts {
+		token := strings.Trim(strings.ToLower(part), ".,!?;:\"'()[]{}")
+		for _, stop := range stopTokens {
+			if token == stop {
+				break stopLoop
+			}
+		}
+		if i == 0 && (token == "a" || token == "an" || token == "the") {
 			continue
 		}
-		value := strings.Trim(parts[i+1], ".,!?;:\"'()[]{}")
-		if value != "" {
+		kept = append(kept, strings.Trim(part, ".,!?;:\"'()[]{}"))
+	}
+	return strings.TrimSpace(strings.Join(kept, " "))
+}
+
+func extractEntityAfterMarkers(text string, markers []string, stopTokens []string) string {
+	text = strings.TrimSpace(text)
+	if text == "" || len(markers) == 0 {
+		return ""
+	}
+	for _, marker := range markers {
+		marker = strings.TrimSpace(marker)
+		if marker == "" {
+			continue
+		}
+		idx := strings.Index(text, marker+" ")
+		if idx < 0 {
+			continue
+		}
+		remainder := strings.TrimSpace(text[idx+len(marker):])
+		remainder = strings.TrimLeft(remainder, " ")
+		if value := trimArgumentEntity(remainder, stopTokens); value != "" {
 			return value
 		}
 	}
 	return ""
+}
+
+func inferredBrand(text string) string {
+	for _, signal := range semantics.Signals(text) {
+		switch signal {
+		case "dell", "samsung", "apple", "lenovo", "hp", "asus":
+			return strings.Title(signal)
+		}
+	}
+	return ""
+}
+
+func inferredKeyword(text string) string {
+	for _, signal := range semantics.Signals(text) {
+		switch signal {
+		case "laptop", "ssd", "phone", "tablet":
+			return strings.ToUpper(signal[:1]) + signal[1:]
+		}
+	}
+	return ""
+}
+
+func termSetsEqual(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftSet := map[string]struct{}{}
+	for _, item := range left {
+		leftSet[item] = struct{}{}
+	}
+	for _, item := range right {
+		if _, ok := leftSet[item]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func toolCandidateAlreadyStaged(matchCtx MatchingContext, entry tool.CatalogEntry, args map[string]any, specs map[string]toolArgumentSpec) bool {

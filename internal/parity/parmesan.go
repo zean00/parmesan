@@ -57,38 +57,43 @@ func hasProviderEnv() bool {
 	return strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")) != "" || strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) != ""
 }
 
-func normalizeParmesan(view policyruntime.ResolvedView, catalog []tool.CatalogEntry, response string, toolCalls []ToolCall, noMatch bool, verification string) NormalizedResult {
-	exposed := normalizeToolNames(view.ExposedTools, catalog)
-	selected := normalizeSelectedTool(view.ToolDecision.SelectedTool, toolCalls, catalog)
+func normalizeParmesan(view policyruntime.EngineResult, catalog []tool.CatalogEntry, response string, toolCalls []ToolCall, noMatch bool, verification string) NormalizedResult {
+	journeyDecision := view.JourneyProgressStage.Decision
+	toolPlan := view.ToolPlanStage.Plan
+	toolDecision := view.ToolDecisionStage.Decision
+	matchedObservations := view.ObservationStage.Observations
+	exposed := normalizeToolNames(view.ToolExposureStage.ExposedTools, catalog)
+	selected := normalizeSelectedTool(toolDecision.SelectedTool, toolCalls, catalog)
 	effectiveJourneyState := effectiveJourneyState(view)
+	analysis := view.ResponseAnalysisStage.Analysis
 	out := NormalizedResult{
-		MatchedObservations:              idsFromObservations(view.MatchedObservations),
+		MatchedObservations:              idsFromObservations(matchedObservations),
 		MatchedGuidelines:                normalizeMatchedGuidelines(view),
-		SuppressedGuidelines:             normalizedSuppressedGuidelines(view.SuppressedGuidelines, view.ResolutionRecords),
+		SuppressedGuidelines:             normalizedSuppressedGuidelines(view.SuppressedGuidelines, view.ResolutionRecords, view.MatchFinalizeStage.MatchedGuidelines),
 		SuppressionReasons:               suppressionReasons(view.SuppressedGuidelines),
 		ResolutionRecords:                normalizeResolutionRecords(view.ResolutionRecords),
 		ProjectedFollowUps:               projectedFollowUps(view.ProjectedNodes),
 		LegalFollowUps:                   legalFollowUps(view.ProjectedNodes),
 		ExposedTools:                     exposed,
-		ToolCandidates:                   normalizeToolCandidates(view.ToolPlan.Candidates, catalog),
-		ToolCandidateStates:              normalizeToolCandidateStates(view.ToolPlan.Candidates, catalog),
-		ToolCandidateRejectedBy:          normalizeToolCandidateRejectedBy(view.ToolPlan.Candidates, catalog),
-		ToolCandidateReasons:             normalizeToolCandidateReasons(view.ToolPlan.Candidates, catalog),
-		ToolCandidateTandemWith:          normalizeToolCandidateTandemWith(view.ToolPlan.Candidates, catalog),
-		OverlappingToolGroups:            normalizeToolGroups(view.ToolPlan.OverlappingGroups, catalog),
+		ToolCandidates:                   normalizeToolCandidates(toolPlan.Candidates, catalog),
+		ToolCandidateStates:              normalizeToolCandidateStates(toolPlan.Candidates, catalog),
+		ToolCandidateRejectedBy:          normalizeToolCandidateRejectedBy(toolPlan.Candidates, catalog),
+		ToolCandidateReasons:             normalizeToolCandidateReasons(toolPlan.Candidates, catalog),
+		ToolCandidateTandemWith:          normalizeToolCandidateTandemWith(toolPlan.Candidates, catalog),
+		OverlappingToolGroups:            normalizeToolGroups(toolPlan.OverlappingGroups, catalog),
 		SelectedTool:                     selected,
-		SelectedTools:                    normalizeSelectedTools(view.ToolPlan.SelectedTools, toolCalls, catalog),
+		SelectedTools:                    normalizeSelectedTools(toolPlan.SelectedTools, toolCalls, catalog),
 		ToolCallTools:                    normalizeToolCallTools(toolCalls),
 		ResponseMode:                     normalizeMode(view.CompositionMode),
 		NoMatch:                          noMatch,
 		ResponseText:                     strings.TrimSpace(response),
 		ToolCalls:                        toolCalls,
 		VerificationOutcome:              verification,
-		ResponseAnalysisStillRequired:    responseAnalysisStillRequired(view.ResponseAnalysis),
-		ResponseAnalysisAlreadySatisfied: responseAnalysisAlreadySatisfied(view.ResponseAnalysis),
-		ResponseAnalysisPartiallyApplied: responseAnalysisPartiallyApplied(view.ResponseAnalysis),
-		ResponseAnalysisToolSatisfied:    responseAnalysisToolSatisfied(view.ResponseAnalysis),
-		ResponseAnalysisSources:          responseAnalysisSources(view.ResponseAnalysis),
+		ResponseAnalysisStillRequired:    responseAnalysisStillRequired(analysis),
+		ResponseAnalysisAlreadySatisfied: responseAnalysisAlreadySatisfied(analysis),
+		ResponseAnalysisPartiallyApplied: responseAnalysisPartiallyApplied(analysis),
+		ResponseAnalysisToolSatisfied:    responseAnalysisToolSatisfied(analysis),
+		ResponseAnalysisSources:          responseAnalysisSources(analysis),
 	}
 	if view.ActiveJourney != nil {
 		out.ActiveJourney = view.ActiveJourney.ID
@@ -96,27 +101,27 @@ func normalizeParmesan(view policyruntime.ResolvedView, catalog []tool.CatalogEn
 	if effectiveJourneyState != nil {
 		out.ActiveJourneyNode = effectiveJourneyState.ID
 	}
-	if view.JourneyDecision.Action != "" {
-		out.JourneyDecision = view.JourneyDecision.Action
-		out.NextJourneyNode = firstNonEmpty(view.JourneyDecision.NextState, view.JourneyDecision.BacktrackTo)
+	if journeyDecision.Action != "" {
+		out.JourneyDecision = journeyDecision.Action
+		out.NextJourneyNode = firstNonEmpty(journeyDecision.NextState, journeyDecision.BacktrackTo)
 	} else {
 		out.JourneyDecision = "ignore"
 	}
 	if out.NextJourneyNode == "" && out.JourneyDecision == "continue" && out.ActiveJourneyNode != "" {
 		out.NextJourneyNode = out.ActiveJourneyNode
 	}
-	if view.ToolDecision.CanRun || len(view.ToolDecision.MissingArguments) > 0 || len(view.ToolDecision.InvalidArguments) > 0 {
-		canRun := view.ToolDecision.CanRun
+	if toolDecision.CanRun || len(toolDecision.MissingArguments) > 0 || len(toolDecision.InvalidArguments) > 0 {
+		canRun := toolDecision.CanRun
 		out.ToolCanRun = &canRun
 	}
-	if strings.TrimSpace(view.ResponseAnalysis.RecommendedTemplate) != "" {
-		out.SelectedTemplate = strings.TrimSpace(view.ResponseAnalysis.RecommendedTemplate)
+	if strings.TrimSpace(analysis.RecommendedTemplate) != "" {
+		out.SelectedTemplate = strings.TrimSpace(analysis.RecommendedTemplate)
 	}
 	return out
 }
 
-func normalizeMatchedGuidelines(view policyruntime.ResolvedView) []string {
-	ids := idsFromGuidelines(view.MatchedGuidelines)
+func normalizeMatchedGuidelines(view policyruntime.EngineResult) []string {
+	ids := idsFromGuidelines(view.MatchFinalizeStage.MatchedGuidelines)
 	if view.ActiveJourney == nil {
 		return ids
 	}
@@ -141,20 +146,35 @@ func normalizeMatchedGuidelines(view policyruntime.ResolvedView) []string {
 	return dedupeAndSort(out)
 }
 
-func effectiveJourneyState(view policyruntime.ResolvedView) *policy.JourneyNode {
+func effectiveJourneyState(view policyruntime.EngineResult) *policy.JourneyNode {
 	return view.ActiveJourneyState
 }
 
-func normalizedSuppressedGuidelines(items []policyruntime.SuppressedGuideline, resolutions []policyruntime.ResolutionRecord) []string {
+func normalizedSuppressedGuidelines(items []policyruntime.SuppressedGuideline, resolutions []policyruntime.ResolutionRecord, matched []policy.Guideline) []string {
 	out := idsFromSuppressed(items)
-	activeJourneys := map[string]struct{}{}
+	finalKinds := map[string]policyruntime.ResolutionKind{}
 	for _, item := range resolutions {
-		if strings.HasPrefix(strings.TrimSpace(item.EntityID), "journey:") && item.Kind == policyruntime.ResolutionNone {
-			activeJourneys[strings.TrimSpace(strings.TrimPrefix(item.EntityID, "journey:"))] = struct{}{}
+		finalKinds[strings.TrimSpace(item.EntityID)] = item.Kind
+	}
+	activeJourneys := map[string]struct{}{}
+	activeEntities := map[string]struct{}{}
+	for _, item := range matched {
+		activeEntities[strings.TrimSpace(item.ID)] = struct{}{}
+	}
+	for entityID, kind := range finalKinds {
+		if kind != policyruntime.ResolutionNone {
+			continue
+		}
+		activeEntities[entityID] = struct{}{}
+		if strings.HasPrefix(entityID, "journey:") {
+			activeJourneys[strings.TrimSpace(strings.TrimPrefix(entityID, "journey:"))] = struct{}{}
 		}
 	}
 	filtered := out[:0]
 	for _, id := range out {
+		if _, ok := activeEntities[strings.TrimSpace(id)]; ok {
+			continue
+		}
 		if strings.HasPrefix(id, "journey_node:") {
 			parts := strings.SplitN(strings.TrimSpace(id), ":", 3)
 			if len(parts) >= 3 {
@@ -169,6 +189,9 @@ func normalizedSuppressedGuidelines(items []policyruntime.SuppressedGuideline, r
 	for _, item := range resolutions {
 		switch item.Kind {
 		case policyruntime.ResolutionDeprioritized, policyruntime.ResolutionUnmetDependency, policyruntime.ResolutionUnmetDependencyAny:
+			if _, ok := activeEntities[strings.TrimSpace(item.EntityID)]; ok {
+				continue
+			}
 			if strings.HasPrefix(strings.TrimSpace(item.EntityID), "journey:") && strings.Contains(strings.ToLower(item.Details.Description), "higher numerical priority entity") {
 				continue
 			}
@@ -482,18 +505,20 @@ func normalizeMode(mode string) string {
 	}
 }
 
-func runFixtureTool(view policyruntime.ResolvedView, catalog []tool.CatalogEntry) (map[string]any, []ToolCall) {
-	if len(view.ToolPlan.Calls) > 0 {
+func runFixtureTool(view policyruntime.EngineResult, catalog []tool.CatalogEntry) (map[string]any, []ToolCall) {
+	toolPlan := view.ToolPlanStage.Plan
+	toolDecision := view.ToolDecisionStage.Decision
+	if len(toolPlan.Calls) > 0 {
 		allowed := runnablePlannedTools(view, catalog)
 		var calls []ToolCall
 		outputs := map[string]any{}
-		for _, call := range view.ToolPlan.Calls {
+		for _, call := range toolPlan.Calls {
 			if len(allowed) > 0 {
 				if _, ok := allowed[fullToolID(call.ToolID, catalog)]; !ok {
 					continue
 				}
 			}
-			candidate, ok := findParityCandidate(view.ToolPlan.Candidates, call.ToolID)
+			candidate, ok := findParityCandidate(toolPlan.Candidates, call.ToolID)
 			if ok && (candidate.AlreadySatisfied || candidate.AlreadyStaged || len(candidate.MissingIssues) > 0 || len(candidate.InvalidIssues) > 0) {
 				continue
 			}
@@ -526,9 +551,9 @@ func runFixtureTool(view policyruntime.ResolvedView, catalog []tool.CatalogEntry
 		}
 		return nil, calls
 	}
-	selectedTools := append([]string(nil), view.ToolPlan.SelectedTools...)
-	if len(selectedTools) == 0 && strings.TrimSpace(view.ToolDecision.SelectedTool) != "" && view.ToolDecision.CanRun {
-		selectedTools = append(selectedTools, view.ToolDecision.SelectedTool)
+	selectedTools := append([]string(nil), toolPlan.SelectedTools...)
+	if len(selectedTools) == 0 && strings.TrimSpace(toolDecision.SelectedTool) != "" && toolDecision.CanRun {
+		selectedTools = append(selectedTools, toolDecision.SelectedTool)
 	}
 	if len(selectedTools) == 0 {
 		return nil, nil
@@ -536,14 +561,14 @@ func runFixtureTool(view policyruntime.ResolvedView, catalog []tool.CatalogEntry
 	var calls []ToolCall
 	outputs := map[string]any{}
 	for _, name := range selectedTools {
-		candidate, ok := findParityCandidate(view.ToolPlan.Candidates, name)
+		candidate, ok := findParityCandidate(toolPlan.Candidates, name)
 		if !ok {
-			if strings.TrimSpace(view.ToolDecision.SelectedTool) != strings.TrimSpace(name) || !view.ToolDecision.CanRun {
+			if strings.TrimSpace(toolDecision.SelectedTool) != strings.TrimSpace(name) || !toolDecision.CanRun {
 				continue
 			}
 			candidate = policyruntime.ToolCandidate{
 				ToolID:    name,
-				Arguments: cloneMap(view.ToolDecision.Arguments),
+				Arguments: cloneMap(toolDecision.Arguments),
 			}
 		}
 		if candidate.AlreadySatisfied || candidate.AlreadyStaged || len(candidate.MissingIssues) > 0 || len(candidate.InvalidIssues) > 0 {
@@ -579,17 +604,19 @@ func runFixtureTool(view policyruntime.ResolvedView, catalog []tool.CatalogEntry
 	return nil, calls
 }
 
-func runnablePlannedTools(view policyruntime.ResolvedView, catalog []tool.CatalogEntry) map[string]struct{} {
+func runnablePlannedTools(view policyruntime.EngineResult, catalog []tool.CatalogEntry) map[string]struct{} {
+	toolPlan := view.ToolPlanStage.Plan
+	toolDecision := view.ToolDecisionStage.Decision
 	out := map[string]struct{}{}
-	for _, name := range view.ToolPlan.SelectedTools {
-		candidate, ok := findParityCandidate(view.ToolPlan.Candidates, name)
+	for _, name := range toolPlan.SelectedTools {
+		candidate, ok := findParityCandidate(toolPlan.Candidates, name)
 		if ok && (candidate.AlreadySatisfied || candidate.AlreadyStaged || len(candidate.MissingIssues) > 0 || len(candidate.InvalidIssues) > 0) {
 			continue
 		}
 		out[fullToolID(name, catalog)] = struct{}{}
 	}
-	if strings.TrimSpace(view.ToolDecision.SelectedTool) != "" && view.ToolDecision.CanRun {
-		out[fullToolID(view.ToolDecision.SelectedTool, catalog)] = struct{}{}
+	if strings.TrimSpace(toolDecision.SelectedTool) != "" && toolDecision.CanRun {
+		out[fullToolID(toolDecision.SelectedTool, catalog)] = struct{}{}
 	}
 	return out
 }
@@ -896,28 +923,30 @@ func fullToolID(name string, catalog []tool.CatalogEntry) string {
 	return name
 }
 
-func renderParityResponse(view policyruntime.ResolvedView, toolOutput map[string]any) string {
+func renderParityResponse(view policyruntime.EngineResult, toolOutput map[string]any) string {
+	analysis := view.ResponseAnalysisStage.Analysis
 	if strings.TrimSpace(view.DisambiguationPrompt) != "" {
 		return strings.TrimSpace(view.DisambiguationPrompt)
 	}
-	if rendered := renderParityTemplateText(view.ResponseAnalysis.RecommendedTemplate, toolOutput); rendered != "" {
+	if rendered := renderParityTemplateText(analysis.RecommendedTemplate, toolOutput); rendered != "" {
 		return rendered
 	}
 	if strings.EqualFold(view.CompositionMode, "strict") {
-		if rendered := renderParityTemplate(view.CandidateTemplates, toolOutput); rendered != "" {
+		if rendered := renderParityTemplate(view.ResponseAnalysisStage.CandidateTemplates, toolOutput); rendered != "" {
 			return rendered
 		}
 		return strictNoMatchForParity(view.NoMatch)
 	}
-	if rendered := renderParityTemplate(view.CandidateTemplates, toolOutput); rendered != "" {
+	if rendered := renderParityTemplate(view.ResponseAnalysisStage.CandidateTemplates, toolOutput); rendered != "" {
 		return rendered
 	}
 	if rendered := renderParityToolOutput(toolOutput); rendered != "" {
 		return rendered
 	}
-	if len(view.MatchedGuidelines) > 0 {
-		parts := make([]string, 0, len(view.MatchedGuidelines))
-		for _, item := range view.MatchedGuidelines {
+	guidelines := view.MatchFinalizeStage.MatchedGuidelines
+	if len(guidelines) > 0 {
+		parts := make([]string, 0, len(guidelines))
+		for _, item := range guidelines {
 			if strings.TrimSpace(item.Then) != "" {
 				parts = append(parts, strings.TrimSpace(item.Then))
 			}

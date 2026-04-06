@@ -473,14 +473,16 @@ func TestRunnerExecutesMultipleSelectedTools(t *testing.T) {
 
 func TestDecisionForPlannedCallPreservesFinalizedArguments(t *testing.T) {
 	view := resolvedView{
-		ToolPlan: policyruntime.ToolCallPlan{
-			Candidates: []policyruntime.ToolCandidate{
-				{
-					ToolID:     "send_confirmation_email",
-					Arguments:  map[string]any{"session_id": "sess_1", "locale": "en"},
-					ShouldRun:  true,
-					Grounded:   true,
-					DecisionState: "selected",
+		ToolPlanStage: policyruntime.ToolPlanStageResult{
+			Plan: policyruntime.ToolCallPlan{
+				Candidates: []policyruntime.ToolCandidate{
+					{
+						ToolID:        "send_confirmation_email",
+						Arguments:     map[string]any{"session_id": "sess_1", "locale": "en"},
+						ShouldRun:     true,
+						Grounded:      true,
+						DecisionState: "selected",
+					},
 				},
 			},
 		},

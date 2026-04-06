@@ -15,6 +15,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/model"
+	"github.com/sahal/parmesan/internal/runtime/semantics"
 )
 
 func TestResolveBuildsARQDrivenView(t *testing.T) {
@@ -72,8 +73,8 @@ func TestResolveBuildsARQDrivenView(t *testing.T) {
 	if view.ActiveJourneyState == nil || view.ActiveJourneyState.ID != "collect_reason" {
 		t.Fatalf("active journey state = %#v, want collect_reason", view.ActiveJourneyState)
 	}
-	if len(view.ExposedTools) != 2 {
-		t.Fatalf("exposed tools = %#v, want 2 commerce tools", view.ExposedTools)
+	if len(view.ToolExposureStage.ExposedTools) != 2 {
+		t.Fatalf("exposed tools = %#v, want 2 commerce tools", view.ToolExposureStage.ExposedTools)
 	}
 	if len(view.ARQResults) < 4 {
 		t.Fatalf("ARQ results = %#v, want staged outputs", view.ARQResults)
@@ -93,6 +94,48 @@ func TestResolveBuildsARQDrivenView(t *testing.T) {
 	}
 	if !foundSized {
 		t.Fatalf("batch results = %#v, want at least one batch with recorded size metadata", view.BatchResults)
+	}
+	if len(view.ObservationStage.Matches) == 0 || len(view.ObservationStage.Observations) == 0 {
+		t.Fatalf("observation stage = %#v, want canonical observation stage on the resolved view", view.ObservationStage)
+	}
+	if len(view.MatchFinalizeStage.GuidelineMatches) == 0 {
+		t.Fatalf("match finalize stage = %#v, want canonical finalize stage on the resolved view", view.MatchFinalizeStage)
+	}
+	if len(view.JourneyProgressStage.Evaluation.JourneySatisfactions) == 0 {
+		t.Fatalf("journey satisfactions = %#v, want semantics artifacts on the resolved view", view.JourneyProgressStage.Evaluation.JourneySatisfactions)
+	}
+	if view.JourneyProgressStage.Decision.Action == "" {
+		t.Fatalf("journey progress stage = %#v, want canonical stage result on the resolved view", view.JourneyProgressStage)
+	}
+	if len(view.JourneyBacktrackStage.Evaluation.BacktrackEvaluations) == 0 && len(view.JourneyProgressStage.Evaluation.NextNodeEvaluations) == 0 {
+		t.Fatalf("journey evaluation artifacts = %#v / %#v, want persisted journey evaluation artifacts on the resolved view", view.JourneyBacktrackStage.Evaluation.BacktrackEvaluations, view.JourneyProgressStage.Evaluation.NextNodeEvaluations)
+	}
+	if len(view.JourneyProgressStage.Evaluation.NextNodeEvaluations) > 0 && view.JourneyProgressStage.Evaluation.SelectedNextNode.Selection.StateID == "" {
+		t.Fatalf("journey progress stage = %#v, want selected next-node evaluation on the canonical stage result", view.JourneyProgressStage)
+	}
+	if len(view.ConditionArtifactsStage.Artifacts) == 0 {
+		t.Fatalf("condition artifacts = %#v, want persisted condition evidence on the resolved view", view.ConditionArtifactsStage.Artifacts)
+	}
+	if len(view.ToolPlanStage.Evaluation.Grounding) == 0 || len(view.ToolPlanStage.Evaluation.SelectionEvidence) == 0 {
+		t.Fatalf("tool semantics artifacts = %#v / %#v, want grounding and selection artifacts", view.ToolPlanStage.Evaluation.Grounding, view.ToolPlanStage.Evaluation.SelectionEvidence)
+	}
+	if len(view.ResponseAnalysisStage.Evaluation.AnalyzedGuidelines) == 0 {
+		t.Fatalf("response analysis evaluation = %#v, want persisted response-analysis stage artifact", view.ResponseAnalysisStage.Evaluation)
+	}
+	if len(view.ResponseAnalysisStage.Analysis.AnalyzedGuidelines) == 0 {
+		t.Fatalf("response analysis stage = %#v, want canonical response-analysis stage result on the resolved view", view.ResponseAnalysisStage)
+	}
+	if len(view.ToolPlanStage.Evaluation.Candidates) == 0 {
+		t.Fatalf("tool plan evaluation = %#v, want persisted tool-plan stage artifact", view.ToolPlanStage.Evaluation)
+	}
+	if len(view.ToolPlanStage.Plan.Candidates) == 0 || view.ToolDecisionStage.Evaluation.FinalSelectedTool == "" {
+		t.Fatalf("tool stage results = %#v / %#v, want canonical tool stage results on the resolved view", view.ToolPlanStage, view.ToolDecisionStage)
+	}
+	if len(view.ToolPlanStage.Evaluation.Batches) == 0 {
+		t.Fatalf("tool batch evaluations = %#v, want persisted tool batch artifacts on the resolved view", view.ToolPlanStage.Evaluation.Batches)
+	}
+	if view.ToolDecisionStage.Evaluation.PlannedSelectedTool == "" {
+		t.Fatalf("tool decision evaluation = %#v, want persisted tool decision artifact on the resolved view", view.ToolDecisionStage.Evaluation)
 	}
 }
 
@@ -195,11 +238,12 @@ func TestResolveSuppressesAlreadyAppliedGuidelineWithoutNewTrigger(t *testing.T)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if len(view.MatchedGuidelines) != 0 {
-		t.Fatalf("matched guidelines = %#v, want none because guideline was already applied", view.MatchedGuidelines)
+	if len(view.MatchFinalizeStage.MatchedGuidelines) != 0 {
+		t.Fatalf("matched guidelines = %#v, want none because guideline was already applied", view.MatchFinalizeStage.MatchedGuidelines)
 	}
-	if len(view.ReapplyDecisions) != 1 || view.ReapplyDecisions[0].ShouldReapply {
-		t.Fatalf("reapply decisions = %#v, want no reapply", view.ReapplyDecisions)
+	reapply := view.PreviouslyAppliedStage.Decisions
+	if len(reapply) != 1 || reapply[0].ShouldReapply {
+		t.Fatalf("reapply decisions = %#v, want no reapply", reapply)
 	}
 }
 
@@ -241,8 +285,9 @@ func TestResolveBacktracksJourneyWhenStateNoLongerMatches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.JourneyDecision.Action != "backtrack" || view.JourneyDecision.BacktrackTo != "collect_reason" {
-		t.Fatalf("journey decision = %#v, want backtrack to collect_reason", view.JourneyDecision)
+	journeyDecision := view.JourneyProgressStage.Decision
+	if journeyDecision.Action != "backtrack" || journeyDecision.BacktrackTo != "collect_reason" {
+		t.Fatalf("journey decision = %#v, want backtrack to collect_reason", journeyDecision)
 	}
 }
 
@@ -284,8 +329,9 @@ func TestResolveRestartsJourneyFromRootForNewPurpose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.JourneyDecision.Action != "backtrack" || view.JourneyDecision.BacktrackTo != "collect_reason" {
-		t.Fatalf("journey decision = %#v, want restart from root state", view.JourneyDecision)
+	journeyDecision := view.JourneyProgressStage.Decision
+	if journeyDecision.Action != "backtrack" || journeyDecision.BacktrackTo != "collect_reason" {
+		t.Fatalf("journey decision = %#v, want restart from root state", journeyDecision)
 	}
 }
 
@@ -334,8 +380,9 @@ func TestResolveBacktracksToRelevantVisitedBranchPoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.JourneyDecision.Action != "backtrack" || view.JourneyDecision.BacktrackTo != "choose_method" {
-		t.Fatalf("journey decision = %#v, want backtrack to choose_method branch point", view.JourneyDecision)
+	journeyDecision := view.JourneyProgressStage.Decision
+	if journeyDecision.Action != "backtrack" || journeyDecision.BacktrackTo != "choose_method" {
+		t.Fatalf("journey decision = %#v, want backtrack to choose_method branch point", journeyDecision)
 	}
 }
 
@@ -382,8 +429,9 @@ func TestResolveAdvancesJourneyToBestGraphFollowUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.JourneyDecision.Action != "advance" || view.JourneyDecision.NextState != "ask_store" {
-		t.Fatalf("journey decision = %#v, want advance to ask_store", view.JourneyDecision)
+	journeyDecision := view.JourneyProgressStage.Decision
+	if journeyDecision.Action != "advance" || journeyDecision.NextState != "ask_store" {
+		t.Fatalf("journey decision = %#v, want advance to ask_store", journeyDecision)
 	}
 }
 
@@ -434,8 +482,9 @@ func TestResolveBacktracksAndFastForwardsThroughSatisfiedFollowUps(t *testing.T)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.JourneyDecision.Action != "backtrack" || view.JourneyDecision.BacktrackTo != "ask_size" || view.JourneyDecision.NextState != "check_stock" {
-		t.Fatalf("journey decision = %#v, want backtrack to ask_size then fast-forward to check_stock", view.JourneyDecision)
+	journeyDecision := view.JourneyProgressStage.Decision
+	if journeyDecision.Action != "backtrack" || journeyDecision.BacktrackTo != "ask_size" || journeyDecision.NextState != "check_stock" {
+		t.Fatalf("journey decision = %#v, want backtrack to ask_size then fast-forward to check_stock", journeyDecision)
 	}
 }
 
@@ -527,8 +576,9 @@ func TestResolveBacktracksWithoutFastForwardingAcrossStaleHistory(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.JourneyDecision.Action != "backtrack" || view.JourneyDecision.BacktrackTo != "ask_dropoff_location" || view.JourneyDecision.NextState != "" {
-		t.Fatalf("journey decision = %#v, want backtrack to ask_dropoff_location without fast-forwarding on stale history", view.JourneyDecision)
+	journeyDecision := view.JourneyProgressStage.Decision
+	if journeyDecision.Action != "backtrack" || journeyDecision.BacktrackTo != "ask_dropoff_location" || journeyDecision.NextState != "" {
+		t.Fatalf("journey decision = %#v, want backtrack to ask_dropoff_location without fast-forwarding on stale history", journeyDecision)
 	}
 }
 
@@ -581,11 +631,11 @@ func TestResolveKeepsGuidelineWhenJourneyDependencyUsesJourneyPrefix(t *testing.
 	if view.ActiveJourney == nil || view.ActiveJourney.ID != "Book Flight" {
 		t.Fatalf("active journey = %#v, want Book Flight", view.ActiveJourney)
 	}
-	if !containsGuideline(view.MatchedGuidelines, "under_21") {
-		t.Fatalf("matched guidelines = %#v, want under_21", view.MatchedGuidelines)
+	if !containsGuideline(view.MatchFinalizeStage.MatchedGuidelines, "under_21") {
+		t.Fatalf("matched guidelines = %#v, want under_21", view.MatchFinalizeStage.MatchedGuidelines)
 	}
-	if containsGuideline(view.MatchedGuidelines, "age_21_or_older") {
-		t.Fatalf("matched guidelines = %#v, do not want age_21_or_older", view.MatchedGuidelines)
+	if containsGuideline(view.MatchFinalizeStage.MatchedGuidelines, "age_21_or_older") {
+		t.Fatalf("matched guidelines = %#v, do not want age_21_or_older", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 	if !containsSuppressedGuideline(view.SuppressedGuidelines, "age_21_or_older") {
 		t.Fatalf("suppressed guidelines = %#v, want age_21_or_older", view.SuppressedGuidelines)
@@ -618,11 +668,11 @@ func TestResolveSuppressesWeakerSiblingGuidelinesDuringDisambiguation(t *testing
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if !containsGuideline(view.MatchedGuidelines, "report_lost") {
-		t.Fatalf("matched guidelines = %#v, want report_lost", view.MatchedGuidelines)
+	if !containsGuideline(view.MatchFinalizeStage.MatchedGuidelines, "report_lost") {
+		t.Fatalf("matched guidelines = %#v, want report_lost", view.MatchFinalizeStage.MatchedGuidelines)
 	}
-	if containsGuideline(view.MatchedGuidelines, "lock_card") || containsGuideline(view.MatchedGuidelines, "replacement_card") {
-		t.Fatalf("matched guidelines = %#v, do not want weaker sibling card actions", view.MatchedGuidelines)
+	if containsGuideline(view.MatchFinalizeStage.MatchedGuidelines, "lock_card") || containsGuideline(view.MatchFinalizeStage.MatchedGuidelines, "replacement_card") {
+		t.Fatalf("matched guidelines = %#v, do not want weaker sibling card actions", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 	if !containsSuppressedGuideline(view.SuppressedGuidelines, "lock_card") || !containsSuppressedGuideline(view.SuppressedGuidelines, "replacement_card") {
 		t.Fatalf("suppressed guidelines = %#v, want lock_card and replacement_card", view.SuppressedGuidelines)
@@ -667,8 +717,9 @@ func TestResolveChoosesBestJourneyFollowUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.JourneyDecision.Action != "advance" || view.JourneyDecision.NextState != "damage_path" {
-		t.Fatalf("journey decision = %#v, want advance to damage_path", view.JourneyDecision)
+	journeyDecision := view.JourneyProgressStage.Decision
+	if journeyDecision.Action != "advance" || journeyDecision.NextState != "damage_path" {
+		t.Fatalf("journey decision = %#v, want advance to damage_path", journeyDecision)
 	}
 }
 
@@ -1005,8 +1056,8 @@ func TestResolveRecordsRelationalResolutionDetails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if !containsGuideline(view.MatchedGuidelines, "refund_help") || !containsGuideline(view.MatchedGuidelines, "returns_closure") {
-		t.Fatalf("matched guidelines = %#v, want refund_help and entailed returns_closure", view.MatchedGuidelines)
+	if !containsGuideline(view.MatchFinalizeStage.MatchedGuidelines, "refund_help") || !containsGuideline(view.MatchFinalizeStage.MatchedGuidelines, "returns_closure") {
+		t.Fatalf("matched guidelines = %#v, want refund_help and entailed returns_closure", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 	if !containsSuppressedGuideline(view.SuppressedGuidelines, "generic_help") {
 		t.Fatalf("suppressed guidelines = %#v, want generic_help", view.SuppressedGuidelines)
@@ -1055,11 +1106,11 @@ func TestResolvePrioritizesGuidelineOverJourney(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if !containsGuidelineID(view.MatchedGuidelines, "standalone") {
-		t.Fatalf("matched guidelines = %#v, want standalone guideline", view.MatchedGuidelines)
+	if !containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "standalone") {
+		t.Fatalf("matched guidelines = %#v, want standalone guideline", view.MatchFinalizeStage.MatchedGuidelines)
 	}
-	if containsGuidelineID(view.MatchedGuidelines, "journey_node:Drink Recommendation Journey:ask_drink") {
-		t.Fatalf("matched guidelines = %#v, do not want active journey node to survive higher-priority guideline", view.MatchedGuidelines)
+	if containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "journey_node:Drink Recommendation Journey:ask_drink") {
+		t.Fatalf("matched guidelines = %#v, do not want active journey node to survive higher-priority guideline", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 	if !containsSuppressedGuideline(view.SuppressedGuidelines, "journey_node:Drink Recommendation Journey:ask_drink") {
 		t.Fatalf("suppressed guidelines = %#v, want journey node deprioritized", view.SuppressedGuidelines)
@@ -1108,14 +1159,14 @@ func TestResolvePrioritizesJourneyOverGuideline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if containsGuidelineID(view.MatchedGuidelines, "standalone") {
-		t.Fatalf("matched guidelines = %#v, do not want standalone guideline to survive higher-priority journey", view.MatchedGuidelines)
+	if containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "standalone") {
+		t.Fatalf("matched guidelines = %#v, do not want standalone guideline to survive higher-priority journey", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 	if !containsSuppressedGuideline(view.SuppressedGuidelines, "standalone") {
 		t.Fatalf("suppressed guidelines = %#v, want standalone deprioritized", view.SuppressedGuidelines)
 	}
-	if !containsGuidelineID(view.MatchedGuidelines, "journey_node:Drink Recommendation Journey:ask_drink") {
-		t.Fatalf("matched guidelines = %#v, want active journey node to remain", view.MatchedGuidelines)
+	if !containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "journey_node:Drink Recommendation Journey:ask_drink") {
+		t.Fatalf("matched guidelines = %#v, want active journey node to remain", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 	if view.ActiveJourney == nil || view.ActiveJourneyState == nil || view.ActiveJourney.ID != "Drink Recommendation Journey" {
 		t.Fatalf("active journey = %#v / %#v, want journey to remain active", view.ActiveJourney, view.ActiveJourneyState)
@@ -1157,8 +1208,8 @@ func TestResolveAppliesNumericalPriorityOverJourneyEntity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if !containsGuidelineID(view.MatchedGuidelines, "standalone") {
-		t.Fatalf("matched guidelines = %#v, want standalone guideline", view.MatchedGuidelines)
+	if !containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "standalone") {
+		t.Fatalf("matched guidelines = %#v, want standalone guideline", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 	if view.ActiveJourney != nil || view.ActiveJourneyState != nil {
 		t.Fatalf("active journey = %#v / %#v, want journey cleared by higher numerical priority guideline", view.ActiveJourney, view.ActiveJourneyState)
@@ -1203,8 +1254,8 @@ func TestResolveAppliesNumericalPriorityJourneyOverGuideline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if containsGuidelineID(view.MatchedGuidelines, "standalone") {
-		t.Fatalf("matched guidelines = %#v, do not want standalone guideline to survive higher numerical priority journey", view.MatchedGuidelines)
+	if containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "standalone") {
+		t.Fatalf("matched guidelines = %#v, do not want standalone guideline to survive higher numerical priority journey", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 	if view.ActiveJourney == nil || view.ActiveJourney.ID != "Drink Recommendation Journey" {
 		t.Fatalf("active journey = %#v, want journey to remain active", view.ActiveJourney)
@@ -1251,11 +1302,11 @@ func TestResolveFiltersJourneyDependentGuidelineWhenJourneyIsDeprioritized(t *te
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if containsGuidelineID(view.MatchedGuidelines, "depends_on_journey") {
-		t.Fatalf("matched guidelines = %#v, do not want journey-dependent guideline when journey is deprioritized", view.MatchedGuidelines)
+	if containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "depends_on_journey") {
+		t.Fatalf("matched guidelines = %#v, do not want journey-dependent guideline when journey is deprioritized", view.MatchFinalizeStage.MatchedGuidelines)
 	}
-	if !containsGuidelineID(view.MatchedGuidelines, "winner") {
-		t.Fatalf("matched guidelines = %#v, want winner guideline", view.MatchedGuidelines)
+	if !containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "winner") {
+		t.Fatalf("matched guidelines = %#v, want winner guideline", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 	if !containsResolutionRecord(view.ResolutionRecords, "depends_on_journey", ResolutionUnmetDependency) {
 		t.Fatalf("resolution records = %#v, want journey-dependent guideline filtered by unmet dependency after journey deprioritization", view.ResolutionRecords)
@@ -1289,8 +1340,8 @@ func TestResolveDoesNotSuppressGuidelineWhenPriorityWinnerIsInactive(t *testing.
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if !containsGuidelineID(view.MatchedGuidelines, "loser") {
-		t.Fatalf("matched guidelines = %#v, want loser to remain active when winner is inactive", view.MatchedGuidelines)
+	if !containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "loser") {
+		t.Fatalf("matched guidelines = %#v, want loser to remain active when winner is inactive", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 	if containsSuppressedGuideline(view.SuppressedGuidelines, "loser") {
 		t.Fatalf("suppressed guidelines = %#v, do not want loser suppressed when winner is inactive", view.SuppressedGuidelines)
@@ -1340,8 +1391,8 @@ func TestResolveDoesNotSuppressJourneyNodeWhenPriorityJourneyIsInactive(t *testi
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if !containsGuidelineID(view.MatchedGuidelines, "journey_node:Journey B:ask_b") {
-		t.Fatalf("matched guidelines = %#v, want Journey B node to remain active when Journey A is inactive", view.MatchedGuidelines)
+	if !containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "journey_node:Journey B:ask_b") {
+		t.Fatalf("matched guidelines = %#v, want Journey B node to remain active when Journey A is inactive", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 	if containsSuppressedGuideline(view.SuppressedGuidelines, "journey_node:Journey B:ask_b") {
 		t.Fatalf("suppressed guidelines = %#v, do not want Journey B node suppressed when Journey A is inactive", view.SuppressedGuidelines)
@@ -1389,11 +1440,11 @@ func TestResolveConditionGuidelineSurvivesWhenJourneyNodeIsDeprioritized(t *test
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if !containsGuidelineID(view.MatchedGuidelines, "winner") || !containsGuidelineID(view.MatchedGuidelines, "journey_condition") {
-		t.Fatalf("matched guidelines = %#v, want winner and journey_condition", view.MatchedGuidelines)
+	if !containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "winner") || !containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "journey_condition") {
+		t.Fatalf("matched guidelines = %#v, want winner and journey_condition", view.MatchFinalizeStage.MatchedGuidelines)
 	}
-	if containsGuidelineID(view.MatchedGuidelines, "journey_node:Journey 1:recommend_product") {
-		t.Fatalf("matched guidelines = %#v, do not want journey node to survive priority loss", view.MatchedGuidelines)
+	if containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "journey_node:Journey 1:recommend_product") {
+		t.Fatalf("matched guidelines = %#v, do not want journey node to survive priority loss", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 	if !containsResolutionRecord(view.ResolutionRecords, "journey_condition", ResolutionNone) {
 		t.Fatalf("resolution records = %#v, want journey_condition to survive", view.ResolutionRecords)
@@ -1435,36 +1486,38 @@ func TestResolveBuildsGroupedToolPlan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if len(view.ToolPlan.Candidates) != 2 {
-		t.Fatalf("tool candidates = %#v, want 2", view.ToolPlan.Candidates)
+	toolPlan := view.ToolPlanStage.Plan
+	toolDecision := view.ToolDecisionStage.Decision
+	if len(toolPlan.Candidates) != 2 {
+		t.Fatalf("tool candidates = %#v, want 2", toolPlan.Candidates)
 	}
-	if len(view.ToolPlan.OverlappingGroups) != 1 {
-		t.Fatalf("overlapping groups = %#v, want 1", view.ToolPlan.OverlappingGroups)
+	if len(toolPlan.OverlappingGroups) != 1 {
+		t.Fatalf("overlapping groups = %#v, want 1", toolPlan.OverlappingGroups)
 	}
-	if len(view.ToolPlan.Batches) != 1 || view.ToolPlan.Batches[0].Kind != "overlapping_tools" || view.ToolPlan.Batches[0].SelectedTool == "" {
-		t.Fatalf("tool batches = %#v, want one overlapping-tools batch with a selected winner", view.ToolPlan.Batches)
+	if len(toolPlan.Batches) != 1 || toolPlan.Batches[0].Kind != "overlapping_tools" || toolPlan.Batches[0].SelectedTool == "" {
+		t.Fatalf("tool batches = %#v, want one overlapping-tools batch with a selected winner", toolPlan.Batches)
 	}
-	if view.ToolPlan.SelectedTool == "" || view.ToolDecision.SelectedTool == "" {
-		t.Fatalf("tool plan/decision = %#v / %#v, want a selected tool", view.ToolPlan, view.ToolDecision)
+	if toolPlan.SelectedTool == "" || toolDecision.SelectedTool == "" {
+		t.Fatalf("tool plan/decision = %#v / %#v, want a selected tool", toolPlan, toolDecision)
 	}
 	states := map[string]string{}
 	rejectedBy := map[string]string{}
-	for _, item := range view.ToolPlan.Candidates {
+	for _, item := range toolPlan.Candidates {
 		states[item.ToolID] = item.DecisionState
 		rejectedBy[item.ToolID] = item.RejectedBy
 	}
-	if states[view.ToolPlan.SelectedTool] != "selected" {
+	if states[toolPlan.SelectedTool] != "selected" {
 		t.Fatalf("tool candidate states = %#v, want selected state for chosen tool", states)
 	}
 	for toolID, state := range states {
-		if toolID == view.ToolPlan.SelectedTool {
+		if toolID == toolPlan.SelectedTool {
 			continue
 		}
 		if state != "rejected_overlap" {
 			t.Fatalf("tool candidate states = %#v, want rejected_overlap for overlapping alternative", states)
 		}
-		if rejectedBy[toolID] != view.ToolPlan.SelectedTool {
-			t.Fatalf("tool rejection provenance = %#v, want %s rejected by %s", rejectedBy, toolID, view.ToolPlan.SelectedTool)
+		if rejectedBy[toolID] != toolPlan.SelectedTool {
+			t.Fatalf("tool rejection provenance = %#v, want %s rejected by %s", rejectedBy, toolID, toolPlan.SelectedTool)
 		}
 	}
 }
@@ -1507,11 +1560,12 @@ func TestResolveBuildsTransitiveOverlapGroupOnlyAcrossMatchedTools(t *testing.T)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if len(view.ToolPlan.OverlappingGroups) != 1 {
-		t.Fatalf("overlapping groups = %#v, want 1 transitive group", view.ToolPlan.OverlappingGroups)
+	toolPlan := view.ToolPlanStage.Plan
+	if len(toolPlan.OverlappingGroups) != 1 {
+		t.Fatalf("overlapping groups = %#v, want 1 transitive group", toolPlan.OverlappingGroups)
 	}
-	if !sameStringSlice(view.ToolPlan.OverlappingGroups[0], []string{"aa", "bb", "cc"}) {
-		t.Fatalf("overlap group = %#v, want [aa bb cc]", view.ToolPlan.OverlappingGroups[0])
+	if !sameStringSlice(toolPlan.OverlappingGroups[0], []string{"aa", "bb", "cc"}) {
+		t.Fatalf("overlap group = %#v, want [aa bb cc]", toolPlan.OverlappingGroups[0])
 	}
 }
 
@@ -1550,8 +1604,9 @@ func TestResolveDoesNotCreateIndirectOverlapAcrossUnmatchedMiddleTool(t *testing
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if len(view.ToolPlan.OverlappingGroups) != 0 {
-		t.Fatalf("overlapping groups = %#v, want none without matched middle tool", view.ToolPlan.OverlappingGroups)
+	toolPlan := view.ToolPlanStage.Plan
+	if len(toolPlan.OverlappingGroups) != 0 {
+		t.Fatalf("overlapping groups = %#v, want none without matched middle tool", toolPlan.OverlappingGroups)
 	}
 }
 
@@ -1614,17 +1669,19 @@ func TestResolveSkipsAlreadyStagedToolCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.ToolPlan.SelectedTool != "lock_card" {
-		t.Fatalf("tool plan = %#v, want selected lock_card", view.ToolPlan)
+	toolPlan := view.ToolPlanStage.Plan
+	toolDecision := view.ToolDecisionStage.Decision
+	if toolPlan.SelectedTool != "lock_card" {
+		t.Fatalf("tool plan = %#v, want selected lock_card", toolPlan)
 	}
-	if len(view.ToolPlan.Candidates) != 1 || view.ToolPlan.Candidates[0].DecisionState != "already_staged" {
-		t.Fatalf("tool candidates = %#v, want already_staged candidate state", view.ToolPlan.Candidates)
+	if len(toolPlan.Candidates) != 1 || toolPlan.Candidates[0].DecisionState != "already_staged" {
+		t.Fatalf("tool candidates = %#v, want already_staged candidate state", toolPlan.Candidates)
 	}
-	if len(view.ToolPlan.Batches) != 1 || view.ToolPlan.Batches[0].Kind != "single_tool" || view.ToolPlan.Batches[0].SelectedTool != "" {
-		t.Fatalf("tool batches = %#v, want one single-tool batch with no runnable selection", view.ToolPlan.Batches)
+	if len(toolPlan.Batches) != 1 || toolPlan.Batches[0].Kind != "single_tool" || toolPlan.Batches[0].SelectedTool != "" {
+		t.Fatalf("tool batches = %#v, want one single-tool batch with no runnable selection", toolPlan.Batches)
 	}
-	if view.ToolDecision.SelectedTool != "" || view.ToolDecision.CanRun {
-		t.Fatalf("tool decision = %#v, want staged tool to be suppressed from execution", view.ToolDecision)
+	if toolDecision.SelectedTool != "" || toolDecision.CanRun {
+		t.Fatalf("tool decision = %#v, want staged tool to be suppressed from execution", toolDecision)
 	}
 }
 
@@ -1668,17 +1725,19 @@ func TestResolveAutoApprovesNonConsequentialNoArgTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.ToolPlan.SelectedTool != "ping" {
-		t.Fatalf("tool plan = %#v, want ping selected", view.ToolPlan)
+	toolPlan := view.ToolPlanStage.Plan
+	toolDecision := view.ToolDecisionStage.Decision
+	if toolPlan.SelectedTool != "ping" {
+		t.Fatalf("tool plan = %#v, want ping selected", toolPlan)
 	}
-	if len(view.ToolPlan.Candidates) != 1 || !view.ToolPlan.Candidates[0].AutoApproved || view.ToolPlan.Candidates[0].DecisionState != "selected" {
-		t.Fatalf("tool candidates = %#v, want one auto-approved selected candidate", view.ToolPlan.Candidates)
+	if len(toolPlan.Candidates) != 1 || !toolPlan.Candidates[0].AutoApproved || toolPlan.Candidates[0].DecisionState != "selected" {
+		t.Fatalf("tool candidates = %#v, want one auto-approved selected candidate", toolPlan.Candidates)
 	}
-	if len(view.ToolPlan.Batches) != 1 || view.ToolPlan.Batches[0].Kind != "single_tool" || !view.ToolPlan.Batches[0].Simplified || view.ToolPlan.Batches[0].SelectedTool != "ping" {
-		t.Fatalf("tool batches = %#v, want one simplified single-tool batch selecting ping", view.ToolPlan.Batches)
+	if len(toolPlan.Batches) != 1 || toolPlan.Batches[0].Kind != "single_tool" || !toolPlan.Batches[0].Simplified || toolPlan.Batches[0].SelectedTool != "ping" {
+		t.Fatalf("tool batches = %#v, want one simplified single-tool batch selecting ping", toolPlan.Batches)
 	}
-	if view.ToolDecision.SelectedTool != "ping" || !view.ToolDecision.CanRun {
-		t.Fatalf("tool decision = %#v, want runnable ping selection", view.ToolDecision)
+	if toolDecision.SelectedTool != "ping" || !toolDecision.CanRun {
+		t.Fatalf("tool decision = %#v, want runnable ping selection", toolDecision)
 	}
 }
 
@@ -1716,9 +1775,10 @@ func TestResolveRejectsUngroundedToolWhenGroundedAlternativeExists(t *testing.T)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
+	toolPlan := view.ToolPlanStage.Plan
 	states := map[string]string{}
 	rejectedBy := map[string]string{}
-	for _, item := range view.ToolPlan.Candidates {
+	for _, item := range toolPlan.Candidates {
 		states[item.ToolID] = item.DecisionState
 		rejectedBy[item.ToolID] = item.RejectedBy
 	}
@@ -1766,12 +1826,13 @@ func TestResolveSelectsSpecializedReferenceTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.ToolPlan.SelectedTool != "check_motorcycle_price" {
-		t.Fatalf("tool plan = %#v, want specialized motorcycle tool selected", view.ToolPlan)
+	toolPlan := view.ToolPlanStage.Plan
+	if toolPlan.SelectedTool != "check_motorcycle_price" {
+		t.Fatalf("tool plan = %#v, want specialized motorcycle tool selected", toolPlan)
 	}
 	reasons := map[string]string{}
 	states := map[string]string{}
-	for _, item := range view.ToolPlan.Candidates {
+	for _, item := range toolPlan.Candidates {
 		reasons[item.ToolID] = item.Rationale
 		states[item.ToolID] = item.DecisionState
 	}
@@ -1820,9 +1881,10 @@ func TestResolveMarksConfirmationToolToRunInTandemWithScheduleTool(t *testing.T)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
+	toolPlan := view.ToolPlanStage.Plan
 	var confirmation ToolCandidate
 	var found bool
-	for _, item := range view.ToolPlan.Candidates {
+	for _, item := range toolPlan.Candidates {
 		if item.ToolID == "send_confirmation_email" {
 			confirmation = item
 			found = true
@@ -1830,10 +1892,10 @@ func TestResolveMarksConfirmationToolToRunInTandemWithScheduleTool(t *testing.T)
 		}
 	}
 	if !found {
-		t.Fatalf("tool candidates = %#v, want send_confirmation_email candidate present", view.ToolPlan.Candidates)
+		t.Fatalf("tool candidates = %#v, want send_confirmation_email candidate present", toolPlan.Candidates)
 	}
-	if !slices.Contains(view.ToolPlan.SelectedTools, "schedule_appointment") || !slices.Contains(view.ToolPlan.SelectedTools, "send_confirmation_email") {
-		t.Fatalf("selected tools = %#v, want both schedule_appointment and send_confirmation_email", view.ToolPlan.SelectedTools)
+	if !slices.Contains(toolPlan.SelectedTools, "schedule_appointment") || !slices.Contains(toolPlan.SelectedTools, "send_confirmation_email") {
+		t.Fatalf("selected tools = %#v, want both schedule_appointment and send_confirmation_email", toolPlan.SelectedTools)
 	}
 	if !slices.Contains(confirmation.RunInTandemWith, "schedule_appointment") {
 		t.Fatalf("confirmation candidate tandem targets = %#v, want schedule_appointment", confirmation.RunInTandemWith)
@@ -1871,13 +1933,14 @@ func TestResolvePlansTwoCallsForSameSearchToolWhenOptionalArgsDiffer(t *testing.
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if len(view.ToolPlan.Calls) != 2 {
-		t.Fatalf("planned calls = %#v, want 2", view.ToolPlan.Calls)
+	toolPlan := view.ToolPlanStage.Plan
+	if len(toolPlan.Calls) != 2 {
+		t.Fatalf("planned calls = %#v, want 2", toolPlan.Calls)
 	}
-	firstArgs := view.ToolPlan.Calls[0].Arguments
-	secondArgs := view.ToolPlan.Calls[1].Arguments
+	firstArgs := toolPlan.Calls[0].Arguments
+	secondArgs := toolPlan.Calls[1].Arguments
 	if firstArgs["vendor"] == secondArgs["vendor"] || firstArgs["keyword"] == secondArgs["keyword"] {
-		t.Fatalf("planned call args = %#v, want distinct vendor/keyword combinations", view.ToolPlan.Calls)
+		t.Fatalf("planned call args = %#v, want distinct vendor/keyword combinations", toolPlan.Calls)
 	}
 }
 
@@ -1940,14 +2003,16 @@ func TestResolveSkipsAlreadySatisfiedToolCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if len(view.ToolPlan.Candidates) != 1 || view.ToolPlan.Candidates[0].DecisionState != "already_satisfied" {
-		t.Fatalf("tool candidates = %#v, want already_satisfied candidate state", view.ToolPlan.Candidates)
+	toolPlan := view.ToolPlanStage.Plan
+	toolDecision := view.ToolDecisionStage.Decision
+	if len(toolPlan.Candidates) != 1 || toolPlan.Candidates[0].DecisionState != "already_satisfied" {
+		t.Fatalf("tool candidates = %#v, want already_satisfied candidate state", toolPlan.Candidates)
 	}
-	if len(view.ToolPlan.Batches) != 1 || view.ToolPlan.Batches[0].Kind != "single_tool" || view.ToolPlan.Batches[0].SelectedTool != "" {
-		t.Fatalf("tool batches = %#v, want one single-tool batch with no runnable selection", view.ToolPlan.Batches)
+	if len(toolPlan.Batches) != 1 || toolPlan.Batches[0].Kind != "single_tool" || toolPlan.Batches[0].SelectedTool != "" {
+		t.Fatalf("tool batches = %#v, want one single-tool batch with no runnable selection", toolPlan.Batches)
 	}
-	if view.ToolDecision.SelectedTool != "" || view.ToolDecision.CanRun {
-		t.Fatalf("tool decision = %#v, want already-satisfied tool to be suppressed from execution", view.ToolDecision)
+	if toolDecision.SelectedTool != "" || toolDecision.CanRun {
+		t.Fatalf("tool decision = %#v, want already-satisfied tool to be suppressed from execution", toolDecision)
 	}
 }
 
@@ -1995,10 +2060,11 @@ func TestResolveMarksGuidelineSatisfiedByToolHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if len(view.ResponseAnalysis.AnalyzedGuidelines) != 1 {
-		t.Fatalf("response analysis = %#v, want one analyzed guideline", view.ResponseAnalysis)
+	analysis := view.ResponseAnalysisStage.Analysis
+	if len(analysis.AnalyzedGuidelines) != 1 {
+		t.Fatalf("response analysis = %#v, want one analyzed guideline", analysis)
 	}
-	item := view.ResponseAnalysis.AnalyzedGuidelines[0]
+	item := analysis.AnalyzedGuidelines[0]
 	if !item.AlreadySatisfied || !item.SatisfiedByToolEvent || item.RequiresResponse {
 		t.Fatalf("analyzed guideline = %#v, want satisfied-by-tool classification", item)
 	}
@@ -2052,10 +2118,11 @@ func TestResolveMarksGuidelineSatisfiedByAssistantMessageSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if len(view.ResponseAnalysis.AnalyzedGuidelines) != 1 {
-		t.Fatalf("response analysis = %#v, want one analyzed guideline", view.ResponseAnalysis)
+	analysis := view.ResponseAnalysisStage.Analysis
+	if len(analysis.AnalyzedGuidelines) != 1 {
+		t.Fatalf("response analysis = %#v, want one analyzed guideline", analysis)
 	}
-	item := view.ResponseAnalysis.AnalyzedGuidelines[0]
+	item := analysis.AnalyzedGuidelines[0]
 	if !item.AlreadySatisfied || item.RequiresResponse {
 		t.Fatalf("analyzed guideline = %#v, want already satisfied by assistant message", item)
 	}
@@ -2109,10 +2176,11 @@ func TestResolveDiscountAlreadyAppliedStaysAssistantMessageSource(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if len(view.ResponseAnalysis.AnalyzedGuidelines) != 1 {
-		t.Fatalf("response analysis = %#v, want one analyzed guideline", view.ResponseAnalysis)
+	analysis := view.ResponseAnalysisStage.Analysis
+	if len(analysis.AnalyzedGuidelines) != 1 {
+		t.Fatalf("response analysis = %#v, want one analyzed guideline", analysis)
 	}
-	item := view.ResponseAnalysis.AnalyzedGuidelines[0]
+	item := analysis.AnalyzedGuidelines[0]
 	if !item.AlreadySatisfied {
 		t.Fatalf("analyzed guideline = %#v, want already satisfied", item)
 	}
@@ -2170,10 +2238,11 @@ func TestResolveMarksCustomerDependentGuidelineSatisfiedByCustomerAnswer(t *test
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if len(view.ResponseAnalysis.AnalyzedGuidelines) != 1 {
-		t.Fatalf("response analysis = %#v, want one analyzed guideline", view.ResponseAnalysis)
+	analysis := view.ResponseAnalysisStage.Analysis
+	if len(analysis.AnalyzedGuidelines) != 1 {
+		t.Fatalf("response analysis = %#v, want one analyzed guideline", analysis)
 	}
-	item := view.ResponseAnalysis.AnalyzedGuidelines[0]
+	item := analysis.AnalyzedGuidelines[0]
 	if !item.AlreadySatisfied || item.RequiresResponse {
 		t.Fatalf("analyzed guideline = %#v, want already satisfied by customer answer", item)
 	}
@@ -2209,8 +2278,8 @@ func TestResolveAppliesPriorityRelationship(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	got := make([]string, 0, len(view.MatchedGuidelines))
-	for _, item := range view.MatchedGuidelines {
+	got := make([]string, 0, len(view.MatchFinalizeStage.MatchedGuidelines))
+	for _, item := range view.MatchFinalizeStage.MatchedGuidelines {
 		got = append(got, item.ID)
 	}
 	if len(got) != 1 || got[0] != "greet_howdy" {
@@ -2250,8 +2319,8 @@ func TestResolveSupportsTagAnyDependency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if !containsGuidelineID(view.MatchedGuidelines, "followup") {
-		t.Fatalf("matched guidelines = %#v, want followup to survive tag_any dependency", view.MatchedGuidelines)
+	if !containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "followup") {
+		t.Fatalf("matched guidelines = %#v, want followup to survive tag_any dependency", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 }
 
@@ -2282,8 +2351,8 @@ func TestResolveDoesNotApplyTagPriorityWithoutActiveSourceMember(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if !containsGuidelineID(view.MatchedGuidelines, "t2_member") {
-		t.Fatalf("matched guidelines = %#v, want t2_member to survive without active t1 source", view.MatchedGuidelines)
+	if !containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "t2_member") {
+		t.Fatalf("matched guidelines = %#v, want t2_member to survive without active t1 source", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 	if containsSuppressedGuideline(view.SuppressedGuidelines, "t2_member") {
 		t.Fatalf("suppressed guidelines = %#v, do not want t2_member deprioritized", view.SuppressedGuidelines)
@@ -2323,7 +2392,7 @@ func TestResolveTagPriorityTransitivelyFiltersDependentGuideline(t *testing.T) {
 		t.Fatalf("Resolve() error = %v", err)
 	}
 	var got []string
-	for _, item := range view.MatchedGuidelines {
+	for _, item := range view.MatchFinalizeStage.MatchedGuidelines {
 		got = append(got, item.ID)
 	}
 	if len(got) != 1 || got[0] != "t1_member" {
@@ -2365,8 +2434,8 @@ func TestResolveFiltersTagAllDependencyWhenNotAllMatched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if containsGuidelineID(view.MatchedGuidelines, "followup") {
-		t.Fatalf("matched guidelines = %#v, want followup filtered by unmet tag_all dependency", view.MatchedGuidelines)
+	if containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "followup") {
+		t.Fatalf("matched guidelines = %#v, want followup filtered by unmet tag_all dependency", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 	if !containsResolutionRecord(view.ResolutionRecords, "followup", ResolutionUnmetDependency) {
 		t.Fatalf("resolution records = %#v, want unmet dependency for followup", view.ResolutionRecords)
@@ -2402,8 +2471,8 @@ func TestResolveSupportsDependencyAnyGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if !containsGuidelineID(view.MatchedGuidelines, "followup") {
-		t.Fatalf("matched guidelines = %#v, want followup to survive dependency_any", view.MatchedGuidelines)
+	if !containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "followup") {
+		t.Fatalf("matched guidelines = %#v, want followup to survive dependency_any", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 }
 
@@ -2436,8 +2505,8 @@ func TestResolveFiltersDependencyAnyGroupWhenNoTargetsActive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if containsGuidelineID(view.MatchedGuidelines, "followup") {
-		t.Fatalf("matched guidelines = %#v, want followup filtered by unmet dependency_any", view.MatchedGuidelines)
+	if containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "followup") {
+		t.Fatalf("matched guidelines = %#v, want followup filtered by unmet dependency_any", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 	if !containsResolutionRecord(view.ResolutionRecords, "followup", ResolutionUnmetDependencyAny) {
 		t.Fatalf("resolution records = %#v, want unmet dependency_any for followup", view.ResolutionRecords)
@@ -2475,8 +2544,8 @@ func TestResolveSupportsMixedDependencyAndDependencyAny(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if !containsGuidelineID(view.MatchedGuidelines, "followup") {
-		t.Fatalf("matched guidelines = %#v, want followup to survive mixed dependency + dependency_any", view.MatchedGuidelines)
+	if !containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "followup") {
+		t.Fatalf("matched guidelines = %#v, want followup to survive mixed dependency + dependency_any", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 }
 
@@ -2515,11 +2584,12 @@ func TestResolveBlocksCustomerDependentGuidelineWithoutClarification(t *testing.
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if len(view.MatchedGuidelines) != 0 {
-		t.Fatalf("matched guidelines = %#v, want none because customer clarification is missing", view.MatchedGuidelines)
+	if len(view.MatchFinalizeStage.MatchedGuidelines) != 0 {
+		t.Fatalf("matched guidelines = %#v, want none because customer clarification is missing", view.MatchFinalizeStage.MatchedGuidelines)
 	}
-	if len(view.CustomerDecisions) != 1 || len(view.CustomerDecisions[0].MissingCustomerData) == 0 {
-		t.Fatalf("customer decisions = %#v, want blocked customer-dependent guideline", view.CustomerDecisions)
+	customer := view.CustomerDependencyStage.Decisions
+	if len(customer) != 1 || len(customer[0].MissingCustomerData) == 0 {
+		t.Fatalf("customer decisions = %#v, want blocked customer-dependent guideline", customer)
 	}
 }
 
@@ -2548,14 +2618,14 @@ func TestResolveMatchesLowCriticalityGuidelineWhenStillRelevant(t *testing.T) {
 		t.Fatalf("Resolve() error = %v", err)
 	}
 	found := false
-	for _, item := range view.MatchedGuidelines {
+	for _, item := range view.MatchFinalizeStage.MatchedGuidelines {
 		if item.ID == "gentle_followup" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("matched guidelines = %#v, want low-criticality guideline to remain active", view.MatchedGuidelines)
+		t.Fatalf("matched guidelines = %#v, want low-criticality guideline to remain active", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 	arqFound := false
 	for _, item := range view.ARQResults {
@@ -2609,11 +2679,11 @@ func TestResolveWithRouterUsesStructuredARQOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveWithRouter() error = %v", err)
 	}
-	if len(view.MatchedGuidelines) != 1 || view.MatchedGuidelines[0].ID != "returns" {
-		t.Fatalf("matched guidelines = %#v, want structured-selected returns", view.MatchedGuidelines)
+	if len(view.MatchFinalizeStage.MatchedGuidelines) != 1 || view.MatchFinalizeStage.MatchedGuidelines[0].ID != "returns" {
+		t.Fatalf("matched guidelines = %#v, want structured-selected returns", view.MatchFinalizeStage.MatchedGuidelines)
 	}
-	if len(view.GuidelineMatches) != 1 || view.GuidelineMatches[0].Rationale != "structured yes" {
-		t.Fatalf("guideline matches = %#v, want structured rationale", view.GuidelineMatches)
+	if len(view.MatchFinalizeStage.GuidelineMatches) != 1 || view.MatchFinalizeStage.GuidelineMatches[0].Rationale != "structured yes" {
+		t.Fatalf("guideline matches = %#v, want structured rationale", view.MatchFinalizeStage.GuidelineMatches)
 	}
 }
 
@@ -2665,8 +2735,88 @@ func TestResolveWithRouterRetriesStructuredARQ(t *testing.T) {
 	if calls < 2 {
 		t.Fatalf("structured provider calls = %d, want retry", calls)
 	}
-	if len(view.MatchedGuidelines) != 1 || view.GuidelineMatches[0].Rationale != "retried yes" {
+	if len(view.MatchFinalizeStage.MatchedGuidelines) != 1 || view.MatchFinalizeStage.GuidelineMatches[0].Rationale != "retried yes" {
 		t.Fatalf("view = %#v, want retried structured match", view)
+	}
+}
+
+func TestResolveWithRouterRetainsStagedToolAgeGuidelineWhenStructuredActionableMisses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"checks\":[]}"}}]}`))
+	}))
+	defer server.Close()
+
+	router := model.NewRouter(config.ProviderConfig{
+		DefaultStructured: "openrouter",
+		OpenRouterBase:    server.URL,
+		OpenRouterAPIKey:  "test-key",
+	})
+
+	now := time.Now().UTC()
+	view, err := ResolveWithRouter(
+		context.Background(),
+		router,
+		[]session.Event{
+			{
+				ID:        "evt_1",
+				SessionID: "sess_1",
+				Source:    "customer",
+				Kind:      "message",
+				CreatedAt: now,
+				Content:   []session.ContentPart{{Type: "text", Text: "Hi there, I want a drink that's on the sweeter side, what would you suggest?"}},
+			},
+			{
+				ID:        "evt_2",
+				SessionID: "sess_1",
+				Source:    "ai_agent",
+				Kind:      "message",
+				CreatedAt: now.Add(time.Second),
+				Content:   []session.ContentPart{{Type: "text", Text: "Let me check your account first."}},
+			},
+			{
+				ID:        "evt_3",
+				SessionID: "sess_1",
+				Source:    "customer",
+				Kind:      "message",
+				CreatedAt: now.Add(2 * time.Second),
+				Content:   []session.ContentPart{{Type: "text", Text: "It's 199877"}},
+			},
+			{
+				ID:        "evt_4",
+				SessionID: "sess_1",
+				Source:    "ai_agent",
+				Kind:      "tool",
+				CreatedAt: now.Add(3 * time.Second),
+				Content: []session.ContentPart{{
+					Type: "tool_call",
+					Meta: map[string]any{
+						"tool_id":   "local:get_user_age",
+						"arguments": map[string]any{"user_id": "199877"},
+						"result":    map[string]any{"data": 16},
+					},
+				}},
+			},
+		},
+		[]policy.Bundle{{
+			ID:      "bundle_1",
+			Version: "v1",
+			Guidelines: []policy.Guideline{
+				{ID: "suggest_drink_underage", When: "drink under 21", Then: "Suggest a sweet non-alcoholic drink."},
+				{ID: "suggest_drink_adult", When: "drink 21 or older", Then: "Suggest an alcoholic option if appropriate."},
+			},
+		}},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("ResolveWithRouter() error = %v", err)
+	}
+	if !containsGuideline(view.MatchFinalizeStage.MatchedGuidelines, "suggest_drink_underage") {
+		t.Fatalf("matched guidelines = %#v, guideline matches = %#v, batches = %#v, condition artifacts = %#v, want suggest_drink_underage", view.MatchFinalizeStage.MatchedGuidelines, view.MatchFinalizeStage.GuidelineMatches, view.BatchResults, view.ConditionArtifactsStage.Artifacts)
+	}
+	if containsGuideline(view.MatchFinalizeStage.MatchedGuidelines, "suggest_drink_adult") {
+		t.Fatalf("matched guidelines = %#v, do not want suggest_drink_adult", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 }
 
@@ -2725,11 +2875,12 @@ func TestResolveWithRouterUsesStructuredToolDecision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveWithRouter() error = %v", err)
 	}
-	if view.ToolDecision.SelectedTool != "get_return_status" {
-		t.Fatalf("selected tool = %q, want get_return_status", view.ToolDecision.SelectedTool)
+	toolDecision := view.ToolDecisionStage.Decision
+	if toolDecision.SelectedTool != "get_return_status" {
+		t.Fatalf("selected tool = %q, want get_return_status", toolDecision.SelectedTool)
 	}
-	if view.ToolDecision.Arguments["reason"] != "status" {
-		t.Fatalf("tool args = %#v, want structured tool arguments", view.ToolDecision.Arguments)
+	if toolDecision.Arguments["reason"] != "status" {
+		t.Fatalf("tool args = %#v, want structured tool arguments", toolDecision.Arguments)
 	}
 }
 
@@ -2766,17 +2917,19 @@ func TestResolveMarksToolAsNotRunnableWhenRequiredArgsMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.ToolDecision.CanRun {
-		t.Fatalf("tool decision = %#v, want cannot run", view.ToolDecision)
+	toolDecision := view.ToolDecisionStage.Decision
+	toolPlan := view.ToolPlanStage.Plan
+	if toolDecision.CanRun {
+		t.Fatalf("tool decision = %#v, want cannot run", toolDecision)
 	}
-	if len(view.ToolDecision.MissingArguments) != 1 || view.ToolDecision.MissingArguments[0] != "return_id" {
-		t.Fatalf("missing arguments = %#v, want return_id", view.ToolDecision.MissingArguments)
+	if len(toolDecision.MissingArguments) != 1 || toolDecision.MissingArguments[0] != "return_id" {
+		t.Fatalf("missing arguments = %#v, want return_id", toolDecision.MissingArguments)
 	}
-	if len(view.ToolDecision.MissingIssues) != 1 || view.ToolDecision.MissingIssues[0].Significance != "critical" {
-		t.Fatalf("missing issues = %#v, want one critical issue", view.ToolDecision.MissingIssues)
+	if len(toolDecision.MissingIssues) != 1 || toolDecision.MissingIssues[0].Significance != "critical" {
+		t.Fatalf("missing issues = %#v, want one critical issue", toolDecision.MissingIssues)
 	}
-	if view.ToolDecision.SelectedTool != "" || view.ToolPlan.SelectedTool != "" {
-		t.Fatalf("selected tool = %#v / %#v, want blocked candidate not to remain selected", view.ToolDecision.SelectedTool, view.ToolPlan.SelectedTool)
+	if toolDecision.SelectedTool != "" || toolPlan.SelectedTool != "" {
+		t.Fatalf("selected tool = %#v / %#v, want blocked candidate not to remain selected", toolDecision.SelectedTool, toolPlan.SelectedTool)
 	}
 }
 
@@ -2813,13 +2966,14 @@ func TestResolveDerivesHiddenToolArgumentWithoutBlocking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if !view.ToolDecision.CanRun {
-		t.Fatalf("tool decision = %#v, want hidden fields derived automatically", view.ToolDecision)
+	toolDecision := view.ToolDecisionStage.Decision
+	if !toolDecision.CanRun {
+		t.Fatalf("tool decision = %#v, want hidden fields derived automatically", toolDecision)
 	}
-	if len(view.ToolDecision.MissingIssues) != 0 {
-		t.Fatalf("missing issues = %#v, want none", view.ToolDecision.MissingIssues)
+	if len(toolDecision.MissingIssues) != 0 {
+		t.Fatalf("missing issues = %#v, want none", toolDecision.MissingIssues)
 	}
-	if got := view.ToolDecision.Arguments["session_id"]; got != "sess_1" {
+	if got := toolDecision.Arguments["session_id"]; got != "sess_1" {
 		t.Fatalf("session_id arg = %#v, want sess_1", got)
 	}
 }
@@ -2857,7 +3011,8 @@ func TestResolveAppliesToolDefaultArguments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if got := view.ToolDecision.Arguments["locale"]; got != "en" {
+	toolDecision := view.ToolDecisionStage.Decision
+	if got := toolDecision.Arguments["locale"]; got != "en" {
 		t.Fatalf("locale arg = %#v, want default en", got)
 	}
 }
@@ -2895,14 +3050,15 @@ func TestResolveBlocksWhenHiddenRequiredArgumentCannotBeDerived(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.ToolDecision.CanRun {
-		t.Fatalf("tool decision = %#v, want hidden unresolved arg to block invocation", view.ToolDecision)
+	toolDecision := view.ToolDecisionStage.Decision
+	if toolDecision.CanRun {
+		t.Fatalf("tool decision = %#v, want hidden unresolved arg to block invocation", toolDecision)
 	}
-	if len(view.ToolDecision.MissingIssues) != 1 || !view.ToolDecision.MissingIssues[0].Hidden {
-		t.Fatalf("missing issues = %#v, want one hidden missing issue", view.ToolDecision.MissingIssues)
+	if len(toolDecision.MissingIssues) != 1 || !toolDecision.MissingIssues[0].Hidden {
+		t.Fatalf("missing issues = %#v, want one hidden missing issue", toolDecision.MissingIssues)
 	}
-	if view.ToolDecision.MissingIssues[0].Significance != "internal" {
-		t.Fatalf("missing issue = %#v, want internal significance", view.ToolDecision.MissingIssues[0])
+	if toolDecision.MissingIssues[0].Significance != "internal" {
+		t.Fatalf("missing issue = %#v, want internal significance", toolDecision.MissingIssues[0])
 	}
 }
 
@@ -2962,21 +3118,23 @@ func TestResolveReportsInvalidToolArgumentWithChoicesAndSignificance(t *testing.
 	if err != nil {
 		t.Fatalf("ResolveWithRouter() error = %v", err)
 	}
-	if view.ToolDecision.CanRun {
-		t.Fatalf("tool decision = %#v, want invalid channel to block invocation", view.ToolDecision)
+	toolDecision := view.ToolDecisionStage.Decision
+	toolPlan := view.ToolPlanStage.Plan
+	if toolDecision.CanRun {
+		t.Fatalf("tool decision = %#v, want invalid channel to block invocation", toolDecision)
 	}
-	if len(view.ToolDecision.InvalidIssues) != 1 {
-		t.Fatalf("invalid issues = %#v, want one invalid issue", view.ToolDecision.InvalidIssues)
+	if len(toolDecision.InvalidIssues) != 1 {
+		t.Fatalf("invalid issues = %#v, want one invalid issue", toolDecision.InvalidIssues)
 	}
-	issue := view.ToolDecision.InvalidIssues[0]
+	issue := toolDecision.InvalidIssues[0]
 	if issue.Parameter != "channel" || issue.Significance != "critical" {
 		t.Fatalf("invalid issue = %#v, want critical channel issue", issue)
 	}
 	if len(issue.Choices) != 2 || issue.Choices[0] != "web" || issue.Choices[1] != "sms" {
 		t.Fatalf("invalid issue choices = %#v, want web/sms", issue.Choices)
 	}
-	if view.ToolDecision.SelectedTool != "" || view.ToolPlan.SelectedTool != "" {
-		t.Fatalf("selected tool = %#v / %#v, want blocked candidate not to remain selected", view.ToolDecision.SelectedTool, view.ToolPlan.SelectedTool)
+	if toolDecision.SelectedTool != "" || toolPlan.SelectedTool != "" {
+		t.Fatalf("selected tool = %#v / %#v, want blocked candidate not to remain selected", toolDecision.SelectedTool, toolPlan.SelectedTool)
 	}
 }
 
@@ -3011,11 +3169,11 @@ func TestResolveAppliesIterativeRelationships(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if len(view.MatchedGuidelines) != 2 {
-		t.Fatalf("matched guidelines = %#v, want cancel_return + cancel_confirm", view.MatchedGuidelines)
+	if len(view.MatchFinalizeStage.MatchedGuidelines) != 2 {
+		t.Fatalf("matched guidelines = %#v, want cancel_return + cancel_confirm", view.MatchFinalizeStage.MatchedGuidelines)
 	}
-	if view.MatchedGuidelines[0].ID != "cancel_return" {
-		t.Fatalf("top matched guideline = %#v, want cancel_return", view.MatchedGuidelines)
+	if view.MatchFinalizeStage.MatchedGuidelines[0].ID != "cancel_return" {
+		t.Fatalf("top matched guideline = %#v, want cancel_return", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 	if len(view.SuppressedGuidelines) != 1 || view.SuppressedGuidelines[0].ID != "return_flow" {
 		t.Fatalf("suppressed guidelines = %#v, want return_flow suppressed", view.SuppressedGuidelines)
@@ -3108,11 +3266,12 @@ func TestResolveDoesNotAdvanceToolJourneyStateBeforeExecution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.JourneyDecision.Action == "advance" || view.JourneyDecision.NextState != "" {
-		t.Fatalf("journey decision = %#v, do not want tool step to advance before execution", view.JourneyDecision)
+	journeyDecision := view.JourneyProgressStage.Decision
+	if journeyDecision.Action == "advance" || journeyDecision.NextState != "" {
+		t.Fatalf("journey decision = %#v, do not want tool step to advance before execution", journeyDecision)
 	}
-	if !slices.Contains(view.JourneyDecision.Missing, "tool_execution") {
-		t.Fatalf("journey decision = %#v, want tool_execution missing signal", view.JourneyDecision)
+	if !slices.Contains(journeyDecision.Missing, "tool_execution") {
+		t.Fatalf("journey decision = %#v, want tool_execution missing signal", journeyDecision)
 	}
 }
 
@@ -3170,8 +3329,9 @@ func TestResolveAdvancesToolJourneyStateAfterExecution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.JourneyDecision.Action != "advance" || view.JourneyDecision.NextState != "summarize_status" {
-		t.Fatalf("journey decision = %#v, want tool step to advance after execution", view.JourneyDecision)
+	journeyDecision := view.JourneyProgressStage.Decision
+	if journeyDecision.Action != "advance" || journeyDecision.NextState != "summarize_status" {
+		t.Fatalf("journey decision = %#v, want tool step to advance after execution", journeyDecision)
 	}
 }
 
@@ -3212,8 +3372,9 @@ func TestResolveAdvancesForkJourneyStateAutomatically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.JourneyDecision.Action != "advance" || view.JourneyDecision.NextState != "collect_reason" {
-		t.Fatalf("journey decision = %#v, want automatic fork advance to collect_reason", view.JourneyDecision)
+	journeyDecision := view.JourneyProgressStage.Decision
+	if journeyDecision.Action != "advance" || journeyDecision.NextState != "collect_reason" {
+		t.Fatalf("journey decision = %#v, want automatic fork advance to collect_reason", journeyDecision)
 	}
 }
 
@@ -3280,11 +3441,11 @@ func TestSelectBestBacktrackTargetPrefersEarlierUnresolvedBranchPoint(t *testing
 		LatestCustomerText: "Actually, can I change those to medium size instead of large? No drinks still.",
 		ConversationText:   "Actually, can I change those to medium size instead of large? No drinks still.",
 	}
-	selected := selectBestBacktrackTarget(ctx, flow, []string{"ask_quantity", "ask_type", "ask_size", "ask_drinks", "check_stock"}, "check_stock", false)
-	if selected == nil || selected.ID != "ask_size" {
-		t.Fatalf("selected = %#v, want ask_size", selected)
+	selection := selectBestBacktrackEvaluation(ctx, flow, []string{"ask_quantity", "ask_type", "ask_size", "ask_drinks", "check_stock"}, "check_stock", false)
+	if selection.Candidate.Selection.StateID != "ask_size" {
+		t.Fatalf("selection = %#v, want ask_size", selection)
 	}
-	if next := fastForwardJourneyState(ctx, flow, selected.ID, ""); next != "check_stock" {
+	if next := fastForwardJourneyState(ctx, flow, selection.Candidate.Selection.StateID, ""); next != "check_stock" {
 		t.Fatalf("fast-forward next state = %q, want check_stock", next)
 	}
 }
@@ -3371,20 +3532,23 @@ func TestResolveRejectsIllegalBacktrackTargetNotInVisitedPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.JourneyDecision.Action == "backtrack" {
-		t.Fatalf("journey decision = %#v, want no illegal backtrack to an unvisited state", view.JourneyDecision)
+	journeyDecision := view.JourneyProgressStage.Decision
+	if journeyDecision.Action == "backtrack" {
+		t.Fatalf("journey decision = %#v, want no illegal backtrack to an unvisited state", journeyDecision)
 	}
 }
 
 func TestVerifyDraftEnforcesStrictTemplate(t *testing.T) {
-	view := ResolvedView{
+	view := EngineResult{
 		CompositionMode: "strict",
 		NoMatch:         "Need more detail.",
-		CandidateTemplates: []policy.Template{{
-			ID:   "tmpl_1",
-			Mode: "strict",
-			Text: "Your return is approved.",
-		}},
+		ResponseAnalysisStage: ResponseAnalysisStageResult{
+			CandidateTemplates: []policy.Template{{
+				ID:   "tmpl_1",
+				Mode: "strict",
+				Text: "Your return is approved.",
+			}},
+		},
 	}
 	got := VerifyDraft(view, "Something else", nil)
 	if got.Status != "revise" || got.Replacement != "Your return is approved." {
@@ -3393,9 +3557,11 @@ func TestVerifyDraftEnforcesStrictTemplate(t *testing.T) {
 }
 
 func TestVerifyDraftUsesResponseAnalysisTemplate(t *testing.T) {
-	view := ResolvedView{
-		ResponseAnalysis: ResponseAnalysis{
-			RecommendedTemplate: "Use this approved answer.",
+	view := EngineResult{
+		ResponseAnalysisStage: ResponseAnalysisStageResult{
+			Analysis: ResponseAnalysis{
+				RecommendedTemplate: "Use this approved answer.",
+			},
 		},
 	}
 	got := VerifyDraft(view, "Something else", nil)
@@ -3405,7 +3571,7 @@ func TestVerifyDraftUsesResponseAnalysisTemplate(t *testing.T) {
 }
 
 func TestVerifyDraftAllowsStrictJourneyInstructionFallback(t *testing.T) {
-	view := ResolvedView{
+	view := EngineResult{
 		CompositionMode: "strict",
 		ActiveJourneyState: &policy.JourneyNode{
 			ID:          "ask_origin",
@@ -3448,7 +3614,7 @@ func TestResolveSkipsJourneyStepsAlreadySatisfiedByCustomerHistory(t *testing.T)
 				Source:    "customer",
 				Kind:      "message",
 				CreatedAt: now,
-				Content: []session.ContentPart{{Type: "text", Text: "Hi, my name is John Smith and I'd like to book a flight for myself from Ben Gurion airport. We flight in the 12.10 and return in the 17.10."}},
+				Content:   []session.ContentPart{{Type: "text", Text: "Hi, my name is John Smith and I'd like to book a flight for myself from Ben Gurion airport. We flight in the 12.10 and return in the 17.10."}},
 			},
 			{
 				ID:        "evt_2",
@@ -3456,7 +3622,7 @@ func TestResolveSkipsJourneyStepsAlreadySatisfiedByCustomerHistory(t *testing.T)
 				Source:    "agent",
 				Kind:      "message",
 				CreatedAt: now.Add(time.Second),
-				Content: []session.ContentPart{{Type: "text", Text: "Hi John, thanks for reaching out! I see you're planning to fly from Ben Gurion airport. Could you please let me know your destination airport?"}},
+				Content:   []session.ContentPart{{Type: "text", Text: "Hi John, thanks for reaching out! I see you're planning to fly from Ben Gurion airport. Could you please let me know your destination airport?"}},
 			},
 			{
 				ID:        "evt_3",
@@ -3494,8 +3660,9 @@ func TestResolveSkipsJourneyStepsAlreadySatisfiedByCustomerHistory(t *testing.T)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.JourneyDecision.Action != "advance" || view.JourneyDecision.NextState != "ask_class" {
-		t.Fatalf("journey decision = %#v, want advance to ask_class after skipping satisfied steps", view.JourneyDecision)
+	journeyDecision := view.JourneyProgressStage.Decision
+	if journeyDecision.Action != "advance" || journeyDecision.NextState != "ask_class" {
+		t.Fatalf("journey decision = %#v, want advance to ask_class after skipping satisfied steps", journeyDecision)
 	}
 }
 
@@ -3509,7 +3676,7 @@ func TestResolveDoesNotBacktrackWhenCustomerCompletesPriorJourneyStepLate(t *tes
 				Source:    "customer",
 				Kind:      "message",
 				CreatedAt: now,
-				Content: []session.ContentPart{{Type: "text", Text: "Hi, my name is John Smith and I'd like to book a flight for myself from Ben Gurion airport. We flight in the 12.10 and return in the 17.10."}},
+				Content:   []session.ContentPart{{Type: "text", Text: "Hi, my name is John Smith and I'd like to book a flight for myself from Ben Gurion airport. We flight in the 12.10 and return in the 17.10."}},
 			},
 			{
 				ID:        "evt_2",
@@ -3517,7 +3684,7 @@ func TestResolveDoesNotBacktrackWhenCustomerCompletesPriorJourneyStepLate(t *tes
 				Source:    "ai_agent",
 				Kind:      "message",
 				CreatedAt: now.Add(time.Second),
-				Content: []session.ContentPart{{Type: "text", Text: "Hi John, thanks for reaching out! I see you're planning to fly from Ben Gurion airport. Could you please let me know your destination airport?"}},
+				Content:   []session.ContentPart{{Type: "text", Text: "Hi John, thanks for reaching out! I see you're planning to fly from Ben Gurion airport. Could you please let me know your destination airport?"}},
 			},
 			{
 				ID:        "evt_3",
@@ -3555,8 +3722,9 @@ func TestResolveDoesNotBacktrackWhenCustomerCompletesPriorJourneyStepLate(t *tes
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if view.JourneyDecision.Action != "advance" || view.JourneyDecision.NextState != "ask_class" {
-		t.Fatalf("journey decision = %#v, want advance to ask_class instead of backtrack", view.JourneyDecision)
+	journeyDecision := view.JourneyProgressStage.Decision
+	if journeyDecision.Action != "advance" || journeyDecision.NextState != "ask_class" {
+		t.Fatalf("journey decision = %#v, want advance to ask_class instead of backtrack", journeyDecision)
 	}
 }
 
@@ -3614,8 +3782,9 @@ func TestResolveWithRouterSupportsResponseAnalysisARQ(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveWithRouter() error = %v", err)
 	}
-	if !view.ResponseAnalysis.NeedsStrictMode || view.ResponseAnalysis.RecommendedTemplate != "Approved strict template." {
-		t.Fatalf("response analysis = %#v, want strict template recommendation", view.ResponseAnalysis)
+	analysis := view.ResponseAnalysisStage.Analysis
+	if !analysis.NeedsStrictMode || analysis.RecommendedTemplate != "Approved strict template." {
+		t.Fatalf("response analysis = %#v, want strict template recommendation", analysis)
 	}
 	if view.CompositionMode != "strict" {
 		t.Fatalf("composition mode = %s, want strict after response analysis", view.CompositionMode)
@@ -3697,10 +3866,11 @@ func TestResolveWithRouterPreservesToolSatisfiedResponseAnalysis(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveWithRouter() error = %v", err)
 	}
-	if len(view.ResponseAnalysis.AnalyzedGuidelines) != 1 {
-		t.Fatalf("response analysis = %#v, want one analyzed guideline", view.ResponseAnalysis)
+	analysis := view.ResponseAnalysisStage.Analysis
+	if len(analysis.AnalyzedGuidelines) != 1 {
+		t.Fatalf("response analysis = %#v, want one analyzed guideline", analysis)
 	}
-	item := view.ResponseAnalysis.AnalyzedGuidelines[0]
+	item := analysis.AnalyzedGuidelines[0]
 	if !item.AlreadySatisfied || !item.SatisfiedByToolEvent || item.RequiresResponse {
 		t.Fatalf("analyzed guideline = %#v, want tool satisfaction preserved across ARQ merge", item)
 	}
@@ -3766,10 +3936,11 @@ func TestResolveIncludesTrackedSatisfiedGuidelineInResponseAnalysis(t *testing.T
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if len(view.ResponseAnalysis.AnalyzedGuidelines) != 1 {
-		t.Fatalf("response analysis = %#v, want one tracked analyzed guideline", view.ResponseAnalysis)
+	analysis := view.ResponseAnalysisStage.Analysis
+	if len(analysis.AnalyzedGuidelines) != 1 {
+		t.Fatalf("response analysis = %#v, want one tracked analyzed guideline", analysis)
 	}
-	item := view.ResponseAnalysis.AnalyzedGuidelines[0]
+	item := analysis.AnalyzedGuidelines[0]
 	if item.ID != "lookup_status" || !item.AlreadySatisfied || !item.SatisfiedByToolEvent || item.RequiresResponse {
 		t.Fatalf("analyzed guideline = %#v, want tracked guideline satisfied by tool event", item)
 	}
@@ -3820,10 +3991,11 @@ func TestResolveMarksGuidelinePartiallyAppliedByAssistantHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if len(view.ResponseAnalysis.AnalyzedGuidelines) != 1 {
-		t.Fatalf("response analysis = %#v, want one analyzed guideline", view.ResponseAnalysis)
+	analysis := view.ResponseAnalysisStage.Analysis
+	if len(analysis.AnalyzedGuidelines) != 1 {
+		t.Fatalf("response analysis = %#v, want one analyzed guideline", analysis)
 	}
-	item := view.ResponseAnalysis.AnalyzedGuidelines[0]
+	item := analysis.AnalyzedGuidelines[0]
 	if item.ID != "late_so_discount" || item.AppliedDegree != "partial" || item.AlreadySatisfied || !item.RequiresResponse || item.SatisfactionSource != "assistant_message" {
 		t.Fatalf("analyzed guideline = %#v, want partial assistant-message application with response still required", item)
 	}
@@ -3871,11 +4043,11 @@ func TestResolveMatchesGuidelineFromStagedToolEventAge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if !containsGuideline(view.MatchedGuidelines, "suggest_drink_underage") {
-		t.Fatalf("matched guidelines = %#v, want suggest_drink_underage", view.MatchedGuidelines)
+	if !containsGuideline(view.MatchFinalizeStage.MatchedGuidelines, "suggest_drink_underage") {
+		t.Fatalf("matched guidelines = %#v, want suggest_drink_underage", view.MatchFinalizeStage.MatchedGuidelines)
 	}
-	if containsGuideline(view.MatchedGuidelines, "suggest_drink_adult") {
-		t.Fatalf("matched guidelines = %#v, do not want suggest_drink_adult", view.MatchedGuidelines)
+	if containsGuideline(view.MatchFinalizeStage.MatchedGuidelines, "suggest_drink_adult") {
+		t.Fatalf("matched guidelines = %#v, do not want suggest_drink_adult", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 }
 
@@ -3934,8 +4106,9 @@ func TestResolveMarksToolAlreadyStagedFromToolEvent(t *testing.T) {
 	if state != "already_staged" && state != "already_satisfied" {
 		t.Fatalf("tool candidate state = %q, want already_staged or already_satisfied", state)
 	}
-	if view.ToolDecision.SelectedTool != "" || view.ToolDecision.CanRun {
-		t.Fatalf("tool decision = %#v, want no runnable tool because call is already staged/satisfied", view.ToolDecision)
+	toolDecision := view.ToolDecisionStage.Decision
+	if toolDecision.SelectedTool != "" || toolDecision.CanRun {
+		t.Fatalf("tool decision = %#v, want no runnable tool because call is already staged/satisfied", toolDecision)
 	}
 }
 
@@ -3982,15 +4155,283 @@ func TestResolveResponseAnalysisUsesStagedToolEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if len(view.ResponseAnalysis.AnalyzedGuidelines) != 1 {
-		t.Fatalf("analyzed guidelines = %#v, want 1", view.ResponseAnalysis.AnalyzedGuidelines)
+	analysis := view.ResponseAnalysisStage.Analysis
+	if len(analysis.AnalyzedGuidelines) != 1 {
+		t.Fatalf("analyzed guidelines = %#v, want 1", analysis.AnalyzedGuidelines)
 	}
-	item := view.ResponseAnalysis.AnalyzedGuidelines[0]
+	item := analysis.AnalyzedGuidelines[0]
 	if !item.AlreadySatisfied || !item.SatisfiedByToolEvent {
 		t.Fatalf("response analysis item = %#v, want satisfied by tool event", item)
 	}
 	if item.RequiresResponse {
 		t.Fatalf("response analysis item = %#v, do not want response still required", item)
+	}
+}
+
+func TestConditionEvidenceTracksContradictoryAgeSignal(t *testing.T) {
+	evidence := semantics.DefaultConditionEvaluator{}.Evaluate(semantics.ConditionContext{Condition: "drink 21 or older", Text: "I am 19 and want a drink"})
+	if evidence.Applies {
+		t.Fatalf("condition evidence = %#v, do not want applies on contradictory age", evidence)
+	}
+	if evidence.Score >= 0 {
+		t.Fatalf("condition evidence = %#v, want negative score for contradictory age evidence", evidence)
+	}
+	if evidence.Signal != "age_fact" {
+		t.Fatalf("condition evidence signal = %q, want age_fact", evidence.Signal)
+	}
+}
+
+func TestConditionEvidenceUsesSemanticSignalsInsteadOfRawLexicalOnly(t *testing.T) {
+	evidence := semantics.DefaultConditionEvaluator{}.Evaluate(semantics.ConditionContext{Condition: "check the return status", Text: "can you check tracking for me"})
+	if !evidence.Applies {
+		t.Fatalf("condition evidence = %#v, want applies from semantic status/tracking signal", evidence)
+	}
+	if evidence.Signal != "semantic_overlap" {
+		t.Fatalf("condition evidence signal = %q, want semantic_overlap", evidence.Signal)
+	}
+}
+
+func TestDetectedSemanticSignalsCollectsCentralFamilies(t *testing.T) {
+	base := signalSet(canonicalKeywordSignals("please arrange store pickup and check tracking"))
+	signals := detectedSemanticSignals("please arrange store pickup and check tracking", base)
+	if !slices.Contains(signals, "pickup") {
+		t.Fatalf("detected semantic signals = %#v, want pickup", signals)
+	}
+	if !slices.Contains(signals, "return_status") {
+		t.Fatalf("detected semantic signals = %#v, want return_status", signals)
+	}
+}
+
+func TestCanonicalKeywordFamilyTableMapsSharedParent(t *testing.T) {
+	parent, ok := semantics.CanonicalKeywordFamily("motorcycle")
+	if !ok {
+		t.Fatalf("canonicalKeywordFamily(motorcycle) did not resolve")
+	}
+	if parent != "vehicle" {
+		t.Fatalf("canonicalKeywordFamily(motorcycle) = %q, want vehicle", parent)
+	}
+}
+
+func TestNormalizedTokensUseSharedAliasAndStopwordRules(t *testing.T) {
+	tokens := semantics.NormalizedTokens("Hey, can you book the vehicle?")
+	if !slices.Contains(tokens, "hello") {
+		t.Fatalf("normalizedTokens = %#v, want hello alias", tokens)
+	}
+	if slices.Contains(tokens, "the") {
+		t.Fatalf("normalizedTokens = %#v, do not want stopword 'the'", tokens)
+	}
+}
+
+func TestJourneyStateSatisfactionUsesStructuredEvidence(t *testing.T) {
+	state := policy.JourneyNode{
+		ID:          "ask_destination",
+		Instruction: "Ask for the destination city",
+	}
+	result := semantics.DefaultJourneySatisfactionEvaluator{}.Evaluate(semantics.JourneyStateContext{
+		Text:                    "Business class to Singapore tomorrow",
+		State:                   state,
+		EdgeCondition:           "",
+		LatestTurn:              true,
+		CustomerSatisfiedAnswer: customerSatisfiedGuideline,
+	})
+	if !result.Satisfied {
+		t.Fatalf("journey state satisfaction = %#v, want satisfied", result)
+	}
+	if result.Source == "" {
+		t.Fatalf("journey state satisfaction = %#v, want explicit source", result)
+	}
+}
+
+func TestToolCandidateGroundingEvidencePrefersJourneyState(t *testing.T) {
+	evidence := semantics.DefaultToolGroundingEvaluator{}.Evaluate(semantics.ToolGroundingContext{
+		LatestCustomerText: "Please check stock",
+		ActiveStateTool:    "check_stock",
+		ToolName:           "check_stock",
+		ToolDescription:    "Check stock availability",
+	})
+	if !evidence.Grounded {
+		t.Fatalf("grounding evidence = %#v, want grounded", evidence)
+	}
+	if evidence.Source != "journey_state" {
+		t.Fatalf("grounding evidence source = %q, want journey_state", evidence.Source)
+	}
+}
+
+func TestInferJourneyBacktrackIntentSeparatesRestartAndSameProcess(t *testing.T) {
+	sameProcess := semantics.DefaultJourneyBacktrackEvaluator{}.Evaluate(semantics.JourneyBacktrackContext{LatestCustomerText: "Actually change that to business class"})
+	if !sameProcess.RequiresBacktrack || sameProcess.RestartFromRoot {
+		t.Fatalf("same-process intent = %#v, want same-process backtrack", sameProcess)
+	}
+
+	restart := semantics.DefaultJourneyBacktrackEvaluator{}.Evaluate(semantics.JourneyBacktrackContext{LatestCustomerText: "Let's start over with a different booking"})
+	if !restart.RequiresBacktrack || !restart.RestartFromRoot {
+		t.Fatalf("restart intent = %#v, want restart-from-root backtrack", restart)
+	}
+}
+
+func TestBacktrackIntentSignalsDetectRestartWithoutPhraseListOrderDependency(t *testing.T) {
+	signals := backtrackIntentSignals("we need another booking, restart this")
+	if !signals.Restart {
+		t.Fatalf("backtrack intent signals = %#v, want restart", signals)
+	}
+	if signals.SameProcess {
+		t.Fatalf("backtrack intent signals = %#v, do not want same-process", signals)
+	}
+}
+
+func TestCustomerDependencyEvidenceRequiresClarificationWhenMissing(t *testing.T) {
+	evidence := semantics.EvaluateGuidelineCustomerDependency(
+		policy.Guideline{ID: "g1", Then: "Ask for the reason for the return.", Scope: "customer"},
+		"I need help",
+		false,
+		false,
+	)
+	if !evidence.CustomerDependent {
+		t.Fatalf("customer dependency evidence = %#v, want customer dependent", evidence)
+	}
+	if len(evidence.MissingData) == 0 {
+		t.Fatalf("customer dependency evidence = %#v, want missing customer data", evidence)
+	}
+}
+
+func TestCustomerSatisfiedGuidelineDoesNotTreatAddressAsDeliveryPickupChoice(t *testing.T) {
+	item := policy.Guideline{ID: "g1", Then: "Ask for the delivery address.", Scope: "customer"}
+	if customerSatisfiedGuideline("actually let's switch this to store pickup", item) {
+		t.Fatalf("customerSatisfiedGuideline() incorrectly treated a delivery address request as satisfied by a pickup choice")
+	}
+}
+
+func TestAssessActionCoverageDetectsPartialCoverage(t *testing.T) {
+	evidence := semantics.EvaluateActionCoverage("we apologized to the customer", "Apologize and offer a discount", toolHistorySatisfiesInstruction, containsEquivalentInstruction, splitActionSegments, segmentSatisfiedByHistory, dedupe)
+	if evidence.AppliedDegree != "partial" {
+		t.Fatalf("action coverage evidence = %#v, want partial", evidence)
+	}
+	if evidence.Source != "assistant_message" {
+		t.Fatalf("action coverage source = %q, want assistant_message", evidence.Source)
+	}
+}
+
+func TestMatchedInstructionCoverageSignalsDetectsToolStatusCoverage(t *testing.T) {
+	matched := matchedInstructionCoverageSignals("Check the return status", "The tracking result says the return status is pending")
+	if len(matched) == 0 || matched[0] != "return_status" {
+		t.Fatalf("matched instruction coverage = %#v, want return_status", matched)
+	}
+}
+
+func TestEvaluateConditionConflictDetectsOpposingAgeBranch(t *testing.T) {
+	active := map[string]policy.Guideline{
+		"adult": {ID: "adult", When: "drink 21 or older"},
+	}
+	decision := evaluateConditionConflict(
+		MatchingContext{LatestCustomerText: "I am 19 and want a drink"},
+		policy.Guideline{ID: "underage", When: "drink under 21"},
+		active,
+	)
+	if decision.ShouldDrop {
+		t.Fatalf("condition conflict decision = %#v, do not want underage branch dropped", decision)
+	}
+
+	decision = evaluateConditionConflict(
+		MatchingContext{LatestCustomerText: "I am 19 and want a drink"},
+		policy.Guideline{ID: "adult", When: "drink 21 or older"},
+		map[string]policy.Guideline{"underage": {ID: "underage", When: "drink under 21"}},
+	)
+	if !decision.ShouldDrop || decision.Reason != "condition_conflict" {
+		t.Fatalf("condition conflict decision = %#v, want adult branch dropped as condition_conflict", decision)
+	}
+}
+
+func TestActionableConditionEvidencePrefersConversationSignal(t *testing.T) {
+	ctx := MatchingContext{
+		LatestCustomerText: "yes",
+		ConversationText:   "I want to ask about a refund for a damaged order. yes",
+	}
+	evidence := semantics.EvaluateConditionAcrossTexts("damaged order refund", matchingSource(ctx), ctx.ConversationText)
+	if !evidence.Applies {
+		t.Fatalf("actionable condition evidence = %#v, want applies", evidence)
+	}
+	if evidence.Score <= 0 {
+		t.Fatalf("actionable condition evidence = %#v, want positive score", evidence)
+	}
+}
+
+func TestToolSelectionEvidenceDetectsSpecializedTool(t *testing.T) {
+	candidate := ToolCandidate{ToolID: "check_motorcycle_price", ReferenceTools: []string{"check_vehicle_price"}}
+	evidence := semantics.DefaultToolSelectionEvaluator{}.Evaluate(semantics.ToolSelectionContext{
+		CandidateID:      candidate.ToolID,
+		CandidateTerms:   semantics.Signals("check motorcycle price"),
+		ReferenceToolIDs: candidate.ReferenceTools,
+		CandidateSets: map[string][]string{
+			"check_motorcycle_price": semantics.Signals("check motorcycle price"),
+			"check_vehicle_price":    semantics.Signals("check vehicle price"),
+		},
+	})
+	if !evidence.Specialized {
+		t.Fatalf("tool selection evidence = %#v, want specialized", evidence)
+	}
+}
+
+func TestSemanticSpecializationUsesSharedCategoryEvidence(t *testing.T) {
+	if !semantics.SemanticSpecialization([]string{"schedule", "confirmation"}, []string{"appointment", "email"}) {
+		t.Fatalf("semanticSpecialization() want shared category specialization signal")
+	}
+}
+
+func TestSemanticCategoriesUseSharedVocabularyTables(t *testing.T) {
+	categories := semantics.Categories([]string{"motorcycle", "confirmation"})
+	if _, ok := categories["vehicle"]; !ok {
+		t.Fatalf("semanticCategories = %#v, want vehicle", categories)
+	}
+	if _, ok := categories["confirmation"]; !ok {
+		t.Fatalf("semanticCategories = %#v, want confirmation", categories)
+	}
+}
+
+func TestObservationConditionEvidenceUsesConversationContext(t *testing.T) {
+	ctx := MatchingContext{
+		LatestCustomerText: "yes",
+		ConversationText:   "The customer reported a damaged order and wants a refund. yes",
+	}
+	evidence := semantics.EvaluateConditionAcrossTexts("damaged order", matchingSource(ctx), ctx.ConversationText)
+	if !evidence.Applies {
+		t.Fatalf("observation condition evidence = %#v, want applies", evidence)
+	}
+}
+
+func TestInferArgumentFromTextExtractsDateField(t *testing.T) {
+	value, ok := inferArgumentFromText("date", toolArgumentSpec{}, "please book it for tomorrow morning")
+	if !ok {
+		t.Fatalf("inferArgumentFromText(date) did not extract a date-like value")
+	}
+	if value == "" {
+		t.Fatalf("inferArgumentFromText(date) = %#v, want non-empty value", value)
+	}
+}
+
+func TestInferArgumentFromTextTrimsDestinationSpan(t *testing.T) {
+	value, ok := inferArgumentFromText("destination", toolArgumentSpec{Choices: []string{"Singapore"}}, "book it to singapore tomorrow")
+	if !ok {
+		t.Fatalf("inferArgumentFromText(destination) did not extract a destination")
+	}
+	if value != "Singapore" {
+		t.Fatalf("inferArgumentFromText(destination) = %#v, want Singapore", value)
+	}
+}
+
+func TestSlotKindForFieldUsesSharedDefinitions(t *testing.T) {
+	kind := semantics.SlotKindForField("product_name")
+	if kind != argumentSlotProductLike {
+		t.Fatalf("slotKindForField(product_name) = %q, want product_like", kind)
+	}
+}
+
+func TestSlotExtractorForKindUsesSharedDefinitions(t *testing.T) {
+	extractor, ok := semantics.SlotExtractorForKind(argumentSlotDestination)
+	if !ok {
+		t.Fatalf("slotExtractorForKind(destination) did not resolve")
+	}
+	if !slices.Contains(extractor.Markers, "to") {
+		t.Fatalf("slotExtractorForKind(destination) = %#v, want 'to' marker", extractor)
 	}
 }
 
@@ -4003,9 +4444,10 @@ func containsGuideline(items []policy.Guideline, id string) bool {
 	return false
 }
 
-func (view ResolvedView) ToolCandidateStates() map[string]string {
+func (view EngineResult) ToolCandidateStates() map[string]string {
+	toolPlan := view.ToolPlanStage.Plan
 	out := map[string]string{}
-	for _, item := range view.ToolPlan.Candidates {
+	for _, item := range toolPlan.Candidates {
 		out[item.ToolID] = item.DecisionState
 	}
 	return out

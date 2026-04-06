@@ -14,15 +14,16 @@ import (
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/model"
+	semantics "github.com/sahal/parmesan/internal/runtime/semantics"
 )
 
-func Resolve(events []session.Event, bundles []policy.Bundle, journeyInstances []journey.Instance, catalog []tool.CatalogEntry) (ResolvedView, error) {
+func Resolve(events []session.Event, bundles []policy.Bundle, journeyInstances []journey.Instance, catalog []tool.CatalogEntry) (EngineResult, error) {
 	return ResolveWithRouter(context.Background(), nil, events, bundles, journeyInstances, catalog)
 }
 
-func ResolveWithRouter(ctx context.Context, router *model.Router, events []session.Event, bundles []policy.Bundle, journeyInstances []journey.Instance, catalog []tool.CatalogEntry) (ResolvedView, error) {
+func ResolveWithRouter(ctx context.Context, router *model.Router, events []session.Event, bundles []policy.Bundle, journeyInstances []journey.Instance, catalog []tool.CatalogEntry) (EngineResult, error) {
 	if len(bundles) == 0 {
-		return ResolvedView{}, nil
+		return EngineResult{}, nil
 	}
 	bundle := bundles[0]
 	matchCtx := buildMatchingContext(events)
@@ -31,109 +32,111 @@ func ResolveWithRouter(ctx context.Context, router *model.Router, events []sessi
 	matcher := newGuidelineMatcher(resolver)
 	state, err := matcher.Run(ctx, router, bundle, matchCtx, journeyInstances, catalog)
 	if err != nil {
-		return ResolvedView{}, err
+		return EngineResult{}, err
 	}
 	// Journey-node projected guidelines only become active once the active state is known.
 	if state.activeJourney != nil && state.activeJourneyState != nil {
 		projected := projectedNodeGuideline(*state.activeJourney, *state.activeJourneyState)
 		if strategy := resolver.Resolve(projected); strategy != nil {
 			appendProjectedGuideline(ctx, state, strategy, projected)
-			state.matchedGuidelines = matchedGuidelinesFromMatches(state.bundle, state.guidelineMatches, state.activeJourney)
-			state.customerDecisions, state.matchedGuidelines = runCustomerDependentARQ(state.context, state.matchedGuidelines)
-			state.reapplyDecisions, state.matchedGuidelines = runPreviouslyAppliedARQ(state.context, state.matchedGuidelines, state.guidelineMatches)
-			resolved := resolveRelationships(state.bundle, state.context, state.matchedObservations, state.guidelineMatches, state.matchedGuidelines, state.activeJourney, state.activeJourneyState)
-			state.matchedGuidelines = resolved.guidelines
-			state.suppressedGuidelines = resolved.suppressed
-			state.disambiguationPrompt = resolved.disambiguation
-			state.resolutionRecords = resolved.resolutions
-			state.activeJourney = resolved.activeJourney
-			if state.activeJourney == nil {
-				state.activeJourneyState = nil
-			}
-			state.matchedGuidelines, state.suppressedGuidelines, state.resolutionRecords = applySiblingDisambiguation(state.bundle, state.context, state.guidelineMatches, state.matchedGuidelines, state.suppressedGuidelines, state.resolutionRecords)
-			state.disambiguationPrompt = runDisambiguationARQ(ctx, state.router, state.context, state.matchedGuidelines, state.disambiguationPrompt)
-			state.candidateTemplates = collectTemplates(state.bundle, state.activeJourney, state.activeJourneyState, state.context)
-			state.responseAnalysis = analyzeResponsePlan(ctx, state.router, state.context, responseAnalysisGuidelines(state.bundle, state.context, state.matchedGuidelines), state.candidateTemplates, modeOrDefault(state.bundle.CompositionMode, state.candidateTemplates), state.bundle.NoMatch)
+			state.matchFinalizeStage.MatchedGuidelines = matchedGuidelinesFromMatches(state.bundle, state.matchFinalizeStage.GuidelineMatches, state.activeJourney)
+			buildCustomerDependencyStageResult(state.context, state.matchFinalizeStage.MatchedGuidelines).Apply(state)
+			buildPreviouslyAppliedStageResult(state.context, state.matchFinalizeStage.MatchedGuidelines, state.matchFinalizeStage.GuidelineMatches).Apply(state)
+			buildRelationshipResolutionStageResult(state.bundle, state.context, state.observationStage.Observations, state.matchFinalizeStage.GuidelineMatches, state.matchFinalizeStage.MatchedGuidelines, state.activeJourney, state.activeJourneyState).Apply(state)
+			buildDisambiguationStageResult(ctx, state.router, state.bundle, state.context, state.matchFinalizeStage.GuidelineMatches, state.matchFinalizeStage.MatchedGuidelines, effectiveSuppressedGuidelines(state.relationshipResolutionStage, state.disambiguationStage), effectiveResolutionRecords(state.relationshipResolutionStage, state.disambiguationStage), effectiveDisambiguationPrompt(state.relationshipResolutionStage, state.disambiguationStage)).Apply(state)
+			templates := collectTemplates(state.bundle, state.activeJourney, state.activeJourneyState, state.context)
+			responseStage := buildResponseAnalysisStageResult(ctx, state.router, state.context, state.bundle, state.matchFinalizeStage.MatchedGuidelines, templates, state.responseAnalysisStage.Evaluation.Coverage)
+			responseStage.Apply(state)
 		}
 	}
-	state.exposedTools, state.toolApprovals = resolveToolExposure(bundle.GuidelineToolAssociations, state.matchedObservations, state.matchedGuidelines, state.activeJourneyState, bundle.ToolPolicies, catalog)
-	state.toolPlan, state.toolDecision = buildToolPlan(ctx, router, matchCtx, state.activeJourney, state.activeJourneyState, state.journeyDecision, state.matchedGuidelines, state.exposedTools, state.toolApprovals, bundle.Relationships, catalog)
+	exposedTools, toolApprovals := resolveToolExposure(bundle.GuidelineToolAssociations, state.observationStage.Observations, state.matchFinalizeStage.MatchedGuidelines, state.activeJourneyState, bundle.ToolPolicies, catalog)
+	ToolExposureStageResult{ExposedTools: exposedTools, ToolApprovals: toolApprovals}.Apply(state)
+	toolPlanResult, toolDecisionResult := buildToolStageResults(ctx, router, matchCtx, state, bundle.Relationships, catalog)
+	toolPlanResult.Apply(state)
+	toolDecisionResult.Apply(state)
 
 	mode := strings.ToLower(strings.TrimSpace(bundle.CompositionMode))
 	if mode == "" {
-		mode = inferCompositionMode(state.candidateTemplates)
+		mode = inferCompositionMode(state.responseAnalysisStage.CandidateTemplates)
 	}
-	if state.responseAnalysis.NeedsStrictMode {
+	if state.responseAnalysisStage.Analysis.NeedsStrictMode {
 		mode = "strict"
 	}
 
 	arqs := arqsFromState(state)
-	arqs = append(arqs, ARQResult{Name: "tool_plan", Version: promptVersion("tool_plan"), Output: map[string]any{
-		"candidates":         state.toolPlan.Candidates,
-		"selected_tool":      state.toolPlan.SelectedTool,
-		"selected_tools":     state.toolPlan.SelectedTools,
-		"overlapping_groups": state.toolPlan.OverlappingGroups,
-		"rationale":          state.toolPlan.Rationale,
-	}})
-	arqs = append(arqs, ARQResult{Name: "tool_decision", Version: promptVersion("tool_decision"), Output: map[string]any{
-		"selected_tool":     state.toolDecision.SelectedTool,
-		"arguments":         state.toolDecision.Arguments,
-		"approval_required": state.toolDecision.ApprovalRequired,
-		"can_run":           state.toolDecision.CanRun,
-		"missing_arguments": state.toolDecision.MissingArguments,
-		"invalid_arguments": state.toolDecision.InvalidArguments,
-		"missing_issues":    state.toolDecision.MissingIssues,
-		"invalid_issues":    state.toolDecision.InvalidIssues,
-		"grounded":          state.toolDecision.Grounded,
-		"rationale":         state.toolDecision.Rationale,
-	}})
+	arqs = append(arqs,
+		ARQResult{Name: "tool_plan", Version: promptVersion("tool_plan"), Output: toolPlanResult.BatchOutput()},
+		ARQResult{Name: "tool_decision", Version: promptVersion("tool_decision"), Output: toolDecisionResult.BatchOutput()},
+	)
 	state.batchResults = append(state.batchResults, BatchResult{
 		Name:          "tool_plan",
 		Strategy:      "generic",
 		PromptVersion: promptVersion("tool_plan"),
-		Output:        arqs[len(arqs)-2].Output,
+		Output:        toolPlanResult.BatchOutput(),
 	}, BatchResult{
 		Name:          "tool_decision",
 		Strategy:      "generic",
 		PromptVersion: promptVersion("tool_decision"),
-		Output:        arqs[len(arqs)-1].Output,
+		Output:        toolDecisionResult.BatchOutput(),
 	})
 	state.promptSetVersions["tool_plan"] = promptVersion("tool_plan")
 	state.promptSetVersions["tool_decision"] = promptVersion("tool_decision")
 
-	return ResolvedView{
-		Bundle:               &bundle,
-		Context:              matchCtx,
-		Attention:            state.attention,
-		ObservationMatches:   state.observationMatches,
-		GuidelineMatches:     state.guidelineMatches,
-		ReapplyDecisions:     state.reapplyDecisions,
-		CustomerDecisions:    state.customerDecisions,
-		MatchedObservations:  state.matchedObservations,
-		MatchedGuidelines:    state.matchedGuidelines,
-		SuppressedGuidelines: state.suppressedGuidelines,
-		ActiveJourney:        state.activeJourney,
-		ActiveJourneyState:   state.activeJourneyState,
-		JourneyInstance:      state.journeyInstance,
-		ProjectedNodes:       state.projectedNodes,
-		JourneyDecision:      state.journeyDecision,
-		ResolutionRecords:    state.resolutionRecords,
-		ExposedTools:         state.exposedTools,
-		ToolApprovals:        state.toolApprovals,
-		ToolPlan:             state.toolPlan,
-		ToolDecision:         state.toolDecision,
-		ResponseAnalysis:     state.responseAnalysis,
-		CandidateTemplates:   state.candidateTemplates,
-		CompositionMode:      mode,
-		NoMatch:              bundle.NoMatch,
-		DisambiguationPrompt: state.disambiguationPrompt,
-		BatchResults:         append([]BatchResult(nil), state.batchResults...),
-		PromptSetVersions:    clonePromptVersions(state.promptSetVersions),
-		ARQResults:           arqs,
-	}, nil
+	return resolvedViewFromState(bundle, state, mode, arqs), nil
 }
 
-func VerifyDraft(view ResolvedView, draft string, toolOutput map[string]any) VerificationResult {
+func resolvedViewFromState(bundle policy.Bundle, state *matchingState, mode string, arqs []ARQResult) EngineResult {
+	backtrackStage := cloneJourneyBacktrackStageResult(state.journeyBacktrackStage)
+	progressStage := cloneJourneyProgressStageResult(state.journeyProgressStage)
+	observationStage := cloneObservationMatchStageResult(state.observationStage)
+	finalizeStage := cloneFinalizeStageResult(state.matchFinalizeStage)
+	previouslyAppliedStage := clonePreviouslyAppliedStageResult(state.previouslyAppliedStage)
+	customerStage := cloneCustomerDependencyStageResult(state.customerDependencyStage)
+	relationshipStage := cloneRelationshipResolutionStageResult(state.relationshipResolutionStage)
+	disambiguationStage := cloneDisambiguationStageResult(state.disambiguationStage)
+	responseStage := cloneResponseAnalysisStageResult(state.responseAnalysisStage)
+	toolExposureStage := cloneToolExposureStageResult(state.toolExposureStage)
+	toolPlanStage := cloneToolPlanStageResult(state.toolPlanStage)
+	toolDecisionStage := cloneToolDecisionStageResult(state.toolDecisionStage)
+	suppressed := effectiveSuppressedGuidelines(relationshipStage, disambiguationStage)
+	suppressed = filterSuppressedAgainstMatched(suppressed, finalizeStage.MatchedGuidelines)
+	resolutions := effectiveResolutionRecords(relationshipStage, disambiguationStage)
+	prompt := effectiveDisambiguationPrompt(relationshipStage, disambiguationStage)
+	return EngineResult{
+		Bundle:                     &bundle,
+		Context:                    state.context,
+		Attention:                  state.attention,
+		ObservationStage:           observationStage,
+		MatchFinalizeStage:         finalizeStage,
+		PreviouslyAppliedStage:     previouslyAppliedStage,
+		SuppressedGuidelines:       suppressed,
+		ActiveJourney:              state.activeJourney,
+		ActiveJourneyState:         state.activeJourneyState,
+		JourneyInstance:            state.journeyInstance,
+		ProjectedNodes:             state.projectedNodes,
+		ResolutionRecords:          resolutions,
+		ConditionArtifactsStage:    ConditionArtifactsStageResult{Artifacts: cloneConditionArtifacts(state.conditionArtifactsStage.Artifacts)},
+		JourneyBacktrackStage:      backtrackStage,
+		JourneyProgressStage:       progressStage,
+		CustomerDependencyStage:    customerStage,
+		RelationshipResolutionStage: relationshipStage,
+		DisambiguationStage:        disambiguationStage,
+		ResponseAnalysisStage:      responseStage,
+		ToolExposureStage:          toolExposureStage,
+		ToolPlanStage:              toolPlanStage,
+		ToolDecisionStage:          toolDecisionStage,
+		CompositionMode:            mode,
+		NoMatch:                    bundle.NoMatch,
+		DisambiguationPrompt:       prompt,
+		BatchResults:               append([]BatchResult(nil), state.batchResults...),
+		PromptSetVersions:          clonePromptVersions(state.promptSetVersions),
+		ARQResults:                 arqs,
+	}
+}
+
+func VerifyDraft(view EngineResult, draft string, toolOutput map[string]any) VerificationResult {
+	analysis := view.ResponseAnalysisStage.Analysis
+	reapplyDecisions := view.PreviouslyAppliedStage.Decisions
 	if strings.TrimSpace(view.DisambiguationPrompt) != "" {
 		return VerificationResult{
 			Status:      "block",
@@ -141,8 +144,9 @@ func VerifyDraft(view ResolvedView, draft string, toolOutput map[string]any) Ver
 			Replacement: view.DisambiguationPrompt,
 		}
 	}
+	templates := view.ResponseAnalysisStage.CandidateTemplates
 	if strings.EqualFold(view.CompositionMode, "strict") {
-		rendered := renderTemplate(view.CandidateTemplates, toolOutput)
+		rendered := renderTemplate(templates, toolOutput)
 		if rendered != "" && normalizeText(draft) != normalizeText(rendered) {
 			return VerificationResult{
 				Status:      "revise",
@@ -169,18 +173,18 @@ func VerifyDraft(view ResolvedView, draft string, toolOutput map[string]any) Ver
 			}
 		}
 	}
-	for _, item := range view.ResponseAnalysis.AnalyzedGuidelines {
+	for _, item := range analysis.AnalyzedGuidelines {
 		if !item.RequiresTemplate {
 			continue
 		}
-		if strings.TrimSpace(view.ResponseAnalysis.RecommendedTemplate) != "" && normalizeText(draft) != normalizeText(view.ResponseAnalysis.RecommendedTemplate) {
+		if strings.TrimSpace(analysis.RecommendedTemplate) != "" && normalizeText(draft) != normalizeText(analysis.RecommendedTemplate) {
 			return VerificationResult{
 				Status:      "revise",
 				Reasons:     []string{"response_analysis_template_required"},
-				Replacement: view.ResponseAnalysis.RecommendedTemplate,
+				Replacement: analysis.RecommendedTemplate,
 			}
 		}
-		if strings.EqualFold(view.CompositionMode, "strict") && strings.TrimSpace(view.ResponseAnalysis.RecommendedTemplate) == "" && view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
+		if strings.EqualFold(view.CompositionMode, "strict") && strings.TrimSpace(analysis.RecommendedTemplate) == "" && view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
 			expected := strings.TrimSpace(view.ActiveJourneyState.Instruction)
 			if normalizeText(draft) != normalizeText(expected) {
 				return VerificationResult{
@@ -192,31 +196,32 @@ func VerifyDraft(view ResolvedView, draft string, toolOutput map[string]any) Ver
 		}
 		break
 	}
-	if view.ResponseAnalysis.NeedsStrictMode && !strings.EqualFold(view.CompositionMode, "strict") {
+	if analysis.NeedsStrictMode && !strings.EqualFold(view.CompositionMode, "strict") {
 		return VerificationResult{
 			Status:  "revise",
 			Reasons: []string{"response_analysis_requires_strict_mode"},
 		}
 	}
-	if view.ResponseAnalysis.RecommendedTemplate != "" && normalizeText(draft) != normalizeText(view.ResponseAnalysis.RecommendedTemplate) {
+	if analysis.RecommendedTemplate != "" && normalizeText(draft) != normalizeText(analysis.RecommendedTemplate) {
 		return VerificationResult{
 			Status:      "revise",
 			Reasons:     []string{"response_analysis_template_mismatch"},
-			Replacement: view.ResponseAnalysis.RecommendedTemplate,
+			Replacement: analysis.RecommendedTemplate,
 		}
 	}
-	if view.ToolDecision.SelectedTool != "" && len(toolOutput) == 0 && strings.Contains(strings.ToLower(view.ToolDecision.Rationale), "required") {
+	toolDecision := view.ToolDecisionStage.Decision
+	if toolDecision.SelectedTool != "" && len(toolOutput) == 0 && strings.Contains(strings.ToLower(toolDecision.Rationale), "required") {
 		return VerificationResult{
 			Status:  "revise",
 			Reasons: []string{"required_tool_missing"},
 		}
 	}
-	for _, item := range view.ReapplyDecisions {
+	for _, item := range reapplyDecisions {
 		if !item.ShouldReapply {
 			continue
 		}
-		for _, guideline := range view.MatchedGuidelines {
-			if guideline.ID == item.ID && strings.TrimSpace(guideline.Then) != "" && !containsAllKeywords(draft, guideline.Then) {
+		for _, guideline := range view.MatchFinalizeStage.MatchedGuidelines {
+			if guideline.ID == item.ID && strings.TrimSpace(guideline.Then) != "" && !responseTextSatisfiesInstruction(draft, guideline.Then) {
 				return VerificationResult{
 					Status:  "revise",
 					Reasons: []string{"reapplied_guideline_missing"},
@@ -232,6 +237,16 @@ func strictNoMatchText(configured string) string {
 		return strings.TrimSpace(configured)
 	}
 	return "Not sure I understand. Could you please say that another way?"
+}
+
+func recordConditionArtifact(state *matchingState, key string, evidence semantics.ConditionEvidence) {
+	if state == nil || strings.TrimSpace(key) == "" {
+		return
+	}
+	if state.conditionArtifactsStage.Artifacts == nil {
+		state.conditionArtifactsStage.Artifacts = map[string]semantics.ConditionEvidence{}
+	}
+	state.conditionArtifactsStage.Artifacts[key] = evidence
 }
 
 func arqsFromState(state *matchingState) []ARQResult {
@@ -253,27 +268,38 @@ func arqsFromState(state *matchingState) []ARQResult {
 }
 
 func appendProjectedGuideline(ctx context.Context, state *matchingState, strategy guidelineMatchingStrategy, guideline policy.Guideline) {
-	previousMatches := append([]Match(nil), state.guidelineMatches...)
-	previousGuidelines := append([]policy.Guideline(nil), state.matchedGuidelines...)
+	previousMatches := append([]Match(nil), state.matchFinalizeStage.GuidelineMatches...)
+	previousGuidelines := append([]policy.Guideline(nil), state.matchFinalizeStage.MatchedGuidelines...)
 	for _, batch := range strategy.CreateMatchingBatches(snapshotFromState(state), []policy.Guideline{guideline}) {
 		switch batch.Name() {
 		case "actionable_match", "low_criticality_match", "customer_dependency", "previously_applied", "relationship_resolution", "disambiguation":
-			mutation, err := batch.Process(ctx, snapshotFromState(state))
+			result, err := batch.Process(ctx, snapshotFromState(state))
 			if err != nil {
 				continue
 			}
-			if mutation != nil {
-				mutation(state)
+			if result != nil {
+				result.Apply(state)
 			}
 			if batch.Name() == "actionable_match" || batch.Name() == "low_criticality_match" {
-				state.guidelineMatches = mergeProjectedMatches(previousMatches, state.guidelineMatches)
-				state.matchedGuidelines = mergeProjectedGuidelines(previousGuidelines, state.matchedGuidelines, state.guidelineMatches)
-				previousMatches = append([]Match(nil), state.guidelineMatches...)
-				previousGuidelines = append([]policy.Guideline(nil), state.matchedGuidelines...)
+				state.matchFinalizeStage.GuidelineMatches = mergeProjectedMatches(previousMatches, state.matchFinalizeStage.GuidelineMatches)
+				state.matchFinalizeStage.MatchedGuidelines = mergeProjectedGuidelines(previousGuidelines, state.matchFinalizeStage.MatchedGuidelines, state.matchFinalizeStage.GuidelineMatches)
+				previousMatches = append([]Match(nil), state.matchFinalizeStage.GuidelineMatches...)
+				previousGuidelines = append([]policy.Guideline(nil), state.matchFinalizeStage.MatchedGuidelines...)
 			}
-			recordBatchResult(state, batch.Name(), batch.Strategy(), batch.PromptVersion(), 0, 1, 0, state)
+			syncFinalizeStageToState(state)
+			recordBatchResult(state, batch.Name(), batch.Strategy(), batch.PromptVersion(), 0, 1, 0, result)
 		}
 	}
+}
+
+func syncFinalizeStageToState(state *matchingState) {
+	if state == nil {
+		return
+	}
+	sortMatches(state.matchFinalizeStage.GuidelineMatches)
+	state.matchFinalizeStage.GuidelineMatches = dedupeMatches(state.matchFinalizeStage.GuidelineMatches)
+	sortGuidelines(state.matchFinalizeStage.MatchedGuidelines, state.matchFinalizeStage.GuidelineMatches)
+	state.matchFinalizeStage.MatchedGuidelines = dedupeGuidelines(state.matchFinalizeStage.MatchedGuidelines)
 }
 
 func mergeProjectedMatches(existing []Match, projected []Match) []Match {
@@ -295,6 +321,24 @@ func clonePromptVersions(input map[string]string) map[string]string {
 	out := make(map[string]string, len(input))
 	for key, value := range input {
 		out[key] = value
+	}
+	return out
+}
+
+func filterSuppressedAgainstMatched(items []SuppressedGuideline, matched []policy.Guideline) []SuppressedGuideline {
+	if len(items) == 0 || len(matched) == 0 {
+		return items
+	}
+	active := make(map[string]struct{}, len(matched))
+	for _, item := range matched {
+		active[item.ID] = struct{}{}
+	}
+	out := make([]SuppressedGuideline, 0, len(items))
+	for _, item := range items {
+		if _, ok := active[item.ID]; ok {
+			continue
+		}
+		out = append(out, item)
 	}
 	return out
 }
@@ -438,8 +482,15 @@ func mergeStructuredResponseAnalysis(base []AnalyzedGuideline, structured []Anal
 			item.RequiresResponse = false
 			item.Rationale = firstNonEmpty(item.Rationale, prior.Rationale)
 		} else if prior, ok := baseByID[item.ID]; ok {
-			item.SatisfactionSource = firstNonEmpty(item.SatisfactionSource, prior.SatisfactionSource)
 			item.AppliedDegree = strongerAppliedDegree(item.AppliedDegree, prior.AppliedDegree)
+			if prior.AlreadySatisfied && item.AppliedDegree == prior.AppliedDegree {
+				item.AlreadySatisfied = true
+				item.RequiresResponse = false
+				item.SatisfactionSource = firstNonEmpty(prior.SatisfactionSource, item.SatisfactionSource)
+				item.Rationale = firstNonEmpty(prior.Rationale, item.Rationale)
+			} else {
+				item.SatisfactionSource = firstNonEmpty(item.SatisfactionSource, prior.SatisfactionSource)
+			}
 			if item.AppliedDegree == "full" {
 				item.AlreadySatisfied = true
 				item.RequiresResponse = false
@@ -563,7 +614,8 @@ func buildMatchingContext(events []session.Event) MatchingContext {
 			case "ai_agent":
 				ctx.AssistantHistory = append(ctx.AssistantHistory, part.Text)
 				ctx.AppliedInstructions = append(ctx.AppliedInstructions, part.Text)
-				for _, token := range keywords(part.Text) {
+				for _, token := range strings.Fields(strings.ToLower(part.Text)) {
+					token = strings.Trim(token, ".,!?;:\"'()[]{}")
 					if strings.HasPrefix(token, "guideline") {
 						applied[token] = struct{}{}
 					}
@@ -673,17 +725,17 @@ func runPolicyAttentionARQ(ctx MatchingContext, bundle policy.Bundle, projected 
 	out := PolicyAttention{}
 	source := matchingSource(ctx)
 	for _, item := range bundle.Observations {
-		if scoreCondition(item.When, source) > 0 {
+		if semantics.EvaluateCondition(item.When, source).Applies {
 			out.ContextSignals = append(out.ContextSignals, item.ID)
 		}
 	}
 	for _, item := range bundle.Guidelines {
-		if scoreCondition(item.When, source) > 0 {
+		if semantics.EvaluateCondition(item.When, source).Applies {
 			out.CriticalInstructionIDs = append(out.CriticalInstructionIDs, item.ID)
 		}
 	}
 	for _, item := range projected {
-		if scoreCondition(item.Instruction, source) > 0 {
+		if semantics.EvaluateCondition(item.Instruction, source).Applies {
 			out.ContextSignals = append(out.ContextSignals, item.ID)
 		}
 	}
@@ -711,7 +763,6 @@ func splitLowCriticalityGuidelines(items []policy.Guideline) ([]policy.Guideline
 func runObservationARQ(ctx context.Context, router *model.Router, matchCtx MatchingContext, items []policy.Observation) ([]Match, []policy.Observation) {
 	var matches []Match
 	var out []policy.Observation
-	source := matchingSource(matchCtx)
 	if router != nil && len(items) > 0 {
 		index := map[string]policy.Observation{}
 		adapted := make([]policy.Observation, 0, len(items))
@@ -741,8 +792,8 @@ func runObservationARQ(ctx context.Context, router *model.Router, matchCtx Match
 				if !ok || !check.Applies {
 					continue
 				}
-				score := scoreCondition(item.When, source)
-				result.Matches = append(result.Matches, Match{ID: item.ID, Kind: "observation", Score: float64(maxInt(score, 1) + item.Priority), Rationale: firstNonEmpty(check.Rationale, "structured match")})
+				evidence := semantics.EvaluateConditionAcrossTexts(item.When, matchingSource(matchCtx), matchCtx.ConversationText)
+				result.Matches = append(result.Matches, Match{ID: item.ID, Kind: "observation", Score: float64(maxInt(evidence.Score, 1) + item.Priority), Rationale: firstNonEmpty(check.Rationale, evidence.Rationale, "structured match")})
 				result.Items = append(result.Items, item)
 			}
 			return result, true
@@ -763,15 +814,15 @@ func runObservationARQ(ctx context.Context, router *model.Router, matchCtx Match
 		}
 	}
 	for _, item := range items {
-		score := scoreCondition(item.When, source)
-		if score <= 0 {
+		evidence := semantics.EvaluateConditionAcrossTexts(item.When, matchingSource(matchCtx), matchCtx.ConversationText)
+		if evidence.Score <= 0 || !evidence.Applies {
 			continue
 		}
 		matches = append(matches, Match{
 			ID:        item.ID,
 			Kind:      "observation",
-			Score:     float64(score) + float64(item.Priority),
-			Rationale: "customer context matches observation condition",
+			Score:     float64(evidence.Score) + float64(item.Priority),
+			Rationale: firstNonEmpty(evidence.Rationale, "customer context matches observation condition"),
 		})
 		out = append(out, item)
 	}
@@ -816,7 +867,7 @@ func runActionableARQ(ctx context.Context, router *model.Router, matchCtx Matchi
 				if strings.HasPrefix(item.ID, "journey_node:") {
 					kind = "journey_node"
 				}
-				score := actionableConditionScore(matchCtx, item.When)
+				score := semantics.EvaluateConditionAcrossTexts(item.When, matchingSource(matchCtx), matchCtx.ConversationText).Score
 				result.Matches = append(result.Matches, Match{ID: item.ID, Kind: kind, Score: float64(maxInt(score, 1) + item.Priority), Rationale: firstNonEmpty(check.Rationale, "structured match")})
 				result.Items = append(result.Items, item)
 			}
@@ -839,8 +890,8 @@ func runActionableARQ(ctx context.Context, router *model.Router, matchCtx Matchi
 			if _, ok := seen[item.ID]; ok {
 				continue
 			}
-			score := actionableConditionScore(matchCtx, item.When)
-			if score < 3 {
+			evidence := semantics.EvaluateConditionAcrossTexts(item.When, matchingSource(matchCtx), matchCtx.ConversationText)
+			if evidence.Score < 3 || !evidence.Applies {
 				continue
 			}
 			kind := "guideline"
@@ -850,8 +901,8 @@ func runActionableARQ(ctx context.Context, router *model.Router, matchCtx Matchi
 			matches = append(matches, Match{
 				ID:        item.ID,
 				Kind:      kind,
-				Score:     float64(score) + float64(item.Priority),
-				Rationale: "deterministic condition signal is strong enough to retain this actionable match",
+				Score:     float64(evidence.Score) + float64(item.Priority),
+				Rationale: firstNonEmpty(evidence.Rationale, "deterministic condition evidence is strong enough to retain this actionable match"),
 			})
 			out = append(out, item)
 		}
@@ -862,8 +913,8 @@ func runActionableARQ(ctx context.Context, router *model.Router, matchCtx Matchi
 		}
 	}
 	for _, item := range items {
-		score := actionableConditionScore(matchCtx, item.When)
-		if score <= 0 {
+		evidence := semantics.EvaluateConditionAcrossTexts(item.When, matchingSource(matchCtx), matchCtx.ConversationText)
+		if evidence.Score <= 0 || !evidence.Applies {
 			continue
 		}
 		kind := "guideline"
@@ -873,24 +924,14 @@ func runActionableARQ(ctx context.Context, router *model.Router, matchCtx Matchi
 		matches = append(matches, Match{
 			ID:        item.ID,
 			Kind:      kind,
-			Score:     float64(score) + float64(item.Priority),
-			Rationale: "customer context satisfies actionable condition",
+			Score:     float64(evidence.Score) + float64(item.Priority),
+			Rationale: firstNonEmpty(evidence.Rationale, "customer context satisfies actionable condition"),
 		})
 		out = append(out, item)
 	}
 	sortMatches(matches)
 	sortGuidelines(out, matches)
 	return matches, out
-}
-
-func actionableConditionScore(ctx MatchingContext, condition string) int {
-	score := scoreCondition(condition, matchingSource(ctx))
-	if strings.TrimSpace(ctx.ConversationText) != "" {
-		if v := scoreCondition(condition, ctx.ConversationText); v > score {
-			score = v
-		}
-	}
-	return score
 }
 
 func runPreviouslyAppliedARQ(ctx MatchingContext, items []policy.Guideline, matches []Match) ([]ReapplyDecision, []policy.Guideline) {
@@ -918,9 +959,15 @@ func runPreviouslyAppliedARQ(ctx MatchingContext, items []policy.Guideline, matc
 			Score:         matchByID[item.ID].Score,
 			Rationale:     "guideline has not been clearly satisfied earlier in the conversation",
 		}
+		dependency := semantics.EvaluateGuidelineCustomerDependency(
+			item,
+			ctx.LatestCustomerText,
+			customerSatisfiedGuideline(ctx.LatestCustomerText, item),
+			len(matchedSemanticTerms(ctx.LatestCustomerText, []string{"because", "reason", "damaged", "refund", "cancel", "return", "order", "item", "details", "status"})) > 0,
+		)
 		alreadyApplied := containsEquivalentInstruction(ctx.AppliedInstructions, item.Then) || customerDependentQuestionWasAsked(ctx.AppliedInstructions, item.Then)
-		customerDependent := strings.Contains(strings.ToLower(item.Scope), "customer") || containsAnyKeyword(item.Then, "ask", "confirm", "clarify", "reason", "details", "status")
-		newSignal := scoreCondition(item.When, ctx.LatestCustomerText) > scoreCondition(item.When, strings.Join(ctx.CustomerHistory[:maxInt(len(ctx.CustomerHistory)-1, 0)], " "))
+		customerDependent := dependency.CustomerDependent
+		newSignal := semantics.EvaluateCondition(item.When, ctx.LatestCustomerText).Score > semantics.EvaluateCondition(item.When, strings.Join(ctx.CustomerHistory[:maxInt(len(ctx.CustomerHistory)-1, 0)], " ")).Score
 		if alreadyApplied && !customerDependent && !newSignal {
 			decision.ShouldReapply = false
 			decision.Score = 0
@@ -941,46 +988,35 @@ func runPreviouslyAppliedARQ(ctx MatchingContext, items []policy.Guideline, matc
 }
 
 func customerSatisfiedGuideline(text string, item policy.Guideline) bool {
-	loweredText := strings.ToLower(text)
-	loweredAction := strings.ToLower(item.Then)
-	if strings.Contains(loweredAction, "inside or outside") {
-		return containsAnyPhrase(loweredText, "inside", "outside")
+	textEvidence := semantics.AnalyzeText(text)
+	switch semantics.InstructionResponseKind(item.Then) {
+	case "inside_outside":
+		return textEvidence.ChoiceKind == "inside_outside"
+	case "delivery_pickup":
+		return textEvidence.ChoiceKind == "delivery_pickup"
+	case "drink_preference":
+		return textEvidence.ChoiceKind == "drink_preference"
+	case "store_pickup":
+		return textEvidence.ChoiceKind == "store_pickup" || textEvidence.ChoiceKind == "delivery_pickup"
 	}
-	if strings.Contains(loweredAction, "delivery") && strings.Contains(loweredAction, "pickup") {
-		return containsAnyPhrase(loweredText, "delivery", "pickup", "pick up", "store pickup")
+	actionEvidence := semantics.AnalyzeText(item.Then)
+	if actionEvidence.HasEmail && textEvidence.HasEmail {
+		return true
 	}
-	if strings.Contains(loweredAction, "drinks") {
-		return containsAnyPhrase(loweredText, "drink", "drinks", "no drinks", "without drinks")
-	}
-	if strings.Contains(loweredAction, "store") {
-		return containsAnyPhrase(loweredText, "store", "pickup", "pick up")
-	}
-	if strings.Contains(loweredAction, "email") {
-		return strings.Contains(loweredText, "@")
-	}
-	if strings.Contains(loweredAction, "phone") || strings.Contains(loweredAction, "number") {
-		for _, token := range strings.Fields(loweredText) {
-			digits := 0
-			for _, r := range token {
-				if r >= '0' && r <= '9' {
-					digits++
-				}
-			}
-			if digits >= 5 {
-				return true
-			}
-		}
+	if actionEvidence.HasPhone && textEvidence.HasPhone {
+		return true
 	}
 	return false
 }
 
 func customerDependentQuestionWasAsked(history []string, instruction string) bool {
-	loweredInstruction := strings.ToLower(instruction)
-	if strings.Contains(loweredInstruction, "inside or outside") {
-		for _, item := range history {
-			if containsAnyPhrase(strings.ToLower(item), "inside", "outside") {
-				return true
-			}
+	needed := semantics.InstructionResponseKind(instruction)
+	if needed == "" {
+		return false
+	}
+	for _, item := range history {
+		if semantics.AnalyzeText(item).ChoiceKind == needed {
+			return true
 		}
 	}
 	return false
@@ -1001,56 +1037,24 @@ func guidelineApplicationAssessment(matchCtx MatchingContext, guideline policy.G
 	}
 	if len(matchCtx.AssistantHistory) > 0 {
 		history := strings.ToLower(strings.Join(matchCtx.AssistantHistory, "\n"))
-		if assistantHistoryReflectsToolResult(history, then) {
-			return "full", "tool_event", true, "guideline action appears satisfied by a previous tool-backed assistant turn"
+		coverage := semantics.EvaluateActionCoverage(history, then, toolHistorySatisfiesInstruction, containsEquivalentInstruction, splitActionSegments, segmentSatisfiedByHistory, dedupe)
+		if coverage.Source == "tool_event" && coverage.AppliedDegree == "full" {
+			return "full", "tool_event", true, firstNonEmpty(coverage.Rationale, "guideline action appears satisfied by a previous tool-backed assistant turn")
 		}
-	}
-	if len(matchCtx.AssistantHistory) > 0 {
-		history := strings.ToLower(strings.Join(matchCtx.AssistantHistory, "\n"))
-		if degree := actionCoverageDegree(history, then); degree != "none" {
-			if degree == "full" {
-				return degree, "assistant_message", false, "guideline action appears satisfied by a previous assistant turn"
+		if coverage.AppliedDegree != "none" {
+			if coverage.AppliedDegree == "full" {
+				return coverage.AppliedDegree, "assistant_message", false, firstNonEmpty(coverage.Rationale, "guideline action appears satisfied by a previous assistant turn")
 			}
-			return degree, "assistant_message", false, "guideline action appears partially handled by a previous assistant turn"
+			return coverage.AppliedDegree, "assistant_message", false, firstNonEmpty(coverage.Rationale, "guideline action appears partially handled by a previous assistant turn")
 		}
 	}
 	if customerSatisfiedGuideline(matchCtx.LatestCustomerText, guideline) {
 		loweredScope := strings.ToLower(guideline.Scope)
-		if strings.Contains(loweredScope, "customer") || customerDependentQuestionWasAsked(matchCtx.AppliedInstructions, guideline.Then) || containsAnyKeyword(guideline.Then, "ask", "confirm", "clarify", "reason", "details", "status", "inside", "outside") {
+		if strings.Contains(loweredScope, "customer") || customerDependentQuestionWasAsked(matchCtx.AppliedInstructions, guideline.Then) || semantics.GuidelineRequestsCustomerFollowUp(guideline.Then) {
 			return "full", "customer_answer", false, "guideline action appears satisfied by the customer's follow-up answer"
 		}
 	}
 	return "none", "", false, ""
-}
-
-func actionCoverageDegree(history string, instruction string) string {
-	if strings.TrimSpace(history) == "" || strings.TrimSpace(instruction) == "" {
-		return "none"
-	}
-	if containsEquivalentInstruction([]string{history}, instruction) {
-		return "full"
-	}
-	segments := splitActionSegments(instruction)
-	if len(segments) == 0 {
-		if segmentSatisfiedByHistory(history, instruction) {
-			return "full"
-		}
-		return "none"
-	}
-	matched := 0
-	for _, segment := range segments {
-		if segmentSatisfiedByHistory(history, segment) {
-			matched++
-		}
-	}
-	switch {
-	case matched == 0:
-		return "none"
-	case matched == len(segments):
-		return "full"
-	default:
-		return "partial"
-	}
 }
 
 func splitActionSegments(instruction string) []string {
@@ -1070,25 +1074,18 @@ func splitActionSegments(instruction string) []string {
 	return out
 }
 
-func segmentSatisfiedByHistory(history string, segment string) bool {
+func segmentSatisfiedByHistory(history string, segment string) ([]string, bool) {
 	lowered := strings.ToLower(strings.TrimSpace(segment))
 	if lowered == "" {
-		return false
+		return nil, false
 	}
-	switch {
-	case strings.Contains(lowered, "apolog"):
-		return containsAnyPhrase(history, "sorry", "apolog")
-	case strings.Contains(lowered, "discount"):
-		return strings.Contains(history, "discount")
-	case strings.Contains(lowered, "check the return status"), strings.Contains(lowered, "return status"):
-		return containsAnyPhrase(history, "status is", "return status", "tracking")
-	case strings.Contains(lowered, "check the order status"), strings.Contains(lowered, "order status"):
-		return containsAnyPhrase(history, "order status", "status is", "tracking")
-	case strings.Contains(lowered, "lock the card"):
-		return containsAnyPhrase(history, "card is now locked", "locked your card", "lock_card", "locked")
-	default:
-		return containsAllKeywords(history, lowered)
+	if matched := matchedInstructionCoverageSignals(lowered, history); len(matched) > 0 {
+		return matched, true
 	}
+	if responseTextSatisfiesInstruction(history, lowered) {
+		return []string{lowered}, true
+	}
+	return nil, false
 }
 
 func strongerAppliedDegree(values ...string) string {
@@ -1104,17 +1101,42 @@ func strongerAppliedDegree(values ...string) string {
 }
 
 func assistantHistoryReflectsToolResult(history string, instruction string) bool {
-	then := strings.ToLower(strings.TrimSpace(instruction))
-	switch {
-	case strings.Contains(then, "check the return status"):
-		return strings.Contains(history, "status is") || strings.Contains(history, "return status") || strings.Contains(history, "tracking")
-	case strings.Contains(then, "check the order status"):
-		return strings.Contains(history, "order status") || strings.Contains(history, "status is")
-	case strings.Contains(then, "lock the card"):
-		return strings.Contains(history, "card is now locked") || strings.Contains(history, "locked your card")
-	default:
+	return toolHistorySatisfiesInstruction(history, instruction)
+}
+
+func toolHistorySatisfiesInstruction(history string, instruction string) bool {
+	required := semantics.InstructionCoverageSignals(instruction)
+	if len(required) == 0 {
 		return false
 	}
+	available := map[string]struct{}{}
+	for _, signal := range semantics.ToolHistoryCoverageSignals(history) {
+		available[signal] = struct{}{}
+	}
+	for _, signal := range required {
+		if _, ok := available[signal]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func matchedInstructionCoverageSignals(instruction string, history string) []string {
+	required := semantics.InstructionCoverageSignals(instruction)
+	if len(required) == 0 {
+		return nil
+	}
+	available := map[string]struct{}{}
+	for _, signal := range semantics.HistoryCoverageSignals(history) {
+		available[signal] = struct{}{}
+	}
+	var matched []string
+	for _, signal := range required {
+		if _, ok := available[signal]; ok {
+			matched = append(matched, signal)
+		}
+	}
+	return dedupe(matched)
 }
 
 func runCustomerDependentARQ(ctx MatchingContext, items []policy.Guideline) ([]CustomerDependencyDecision, []policy.Guideline) {
@@ -1131,16 +1153,18 @@ func runCustomerDependentARQ(ctx MatchingContext, items []policy.Guideline) ([]C
 			out = append(out, item)
 			continue
 		}
-		customerDependent := strings.Contains(strings.ToLower(item.Scope), "customer") || containsAnyKeyword(item.Then, "ask", "confirm", "clarify", "reason", "details", "status")
+		evidence := semantics.EvaluateGuidelineCustomerDependency(
+			item,
+			ctx.LatestCustomerText,
+			customerSatisfiedGuideline(ctx.LatestCustomerText, item),
+			len(matchedSemanticTerms(ctx.LatestCustomerText, []string{"because", "reason", "damaged", "refund", "cancel", "return", "order", "item", "details", "status"})) > 0,
+		)
 		alreadyApplied := containsEquivalentInstruction(ctx.AppliedInstructions, item.Then) || customerDependentQuestionWasAsked(ctx.AppliedInstructions, item.Then)
 		decision := CustomerDependencyDecision{
-			ID:                item.ID,
-			CustomerDependent: customerDependent,
-			Rationale:         "guideline can proceed without extra customer data",
-		}
-		if customerDependent && !containsAnyKeyword(ctx.LatestCustomerText, "because", "reason", "damaged", "refund", "cancel", "return", "order", "item", "details", "status") {
-			decision.MissingCustomerData = append(decision.MissingCustomerData, "customer_confirmation")
-			decision.Rationale = "guideline depends on customer clarification before execution"
+			ID:                  item.ID,
+			CustomerDependent:   evidence.CustomerDependent,
+			MissingCustomerData: append([]string(nil), evidence.MissingData...),
+			Rationale:           firstNonEmpty(evidence.Rationale, "guideline can proceed without extra customer data"),
 		}
 		decisions = append(decisions, decision)
 		if len(decision.MissingCustomerData) == 0 || alreadyApplied {
@@ -1148,63 +1172,6 @@ func runCustomerDependentARQ(ctx MatchingContext, items []policy.Guideline) ([]C
 		}
 	}
 	return decisions, out
-}
-
-func resolveJourney(bundle policy.Bundle, instances []journey.Instance, ctx MatchingContext) (*policy.Journey, *policy.JourneyNode, *journey.Instance) {
-	instanceByJourney := map[string]journey.Instance{}
-	for _, item := range instances {
-		if item.Status == journey.StatusActive {
-			instanceByJourney[item.JourneyID] = item
-		}
-	}
-	for _, j := range bundle.Journeys {
-		if instance, ok := instanceByJourney[j.ID]; ok {
-			state := findState(j, instance.StateID)
-			if state != nil {
-				copiedJourney := j
-				copiedState := *state
-				copiedInstance := instance
-				return &copiedJourney, &copiedState, &copiedInstance
-			}
-		}
-	}
-
-	bestScore := 0
-	var selected *policy.Journey
-	for _, j := range bundle.Journeys {
-		score := 0
-		for _, cond := range j.When {
-			if v := scoreCondition(cond, ctx.LatestCustomerText); v > score {
-				score = v
-			}
-		}
-		score += j.Priority
-		if score > bestScore && journeyRootState(&j) != nil {
-			copied := j
-			selected = &copied
-			bestScore = score
-		}
-	}
-	root := journeyRootState(selected)
-	if selected == nil || root == nil {
-		return nil, nil, nil
-	}
-	startState, startPath := firstExecutableJourneyState(selected, root.ID)
-	if startState == nil {
-		startState = root
-		startPath = []string{root.ID}
-	}
-	instance := journey.Instance{
-		ID:        fmt.Sprintf("journey_%s", selected.ID),
-		SessionID: "",
-		JourneyID: selected.ID,
-		StateID:   startState.ID,
-		Path:      startPath,
-		Status:    journey.StatusActive,
-		UpdatedAt: time.Now().UTC(),
-	}
-	state := *startState
-	return selected, &state, &instance
 }
 
 func firstExecutableJourneyState(flow *policy.Journey, rootID string) (*policy.JourneyNode, []string) {
@@ -1249,170 +1216,9 @@ func shouldSkipStartupNode(state policy.JourneyNode, nextCount int) bool {
 	return strings.TrimSpace(state.Instruction) == ""
 }
 
-func runJourneyBacktrackARQ(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, instance *journey.Instance) JourneyDecision {
-	if activeJourney == nil || activeState == nil || instance == nil {
-		return JourneyDecision{}
-	}
-	if lateCompletedPreviousJourneyStep(matchCtx, activeJourney, activeState) {
-		return JourneyDecision{}
-	}
-	rootID := ""
-	if root := journeyRootState(activeJourney); root != nil {
-		rootID = root.ID
-	}
-	if router != nil {
-		var structured struct {
-			RequiresBacktracking bool   `json:"requires_backtracking"`
-			BacktrackToSame      bool   `json:"backtrack_to_same_journey_process"`
-			Rationale            string `json:"rationale"`
-		}
-		prompt := buildJourneyBacktrackPrompt(matchCtx, activeJourney, activeState, rootID)
-		if generateStructuredWithRetry(ctx, router, prompt, &structured) && structured.RequiresBacktracking {
-			target := rootID
-			nextState := ""
-			if structured.BacktrackToSame {
-				if selected := selectBestBacktrackTarget(matchCtx, activeJourney, instance.Path, activeState.ID, false); selected != nil {
-					target = selected.ID
-					nextState = backtrackFastForwardState(matchCtx, activeJourney, selected.ID, activeState)
-				} else if strings.TrimSpace(target) == "" {
-					target = activeState.ID
-				}
-			}
-			if !isLegalBacktrackTarget(instance.Path, target, rootID) {
-				return JourneyDecision{}
-			}
-			return JourneyDecision{
-				Action:       "backtrack",
-				CurrentState: activeState.ID,
-				BacktrackTo:  target,
-				NextState:    nextState,
-				Rationale:    firstNonEmpty(structured.Rationale, "journey should backtrack before proceeding"),
-			}
-		}
-	}
-	message := strings.ToLower(matchCtx.LatestCustomerText)
-	sameProcessMarkers := []string{"actually", "change", "changed", "resume", "continue", "go back"}
-	newPurposeMarkers := []string{"instead", "different", "another", "new", "start over", "again", "restart"}
-	if containsAnyPhrase(message, sameProcessMarkers...) {
-		if selected := selectBestBacktrackTarget(matchCtx, activeJourney, instance.Path, activeState.ID, false); selected != nil {
-			nextState := backtrackFastForwardState(matchCtx, activeJourney, selected.ID, activeState)
-			if !isLegalBacktrackTarget(instance.Path, selected.ID, rootID) {
-				return JourneyDecision{}
-			}
-			return JourneyDecision{
-				Action:       "backtrack",
-				CurrentState: activeState.ID,
-				BacktrackTo:  selected.ID,
-				NextState:    nextState,
-				Rationale:    "customer is revisiting a previous decision in the same journey process",
-			}
-		}
-	}
-	if containsAnyPhrase(message, newPurposeMarkers...) && !containsAnyPhrase(message, sameProcessMarkers...) && rootID != "" && activeState.ID != rootID {
-		if !isLegalBacktrackTarget(instance.Path, rootID, rootID) {
-			return JourneyDecision{}
-		}
-		return JourneyDecision{
-			Action:       "backtrack",
-			CurrentState: activeState.ID,
-			BacktrackTo:  rootID,
-			Rationale:    "customer changed the purpose of the journey, so restart from the beginning",
-		}
-	}
-	return JourneyDecision{}
-}
-
-func runJourneyProgressARQ(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, instance *journey.Instance, backtrackDecision JourneyDecision) JourneyDecision {
-	if activeJourney == nil || activeState == nil || instance == nil {
-		return JourneyDecision{}
-	}
-	if strings.EqualFold(backtrackDecision.Action, "backtrack") {
-		return backtrackDecision
-	}
-	if lateCompletedPreviousJourneyStep(matchCtx, activeJourney, activeState) {
-		nextIDs := journeyNextStateIDs(*activeJourney, activeState.ID)
-		nextState := ""
-		if len(nextIDs) == 1 {
-			nextState = nextIDs[0]
-		}
-		nextState = skipSatisfiedJourneyStates(matchCtx, activeJourney, activeState.ID, nextState, "")
-		return JourneyDecision{
-			Action:       "advance",
-			CurrentState: activeState.ID,
-			NextState:    nextState,
-			Rationale:    "customer completed a prior missing journey step and the journey can continue forward",
-		}
-	}
-	decision := JourneyDecision{
-		Action:       "continue",
-		CurrentState: activeState.ID,
-		Rationale:    "active journey remains relevant for this turn",
-	}
-	if router != nil {
-		if decision, ok := runJourneyProgressStructuredARQ(ctx, router, matchCtx, activeJourney, activeState); ok {
-			return decision
-		}
-	}
-	if len(activeState.When) > 0 && !matchesAnyCondition(activeState.When, matchCtx.LatestCustomerText) {
-		rootID := ""
-		if root := journeyRootState(activeJourney); root != nil {
-			rootID = root.ID
-		}
-		if selected := selectBestBacktrackTarget(matchCtx, activeJourney, instance.Path, activeState.ID, true); selected != nil && isLegalBacktrackTarget(instance.Path, selected.ID, rootID) {
-			nextState := backtrackFastForwardState(matchCtx, activeJourney, selected.ID, activeState)
-			decision.Action = "backtrack"
-			decision.BacktrackTo = selected.ID
-			decision.NextState = nextState
-			decision.Rationale = "active node no longer matches the customer context, so the journey should backtrack"
-			return decision
-		}
-		decision.Missing = append(decision.Missing, "state_condition")
-		decision.Rationale = "state entry condition is not yet satisfied"
-		return decision
-	}
-	nextIDs := journeyNextStateIDs(*activeJourney, activeState.ID)
-	if activeState.Type == "tool" && len(nextIDs) > 0 {
-		if !journeyToolStateExecuted(matchCtx, *activeState) {
-			decision.Missing = append(decision.Missing, "tool_execution")
-			decision.Rationale = "tool state requires execution before the journey can advance"
-			return decision
-		}
-		decision.Action = "advance"
-		decision.NextState = nextIDs[0]
-		decision.Rationale = "tool state can advance after execution"
-		return decision
-	}
-	if strings.EqualFold(activeState.Kind, "fork") && len(nextIDs) > 0 {
-		bestNextID := selectNextJourneyState(matchCtx, activeJourney, activeState, nextIDs)
-		if bestNextID == "" && len(nextIDs) == 1 {
-			bestNextID = nextIDs[0]
-		}
-		bestNextID = skipSatisfiedJourneyStates(matchCtx, activeJourney, activeState.ID, bestNextID, "")
-		if bestNextID != "" {
-			decision.Action = "advance"
-			decision.NextState = bestNextID
-			decision.Rationale = "fork state routes to the best matching legal follow-up"
-			return decision
-		}
-	}
-	bestNextID := selectNextJourneyState(matchCtx, activeJourney, activeState, nextIDs)
-	if bestNextID == "" && len(nextIDs) == 1 {
-		bestNextID = nextIDs[0]
-	}
-	bestNextID = skipSatisfiedJourneyStates(matchCtx, activeJourney, activeState.ID, bestNextID, "")
-	if bestNextID != "" {
-		decision.Action = "advance"
-		decision.NextState = bestNextID
-		decision.Rationale = "customer response best matches the selected journey follow-up"
-		return decision
-	}
-	return decision
-}
-
 func runLowCriticalityARQ(ctx context.Context, router *model.Router, matchCtx MatchingContext, items []policy.Guideline) ([]Match, []policy.Guideline) {
 	var matches []Match
 	var out []policy.Guideline
-	source := matchingSource(matchCtx)
 	if len(items) == 0 {
 		return nil, nil
 	}
@@ -1443,8 +1249,8 @@ func runLowCriticalityARQ(ctx context.Context, router *model.Router, matchCtx Ma
 				if !ok || !check.Applies {
 					continue
 				}
-				score := scoreCondition(item.When, source)
-				result.Matches = append(result.Matches, Match{ID: item.ID, Kind: "guideline", Score: float64(maxInt(score, 1) + item.Priority), Rationale: firstNonEmpty(check.Rationale, "structured low-criticality match")})
+				evidence := semantics.EvaluateConditionAcrossTexts(item.When, matchingSource(matchCtx), matchCtx.ConversationText)
+				result.Matches = append(result.Matches, Match{ID: item.ID, Kind: "guideline", Score: float64(maxInt(evidence.Score, 1) + item.Priority), Rationale: firstNonEmpty(check.Rationale, evidence.Rationale, "structured low-criticality match")})
 				result.Items = append(result.Items, item)
 			}
 			return result, true
@@ -1465,15 +1271,15 @@ func runLowCriticalityARQ(ctx context.Context, router *model.Router, matchCtx Ma
 		}
 	}
 	for _, item := range items {
-		score := scoreCondition(item.When, source)
-		if score <= 0 {
+		evidence := semantics.EvaluateConditionAcrossTexts(item.When, matchingSource(matchCtx), matchCtx.ConversationText)
+		if evidence.Score <= 0 || !evidence.Applies {
 			continue
 		}
 		matches = append(matches, Match{
 			ID:        item.ID,
 			Kind:      "guideline",
-			Score:     float64(score) + float64(item.Priority),
-			Rationale: "lower-criticality guideline remains relevant to the current subtopic",
+			Score:     float64(evidence.Score) + float64(item.Priority),
+			Rationale: firstNonEmpty(evidence.Rationale, "lower-criticality guideline remains relevant to the current subtopic"),
 		})
 		out = append(out, item)
 	}
@@ -1530,20 +1336,12 @@ func applySiblingDisambiguation(bundle policy.Bundle, matchCtx MatchingContext, 
 		if _, ok := active[candidate.ID]; ok {
 			continue
 		}
-		if ageConditionScore(strings.ToLower(candidate.When), strings.ToLower(matchCtx.LatestCustomerText)) >= 0 {
+		decision := evaluateConditionConflict(matchCtx, candidate, active)
+		if !decision.ShouldDrop {
 			continue
 		}
-		for _, winner := range active {
-			if ageConditionScore(strings.ToLower(winner.When), strings.ToLower(matchCtx.LatestCustomerText)) <= 0 {
-				continue
-			}
-			if !shareConditionTopic(candidate.When, winner.When) {
-				continue
-			}
-			recordSuppressed(&suppressed, suppressedIndex, candidate.ID, "condition_conflict", winner.ID)
-			appendResolution(resolutionStore, candidate.ID, ResolutionDeprioritized, "conflicting conditional branch lost", winner.ID)
-			break
-		}
+		recordSuppressed(&suppressed, suppressedIndex, decision.LoserID, decision.Reason, decision.WinnerID)
+		appendResolution(resolutionStore, decision.LoserID, ResolutionDeprioritized, decision.Rationale, decision.WinnerID)
 	}
 
 	for loserID, loser := range active {
@@ -1565,15 +1363,13 @@ func applySiblingDisambiguation(bundle policy.Bundle, matchCtx MatchingContext, 
 			if winner.Priority != loser.Priority {
 				continue
 			}
-			if hasDirectRelationship(bundle.Relationships, loserID, winnerID) {
-				continue
-			}
-			if !shareConditionTopic(loser.When, winner.When) {
+			decision := evaluateSiblingSuppression(bundle, matchCtx, loserID, loser, loserMatch, winnerID, winner, winnerMatch)
+			if !decision.ShouldDrop {
 				continue
 			}
 			delete(active, loserID)
-			recordSuppressed(&suppressed, suppressedIndex, loserID, "disambiguated", winnerID)
-			appendResolution(resolutionStore, loserID, ResolutionDeprioritized, "a stronger sibling guideline won", winnerID)
+			recordSuppressed(&suppressed, suppressedIndex, loserID, decision.Reason, winnerID)
+			appendResolution(resolutionStore, loserID, ResolutionDeprioritized, decision.Rationale, winnerID)
 			break
 		}
 	}
@@ -1582,7 +1378,7 @@ func applySiblingDisambiguation(bundle policy.Bundle, matchCtx MatchingContext, 
 		if _, ok := active[candidateID]; ok {
 			continue
 		}
-		loserScore := scoreCondition(candidate.When, matchCtx.LatestCustomerText)
+		loserScore := semantics.EvaluateCondition(candidate.When, matchCtx.LatestCustomerText).Score
 		if loserScore <= 0 {
 			continue
 		}
@@ -1594,17 +1390,12 @@ func applySiblingDisambiguation(bundle policy.Bundle, matchCtx MatchingContext, 
 			if winnerMatch.Score < 2 || winnerMatch.Score <= float64(loserScore) {
 				continue
 			}
-			if winner.Priority != candidate.Priority {
+			decision := evaluateLatentSiblingSuppression(bundle, matchCtx, candidateID, candidate, float64(loserScore), winnerID, winner, winnerMatch)
+			if !decision.ShouldDrop {
 				continue
 			}
-			if hasDirectRelationship(bundle.Relationships, candidateID, winnerID) {
-				continue
-			}
-			if !shareConditionTopic(candidate.When, winner.When) {
-				continue
-			}
-			recordSuppressed(&suppressed, suppressedIndex, candidateID, "disambiguated", winnerID)
-			appendResolution(resolutionStore, candidateID, ResolutionDeprioritized, "a stronger latent sibling guideline won", winnerID)
+			recordSuppressed(&suppressed, suppressedIndex, candidateID, decision.Reason, winnerID)
+			appendResolution(resolutionStore, candidateID, ResolutionDeprioritized, decision.Rationale, winnerID)
 			break
 		}
 	}
@@ -1616,6 +1407,74 @@ func applySiblingDisambiguation(bundle policy.Bundle, matchCtx MatchingContext, 
 	sortMatches(guidelineMatches)
 	sortGuidelines(out, guidelineMatches)
 	return out, suppressed, flattenResolutions(resolutionStore)
+}
+
+func evaluateConditionConflict(ctx MatchingContext, candidate policy.Guideline, active map[string]policy.Guideline) SiblingSuppressionDecision {
+	candidateEvidence := semantics.EvaluateCondition(candidate.When, ctx.LatestCustomerText)
+	if candidateEvidence.Score >= 0 {
+		return SiblingSuppressionDecision{}
+	}
+	for _, winner := range active {
+		winnerEvidence := semantics.EvaluateCondition(winner.When, ctx.LatestCustomerText)
+		if winnerEvidence.Score <= 0 {
+			continue
+		}
+		if !shareConditionTopic(candidate.When, winner.When) {
+			continue
+		}
+		return SiblingSuppressionDecision{
+			LoserID:    candidate.ID,
+			WinnerID:   winner.ID,
+			Reason:     "condition_conflict",
+			Rationale:  "conflicting conditional branch lost",
+			ShouldDrop: true,
+		}
+	}
+	return SiblingSuppressionDecision{}
+}
+
+func evaluateSiblingSuppression(bundle policy.Bundle, _ MatchingContext, loserID string, loser policy.Guideline, loserMatch Match, winnerID string, winner policy.Guideline, winnerMatch Match) SiblingSuppressionDecision {
+	if winner.Priority != loser.Priority {
+		return SiblingSuppressionDecision{}
+	}
+	if hasDirectRelationship(bundle.Relationships, loserID, winnerID) {
+		return SiblingSuppressionDecision{}
+	}
+	if !shareConditionTopic(loser.When, winner.When) {
+		return SiblingSuppressionDecision{}
+	}
+	if winnerMatch.Score < 2 || winnerMatch.Score <= loserMatch.Score {
+		return SiblingSuppressionDecision{}
+	}
+	return SiblingSuppressionDecision{
+		LoserID:    loserID,
+		WinnerID:   winnerID,
+		Reason:     "disambiguated",
+		Rationale:  "a stronger sibling guideline won",
+		ShouldDrop: true,
+	}
+}
+
+func evaluateLatentSiblingSuppression(bundle policy.Bundle, _ MatchingContext, candidateID string, candidate policy.Guideline, loserScore float64, winnerID string, winner policy.Guideline, winnerMatch Match) SiblingSuppressionDecision {
+	if winner.Priority != candidate.Priority {
+		return SiblingSuppressionDecision{}
+	}
+	if hasDirectRelationship(bundle.Relationships, candidateID, winnerID) {
+		return SiblingSuppressionDecision{}
+	}
+	if !shareConditionTopic(candidate.When, winner.When) {
+		return SiblingSuppressionDecision{}
+	}
+	if winnerMatch.Score < 2 || winnerMatch.Score <= loserScore {
+		return SiblingSuppressionDecision{}
+	}
+	return SiblingSuppressionDecision{
+		LoserID:    candidateID,
+		WinnerID:   winnerID,
+		Reason:     "disambiguated",
+		Rationale:  "a stronger latent sibling guideline won",
+		ShouldDrop: true,
+	}
 }
 
 func resolveToolExposure(associations []policy.GuidelineToolAssociation, observations []policy.Observation, guidelines []policy.Guideline, state *policy.JourneyNode, toolPolicies []policy.ToolPolicy, catalog []tool.CatalogEntry) ([]string, map[string]string) {
@@ -1769,9 +1628,30 @@ func lateCompletedPreviousJourneyStep(ctx MatchingContext, activeJourney *policy
 	if previous == nil {
 		return false
 	}
-	prevSat := journeyStateSatisfiedByLatestTurn(ctx, *previous, "")
-	activeSat := journeyStateSatisfiedByHistory(ctx, *activeState, "")
+	prevSat := semantics.EvaluateJourneyState(ctx.LatestCustomerText, ctx.CustomerHistory, *previous, "", true, customerSatisfiedGuideline).Satisfied
+	activeSat := semantics.EvaluateJourneyState(ctx.LatestCustomerText, ctx.CustomerHistory, *activeState, "", false, customerSatisfiedGuideline).Satisfied
 	return prevSat && activeSat
+}
+
+type backtrackSignals struct {
+	SameProcess bool
+	Restart     bool
+}
+
+func backtrackIntentSignals(text string) backtrackSignals {
+	tokens := signalSet(semantics.Signals(text))
+	has := func(parts ...string) bool {
+		for _, part := range parts {
+			if _, ok := tokens[part]; ok {
+				return true
+			}
+		}
+		return false
+	}
+	return backtrackSignals{
+		SameProcess: containsAnyPhrase(text, "go back") || has("actually", "change", "changed", "resume", "continue"),
+		Restart:     containsAnyPhrase(text, "start over") || has("instead", "different", "another", "restart", "again", "new"),
+	}
 }
 
 func collectTemplates(bundle policy.Bundle, activeJourney *policy.Journey, activeState *policy.JourneyNode, ctx MatchingContext) []policy.Template {
@@ -1834,27 +1714,78 @@ func previousVisitedState(flow *policy.Journey, path []string, currentStateID st
 	return findState(*flow, target)
 }
 
-func selectBestBacktrackTarget(ctx MatchingContext, flow *policy.Journey, path []string, currentStateID string, allowRootFallback bool) *policy.JourneyNode {
+func selectBestBacktrackEvaluation(ctx MatchingContext, flow *policy.Journey, path []string, currentStateID string, allowRootFallback bool) BacktrackSelectionEvaluation {
+	if flow == nil {
+		return BacktrackSelectionEvaluation{}
+	}
+	candidates := visitedBacktrackCandidates(flow, path, currentStateID)
+	if len(candidates) == 0 {
+		return BacktrackSelectionEvaluation{FallbackID: backtrackFallbackID(flow, path, currentStateID, allowRootFallback)}
+	}
+	evaluations := buildBacktrackCandidateEvaluations(ctx, flow, path, currentStateID)
+	return selectBestBacktrackEvaluationFromMap(candidates, evaluations, backtrackFallbackID(flow, path, currentStateID, allowRootFallback))
+}
+
+func buildBacktrackCandidateEvaluations(ctx MatchingContext, flow *policy.Journey, path []string, currentStateID string) map[string]BacktrackCandidateEvaluation {
 	if flow == nil {
 		return nil
 	}
 	candidates := visitedBacktrackCandidates(flow, path, currentStateID)
 	if len(candidates) == 0 {
-		if allowRootFallback {
-			return previousState(flow, currentStateID)
-		}
-		return previousVisitedState(flow, path, currentStateID)
+		return nil
 	}
-	best := candidates[0]
-	bestScore := backtrackTargetScore(ctx, flow, path, best)
-	for _, candidate := range candidates[1:] {
-		score := backtrackTargetScore(ctx, flow, path, candidate)
-		if score > bestScore {
-			best = candidate
-			bestScore = score
+	evaluations := make(map[string]BacktrackCandidateEvaluation, len(candidates))
+	for _, candidate := range candidates {
+		evaluations[candidate] = evaluateBacktrackCandidate(ctx, flow, path, candidate)
+	}
+	return evaluations
+}
+
+func backtrackFallbackID(flow *policy.Journey, path []string, currentStateID string, allowRootFallback bool) string {
+	if flow == nil {
+		return ""
+	}
+	if allowRootFallback {
+		if previous := previousState(flow, currentStateID); previous != nil {
+			return previous.ID
+		}
+		return ""
+	}
+	if previous := previousVisitedState(flow, path, currentStateID); previous != nil {
+		return previous.ID
+	}
+	return ""
+}
+
+func selectBestBacktrackEvaluationFromMap(candidates []string, evaluations map[string]BacktrackCandidateEvaluation, fallbackID string) BacktrackSelectionEvaluation {
+	if len(candidates) == 0 {
+		return BacktrackSelectionEvaluation{FallbackID: fallbackID}
+	}
+	bestEval := BacktrackCandidateEvaluation{}
+	bestScore := 0
+	found := false
+	for _, candidate := range candidates {
+		eval, ok := evaluations[candidate]
+		if !ok {
+			continue
+		}
+		if !found || eval.Selection.Score > bestScore {
+			bestEval = eval
+			bestScore = eval.Selection.Score
+			found = true
 		}
 	}
-	return findState(*flow, best)
+	if !found {
+		return BacktrackSelectionEvaluation{FallbackID: fallbackID}
+	}
+	return BacktrackSelectionEvaluation{Candidate: bestEval, FallbackID: fallbackID}
+}
+
+func selectedBacktrackTargetID(selection BacktrackSelectionEvaluation) string {
+	if selection.Candidate.Selection.StateID != "" {
+		return selection.Candidate.Selection.StateID
+	}
+	return selection.FallbackID
 }
 
 func visitedBacktrackCandidates(flow *policy.Journey, path []string, currentStateID string) []string {
@@ -1902,22 +1833,25 @@ func isLegalBacktrackTarget(path []string, target string, rootID string) bool {
 	return false
 }
 
-func backtrackTargetScore(ctx MatchingContext, flow *policy.Journey, path []string, stateID string) int {
-	score := 0
+func evaluateBacktrackCandidate(ctx MatchingContext, flow *policy.Journey, path []string, stateID string) BacktrackCandidateEvaluation {
+	evaluation := BacktrackCandidateEvaluation{
+		Selection: JourneyNodeSelection{StateID: stateID},
+	}
 	state := findState(*flow, stateID)
 	if state == nil {
-		return score
+		return evaluation
 	}
-	score += journeyNextStateScore(ctx, *state)
-	if len(state.When) > 0 && matchesAnyCondition(state.When, ctx.LatestCustomerText) {
+	evidence := buildJourneyNodeEvidence(ctx, flow, "", stateID, true)
+	evaluation.Evidence = evidence
+	evaluation.RelevanceScore = evidence.RelevanceScore
+	evaluation.LatestSatisfied = evidence.LatestSatisfaction.Satisfied
+	evaluation.HistorySatisfied = evidence.HistorySatisfaction.Satisfied
+	score := evidence.RelevanceScore
+	evaluation.Selection.Conditions = append(evaluation.Selection.Conditions, evidence.RelevanceConditions...)
+	evaluation.Selection.Conditions = append(evaluation.Selection.Conditions, evidence.LatestSatisfaction.Conditions...)
+	if len(state.When) > 0 && evidence.LatestSatisfaction.Satisfied {
 		score += 4
-		matchedConditions := 0
-		for _, condition := range state.When {
-			if scoreCondition(condition, ctx.LatestCustomerText) > 0 {
-				matchedConditions++
-			}
-		}
-		score += matchedConditions
+		score += len(evidence.LatestSatisfaction.Conditions)
 	}
 	if strings.EqualFold(state.Type, "message") || strings.EqualFold(state.Kind, "chat") {
 		score += 1
@@ -1925,11 +1859,12 @@ func backtrackTargetScore(ctx MatchingContext, flow *policy.Journey, path []stri
 	if strings.Contains(strings.ToLower(ctx.LatestCustomerText), strings.ToLower(state.ID)) {
 		score += 2
 	}
-	if journeyStateSatisfiedByHistory(ctx, *state, "") {
+	if evidence.HistorySatisfaction.Satisfied {
 		score -= 5
 		if nextState := fastForwardJourneyState(ctx, flow, stateID, ""); strings.TrimSpace(nextState) != "" {
 			score += 2
-			score += len(journeyPathBetween(*flow, stateID, nextState))
+			evaluation.FastForwardPathSize = len(journeyPathBetween(*flow, stateID, nextState))
+			score += evaluation.FastForwardPathSize
 		}
 	} else {
 		score += 2
@@ -1937,13 +1872,19 @@ func backtrackTargetScore(ctx MatchingContext, flow *policy.Journey, path []stri
 	if len(journeyNextStateIDs(*flow, stateID)) > 0 {
 		score += 1
 	}
-	score += branchSwitchScore(ctx, flow, path, stateID)
-	return score
+	branchSwitch := bestAlternativeNextNodeEvaluation(ctx, flow, path, stateID)
+	if branchSwitch.Selection.Score > 0 {
+		evaluation.BranchSwitchScore = branchSwitch.Selection.Score + 6
+	}
+	score += evaluation.BranchSwitchScore
+	evaluation.Selection.Score = score
+	evaluation.Selection.Rationale = firstNonEmpty(evidence.LatestSatisfaction.Rationale, "backtrack target best matches the current journey context")
+	return evaluation
 }
 
-func branchSwitchScore(ctx MatchingContext, flow *policy.Journey, path []string, stateID string) int {
+func bestAlternativeNextNodeEvaluation(ctx MatchingContext, flow *policy.Journey, path []string, stateID string) JourneyNextNodeEvaluation {
 	if flow == nil || len(path) == 0 {
-		return 0
+		return JourneyNextNodeEvaluation{}
 	}
 	index := -1
 	for i, item := range path {
@@ -1953,40 +1894,43 @@ func branchSwitchScore(ctx MatchingContext, flow *policy.Journey, path []string,
 		}
 	}
 	if index < 0 {
-		return 0
+		return JourneyNextNodeEvaluation{}
 	}
 	priorNext := ""
 	if index+1 < len(path) {
 		priorNext = path[index+1]
 	}
-	best := 0
+	var candidates []string
 	for _, nextID := range journeyNextStateIDs(*flow, stateID) {
 		if nextID == priorNext {
 			continue
 		}
-		edgeCondition := ""
-		if edge := journeyEdgeBetween(*flow, stateID, nextID); edge != nil {
-			edgeCondition = strings.TrimSpace(edge.Condition)
-		}
-		nextState := findState(*flow, nextID)
-		score := 0
-		if edgeCondition != "" {
-			score += scoreCondition(edgeCondition, ctx.LatestCustomerText)
-		}
-		if nextState != nil {
-			score += journeyNextStateScore(ctx, *nextState)
-		}
-		if score > best {
-			best = score
-		}
+		candidates = append(candidates, nextID)
 	}
-	if best > 0 {
-		return best + 6
-	}
-	return 0
+	return selectNextJourneyNodeFromEvaluations(candidates, buildJourneyNextNodeEvaluations(ctx, flow, stateID, candidates))
 }
 
-func selectNextJourneyState(ctx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, nextIDs []string) string {
+func selectNextJourneyNode(ctx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, nextIDs []string) JourneyNextNodeEvaluation {
+	return selectNextJourneyNodeFromEvaluations(nextIDs, buildJourneyNextNodeEvaluations(ctx, activeJourney, activeState.ID, nextIDs))
+}
+
+func buildJourneyNextNodeEvaluations(ctx MatchingContext, flow *policy.Journey, fromStateID string, nextIDs []string) map[string]JourneyNextNodeEvaluation {
+	if flow == nil || len(nextIDs) == 0 {
+		return nil
+	}
+	evaluations := map[string]JourneyNextNodeEvaluation{}
+	for _, nextID := range nextIDs {
+		nextID = strings.TrimSpace(nextID)
+		if nextID == "" {
+			continue
+		}
+		evaluations[nextID] = evaluateJourneyNextNode(ctx, flow, fromStateID, nextID)
+	}
+	return evaluations
+}
+
+func selectNextJourneyNodeFromEvaluations(nextIDs []string, evaluations map[string]JourneyNextNodeEvaluation) JourneyNextNodeEvaluation {
+	best := JourneyNextNodeEvaluation{}
 	bestNextID := ""
 	bestNextScore := 0
 	for _, nextID := range nextIDs {
@@ -1994,27 +1938,86 @@ func selectNextJourneyState(ctx MatchingContext, activeJourney *policy.Journey, 
 		if nextID == "" {
 			continue
 		}
-		score := 0
-		if nextState := findState(*activeJourney, nextID); nextState != nil {
-			score = journeyNextStateScore(ctx, *nextState)
-			if edge := journeyEdgeBetween(*activeJourney, activeState.ID, nextID); edge != nil {
-				score += scoreCondition(strings.TrimSpace(edge.Condition), ctx.LatestCustomerText)
-			}
-			if strings.EqualFold(nextState.Type, "tool") {
-				score -= 1
-			}
-			if strings.EqualFold(nextState.Kind, "fork") {
-				score += 1
-			}
-		} else {
-			score = scoreCondition(nextID, ctx.LatestCustomerText)
+		evaluation, ok := evaluations[nextID]
+		if !ok {
+			continue
 		}
-		if score > bestNextScore {
-			bestNextScore = score
+		if evaluation.Selection.Score > bestNextScore {
+			bestNextScore = evaluation.Selection.Score
 			bestNextID = nextID
+			best = evaluation
 		}
 	}
-	return bestNextID
+	if bestNextID == "" && len(nextIDs) == 1 {
+		bestNextID = strings.TrimSpace(nextIDs[0])
+		best.Selection = JourneyNodeSelection{
+			StateID:   bestNextID,
+			Rationale: "the journey has a single legal follow-up",
+		}
+	}
+	best.Selection.StateID = bestNextID
+	return best
+}
+
+func evaluateJourneyNextNode(ctx MatchingContext, flow *policy.Journey, fromStateID string, nextID string) JourneyNextNodeEvaluation {
+	evaluation := JourneyNextNodeEvaluation{
+		Selection: JourneyNodeSelection{StateID: nextID},
+	}
+	if flow == nil {
+		return evaluation
+	}
+	nextID = strings.TrimSpace(nextID)
+	if nextID == "" {
+		return evaluation
+	}
+	if nextState := findState(*flow, nextID); nextState != nil {
+		evidence := buildJourneyNodeEvidence(ctx, flow, fromStateID, nextID, false)
+		evaluation.Evidence = evidence
+		evaluation.RelevanceScore = evidence.RelevanceScore
+		evaluation.EdgeScore = evidence.EdgeCondition.Score
+		score := evidence.RelevanceScore + evidence.EdgeCondition.Score
+		evaluation.Selection.Conditions = append(evaluation.Selection.Conditions, evidence.RelevanceConditions...)
+		if evidence.EdgeCondition.Condition != "" || evidence.EdgeCondition.Score != 0 || evidence.EdgeCondition.Applies {
+			evaluation.Selection.Conditions = append(evaluation.Selection.Conditions, evidence.EdgeCondition)
+		}
+		if strings.EqualFold(nextState.Type, "tool") {
+			score -= 1
+		}
+		if strings.EqualFold(nextState.Kind, "fork") {
+			score += 1
+		}
+		evaluation.LatestSatisfied = evidence.LatestSatisfaction.Satisfied
+		evaluation.Selection.Conditions = append(evaluation.Selection.Conditions, evidence.LatestSatisfaction.Conditions...)
+		evaluation.Selection.Rationale = firstNonEmpty(evidence.LatestSatisfaction.Rationale, "next node best matches the latest customer turn")
+		evaluation.Selection.Score = score
+	} else {
+		score := semantics.EvaluateCondition(nextID, ctx.LatestCustomerText).Score
+		evaluation.Selection.Rationale = "next node id best matches the latest customer turn"
+		evaluation.Selection.Score = score
+	}
+	return evaluation
+}
+
+func buildJourneyNodeEvidence(ctx MatchingContext, flow *policy.Journey, fromStateID string, stateID string, includeHistory bool) JourneyNodeEvidence {
+	evidence := JourneyNodeEvidence{}
+	if flow == nil {
+		return evidence
+	}
+	state := findState(*flow, stateID)
+	if state == nil {
+		return evidence
+	}
+	evidence.RelevanceScore, evidence.RelevanceConditions = journeyNodeRelevance(ctx, *state)
+	evidence.LatestSatisfaction = semantics.EvaluateJourneyState(ctx.LatestCustomerText, ctx.CustomerHistory, *state, "", true, customerSatisfiedGuideline)
+	if includeHistory {
+		evidence.HistorySatisfaction = semantics.EvaluateJourneyState(ctx.LatestCustomerText, ctx.CustomerHistory, *state, "", false, customerSatisfiedGuideline)
+	}
+	if strings.TrimSpace(fromStateID) != "" {
+		if edge := journeyEdgeBetween(*flow, fromStateID, stateID); edge != nil {
+			evidence.EdgeCondition = semantics.EvaluateCondition(strings.TrimSpace(edge.Condition), ctx.LatestCustomerText)
+		}
+	}
+	return evidence
 }
 
 func backtrackFastForwardState(ctx MatchingContext, activeJourney *policy.Journey, startStateID string, currentActiveState *policy.JourneyNode) string {
@@ -2022,7 +2025,7 @@ func backtrackFastForwardState(ctx MatchingContext, activeJourney *policy.Journe
 		return ""
 	}
 	startState := findState(*activeJourney, startStateID)
-	if startState == nil || !journeyStateSatisfiedByLatestTurn(ctx, *startState, "") {
+	if startState == nil || !semantics.EvaluateJourneyState(ctx.LatestCustomerText, ctx.CustomerHistory, *startState, "", true, customerSatisfiedGuideline).Satisfied {
 		return ""
 	}
 	rerunToolID := ""
@@ -2059,7 +2062,7 @@ func fastForwardJourneyState(ctx MatchingContext, activeJourney *policy.Journey,
 			if edge := journeyEdgeBetween(*activeJourney, currentID, nextID); edge != nil {
 				edgeCondition = edge.Condition
 			}
-			if !journeyStateSatisfiedByLatestTurn(ctx, *nextState, edgeCondition) {
+			if !semantics.EvaluateJourneyState(ctx.LatestCustomerText, ctx.CustomerHistory, *nextState, edgeCondition, true, customerSatisfiedGuideline).Satisfied {
 				if bestUnresolved == "" {
 					bestUnresolved = nextState.ID
 				}
@@ -2103,17 +2106,15 @@ func skipSatisfiedJourneyStates(ctx MatchingContext, activeJourney *policy.Journ
 		if edge := journeyEdgeBetween(*activeJourney, prevID, state.ID); edge != nil {
 			edgeCondition = edge.Condition
 		}
-		if !journeyStateSatisfiedByHistory(ctx, *state, edgeCondition) {
+		if !semantics.EvaluateJourneyState(ctx.LatestCustomerText, ctx.CustomerHistory, *state, edgeCondition, false, customerSatisfiedGuideline).Satisfied {
 			return state.ID
 		}
 		nextIDs := journeyNextStateIDs(*activeJourney, state.ID)
 		if len(nextIDs) == 0 {
 			return state.ID
 		}
-		nextID := selectNextJourneyState(ctx, activeJourney, state, nextIDs)
-		if nextID == "" && len(nextIDs) == 1 {
-			nextID = nextIDs[0]
-		}
+		nextEvaluation := selectNextJourneyNode(ctx, activeJourney, state, nextIDs)
+		nextID := nextEvaluation.Selection.StateID
 		if strings.TrimSpace(nextID) == "" {
 			return state.ID
 		}
@@ -2123,58 +2124,9 @@ func skipSatisfiedJourneyStates(ctx MatchingContext, activeJourney *policy.Journ
 	return ""
 }
 
-func journeyStateSatisfiedByLatestTurn(ctx MatchingContext, state policy.JourneyNode, edgeCondition string) bool {
-	return journeyStateSatisfiedByText(ctx.LatestCustomerText, state, edgeCondition)
-}
+type semanticTextSnapshot = semantics.TextSnapshot
 
-func journeyStateSatisfiedByHistory(ctx MatchingContext, state policy.JourneyNode, edgeCondition string) bool {
-	text := strings.TrimSpace(strings.Join(append(append([]string(nil), ctx.CustomerHistory...), ctx.LatestCustomerText), "\n"))
-	return journeyStateSatisfiedByText(text, state, edgeCondition)
-}
-
-func journeyStateSatisfiedByText(text string, state policy.JourneyNode, edgeCondition string) bool {
-	if strings.EqualFold(state.Type, "tool") {
-		return false
-	}
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return false
-	}
-	if len(state.When) > 0 && matchesAnyCondition(state.When, text) {
-		return true
-	}
-	if strings.TrimSpace(edgeCondition) != "" && scoreCondition(edgeCondition, text) > 0 {
-		return true
-	}
-	if journeyStateSemanticSatisfied(text, state) {
-		return true
-	}
-	pseudo := policy.Guideline{Then: state.Instruction, Scope: "customer"}
-	return customerSatisfiedGuideline(text, pseudo)
-}
-
-func journeyStateSemanticSatisfied(text string, state policy.JourneyNode) bool {
-	loweredText := strings.ToLower(strings.TrimSpace(text))
-	if loweredText == "" {
-		return false
-	}
-	label := strings.ToLower(strings.TrimSpace(state.ID + " " + state.Instruction))
-	switch {
-	case strings.Contains(label, "destination"):
-		return containsAnyPhrase(loweredText, "airport", "station", "terminal", "to ") || likelyLocationAnswer(loweredText)
-	case strings.Contains(label, "origin"), strings.Contains(label, "departure"):
-		return containsAnyPhrase(loweredText, "airport", "station", "terminal", "from ") || likelyLocationAnswer(loweredText)
-	case strings.Contains(label, "date"), strings.Contains(label, "travel"):
-		return containsDateLikeValue(loweredText)
-	case strings.Contains(label, "class"):
-		return containsAnyPhrase(loweredText, "economy", "business", "first class", "premium")
-	case strings.Contains(label, "name"):
-		return containsAnyPhrase(loweredText, "my name is", "i am ", "i'm ")
-	}
-	return false
-}
-
-func likelyLocationAnswer(text string) bool {
+func hasLocationLikeValue(text string) bool {
 	if containsAnyPhrase(text, "airport", "station", "terminal") {
 		return true
 	}
@@ -2182,38 +2134,23 @@ func likelyLocationAnswer(text string) bool {
 	return len(words) >= 2
 }
 
-func containsDateLikeValue(text string) bool {
-	for _, token := range strings.FieldsFunc(text, func(r rune) bool {
-		return r == ' ' || r == ',' || r == ';'
-	}) {
-		token = strings.Trim(token, ".!?()[]{}")
-		parts := strings.FieldsFunc(token, func(r rune) bool {
-			return r == '.' || r == '/' || r == '-'
-		})
-		if len(parts) < 2 || len(parts) > 3 {
-			continue
-		}
-		allNumeric := true
-		for _, part := range parts {
-			if part == "" {
-				allNumeric = false
-				break
-			}
-			for _, r := range part {
-				if r < '0' || r > '9' {
-					allNumeric = false
-					break
-				}
-			}
-			if !allNumeric {
-				break
+func hasPhoneLikeValue(text string) bool {
+	for _, token := range strings.Fields(text) {
+		digits := 0
+		for _, r := range token {
+			if r >= '0' && r <= '9' {
+				digits++
 			}
 		}
-		if allNumeric {
+		if digits >= 5 {
 			return true
 		}
 	}
-	return containsAnyPhrase(text, "today", "tomorrow", "next week", "next month", "return in")
+	return false
+}
+
+func hasDateLikeValue(text string) bool {
+	return semantics.AnalyzeText(text).HasDate
 }
 
 func journeyToolStateExecuted(ctx MatchingContext, state policy.JourneyNode) bool {
@@ -2388,7 +2325,7 @@ func inferCompositionMode(templates []policy.Template) string {
 }
 
 func templateScore(tmpl policy.Template, text string) int {
-	return scoreCondition(firstNonEmpty(tmpl.When, tmpl.Text), text)
+	return semantics.EvaluateCondition(firstNonEmpty(tmpl.When, tmpl.Text), text).Score
 }
 
 func renderTemplate(templates []policy.Template, toolOutput map[string]any) string {
@@ -2443,6 +2380,8 @@ func buildActionablePrompt(ctx MatchingContext, items []policy.Guideline) string
 		"Determine which actionable guidelines should influence the next reply.",
 		"Latest customer message: " + ctx.LatestCustomerText,
 		"Conversation context: " + firstNonEmpty(ctx.ConversationText, ctx.LatestCustomerText),
+		"Staged tool facts: " + firstNonEmpty(strings.Join(ctx.StagedToolText, " | "), "none"),
+		"Treat staged tool facts and prior assistant/tool context as authoritative evidence, even if the latest customer message alone is underspecified.",
 		"Assume the action has not been carried out yet for this stage. Focus on whether the guideline should influence the next reply now.",
 		"Guidelines remain applicable across a related sub-issue of the same unresolved topic, but not after a clear topic shift.",
 		"Examples:",
@@ -2599,25 +2538,65 @@ func formatShots(shots []stageShot) []string {
 	return out
 }
 
-func scoreCondition(condition, text string) int {
-	conditionWords := keywords(condition)
-	textWords := map[string]struct{}{}
-	for _, token := range keywords(text) {
-		textWords[token] = struct{}{}
+func detectedSemanticSignals(text string, base map[string]struct{}) []string {
+	text = strings.ToLower(strings.TrimSpace(text))
+	var out []string
+	if semantics.DefaultSignalRegistry.HasPhraseFamily(text, semantics.SignalReservation) {
+		out = append(out, "reservation")
 	}
-	score := 0
-	for _, token := range conditionWords {
-		if _, ok := textWords[token]; ok {
-			score++
+	switch {
+	case hasAnySignal(base, "return_status", "tracking") || semantics.DefaultSignalRegistry.HasPhraseFamily(text, semantics.SignalReturnStatus):
+		out = append(out, "return_status")
+	case hasAnySignal(base, "order_status") || semantics.DefaultSignalRegistry.HasPhraseFamily(text, semantics.SignalOrderStatus):
+		out = append(out, "order_status")
+	}
+	switch {
+	case semantics.DefaultSignalRegistry.HasPhraseFamily(text, semantics.SignalPickup):
+		out = append(out, "pickup")
+	case strings.Contains(text, "delivery"):
+		out = append(out, "delivery")
+	}
+	switch {
+	case semantics.DefaultSignalRegistry.HasPhraseFamily(text, semantics.SignalInsideOutside):
+		out = append(out, "inside_outside")
+	case semantics.DefaultSignalRegistry.HasPhraseFamily(text, semantics.SignalDrinkPreference):
+		out = append(out, "drink_preference")
+	}
+	return dedupe(out)
+}
+
+func hasAnySignal(set map[string]struct{}, signals ...string) bool {
+	for _, signal := range signals {
+		if _, ok := set[signal]; ok {
+			return true
 		}
 	}
-	score += reservationConditionScore(strings.ToLower(condition), strings.ToLower(text))
-	score += ageConditionScore(strings.ToLower(condition), strings.ToLower(text))
-	return score
+	return false
+}
+
+func containsNamePattern(text string) bool {
+	return containsAnyPhrase(text, "my name is", "i am ", "i'm ")
+}
+
+func canonicalKeywordSignals(input string) []string {
+	raw := semantics.NormalizedTokens(input)
+	var out []string
+	for _, token := range raw {
+		parent, ok := semantics.CanonicalKeywordFamily(token)
+		if !ok {
+			out = append(out, token)
+			continue
+		}
+		out = append(out, token)
+		if parent != "" {
+			out = append(out, parent)
+		}
+	}
+	return dedupe(out)
 }
 
 func reservationConditionScore(condition, text string) int {
-	if !containsAnyPhrase(condition, "reservation", "reserve a table", "book a table") {
+	if !semantics.DefaultSignalRegistry.HasPhraseFamily(strings.ToLower(condition), semantics.SignalReservation) {
 		return 0
 	}
 	if containsAnyPhrase(text,
@@ -2673,44 +2652,17 @@ func extractMentionedAge(text string) (int, bool) {
 		if prev == "i'm" || prev == "im" || prev == "aged" || next == "years" || next == "year-old" || next == "yo" {
 			return value, true
 		}
+		if i >= 2 {
+			prevPrev := strings.Trim(parts[i-2], ".,!?;:\"'()[]{}")
+			if prevPrev == "i" && prev == "am" {
+				return value, true
+			}
+		}
 		if i > 0 && parts[i-1] == "age" {
 			return value, true
 		}
 	}
 	return 0, false
-}
-
-func keywords(input string) []string {
-	input = strings.NewReplacer("_", " ", "/", " ", "-", " ").Replace(input)
-	raw := strings.Fields(strings.ToLower(input))
-	var out []string
-	stop := map[string]struct{}{
-		"the": {}, "a": {}, "an": {}, "and": {}, "or": {}, "to": {}, "for": {}, "with": {}, "of": {}, "is": {}, "are": {}, "be": {}, "i": {}, "you": {}, "my": {}, "your": {}, "it": {}, "this": {}, "that": {}, "do": {}, "does": {},
-	}
-	aliases := map[string]string{
-		"hi":        "hello",
-		"hey":       "hello",
-		"greetings": "hello",
-		"greet":     "hello",
-		"greeting":  "hello",
-		"says":      "say",
-		"said":      "say",
-		"saying":    "say",
-	}
-	for _, token := range raw {
-		token = strings.Trim(token, ".,!?;:\"'()[]{}")
-		if canonical, ok := aliases[token]; ok {
-			token = canonical
-		}
-		if len(token) < 3 {
-			continue
-		}
-		if _, ok := stop[token]; ok {
-			continue
-		}
-		out = append(out, token)
-	}
-	return out
 }
 
 func sortMatches(items []Match) {
@@ -2875,7 +2827,7 @@ func dedupe(items []string) []string {
 
 func matchesAnyCondition(conditions []string, text string) bool {
 	for _, condition := range conditions {
-		if scoreCondition(condition, text) > 0 {
+		if semantics.EvaluateCondition(condition, text).Applies {
 			return true
 		}
 	}
@@ -2883,16 +2835,13 @@ func matchesAnyCondition(conditions []string, text string) bool {
 }
 
 func containsAnyKeyword(text string, words ...string) bool {
-	if strings.TrimSpace(text) == "" {
+	textSignals := signalSet(semantics.Signals(text))
+	if len(textSignals) == 0 {
 		return false
 	}
-	textWords := map[string]struct{}{}
-	for _, word := range keywords(text) {
-		textWords[word] = struct{}{}
-	}
 	for _, word := range words {
-		for _, token := range keywords(word) {
-			if _, ok := textWords[token]; ok {
+		for _, token := range semantics.Signals(word) {
+			if _, ok := textSignals[token]; ok {
 				return true
 			}
 		}
@@ -2911,20 +2860,30 @@ func containsAnyPhrase(text string, phrases ...string) bool {
 }
 
 func containsAllKeywords(text string, sample string) bool {
-	required := keywords(sample)
-	if len(required) == 0 {
-		return true
+	return responseTextSatisfiesInstruction(text, sample)
+}
+
+func responseTextSatisfiesInstruction(text string, sample string) bool {
+	return semantics.ResponseTextSatisfiesInstruction(text, sample)
+}
+
+func signalSet(items []string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, item := range items {
+		out[item] = struct{}{}
 	}
-	present := map[string]struct{}{}
-	for _, word := range keywords(text) {
-		present[word] = struct{}{}
+	return out
+}
+
+func cloneOverlappingGroups(src [][]string) [][]string {
+	if len(src) == 0 {
+		return nil
 	}
-	for _, token := range required {
-		if _, ok := present[token]; !ok {
-			return false
-		}
+	out := make([][]string, 0, len(src))
+	for _, group := range src {
+		out = append(out, append([]string(nil), group...))
 	}
-	return true
+	return out
 }
 
 func containsEquivalentInstruction(history []string, instruction string) bool {
@@ -2933,7 +2892,7 @@ func containsEquivalentInstruction(history []string, instruction string) bool {
 		return false
 	}
 	for _, item := range history {
-		if containsAllKeywords(item, instruction) {
+		if responseTextSatisfiesInstruction(item, instruction) {
 			return true
 		}
 	}
@@ -2966,6 +2925,13 @@ func maxInt(a, b int) int {
 	return b
 }
 
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
 func modeOrDefault(mode string, templates []policy.Template) string {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode != "" {
@@ -2974,20 +2940,29 @@ func modeOrDefault(mode string, templates []policy.Template) string {
 	return inferCompositionMode(templates)
 }
 
-func journeyNextStateScore(ctx MatchingContext, state policy.JourneyNode) int {
+func journeyNodeRelevance(ctx MatchingContext, state policy.JourneyNode) (int, []ConditionEvidence) {
 	score := 0
+	var evidenceOut []ConditionEvidence
 	for _, condition := range state.When {
-		if v := scoreCondition(condition, ctx.LatestCustomerText); v > score {
-			score = v
+		evidence := semantics.EvaluateCondition(condition, ctx.LatestCustomerText)
+		evidenceOut = append(evidenceOut, evidence)
+		if evidence.Score > score {
+			score = evidence.Score
 		}
 	}
-	if v := scoreCondition(state.Instruction, ctx.LatestCustomerText); v > score {
-		score = v
+	if evidence := semantics.EvaluateCondition(state.Instruction, ctx.LatestCustomerText); evidence.Score > score {
+		evidenceOut = append(evidenceOut, evidence)
+		score = evidence.Score
+	} else {
+		evidenceOut = append(evidenceOut, evidence)
 	}
-	if v := scoreCondition(state.ID, ctx.LatestCustomerText); v > score {
-		score = v
+	if evidence := semantics.EvaluateCondition(state.ID, ctx.LatestCustomerText); evidence.Score > score {
+		evidenceOut = append(evidenceOut, evidence)
+		score = evidence.Score
+	} else {
+		evidenceOut = append(evidenceOut, evidence)
 	}
-	return score
+	return score, evidenceOut
 }
 
 func findToolCatalogEntry(catalog []tool.CatalogEntry, selected string) (tool.CatalogEntry, bool) {
@@ -3219,7 +3194,7 @@ func stringInSlice(value string, items []string) bool {
 }
 
 func normalizeText(input string) string {
-	return strings.Join(keywords(input), " ")
+	return strings.Join(semantics.Signals(input), " ")
 }
 
 func recordSuppressed(out *[]SuppressedGuideline, idx map[string]int, id string, reason string, related ...string) {
@@ -3259,8 +3234,8 @@ func matchesJourneyDependencyTarget(target string, activeJourney *policy.Journey
 }
 
 func shareConditionTopic(left string, right string) bool {
-	leftWords := keywords(strings.ToLower(left))
-	rightWords := keywords(strings.ToLower(right))
+	leftWords := semantics.Signals(strings.ToLower(left))
+	rightWords := semantics.Signals(strings.ToLower(right))
 	rightSet := make(map[string]struct{}, len(rightWords))
 	for _, word := range rightWords {
 		if isAgeQualifierWord(word) {

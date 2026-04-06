@@ -52,7 +52,7 @@ func New(repo store.Repository, writes *asyncwrite.Queue, broker *sse.Broker, ro
 	}
 }
 
-type resolvedView = policyruntime.ResolvedView
+type resolvedView = policyruntime.EngineResult
 
 func (r *Runner) Start(ctx context.Context) {
 	go r.loop(ctx)
@@ -217,6 +217,8 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 		if err != nil {
 			return err
 		}
+		journeyDecision := view.JourneyProgressStage.Decision
+		toolDecision := view.ToolDecisionStage.Decision
 		if view.Bundle != nil {
 			exec.PolicyBundleID = view.Bundle.ID
 			exec.UpdatedAt = time.Now().UTC()
@@ -236,20 +238,20 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 				"proposal_id":           exec.ProposalID,
 				"rollout_id":            exec.RolloutID,
 				"selection_reason":      exec.SelectionReason,
-				"matched_observations":  idsFromObservations(view.MatchedObservations),
-				"matched_guidelines":    idsFromGuidelines(view.MatchedGuidelines),
+				"matched_observations":  idsFromObservations(view.ObservationStage.Observations),
+				"matched_guidelines":    idsFromGuidelines(view.MatchFinalizeStage.MatchedGuidelines),
 				"suppressed_guidelines": suppressedIDs(view.SuppressedGuidelines),
 				"journey_id":            journeyID(view.ActiveJourney),
 				"journey_state":         journeyStateID(view.ActiveJourneyState),
-				"journey_decision":      view.JourneyDecision,
-				"exposed_tools":         view.ExposedTools,
-				"selected_tool":         view.ToolDecision.SelectedTool,
-				"tool_can_run":          view.ToolDecision.CanRun,
-				"tool_missing_args":     view.ToolDecision.MissingArguments,
-				"tool_invalid_args":     view.ToolDecision.InvalidArguments,
-				"reapply_decisions":     view.ReapplyDecisions,
-				"customer_decisions":    view.CustomerDecisions,
-				"response_analysis":     view.ResponseAnalysis,
+				"journey_decision":      journeyDecision,
+				"exposed_tools":         append([]string(nil), view.ToolExposureStage.ExposedTools...),
+				"selected_tool":         toolDecision.SelectedTool,
+				"tool_can_run":          toolDecision.CanRun,
+				"tool_missing_args":     toolDecision.MissingArguments,
+				"tool_invalid_args":     toolDecision.InvalidArguments,
+				"reapply_decisions":     view.PreviouslyAppliedStage.Decisions,
+				"customer_decisions":    view.CustomerDependencyStage.Decisions,
+				"response_analysis":     view.ResponseAnalysisStage.Analysis,
 				"composition_mode":      view.CompositionMode,
 				"arq_results":           view.ARQResults,
 			},
@@ -261,6 +263,8 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 		if err != nil {
 			return err
 		}
+		journeyDecision := view.JourneyProgressStage.Decision
+		toolDecision := view.ToolDecisionStage.Decision
 		r.appendTrace(ctx, audit.Record{
 			ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
 			Kind:        "runtime.plan",
@@ -271,17 +275,17 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			Fields: map[string]any{
 				"active_journey":        journeyID(view.ActiveJourney),
 				"active_state":          journeyStateID(view.ActiveJourneyState),
-				"candidate_templates":   templateIDs(view.CandidateTemplates),
+				"candidate_templates":   templateIDs(view.ResponseAnalysisStage.CandidateTemplates),
 				"disambiguation_prompt": view.DisambiguationPrompt,
-				"exposed_tools":         view.ExposedTools,
-				"selected_tool":         view.ToolDecision.SelectedTool,
-				"tool_can_run":          view.ToolDecision.CanRun,
-				"tool_missing_args":     view.ToolDecision.MissingArguments,
-				"tool_invalid_args":     view.ToolDecision.InvalidArguments,
-				"reapply_decisions":     view.ReapplyDecisions,
-				"customer_decisions":    view.CustomerDecisions,
-				"response_analysis":     view.ResponseAnalysis,
-				"journey_decision":      view.JourneyDecision,
+				"exposed_tools":         append([]string(nil), view.ToolExposureStage.ExposedTools...),
+				"selected_tool":         toolDecision.SelectedTool,
+				"tool_can_run":          toolDecision.CanRun,
+				"tool_missing_args":     toolDecision.MissingArguments,
+				"tool_invalid_args":     toolDecision.InvalidArguments,
+				"reapply_decisions":     view.PreviouslyAppliedStage.Decisions,
+				"customer_decisions":    view.CustomerDependencyStage.Decisions,
+				"response_analysis":     view.ResponseAnalysisStage.Analysis,
+				"journey_decision":      journeyDecision,
 			},
 			CreatedAt: time.Now().UTC(),
 		})
@@ -325,8 +329,9 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 		if err := r.repo.AppendEvent(ctx, assistantEvent); err != nil {
 			return err
 		}
+		journeyDecision := view.JourneyProgressStage.Decision
 		if view.JourneyInstance != nil && view.ActiveJourney != nil && view.ActiveJourneyState != nil {
-			next := policyruntime.AdvanceJourney(view.JourneyInstance, view.ActiveJourneyState, view.ActiveJourney, view.JourneyDecision)
+			next := policyruntime.AdvanceJourney(view.JourneyInstance, view.ActiveJourneyState, view.ActiveJourney, journeyDecision)
 			if next != nil {
 				if err := r.repo.UpsertJourneyInstance(ctx, *next); err != nil {
 					return err
@@ -455,9 +460,22 @@ func selectPolicyBundles(bundles []policy.Bundle, preferred string, fallback str
 }
 
 func (r *Runner) maybeRunTool(ctx context.Context, exec execution.TurnExecution, view resolvedView) (map[string]any, error) {
-	if len(view.ToolPlan.Calls) > 0 {
+	toolPlan := view.ToolPlanStage.Plan
+	toolDecision := view.ToolDecisionStage.Decision
+	if len(toolPlan.Calls) > 0 {
 		outputs := map[string]map[string]any{}
-		for _, call := range view.ToolPlan.Calls {
+		calls := append([]policyruntime.ToolPlannedCall(nil), toolPlan.Calls...)
+		plannedByTool := map[string]struct{}{}
+		for _, call := range calls {
+			plannedByTool[strings.TrimSpace(call.ToolID)] = struct{}{}
+		}
+		for _, toolName := range dedupeStrings(toolPlan.SelectedTools) {
+			if _, ok := plannedByTool[strings.TrimSpace(toolName)]; ok {
+				continue
+			}
+			calls = append(calls, policyruntime.ToolPlannedCall{ToolID: toolName})
+		}
+		for _, call := range calls {
 			entry, ok := findCatalogEntry(r.repo, call.ToolID)
 			if !ok {
 				continue
@@ -486,13 +504,13 @@ func (r *Runner) maybeRunTool(ctx context.Context, exec execution.TurnExecution,
 		}
 		return map[string]any{"tools": outputs}, nil
 	}
-	selectedTools := dedupeStrings(view.ToolPlan.SelectedTools)
+	selectedTools := dedupeStrings(toolPlan.SelectedTools)
 	if len(selectedTools) == 0 {
 		entry, ok := r.selectTool(view)
 		if !ok {
 			return nil, nil
 		}
-		return r.runSingleTool(ctx, exec, view, entry, view.ToolDecision)
+		return r.runSingleTool(ctx, exec, view, entry, toolDecision)
 	}
 	outputs := map[string]map[string]any{}
 	for _, toolName := range selectedTools {
@@ -626,10 +644,12 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 }
 
 func decisionForTool(view resolvedView, toolName string) policyruntime.ToolDecision {
-	if strings.TrimSpace(view.ToolDecision.SelectedTool) == strings.TrimSpace(toolName) {
-		return view.ToolDecision
+	toolDecision := view.ToolDecisionStage.Decision
+	toolPlan := view.ToolPlanStage.Plan
+	if strings.TrimSpace(toolDecision.SelectedTool) == strings.TrimSpace(toolName) {
+		return toolDecision
 	}
-	for _, candidate := range view.ToolPlan.Candidates {
+	for _, candidate := range toolPlan.Candidates {
 		if strings.TrimSpace(candidate.ToolID) != strings.TrimSpace(toolName) {
 			continue
 		}
@@ -767,12 +787,13 @@ func (r *Runner) reuseToolRun(ctx context.Context, executionID string, toolID st
 }
 
 func (r *Runner) approvalStatus(ctx context.Context, exec execution.TurnExecution, entry tool.CatalogEntry, view resolvedView) (string, error) {
-	approvalMode := view.ToolApprovals[entry.ID]
+	toolApprovals := view.ToolExposureStage.ToolApprovals
+	approvalMode := toolApprovals[entry.ID]
 	if approvalMode == "" {
-		approvalMode = view.ToolApprovals[entry.Name]
+		approvalMode = toolApprovals[entry.Name]
 	}
 	if approvalMode == "" {
-		approvalMode = view.ToolApprovals[entry.ProviderID+"."+entry.Name]
+		approvalMode = toolApprovals[entry.ProviderID+"."+entry.Name]
 	}
 	if !strings.EqualFold(approvalMode, "required") {
 		return "", nil
@@ -822,7 +843,7 @@ func (r *Runner) approvalStatus(ctx context.Context, exec execution.TurnExecutio
 }
 
 func (r *Runner) selectTool(view resolvedView) (tool.CatalogEntry, bool) {
-	name := strings.TrimSpace(view.ToolDecision.SelectedTool)
+	name := strings.TrimSpace(view.ToolDecisionStage.Decision.SelectedTool)
 	if name == "" || view.Bundle == nil {
 		return tool.CatalogEntry{}, false
 	}
@@ -848,9 +869,10 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 	if latest := latestText(events); latest != "" {
 		parts = append(parts, "Customer message: "+latest)
 	}
-	if len(view.MatchedGuidelines) > 0 {
-		instructions := make([]string, 0, len(view.MatchedGuidelines))
-		for _, item := range view.MatchedGuidelines {
+	guidelines := view.MatchFinalizeStage.MatchedGuidelines
+	if len(guidelines) > 0 {
+		instructions := make([]string, 0, len(guidelines))
+		for _, item := range guidelines {
 			if strings.TrimSpace(item.Then) != "" {
 				instructions = append(instructions, item.Then)
 			}
@@ -865,8 +887,8 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 	if view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
 		parts = append(parts, "Current journey instruction: "+view.ActiveJourneyState.Instruction)
 	}
-	if view.ToolDecision.SelectedTool != "" {
-		parts = append(parts, "Selected tool: "+view.ToolDecision.SelectedTool)
+	if toolDecision := view.ToolDecisionStage.Decision; toolDecision.SelectedTool != "" {
+		parts = append(parts, "Selected tool: "+toolDecision.SelectedTool)
 	}
 	if len(toolOutput) > 0 {
 		parts = append(parts, "Tool output: "+mustJSON(toolOutput))

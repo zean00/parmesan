@@ -1345,29 +1345,33 @@ func selectBundles(bundles []policy.Bundle, explicitID string, executionBundleID
 	return []policy.Bundle{bundles[0]}
 }
 
-func toResolvedPolicyResponse(exec execution.TurnExecution, view policyruntime.ResolvedView) resolvedPolicyResponse {
+func toResolvedPolicyResponse(exec execution.TurnExecution, view policyruntime.EngineResult) resolvedPolicyResponse {
+	journeyDecision := view.JourneyProgressStage.Decision
+	toolDecision := view.ToolDecisionStage.Decision
+	matchedObservations := view.ObservationStage.Observations
+	matchedGuidelines := view.MatchFinalizeStage.MatchedGuidelines
 	resp := resolvedPolicyResponse{
 		ProposalID:           exec.ProposalID,
 		RolloutID:            exec.RolloutID,
 		SelectionReason:      exec.SelectionReason,
 		CompositionMode:      view.CompositionMode,
 		NoMatch:              view.NoMatch,
-		MatchedObservations:  observationIDs(view.MatchedObservations),
-		MatchedGuidelines:    guidelineIDs(view.MatchedGuidelines),
+		MatchedObservations:  observationIDs(matchedObservations),
+		MatchedGuidelines:    guidelineIDs(matchedGuidelines),
 		SuppressedGuidelines: suppressedGuidelineIDs(view.SuppressedGuidelines),
-		ReapplyGuidelines:    reapplyGuidelineIDs(view.ReapplyDecisions),
-		CustomerBlocked:      customerBlockedIDs(view.CustomerDecisions),
-		JourneyDecision:      view.JourneyDecision.Action,
-		SelectedTool:         view.ToolDecision.SelectedTool,
-		ToolCanRun:           view.ToolDecision.CanRun,
-		ToolMissingArgs:      append([]string(nil), view.ToolDecision.MissingArguments...),
-		ToolInvalidArgs:      append([]string(nil), view.ToolDecision.InvalidArguments...),
-		ToolMissingIssues:    append([]policyruntime.ToolArgumentIssue(nil), view.ToolDecision.MissingIssues...),
-		ToolInvalidIssues:    append([]policyruntime.ToolArgumentIssue(nil), view.ToolDecision.InvalidIssues...),
-		ResponseRevision:     view.ResponseAnalysis.NeedsRevision,
-		ResponseStrict:       view.ResponseAnalysis.NeedsStrictMode,
-		ExposedTools:         append([]string(nil), view.ExposedTools...),
-		CandidateTemplates:   templateIDsForAPI(view.CandidateTemplates),
+		ReapplyGuidelines:    reapplyGuidelineIDs(view.PreviouslyAppliedStage.Decisions),
+		CustomerBlocked:      customerBlockedIDs(view.CustomerDependencyStage.Decisions),
+		JourneyDecision:      journeyDecision.Action,
+		SelectedTool:         toolDecision.SelectedTool,
+		ToolCanRun:           toolDecision.CanRun,
+		ToolMissingArgs:      append([]string(nil), toolDecision.MissingArguments...),
+		ToolInvalidArgs:      append([]string(nil), toolDecision.InvalidArguments...),
+		ToolMissingIssues:    append([]policyruntime.ToolArgumentIssue(nil), toolDecision.MissingIssues...),
+		ToolInvalidIssues:    append([]policyruntime.ToolArgumentIssue(nil), toolDecision.InvalidIssues...),
+		ResponseRevision:     view.ResponseAnalysisStage.Analysis.NeedsRevision,
+		ResponseStrict:       view.ResponseAnalysisStage.Analysis.NeedsStrictMode,
+		ExposedTools:         append([]string(nil), view.ToolExposureStage.ExposedTools...),
+		CandidateTemplates:   templateIDsForAPI(view.ResponseAnalysisStage.CandidateTemplates),
 		DisambiguationPrompt: view.DisambiguationPrompt,
 		BatchResults:         append([]policyruntime.BatchResult(nil), view.BatchResults...),
 		PromptSetVersions:    cloneStringMap(view.PromptSetVersions),

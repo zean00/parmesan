@@ -8,29 +8,28 @@ import (
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/model"
+	semantics "github.com/sahal/parmesan/internal/runtime/semantics"
 )
 
 type guidelineMatchingBatch interface {
 	Name() string
 	Strategy() string
 	PromptVersion() string
-	Process(context.Context, matchingSnapshot) (stateMutation, error)
+	Process(context.Context, matchingSnapshot) (StageResult, error)
 }
 
 type responseAnalysisBatch interface {
 	Name() string
 	Strategy() string
 	PromptVersion() string
-	Process(context.Context, matchingSnapshot) (stateMutation, error)
+	Process(context.Context, matchingSnapshot) (StageResult, error)
 }
-
-type stateMutation func(*matchingState)
 
 type guidelineMatchingStrategy interface {
 	Name() string
 	CreateMatchingBatches(matchingSnapshot, []policy.Guideline) []guidelineMatchingBatch
 	CreateResponseAnalysisBatches(matchingSnapshot) []responseAnalysisBatch
-	TransformMatches(matchingSnapshot) stateMutation
+	TransformMatches(matchingSnapshot) StageResult
 }
 
 type guidelineMatchingStrategyResolver interface {
@@ -99,27 +98,22 @@ type matchingState struct {
 
 	projectedNodes       []ProjectedJourneyNode
 	attention            PolicyAttention
-	observationMatches   []Match
-	matchedObservations  []policy.Observation
+	observationStage     ObservationMatchStageResult
 	activeJourney        *policy.Journey
 	activeJourneyState   *policy.JourneyNode
 	journeyInstance      *journey.Instance
-	backtrackDecision    JourneyDecision
-	journeyDecision      JourneyDecision
-	guidelineMatches     []Match
-	matchedGuidelines    []policy.Guideline
-	lowCriticality       []Match
-	reapplyDecisions     []ReapplyDecision
-	customerDecisions    []CustomerDependencyDecision
-	suppressedGuidelines []SuppressedGuideline
-	resolutionRecords    []ResolutionRecord
-	disambiguationPrompt string
-	candidateTemplates   []policy.Template
-	responseAnalysis     ResponseAnalysis
-	exposedTools         []string
-	toolApprovals        map[string]string
-	toolPlan             ToolCallPlan
-	toolDecision         ToolDecision
+	matchFinalizeStage   FinalizeStageResult
+	previouslyAppliedStage PreviouslyAppliedStageResult
+	conditionArtifactsStage ConditionArtifactsStageResult
+	journeyBacktrackStage JourneyBacktrackStageResult
+	journeyProgressStage  JourneyProgressStageResult
+	customerDependencyStage CustomerDependencyStageResult
+	relationshipResolutionStage RelationshipResolutionStageResult
+	disambiguationStage DisambiguationStageResult
+	responseAnalysisStage ResponseAnalysisStageResult
+	toolExposureStage    ToolExposureStageResult
+	toolPlanStage        ToolPlanStageResult
+	toolDecisionStage    ToolDecisionStageResult
 	batchResults         []BatchResult
 	promptSetVersions    map[string]string
 }
@@ -132,33 +126,38 @@ type matchingSnapshot struct {
 	journeyInstances    []journey.Instance
 	projectedNodes      []ProjectedJourneyNode
 	attention           PolicyAttention
-	observationMatches  []Match
-	matchedObservations []policy.Observation
+	observationStage    ObservationMatchStageResult
 	activeJourney       *policy.Journey
 	activeJourneyState  *policy.JourneyNode
 	journeyInstance     *journey.Instance
-	backtrackDecision   JourneyDecision
-	journeyDecision     JourneyDecision
-	guidelineMatches    []Match
-	matchedGuidelines   []policy.Guideline
-	lowCriticality      []Match
-	reapplyDecisions    []ReapplyDecision
-	customerDecisions   []CustomerDependencyDecision
-	suppressedGuidelines []SuppressedGuideline
-	resolutionRecords   []ResolutionRecord
-	disambiguationPrompt string
-	candidateTemplates  []policy.Template
-	responseAnalysis    ResponseAnalysis
-	exposedTools        []string
-	toolApprovals       map[string]string
-	toolPlan            ToolCallPlan
-	toolDecision        ToolDecision
+	matchFinalizeStage  FinalizeStageResult
+	previouslyAppliedStage PreviouslyAppliedStageResult
+	conditionArtifactsStage ConditionArtifactsStageResult
+	journeyBacktrackStage JourneyBacktrackStageResult
+	journeyProgressStage  JourneyProgressStageResult
+	customerDependencyStage CustomerDependencyStageResult
+	relationshipResolutionStage RelationshipResolutionStageResult
+	disambiguationStage DisambiguationStageResult
+	responseAnalysisStage ResponseAnalysisStageResult
+	toolExposureStage    ToolExposureStageResult
+	toolPlanStage       ToolPlanStageResult
+	toolDecisionStage   ToolDecisionStageResult
 }
 
 func snapshotFromState(state *matchingState) matchingSnapshot {
 	if state == nil {
 		return matchingSnapshot{}
 	}
+	backtrackStage := cloneJourneyBacktrackStageResult(state.journeyBacktrackStage)
+	progressStage := cloneJourneyProgressStageResult(state.journeyProgressStage)
+	previouslyAppliedStage := clonePreviouslyAppliedStageResult(state.previouslyAppliedStage)
+	customerStage := cloneCustomerDependencyStageResult(state.customerDependencyStage)
+	relationshipStage := cloneRelationshipResolutionStageResult(state.relationshipResolutionStage)
+	disambiguationStage := cloneDisambiguationStageResult(state.disambiguationStage)
+	responseStage := cloneResponseAnalysisStageResult(state.responseAnalysisStage)
+	toolExposureStage := cloneToolExposureStageResult(state.toolExposureStage)
+	toolPlanStage := cloneToolPlanStageResult(state.toolPlanStage)
+	toolDecisionStage := cloneToolDecisionStageResult(state.toolDecisionStage)
 	return matchingSnapshot{
 		router:               state.router,
 		bundle:               state.bundle,
@@ -167,27 +166,22 @@ func snapshotFromState(state *matchingState) matchingSnapshot {
 		journeyInstances:     append([]journey.Instance(nil), state.journeyInstances...),
 		projectedNodes:       append([]ProjectedJourneyNode(nil), state.projectedNodes...),
 		attention:            state.attention,
-		observationMatches:   append([]Match(nil), state.observationMatches...),
-		matchedObservations:  append([]policy.Observation(nil), state.matchedObservations...),
+		observationStage:     cloneObservationMatchStageResult(state.observationStage),
 		activeJourney:        state.activeJourney,
 		activeJourneyState:   state.activeJourneyState,
 		journeyInstance:      state.journeyInstance,
-		backtrackDecision:    state.backtrackDecision,
-		journeyDecision:      state.journeyDecision,
-		guidelineMatches:     append([]Match(nil), state.guidelineMatches...),
-		matchedGuidelines:    append([]policy.Guideline(nil), state.matchedGuidelines...),
-		lowCriticality:       append([]Match(nil), state.lowCriticality...),
-		reapplyDecisions:     append([]ReapplyDecision(nil), state.reapplyDecisions...),
-		customerDecisions:    append([]CustomerDependencyDecision(nil), state.customerDecisions...),
-		suppressedGuidelines: append([]SuppressedGuideline(nil), state.suppressedGuidelines...),
-		resolutionRecords:    append([]ResolutionRecord(nil), state.resolutionRecords...),
-		disambiguationPrompt: state.disambiguationPrompt,
-		candidateTemplates:   append([]policy.Template(nil), state.candidateTemplates...),
-		responseAnalysis:     state.responseAnalysis,
-		exposedTools:         append([]string(nil), state.exposedTools...),
-		toolApprovals:        cloneStringMap(state.toolApprovals),
-		toolPlan:             state.toolPlan,
-		toolDecision:         state.toolDecision,
+		matchFinalizeStage:   cloneFinalizeStageResult(state.matchFinalizeStage),
+		previouslyAppliedStage: previouslyAppliedStage,
+		conditionArtifactsStage: ConditionArtifactsStageResult{Artifacts: cloneConditionArtifacts(state.conditionArtifactsStage.Artifacts)},
+		journeyBacktrackStage: backtrackStage,
+		journeyProgressStage:  progressStage,
+		customerDependencyStage: customerStage,
+		relationshipResolutionStage: relationshipStage,
+		disambiguationStage: disambiguationStage,
+		responseAnalysisStage: responseStage,
+		toolExposureStage:    toolExposureStage,
+		toolPlanStage:        toolPlanStage,
+		toolDecisionStage:    toolDecisionStage,
 	}
 }
 
@@ -196,6 +190,244 @@ func cloneStringMap(src map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneConditionArtifacts(src map[string]semantics.ConditionEvidence) map[string]semantics.ConditionEvidence {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]semantics.ConditionEvidence, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneJourneySatisfactions(src map[string]semantics.JourneyStateSatisfaction) map[string]semantics.JourneyStateSatisfaction {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]semantics.JourneyStateSatisfaction, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneBacktrackEvaluations(src map[string]BacktrackCandidateEvaluation) map[string]BacktrackCandidateEvaluation {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]BacktrackCandidateEvaluation, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneNextNodeEvaluations(src map[string]JourneyNextNodeEvaluation) map[string]JourneyNextNodeEvaluation {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]JourneyNextNodeEvaluation, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneCustomerDependencyEvidence(src map[string]semantics.CustomerDependencyEvidence) map[string]semantics.CustomerDependencyEvidence {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]semantics.CustomerDependencyEvidence, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneActionCoverage(src map[string]semantics.ActionCoverageEvidence) map[string]semantics.ActionCoverageEvidence {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]semantics.ActionCoverageEvidence, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneToolGrounding(src map[string]semantics.ToolGroundingEvidence) map[string]semantics.ToolGroundingEvidence {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]semantics.ToolGroundingEvidence, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneToolSelection(src map[string]semantics.ToolSelectionEvidence) map[string]semantics.ToolSelectionEvidence {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]semantics.ToolSelectionEvidence, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneJourneyBacktrackStageResult(src JourneyBacktrackStageResult) JourneyBacktrackStageResult {
+	src.Evaluation = cloneJourneyBacktrackEvaluation(src.Evaluation)
+	return src
+}
+
+func cloneJourneyProgressStageResult(src JourneyProgressStageResult) JourneyProgressStageResult {
+	src.Evaluation = cloneJourneyProgressEvaluation(src.Evaluation)
+	return src
+}
+
+func cloneJourneyBacktrackEvaluation(src JourneyBacktrackEvaluation) JourneyBacktrackEvaluation {
+	src.BacktrackEvaluations = cloneBacktrackEvaluations(src.BacktrackEvaluations)
+	return src
+}
+
+func cloneJourneyProgressEvaluation(src JourneyProgressEvaluation) JourneyProgressEvaluation {
+	src.JourneySatisfactions = cloneJourneySatisfactions(src.JourneySatisfactions)
+	src.NextNodeEvaluations = cloneNextNodeEvaluations(src.NextNodeEvaluations)
+	return src
+}
+
+func cloneCustomerDependencyStageResult(src CustomerDependencyStageResult) CustomerDependencyStageResult {
+	src.Decisions = append([]CustomerDependencyDecision(nil), src.Decisions...)
+	src.Guidelines = append([]policy.Guideline(nil), src.Guidelines...)
+	src.Evidence = cloneCustomerDependencyEvidence(src.Evidence)
+	return src
+}
+
+func cloneRelationshipResolutionStageResult(src RelationshipResolutionStageResult) RelationshipResolutionStageResult {
+	src.Guidelines = append([]policy.Guideline(nil), src.Guidelines...)
+	src.SuppressedGuidelines = append([]SuppressedGuideline(nil), src.SuppressedGuidelines...)
+	src.ResolutionRecords = append([]ResolutionRecord(nil), src.ResolutionRecords...)
+	return src
+}
+
+func cloneObservationMatchStageResult(src ObservationMatchStageResult) ObservationMatchStageResult {
+	src.Matches = append([]Match(nil), src.Matches...)
+	src.Observations = append([]policy.Observation(nil), src.Observations...)
+	return src
+}
+
+func cloneFinalizeStageResult(src FinalizeStageResult) FinalizeStageResult {
+	src.GuidelineMatches = append([]Match(nil), src.GuidelineMatches...)
+	src.MatchedGuidelines = append([]policy.Guideline(nil), src.MatchedGuidelines...)
+	src.SuppressedGuidelines = append([]SuppressedGuideline(nil), src.SuppressedGuidelines...)
+	src.ResolutionRecords = append([]ResolutionRecord(nil), src.ResolutionRecords...)
+	return src
+}
+
+func cloneDisambiguationStageResult(src DisambiguationStageResult) DisambiguationStageResult {
+	src.Guidelines = append([]policy.Guideline(nil), src.Guidelines...)
+	src.SuppressedGuidelines = append([]SuppressedGuideline(nil), src.SuppressedGuidelines...)
+	src.ResolutionRecords = append([]ResolutionRecord(nil), src.ResolutionRecords...)
+	return src
+}
+
+func effectiveSuppressedGuidelines(relationshipStage RelationshipResolutionStageResult, disambiguationStage DisambiguationStageResult) []SuppressedGuideline {
+	if len(disambiguationStage.SuppressedGuidelines) > 0 {
+		return append([]SuppressedGuideline(nil), disambiguationStage.SuppressedGuidelines...)
+	}
+	return append([]SuppressedGuideline(nil), relationshipStage.SuppressedGuidelines...)
+}
+
+func effectiveResolutionRecords(relationshipStage RelationshipResolutionStageResult, disambiguationStage DisambiguationStageResult) []ResolutionRecord {
+	items := append([]ResolutionRecord(nil), relationshipStage.ResolutionRecords...)
+	items = append(items, disambiguationStage.ResolutionRecords...)
+	return dedupeResolutionRecords(items)
+}
+
+func effectiveDisambiguationPrompt(relationshipStage RelationshipResolutionStageResult, disambiguationStage DisambiguationStageResult) string {
+	if strings.TrimSpace(disambiguationStage.Prompt) != "" {
+		return disambiguationStage.Prompt
+	}
+	return relationshipStage.DisambiguationPrompt
+}
+
+func clonePreviouslyAppliedStageResult(src PreviouslyAppliedStageResult) PreviouslyAppliedStageResult {
+	src.Decisions = append([]ReapplyDecision(nil), src.Decisions...)
+	src.Guidelines = append([]policy.Guideline(nil), src.Guidelines...)
+	return src
+}
+
+func cloneResponseAnalysisEvaluation(src ResponseAnalysisEvaluation) ResponseAnalysisEvaluation {
+	src.Coverage = cloneActionCoverage(src.Coverage)
+	src.AnalyzedGuidelines = append([]AnalyzedGuideline(nil), src.AnalyzedGuidelines...)
+	return src
+}
+
+func cloneResponseAnalysisStageResult(src ResponseAnalysisStageResult) ResponseAnalysisStageResult {
+	src.CandidateTemplates = append([]policy.Template(nil), src.CandidateTemplates...)
+	src.Evaluation = cloneResponseAnalysisEvaluation(src.Evaluation)
+	src.Analysis.AnalyzedGuidelines = append([]AnalyzedGuideline(nil), src.Analysis.AnalyzedGuidelines...)
+	return src
+}
+
+func cloneToolPlanEvaluation(src ToolPlanEvaluation) ToolPlanEvaluation {
+	src.Candidates = append([]ToolCandidate(nil), src.Candidates...)
+	src.Batches = append([]ToolCallBatchResult(nil), src.Batches...)
+	src.Grounding = cloneToolGrounding(src.Grounding)
+	src.SelectionEvidence = cloneToolSelection(src.SelectionEvidence)
+	if len(src.OverlappingGroups) > 0 {
+		out := make([][]string, 0, len(src.OverlappingGroups))
+		for _, group := range src.OverlappingGroups {
+			out = append(out, append([]string(nil), group...))
+		}
+		src.OverlappingGroups = out
+	}
+	src.SelectedTools = append([]string(nil), src.SelectedTools...)
+	return src
+}
+
+func cloneToolExposureStageResult(src ToolExposureStageResult) ToolExposureStageResult {
+	src.ExposedTools = append([]string(nil), src.ExposedTools...)
+	src.ToolApprovals = cloneStringMap(src.ToolApprovals)
+	return src
+}
+
+func cloneToolPlanStageResult(src ToolPlanStageResult) ToolPlanStageResult {
+	src.Plan.Candidates = append([]ToolCandidate(nil), src.Plan.Candidates...)
+	src.Plan.Batches = append([]ToolCallBatchResult(nil), src.Plan.Batches...)
+	src.Plan.SelectedTools = append([]string(nil), src.Plan.SelectedTools...)
+	src.Plan.OverlappingGroups = cloneOverlappingGroups(src.Plan.OverlappingGroups)
+	src.Plan.Calls = append([]ToolPlannedCall(nil), src.Plan.Calls...)
+	src.Evaluation = cloneToolPlanEvaluation(src.Evaluation)
+	return src
+}
+
+func cloneToolDecisionStageResult(src ToolDecisionStageResult) ToolDecisionStageResult {
+	src.Decision.Arguments = cloneAnyMap(src.Decision.Arguments)
+	src.Decision.MissingArguments = append([]string(nil), src.Decision.MissingArguments...)
+	src.Decision.InvalidArguments = append([]string(nil), src.Decision.InvalidArguments...)
+	src.Decision.MissingIssues = append([]ToolArgumentIssue(nil), src.Decision.MissingIssues...)
+	src.Decision.InvalidIssues = append([]ToolArgumentIssue(nil), src.Decision.InvalidIssues...)
+	src.Evaluation.SelectedTools = append([]string(nil), src.Evaluation.SelectedTools...)
+	src.Evaluation.MissingIssues = append([]ToolArgumentIssue(nil), src.Evaluation.MissingIssues...)
+	src.Evaluation.InvalidIssues = append([]ToolArgumentIssue(nil), src.Evaluation.InvalidIssues...)
+	return src
+}
+
+func cloneAnyMap(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(src))
 	for k, v := range src {
 		out[k] = v
 	}
@@ -214,129 +446,88 @@ func (customStrategy) Name() string {
 	return "custom"
 }
 
-func (genericStrategy) TransformMatches(snapshot matchingSnapshot) stateMutation {
-	if snapshot.bundle.ID == "" && snapshot.context.SessionID == "" && len(snapshot.guidelineMatches) == 0 && len(snapshot.matchedGuidelines) == 0 {
+func (genericStrategy) TransformMatches(snapshot matchingSnapshot) StageResult {
+	if snapshot.bundle.ID == "" && snapshot.context.SessionID == "" && len(snapshot.matchFinalizeStage.GuidelineMatches) == 0 && len(snapshot.matchFinalizeStage.MatchedGuidelines) == 0 {
 		return nil
 	}
-	guidelineMatches := append([]Match(nil), snapshot.guidelineMatches...)
-	matchedGuidelines := append([]policy.Guideline(nil), snapshot.matchedGuidelines...)
-	suppressed := append([]SuppressedGuideline(nil), snapshot.suppressedGuidelines...)
-	resolutions := append([]ResolutionRecord(nil), snapshot.resolutionRecords...)
-	return func(s *matchingState) {
-		sortMatches(guidelineMatches)
-		guidelineMatches = dedupeMatches(guidelineMatches)
-		sortGuidelines(matchedGuidelines, guidelineMatches)
-		matchedGuidelines = dedupeGuidelines(matchedGuidelines)
-		suppressed = dedupeSuppressedGuidelines(suppressed)
-		resolutions = dedupeResolutionRecords(resolutions)
-		s.guidelineMatches = guidelineMatches
-		s.matchedGuidelines = matchedGuidelines
-		s.suppressedGuidelines = suppressed
-		s.resolutionRecords = resolutions
+	guidelineMatches := append([]Match(nil), snapshot.matchFinalizeStage.GuidelineMatches...)
+	matchedGuidelines := append([]policy.Guideline(nil), snapshot.matchFinalizeStage.MatchedGuidelines...)
+	suppressed := effectiveSuppressedGuidelines(snapshot.relationshipResolutionStage, snapshot.disambiguationStage)
+	resolutions := effectiveResolutionRecords(snapshot.relationshipResolutionStage, snapshot.disambiguationStage)
+	sortMatches(guidelineMatches)
+	guidelineMatches = dedupeMatches(guidelineMatches)
+	sortGuidelines(matchedGuidelines, guidelineMatches)
+	matchedGuidelines = dedupeGuidelines(matchedGuidelines)
+	suppressed = dedupeSuppressedGuidelines(suppressed)
+	resolutions = dedupeResolutionRecords(resolutions)
+	return FinalizeStageResult{
+		GuidelineMatches:     guidelineMatches,
+		MatchedGuidelines:    matchedGuidelines,
+		SuppressedGuidelines: suppressed,
+		ResolutionRecords:    resolutions,
 	}
 }
 
-func (customStrategy) TransformMatches(snapshot matchingSnapshot) stateMutation {
+func (customStrategy) TransformMatches(snapshot matchingSnapshot) StageResult {
 	return genericStrategy{}.TransformMatches(snapshot)
 }
 
 func (genericStrategy) CreateMatchingBatches(_ matchingSnapshot, items []policy.Guideline) []guidelineMatchingBatch {
 	regular, low := splitLowCriticalityGuidelines(items)
 	return []guidelineMatchingBatch{
-		makeBatch("observation_match", "generic", promptVersion("observation_match"), func(ctx context.Context, snapshot matchingSnapshot) (stateMutation, error) {
+		makeBatch("observation_match", "generic", promptVersion("observation_match"), func(ctx context.Context, snapshot matchingSnapshot) (StageResult, error) {
 			matches, observations := runObservationARQ(ctx, snapshot.router, snapshot.context, snapshot.bundle.Observations)
-			return func(s *matchingState) {
-				s.observationMatches, s.matchedObservations = matches, observations
-			}, nil
+			return ObservationMatchStageResult{Matches: matches, Observations: observations}, nil
 		}),
-		makeBatch("journey_backtrack", "generic", promptVersion("journey_backtrack"), func(ctx context.Context, snapshot matchingSnapshot) (stateMutation, error) {
-			activeJourney, activeJourneyState, instance := resolveJourney(snapshot.bundle, snapshot.journeyInstances, snapshot.context)
-			backtrack := runJourneyBacktrackARQ(ctx, snapshot.router, snapshot.context, activeJourney, activeJourneyState, instance)
-			return func(s *matchingState) {
-				s.activeJourney, s.activeJourneyState, s.journeyInstance = activeJourney, activeJourneyState, instance
-				s.backtrackDecision = backtrack
-			}, nil
+		makeBatch("journey_backtrack", "generic", promptVersion("journey_backtrack"), func(ctx context.Context, snapshot matchingSnapshot) (StageResult, error) {
+			return buildJourneyBacktrackStageResult(ctx, snapshot.router, snapshot.bundle, snapshot.context, snapshot.journeyInstances), nil
 		}),
-		makeBatch("journey_progress", "generic", promptVersion("journey_progress"), func(ctx context.Context, snapshot matchingSnapshot) (stateMutation, error) {
-			decision := runJourneyProgressARQ(ctx, snapshot.router, snapshot.context, snapshot.activeJourney, snapshot.activeJourneyState, snapshot.journeyInstance, snapshot.backtrackDecision)
-			return func(s *matchingState) {
-				s.journeyDecision = decision
-			}, nil
+		makeBatch("journey_progress", "generic", promptVersion("journey_progress"), func(ctx context.Context, snapshot matchingSnapshot) (StageResult, error) {
+			return buildJourneyProgressStageResult(ctx, snapshot.router, snapshot.context, snapshot.activeJourney, snapshot.activeJourneyState, snapshot.journeyInstance, snapshot.journeyBacktrackStage.Decision), nil
 		}),
-		makeBatch("actionable_match", "generic", promptVersion("actionable_match"), func(ctx context.Context, snapshot matchingSnapshot) (stateMutation, error) {
+		makeBatch("actionable_match", "generic", promptVersion("actionable_match"), func(ctx context.Context, snapshot matchingSnapshot) (StageResult, error) {
 			matches, guidelines := runActionableARQ(ctx, snapshot.router, snapshot.context, regular)
-			return func(s *matchingState) {
-				s.guidelineMatches, s.matchedGuidelines = matches, guidelines
-			}, nil
+			return GuidelineMatchStageResult{Matches: matches, Guidelines: guidelines}, nil
 		}),
-		makeBatch("low_criticality_match", "generic", promptVersion("low_criticality_match"), func(ctx context.Context, snapshot matchingSnapshot) (stateMutation, error) {
+		makeBatch("low_criticality_match", "generic", promptVersion("low_criticality_match"), func(ctx context.Context, snapshot matchingSnapshot) (StageResult, error) {
 			matches, guidelines := runLowCriticalityARQ(ctx, snapshot.router, snapshot.context, low)
-			return func(s *matchingState) {
-				s.lowCriticality = matches
-				s.guidelineMatches = append(s.guidelineMatches, matches...)
-				s.matchedGuidelines = append(s.matchedGuidelines, guidelines...)
-			}, nil
+			return GuidelineMatchStageResult{Matches: matches, Guidelines: guidelines, Low: true}, nil
 		}),
-		makeBatch("customer_dependency", "generic", promptVersion("customer_dependency"), func(_ context.Context, snapshot matchingSnapshot) (stateMutation, error) {
-			decisions, guidelines := runCustomerDependentARQ(snapshot.context, snapshot.matchedGuidelines)
-			return func(s *matchingState) {
-				s.customerDecisions, s.matchedGuidelines = decisions, guidelines
-			}, nil
+		makeBatch("customer_dependency", "generic", promptVersion("customer_dependency"), func(_ context.Context, snapshot matchingSnapshot) (StageResult, error) {
+			return buildCustomerDependencyStageResult(snapshot.context, snapshot.matchFinalizeStage.MatchedGuidelines), nil
 		}),
-		makeBatch("previously_applied", "generic", promptVersion("previously_applied"), func(_ context.Context, snapshot matchingSnapshot) (stateMutation, error) {
-			decisions, guidelines := runPreviouslyAppliedARQ(snapshot.context, snapshot.matchedGuidelines, snapshot.guidelineMatches)
-			return func(s *matchingState) {
-				s.reapplyDecisions, s.matchedGuidelines = decisions, guidelines
-			}, nil
+		makeBatch("previously_applied", "generic", promptVersion("previously_applied"), func(_ context.Context, snapshot matchingSnapshot) (StageResult, error) {
+			return buildPreviouslyAppliedStageResult(snapshot.context, snapshot.matchFinalizeStage.MatchedGuidelines, snapshot.matchFinalizeStage.GuidelineMatches), nil
 		}),
-		makeBatch("relationship_resolution", "generic", promptVersion("relationship_resolution"), func(_ context.Context, snapshot matchingSnapshot) (stateMutation, error) {
-			resolved := resolveRelationships(snapshot.bundle, snapshot.context, snapshot.matchedObservations, snapshot.guidelineMatches, snapshot.matchedGuidelines, snapshot.activeJourney, snapshot.activeJourneyState)
-			return func(s *matchingState) {
-				s.matchedGuidelines = resolved.guidelines
-				s.suppressedGuidelines = resolved.suppressed
-				s.disambiguationPrompt = resolved.disambiguation
-				s.resolutionRecords = resolved.resolutions
-				s.activeJourney = resolved.activeJourney
-				if s.activeJourney == nil {
-					s.activeJourneyState = nil
-				}
-			}, nil
+		makeBatch("relationship_resolution", "generic", promptVersion("relationship_resolution"), func(_ context.Context, snapshot matchingSnapshot) (StageResult, error) {
+			return buildRelationshipResolutionStageResult(snapshot.bundle, snapshot.context, snapshot.observationStage.Observations, snapshot.matchFinalizeStage.GuidelineMatches, snapshot.matchFinalizeStage.MatchedGuidelines, snapshot.activeJourney, snapshot.activeJourneyState), nil
 		}),
-		makeBatch("disambiguation", "generic", promptVersion("disambiguation"), func(ctx context.Context, snapshot matchingSnapshot) (stateMutation, error) {
-			guidelines, suppressed, resolutions := applySiblingDisambiguation(snapshot.bundle, snapshot.context, snapshot.guidelineMatches, snapshot.matchedGuidelines, snapshot.suppressedGuidelines, snapshot.resolutionRecords)
-			prompt := runDisambiguationARQ(ctx, snapshot.router, snapshot.context, guidelines, snapshot.disambiguationPrompt)
-			return func(s *matchingState) {
-				s.matchedGuidelines, s.suppressedGuidelines, s.resolutionRecords = guidelines, suppressed, resolutions
-				s.disambiguationPrompt = prompt
-			}, nil
+		makeBatch("disambiguation", "generic", promptVersion("disambiguation"), func(ctx context.Context, snapshot matchingSnapshot) (StageResult, error) {
+			suppressed := effectiveSuppressedGuidelines(snapshot.relationshipResolutionStage, snapshot.disambiguationStage)
+			resolutions := effectiveResolutionRecords(snapshot.relationshipResolutionStage, snapshot.disambiguationStage)
+			prompt := effectiveDisambiguationPrompt(snapshot.relationshipResolutionStage, snapshot.disambiguationStage)
+			return buildDisambiguationStageResult(ctx, snapshot.router, snapshot.bundle, snapshot.context, snapshot.matchFinalizeStage.GuidelineMatches, snapshot.matchFinalizeStage.MatchedGuidelines, suppressed, resolutions, prompt), nil
 		}),
 	}
 }
 
 func (genericStrategy) CreateResponseAnalysisBatches(_ matchingSnapshot) []responseAnalysisBatch {
 	return []responseAnalysisBatch{
-		makeResponseBatch("response_analysis", "generic", promptVersion("response_analysis"), func(ctx context.Context, snapshot matchingSnapshot) (stateMutation, error) {
+		makeResponseBatch("response_analysis", "generic", promptVersion("response_analysis"), func(ctx context.Context, snapshot matchingSnapshot) (StageResult, error) {
 			templates := collectTemplates(snapshot.bundle, snapshot.activeJourney, snapshot.activeJourneyState, snapshot.context)
-			mode := modeOrDefault(snapshot.bundle.CompositionMode, templates)
-			analysis := analyzeResponsePlan(ctx, snapshot.router, snapshot.context, responseAnalysisGuidelines(snapshot.bundle, snapshot.context, snapshot.matchedGuidelines), templates, mode, snapshot.bundle.NoMatch)
-			return func(s *matchingState) {
-				s.candidateTemplates = templates
-				s.responseAnalysis = analysis
-			}, nil
+			return buildResponseAnalysisStageResult(ctx, snapshot.router, snapshot.context, snapshot.bundle, snapshot.matchFinalizeStage.MatchedGuidelines, templates, snapshot.responseAnalysisStage.Evaluation.Coverage), nil
 		}),
 	}
 }
 
 func (customStrategy) CreateMatchingBatches(_ matchingSnapshot, items []policy.Guideline) []guidelineMatchingBatch {
 	return []guidelineMatchingBatch{
-		makeBatch("custom_actionable_match", "custom", promptVersion("custom_actionable_match"), func(ctx context.Context, snapshot matchingSnapshot) (stateMutation, error) {
+		makeBatch("custom_actionable_match", "custom", promptVersion("custom_actionable_match"), func(ctx context.Context, snapshot matchingSnapshot) (StageResult, error) {
 			matches, guidelines := runActionableARQ(ctx, snapshot.router, snapshot.context, items)
-			return func(s *matchingState) {
-				s.guidelineMatches = append(s.guidelineMatches, matches...)
-				s.matchedGuidelines = append(s.matchedGuidelines, guidelines...)
-				sortMatches(s.guidelineMatches)
-				sortGuidelines(s.matchedGuidelines, s.guidelineMatches)
-				s.matchedGuidelines = dedupeGuidelines(s.matchedGuidelines)
+			return GuidelineMatchStageResult{
+				Matches:    matches,
+				Guidelines: guidelines,
+				Append:     true,
 			}, nil
 		}),
 	}
@@ -350,17 +541,17 @@ type batchFunc struct {
 	name          string
 	strategy      string
 	promptVersion string
-	run           func(context.Context, matchingSnapshot) (stateMutation, error)
+	run           func(context.Context, matchingSnapshot) (StageResult, error)
 }
 
-func makeBatch(name string, strategy string, promptVersion string, run func(context.Context, matchingSnapshot) (stateMutation, error)) batchFunc {
+func makeBatch(name string, strategy string, promptVersion string, run func(context.Context, matchingSnapshot) (StageResult, error)) batchFunc {
 	return batchFunc{name: name, strategy: strategy, promptVersion: promptVersion, run: run}
 }
 
 func (b batchFunc) Name() string          { return b.name }
 func (b batchFunc) Strategy() string      { return b.strategy }
 func (b batchFunc) PromptVersion() string { return b.promptVersion }
-func (b batchFunc) Process(ctx context.Context, snapshot matchingSnapshot) (stateMutation, error) {
+func (b batchFunc) Process(ctx context.Context, snapshot matchingSnapshot) (StageResult, error) {
 	return b.run(ctx, snapshot)
 }
 
@@ -368,17 +559,17 @@ type responseBatchFunc struct {
 	name          string
 	strategy      string
 	promptVersion string
-	run           func(context.Context, matchingSnapshot) (stateMutation, error)
+	run           func(context.Context, matchingSnapshot) (StageResult, error)
 }
 
-func makeResponseBatch(name string, strategy string, promptVersion string, run func(context.Context, matchingSnapshot) (stateMutation, error)) responseBatchFunc {
+func makeResponseBatch(name string, strategy string, promptVersion string, run func(context.Context, matchingSnapshot) (StageResult, error)) responseBatchFunc {
 	return responseBatchFunc{name: name, strategy: strategy, promptVersion: promptVersion, run: run}
 }
 
 func (b responseBatchFunc) Name() string          { return b.name }
 func (b responseBatchFunc) Strategy() string      { return b.strategy }
 func (b responseBatchFunc) PromptVersion() string { return b.promptVersion }
-func (b responseBatchFunc) Process(ctx context.Context, snapshot matchingSnapshot) (stateMutation, error) {
+func (b responseBatchFunc) Process(ctx context.Context, snapshot matchingSnapshot) (StageResult, error) {
 	return b.run(ctx, snapshot)
 }
 

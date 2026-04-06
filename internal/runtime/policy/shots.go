@@ -25,6 +25,10 @@ var actionableShots = []stageShot{
 		Input:  `Latest message: "Actually I need to change my shipping address." Guideline: when="return order" then="Help with the return".`,
 		Output: `applies=false because the customer switched to a different topic.`,
 	},
+	{
+		Input:  `Latest message: "It's 199877". Tool facts: "tool local:get_user_age result data 16 age 16". Guideline: when="drink under 21" then="Suggest a sweet non-alcoholic drink".`,
+		Output: `applies=true because staged tool facts are authoritative conversation context and establish that the customer is under 21.`,
+	},
 }
 
 var lowCriticalityShots = []stageShot{

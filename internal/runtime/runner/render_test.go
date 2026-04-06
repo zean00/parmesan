@@ -4,15 +4,18 @@ import (
 	"testing"
 
 	"github.com/sahal/parmesan/internal/domain/policy"
+	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
 )
 
 func TestRenderResponsePrefersMatchedGuidelineInstructionOverJourneyPrompt(t *testing.T) {
 	view := resolvedView{
 		CompositionMode: "guided",
-		MatchedGuidelines: []policy.Guideline{
-			{
-				ID:   "under_21",
-				Then: "inform the customer that only economy class is available",
+		MatchFinalizeStage: policyruntime.FinalizeStageResult{
+			MatchedGuidelines: []policy.Guideline{
+				{
+					ID:   "under_21",
+					Then: "inform the customer that only economy class is available",
+				},
 			},
 		},
 		ActiveJourneyState: &policy.JourneyNode{
