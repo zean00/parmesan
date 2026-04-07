@@ -87,9 +87,12 @@ send either `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
 - `POST /v1/operator/sessions/{id}/feedback`
 - `GET /v1/operator/feedback` with optional `session_id`, `operator_id`, `category`, and `limit` filters
 - `GET /v1/operator/feedback/{id}`
-- `GET /v1/operator/customers/{customer_id}/preferences` with required `agent_id`
+- `GET /v1/operator/customers/{customer_id}/preferences` with required `agent_id` and optional `status`, `key`, `source`, `include_expired`, and `limit` filters
 - `PUT /v1/operator/customers/{customer_id}/preferences/{key}`
-- `GET /v1/operator/customers/{customer_id}/preference-events` with required `agent_id`
+- `POST /v1/operator/customers/{customer_id}/preferences/{key}/confirm`
+- `POST /v1/operator/customers/{customer_id}/preferences/{key}/reject`
+- `POST /v1/operator/customers/{customer_id}/preferences/{key}/expire`
+- `GET /v1/operator/customers/{customer_id}/preference-events` with required `agent_id` and optional `key`, `source`, and `limit` filters
 - `POST /v1/operator/agents`
 - `GET /v1/operator/agents`
 - `GET /v1/operator/agents/{id}`
@@ -103,6 +106,9 @@ send either `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
 - `GET /v1/operator/knowledge/proposals/{id}/preview`
 - `POST /v1/operator/knowledge/proposals/{id}/state`
 - `POST /v1/operator/knowledge/proposals/{id}/apply`
+- `POST /v1/operator/knowledge/lint/run`
+- `GET /v1/operator/knowledge/lint`
+- `POST /v1/operator/knowledge/lint/{id}/resolve`
 - `GET /v1/operator/media/assets` with optional `session_id`
 - `GET /v1/operator/media/assets/{id}` with optional `session_id`
 - `POST /v1/operator/media/assets/{id}/reprocess` with optional `session_id`
@@ -139,8 +145,11 @@ customer facts into first-class `CustomerPreference` records and records shared
 knowledge as draft `KnowledgeUpdateProposal` records until an operator reviews
 them. Operator feedback uses the same compiler path and can create customer
 preferences, shared knowledge proposals, or draft policy/SOUL rollout proposals.
+Preference learning now keeps explicit preferences active while routing inferred
+or conflicting preferences through pending events for operator confirmation.
 Proposal workflow now supports preview plus explicit `draft`, `approved`,
-`rejected`, and `applied` states.
+`rejected`, and `applied` states; shared knowledge apply is gated by lint
+findings for high-risk citation, staleness, and contradiction issues.
 
 Multimodal provider config:
 - `OPENROUTER_API_KEY`

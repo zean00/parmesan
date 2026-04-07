@@ -198,8 +198,13 @@ func (c *Client) ListCustomerPreferences(ctx context.Context, query customer.Pre
 		WHERE ($1 = '' OR agent_id = $1)
 		  AND ($2 = '' OR customer_id = $2)
 		  AND ($3 = '' OR status = $3)
+		  AND ($4 = '' OR key = $4)
+		  AND ($5 = '' OR source = $5)
+		  AND ($6::float8 = 0 OR confidence >= $6)
+		  AND ($7::bool OR expires_at IS NULL OR expires_at > NOW())
 		ORDER BY updated_at DESC
-	`, query.AgentID, query.CustomerID, query.Status)
+		LIMIT NULLIF($8, 0)
+	`, query.AgentID, query.CustomerID, query.Status, query.Key, query.Source, query.MinConfidence, query.IncludeExpired, query.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -242,8 +247,11 @@ func (c *Client) ListCustomerPreferenceEvents(ctx context.Context, query custome
 		FROM customer_preference_events
 		WHERE ($1 = '' OR agent_id = $1)
 		  AND ($2 = '' OR customer_id = $2)
+		  AND ($3 = '' OR key = $3)
+		  AND ($4 = '' OR source = $4)
 		ORDER BY created_at DESC
-	`, query.AgentID, query.CustomerID)
+		LIMIT NULLIF($5, 0)
+	`, query.AgentID, query.CustomerID, query.Key, query.Source, query.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -968,6 +976,60 @@ func (c *Client) ListKnowledgeUpdateProposals(ctx context.Context, scopeKind str
 		}
 		_ = json.Unmarshal(evidence, &item.Evidence)
 		_ = json.Unmarshal(payload, &item.Payload)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) SaveKnowledgeLintFinding(ctx context.Context, finding knowledge.LintFinding) error {
+	evidence, err := json.Marshal(finding.Evidence)
+	if err != nil {
+		return err
+	}
+	metadata, err := json.Marshal(finding.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = c.sessionQuery().Exec(ctx, `
+		INSERT INTO knowledge_lint_findings (id, scope_kind, scope_id, proposal_id, page_id, source_id, kind, severity, status, message, evidence_json, metadata_json, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		ON CONFLICT (id) DO UPDATE
+		SET status = EXCLUDED.status,
+		    message = EXCLUDED.message,
+		    evidence_json = EXCLUDED.evidence_json,
+		    metadata_json = EXCLUDED.metadata_json,
+		    updated_at = EXCLUDED.updated_at
+	`, finding.ID, finding.ScopeKind, finding.ScopeID, nullString(finding.ProposalID), nullString(finding.PageID), nullString(finding.SourceID), finding.Kind, finding.Severity, finding.Status, finding.Message, evidence, metadata, finding.CreatedAt, finding.UpdatedAt)
+	return err
+}
+
+func (c *Client) ListKnowledgeLintFindings(ctx context.Context, query knowledge.LintQuery) ([]knowledge.LintFinding, error) {
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT id, scope_kind, scope_id, COALESCE(proposal_id,''), COALESCE(page_id,''), COALESCE(source_id,''), kind, severity, status, message, evidence_json, metadata_json, created_at, updated_at
+		FROM knowledge_lint_findings
+		WHERE ($1 = '' OR scope_kind = $1)
+		  AND ($2 = '' OR scope_id = $2)
+		  AND ($3 = '' OR proposal_id = $3)
+		  AND ($4 = '' OR page_id = $4)
+		  AND ($5 = '' OR kind = $5)
+		  AND ($6 = '' OR severity = $6)
+		  AND ($7 = '' OR status = $7)
+		ORDER BY created_at DESC
+		LIMIT NULLIF($8, 0)
+	`, query.ScopeKind, query.ScopeID, query.ProposalID, query.PageID, query.Kind, query.Severity, query.Status, query.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []knowledge.LintFinding
+	for rows.Next() {
+		var item knowledge.LintFinding
+		var evidence, metadata []byte
+		if err := rows.Scan(&item.ID, &item.ScopeKind, &item.ScopeID, &item.ProposalID, &item.PageID, &item.SourceID, &item.Kind, &item.Severity, &item.Status, &item.Message, &evidence, &metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(evidence, &item.Evidence)
+		_ = json.Unmarshal(metadata, &item.Metadata)
 		out = append(out, item)
 	}
 	return out, rows.Err()

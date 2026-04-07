@@ -20,7 +20,7 @@ Conversation-edge rules:
 - Operator session listing supports `customer_id`, `agent_id`, `mode`, `label`, `operator_id`, `active=true`, and `limit` filters.
 - Operator event listing supports `min_offset`, `limit`, `source`, `trace_id`, and `kind` filters.
 - Operator feedback uses `POST /v1/operator/sessions/{id}/feedback` and can compile into customer preferences, knowledge proposals, or draft policy/SOUL proposals.
-- Operator customer preferences are available under `/v1/operator/customers/{customer_id}/preferences?agent_id=...`.
+- Operator customer preferences are available under `/v1/operator/customers/{customer_id}/preferences?agent_id=...`; lifecycle actions use `/confirm`, `/reject`, and `/expire` on a preference key.
 - Trace listing supports `trace_id`, `session_id`, `execution_id`, `kind`, and `limit` filters; `GET /v1/traces/{id}` returns the detailed timeline.
 - If `OPERATOR_API_KEY` is configured, `/v1/operator/...` requires `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
 
@@ -38,6 +38,9 @@ Knowledge workspace routes:
 - `GET /v1/operator/knowledge/proposals/{id}/preview`
 - `POST /v1/operator/knowledge/proposals/{id}/state`
 - `POST /v1/operator/knowledge/proposals/{id}/apply`
+- `POST /v1/operator/knowledge/lint/run`
+- `GET /v1/operator/knowledge/lint`
+- `POST /v1/operator/knowledge/lint/{id}/resolve`
 - `GET /v1/operator/media/assets`
 - `GET /v1/operator/media/assets/{id}`
 - `POST /v1/operator/media/assets/{id}/reprocess`
@@ -56,8 +59,10 @@ Knowledge rules:
 - Non-text ACP content parts are treated as media assets; image/audio parts now produce derived signals like OCR text, summaries, labels, transcripts, and language hints.
 - Retrieval prefers customer-scoped `customer_agent` knowledge when available, then falls back to shared agent or bundle knowledge.
 - Shared conversation learning creates draft knowledge proposals; low-risk customer facts update first-class customer preferences directly.
+- Inferred or conflicting preference signals are reviewable and are not injected into runtime responses until confirmed active.
 - Policy and SOUL changes inferred from operator feedback always become draft rollout proposals and never auto-apply.
 - Proposal review supports explicit `draft`, `approved`, `rejected`, and `applied` states, plus a preview surface before apply.
+- Knowledge lint findings are surfaced during preview/apply; unresolved high-risk citation, staleness, or contradiction findings block apply.
 - OpenRouter multimodal enrichers are used when configured:
   - images use `image_url`
   - audio uses `input_audio`

@@ -2,6 +2,13 @@ package customer
 
 import "time"
 
+const (
+	PreferenceStatusActive   = "active"
+	PreferenceStatusPending  = "pending"
+	PreferenceStatusRejected = "rejected"
+	PreferenceStatusExpired  = "expired"
+)
+
 type Preference struct {
 	ID              string         `json:"id"`
 	AgentID         string         `json:"agent_id"`
@@ -35,7 +42,12 @@ type PreferenceEvent struct {
 }
 
 type PreferenceQuery struct {
-	AgentID    string
-	CustomerID string
-	Status     string
+	AgentID        string
+	CustomerID     string
+	Status         string
+	Key            string
+	Source         string
+	MinConfidence  float64
+	IncludeExpired bool
+	Limit          int
 }

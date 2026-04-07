@@ -97,6 +97,8 @@ type Repository interface {
 	SaveKnowledgeUpdateProposal(ctx context.Context, proposal knowledge.UpdateProposal) error
 	GetKnowledgeUpdateProposal(ctx context.Context, proposalID string) (knowledge.UpdateProposal, error)
 	ListKnowledgeUpdateProposals(ctx context.Context, scopeKind string, scopeID string) ([]knowledge.UpdateProposal, error)
+	SaveKnowledgeLintFinding(ctx context.Context, finding knowledge.LintFinding) error
+	ListKnowledgeLintFindings(ctx context.Context, query knowledge.LintQuery) ([]knowledge.LintFinding, error)
 	SaveMediaAsset(ctx context.Context, asset media.Asset) error
 	ListMediaAssets(ctx context.Context, sessionID string) ([]media.Asset, error)
 	SaveDerivedSignal(ctx context.Context, signal media.DerivedSignal) error

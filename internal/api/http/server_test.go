@@ -350,6 +350,111 @@ func TestOperatorFeedbackDoesNotRoutePreferenceOnlyMediaSessionToKnowledge(t *te
 	}
 }
 
+func TestCustomerPreferenceLifecycleConfirmRejectExpire(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	pref := customer.Preference{
+		ID: "pref_1", AgentID: "agent_1", CustomerID: "cust_1", Key: "inferred_preference", Value: "SMS updates",
+		Source: "operator_feedback", Confidence: 0.65, Status: customer.PreferenceStatusPending, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := repo.SaveCustomerPreference(context.Background(), pref, customer.PreferenceEvent{
+		ID: "pevt_1", PreferenceID: "pref_1", AgentID: "agent_1", CustomerID: "cust_1", Key: "inferred_preference", Value: "SMS updates", Action: "pending", Source: "operator_feedback", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/customers/cust_1/preferences?agent_id=agent_1&status=pending&key=inferred_preference", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list pending status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var prefs []customer.Preference
+	if err := json.Unmarshal(rec.Body.Bytes(), &prefs); err != nil {
+		t.Fatal(err)
+	}
+	if len(prefs) != 1 || prefs[0].Status != customer.PreferenceStatusPending {
+		t.Fatalf("pending prefs = %#v", prefs)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/customers/cust_1/preferences/inferred_preference/confirm", strings.NewReader(`{"agent_id":"agent_1","operator_id":"op_1"}`))
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("confirm status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if updated, err := repo.GetCustomerPreference(context.Background(), "agent_1", "cust_1", "inferred_preference"); err != nil || updated.Status != customer.PreferenceStatusActive || updated.LastConfirmedAt == nil {
+		t.Fatalf("updated pref = %#v err=%v, want active confirmed", updated, err)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/customers/cust_1/preferences/inferred_preference/expire", strings.NewReader(`{"agent_id":"agent_1","operator_id":"op_1"}`))
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expire status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if expired, err := repo.GetCustomerPreference(context.Background(), "agent_1", "cust_1", "inferred_preference"); err != nil || expired.Status != customer.PreferenceStatusExpired || expired.ExpiresAt == nil {
+		t.Fatalf("expired pref = %#v err=%v, want expired", expired, err)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/customers/cust_1/preferences/inferred_preference/confirm", strings.NewReader(`{"agent_id":"agent_1","operator_id":"op_1"}`))
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reconfirm status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if reactivated, err := repo.GetCustomerPreference(context.Background(), "agent_1", "cust_1", "inferred_preference"); err != nil || reactivated.Status != customer.PreferenceStatusActive || reactivated.ExpiresAt != nil {
+		t.Fatalf("reactivated pref = %#v err=%v, want active with cleared expiration", reactivated, err)
+	}
+}
+
+func TestPreferenceConflictCreatesPendingEventWithoutOverwrite(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_pref_conflict", Channel: "acp", AgentID: "agent_1", CustomerID: "cust_1", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveCustomerPreference(context.Background(), customer.Preference{
+		ID: "pref_name", AgentID: "agent_1", CustomerID: "cust_1", Key: "name", Value: "Ada", Source: "operator", Confidence: 1, Status: customer.PreferenceStatusActive, CreatedAt: now, UpdatedAt: now,
+	}, customer.PreferenceEvent{ID: "pevt_name", PreferenceID: "pref_name", AgentID: "agent_1", CustomerID: "cust_1", Key: "name", Value: "Ada", Action: "operator_upsert", Source: "operator", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_pref_conflict/feedback", strings.NewReader(`{"id":"fb_conflict","text":"My name is Bob."}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("feedback status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	pref, err := repo.GetCustomerPreference(context.Background(), "agent_1", "cust_1", "name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pref.Value != "Ada" || pref.Status != customer.PreferenceStatusActive {
+		t.Fatalf("preference = %#v, want original active value preserved", pref)
+	}
+	events, err := repo.ListCustomerPreferenceEvents(context.Background(), customer.PreferenceQuery{AgentID: "agent_1", CustomerID: "cust_1", Key: "name"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundConflict bool
+	for _, event := range events {
+		if event.Action == "conflict_pending" && event.Value == "Bob" {
+			foundConflict = true
+		}
+	}
+	if !foundConflict {
+		t.Fatalf("events = %#v, want conflict_pending event", events)
+	}
+}
+
 func TestOperatorFeedbackCreatesSoulProposal(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
@@ -2001,6 +2106,7 @@ func TestOperatorKnowledgeProposalAndMediaEndpoints(t *testing.T) {
 		ScopeID:   "agent_1",
 		Kind:      "conversation_insight",
 		State:     "draft",
+		Evidence:  []knowledge.Citation{{URI: "session:sess_1", Title: "operator evidence"}},
 		Payload: map[string]any{
 			"page": map[string]any{"title": "Returns", "body": "Damaged orders can be refunded.", "base_checksum": "base123"},
 		},
@@ -2374,6 +2480,159 @@ func TestRejectedKnowledgeProposalCannotBeApplied(t *testing.T) {
 	srv.httpServer.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("apply rejected proposal status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestKnowledgeProposalLintBlocksMissingCitationApply(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.SaveKnowledgeUpdateProposal(context.Background(), knowledge.UpdateProposal{
+		ID:        "prop_missing_citation",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		Kind:      "operator_feedback",
+		State:     "approved",
+		Payload: map[string]any{
+			"page": map[string]any{"title": "Warranty", "body": "Warranty claims require a receipt."},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/knowledge/proposals/prop_missing_citation/preview", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var preview struct {
+		ApplyBlocked bool                    `json:"apply_blocked"`
+		LintFindings []knowledge.LintFinding `json:"lint_findings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if !preview.ApplyBlocked || len(preview.LintFindings) == 0 || preview.LintFindings[0].Kind != "missing_citation" {
+		t.Fatalf("preview = %#v, want missing citation blocker", preview)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/proposals/prop_missing_citation/apply", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("apply status = %d, want %d body=%s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+}
+
+func TestKnowledgeProposalApplyPersistsPayloadCitations(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.SaveKnowledgeUpdateProposal(context.Background(), knowledge.UpdateProposal{
+		ID:        "prop_payload_citation",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		Kind:      "operator_feedback",
+		State:     "approved",
+		Payload: map[string]any{
+			"page": map[string]any{
+				"title": "Warranty",
+				"body":  "Warranty claims require a receipt.",
+				"citations": []any{
+					map[string]any{"uri": "doc://warranty", "title": "Warranty policy", "anchor": "receipt"},
+				},
+			},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/proposals/prop_payload_citation/apply", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	pages, err := repo.ListKnowledgePages(context.Background(), knowledge.PageQuery{ScopeKind: "agent", ScopeID: "agent_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pages) != 1 || len(pages[0].Citations) != 1 || pages[0].Citations[0].URI != "doc://warranty" {
+		t.Fatalf("pages = %#v, want payload citation persisted", pages)
+	}
+	chunks, err := repo.ListKnowledgeChunks(context.Background(), knowledge.ChunkQuery{ScopeKind: "agent", ScopeID: "agent_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 1 || len(chunks[0].Citations) != 1 || chunks[0].Citations[0].URI != "doc://warranty" {
+		t.Fatalf("chunks = %#v, want payload citation persisted", chunks)
+	}
+}
+
+func TestKnowledgeLintRunListResolve(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.SaveKnowledgePage(context.Background(), knowledge.Page{
+		ID:        "page_uncited",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		Title:     "Uncited",
+		Body:      "No citations yet.",
+		Checksum:  "sum",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, []knowledge.Chunk{{ID: "chunk_uncited", PageID: "page_uncited", ScopeKind: "agent", ScopeID: "agent_1", Text: "No citations yet.", CreatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/lint/run", strings.NewReader(`{"scope_kind":"agent","scope_id":"agent_1"}`))
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("lint run status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var findings []knowledge.LintFinding
+	if err := json.Unmarshal(rec.Body.Bytes(), &findings); err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) == 0 {
+		t.Fatalf("findings = %#v, want at least one missing citation finding", findings)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/knowledge/lint?scope_kind=agent&scope_id=agent_1&kind=missing_citation&status=open", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("lint list status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &findings); err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("findings = %#v, want one filtered finding", findings)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/lint/"+findings[0].ID+"/resolve", strings.NewReader(`{"operator_id":"op_1","resolution":"accepted risk"}`))
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resolve status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resolved knowledge.LintFinding
+	if err := json.Unmarshal(rec.Body.Bytes(), &resolved); err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Status != "resolved" {
+		t.Fatalf("resolved = %#v, want resolved status", resolved)
 	}
 }
 

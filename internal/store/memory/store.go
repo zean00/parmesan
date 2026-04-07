@@ -54,6 +54,7 @@ type Store struct {
 	knowledgeChunks          []knowledge.Chunk
 	knowledgeSnapshots       []knowledge.Snapshot
 	knowledgeUpdateProposals []knowledge.UpdateProposal
+	knowledgeLintFindings    []knowledge.LintFinding
 	mediaAssets              []media.Asset
 	derivedSignals           []media.DerivedSignal
 }
@@ -151,6 +152,7 @@ func (s *Store) GetCustomerPreference(_ context.Context, agentID string, custome
 func (s *Store) ListCustomerPreferences(_ context.Context, query customer.PreferenceQuery) ([]customer.Preference, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	now := time.Now().UTC()
 	var out []customer.Preference
 	for _, item := range s.customerPreferences {
 		if query.AgentID != "" && item.AgentID != query.AgentID {
@@ -162,11 +164,26 @@ func (s *Store) ListCustomerPreferences(_ context.Context, query customer.Prefer
 		if query.Status != "" && item.Status != query.Status {
 			continue
 		}
+		if query.Key != "" && item.Key != query.Key {
+			continue
+		}
+		if query.Source != "" && item.Source != query.Source {
+			continue
+		}
+		if query.MinConfidence > 0 && item.Confidence < query.MinConfidence {
+			continue
+		}
+		if !query.IncludeExpired && item.ExpiresAt != nil && !item.ExpiresAt.After(now) {
+			continue
+		}
 		out = append(out, item)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].UpdatedAt.After(out[j].UpdatedAt)
 	})
+	if query.Limit > 0 && len(out) > query.Limit {
+		out = out[:query.Limit]
+	}
 	return out, nil
 }
 
@@ -188,11 +205,20 @@ func (s *Store) ListCustomerPreferenceEvents(_ context.Context, query customer.P
 		if query.CustomerID != "" && item.CustomerID != query.CustomerID {
 			continue
 		}
+		if query.Key != "" && item.Key != query.Key {
+			continue
+		}
+		if query.Source != "" && item.Source != query.Source {
+			continue
+		}
 		out = append(out, item)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].CreatedAt.After(out[j].CreatedAt)
 	})
+	if query.Limit > 0 && len(out) > query.Limit {
+		out = out[:query.Limit]
+	}
 	return out, nil
 }
 
@@ -1074,6 +1100,56 @@ func (s *Store) GetKnowledgeUpdateProposal(_ context.Context, proposalID string)
 		}
 	}
 	return knowledge.UpdateProposal{}, errors.New("knowledge update proposal not found")
+}
+
+func (s *Store) SaveKnowledgeLintFinding(_ context.Context, finding knowledge.LintFinding) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.knowledgeLintFindings {
+		if item.ID == finding.ID {
+			s.knowledgeLintFindings[i] = finding
+			return nil
+		}
+	}
+	s.knowledgeLintFindings = append(s.knowledgeLintFindings, finding)
+	return nil
+}
+
+func (s *Store) ListKnowledgeLintFindings(_ context.Context, query knowledge.LintQuery) ([]knowledge.LintFinding, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []knowledge.LintFinding
+	for _, item := range s.knowledgeLintFindings {
+		if query.ScopeKind != "" && item.ScopeKind != query.ScopeKind {
+			continue
+		}
+		if query.ScopeID != "" && item.ScopeID != query.ScopeID {
+			continue
+		}
+		if query.ProposalID != "" && item.ProposalID != query.ProposalID {
+			continue
+		}
+		if query.PageID != "" && item.PageID != query.PageID {
+			continue
+		}
+		if query.Kind != "" && item.Kind != query.Kind {
+			continue
+		}
+		if query.Severity != "" && item.Severity != query.Severity {
+			continue
+		}
+		if query.Status != "" && item.Status != query.Status {
+			continue
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	if query.Limit > 0 && len(out) > query.Limit {
+		out = out[:query.Limit]
+	}
+	return out, nil
 }
 
 func (s *Store) SaveMediaAsset(_ context.Context, asset media.Asset) error {

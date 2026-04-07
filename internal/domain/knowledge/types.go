@@ -77,6 +77,23 @@ type UpdateProposal struct {
 	UpdatedAt time.Time      `json:"updated_at"`
 }
 
+type LintFinding struct {
+	ID         string         `json:"id"`
+	ScopeKind  string         `json:"scope_kind"`
+	ScopeID    string         `json:"scope_id"`
+	ProposalID string         `json:"proposal_id,omitempty"`
+	PageID     string         `json:"page_id,omitempty"`
+	SourceID   string         `json:"source_id,omitempty"`
+	Kind       string         `json:"kind"`
+	Severity   string         `json:"severity"`
+	Status     string         `json:"status"`
+	Message    string         `json:"message"`
+	Evidence   []Citation     `json:"evidence,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+}
+
 type SnapshotQuery struct {
 	ScopeKind string
 	ScopeID   string
@@ -102,5 +119,16 @@ type ChunkSearchQuery struct {
 	ScopeID    string
 	SnapshotID string
 	Vector     []float32
+	Limit      int
+}
+
+type LintQuery struct {
+	ScopeKind  string
+	ScopeID    string
+	ProposalID string
+	PageID     string
+	Kind       string
+	Severity   string
+	Status     string
 	Limit      int
 }

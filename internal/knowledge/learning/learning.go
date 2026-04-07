@@ -51,11 +51,18 @@ func (l *Learner) CompileFeedback(ctx context.Context, record feedback.Record, s
 		return out, nil
 	}
 	for _, finding := range preferenceFindings(record.Text) {
-		pref, event, err := l.preferenceRecord(sess, record.ExecutionID, record.TraceID, "operator_feedback", finding)
+		pref, event, err := l.preferenceRecord(ctx, sess, record.ExecutionID, record.TraceID, "operator_feedback", finding)
 		if err != nil {
 			return out, err
 		}
 		if pref.ID == "" {
+			if event.ID != "" {
+				if err := l.repo.AppendCustomerPreferenceEvent(ctx, event); err != nil {
+					return out, err
+				}
+				out.PreferenceEventIDs = append(out.PreferenceEventIDs, event.ID)
+				continue
+			}
 			out.Unclassified = append(out.Unclassified, "preference feedback requires session agent_id and customer_id")
 			continue
 		}
@@ -100,9 +107,10 @@ func (l *Learner) CompileFeedback(ctx context.Context, record feedback.Record, s
 }
 
 var (
-	rePrefer = regexp.MustCompile(`(?i)\bi prefer ([^.!\n]+)`)
-	reCallMe = regexp.MustCompile(`(?i)\bcall me ([^.!\n]+)`)
-	reName   = regexp.MustCompile(`(?i)\bmy name is ([^.!\n]+)`)
+	rePrefer         = regexp.MustCompile(`(?i)\bi prefer ([^.!\n]+)`)
+	reCallMe         = regexp.MustCompile(`(?i)\bcall me ([^.!\n]+)`)
+	reName           = regexp.MustCompile(`(?i)\bmy name is ([^.!\n]+)`)
+	reInferredPrefer = regexp.MustCompile(`(?i)\b(?:seems like|it looks like|maybe|probably)\s+(?:the customer\s+)?(?:prefers|likes|wants)\s+([^.!\n]+)`)
 )
 
 func (l *Learner) learnCustomerFacts(ctx context.Context, sess session.Session, exec execution.TurnExecution, events []session.Event) error {
@@ -118,7 +126,7 @@ func (l *Learner) learnCustomerFacts(ctx context.Context, sess session.Session, 
 				continue
 			}
 			for _, finding := range preferenceFindings(part.Text) {
-				pref, prefEvent, err := l.preferenceRecord(sess, exec.ID, exec.TraceID, "conversation_explicit", finding)
+				pref, prefEvent, err := l.preferenceRecord(ctx, sess, exec.ID, exec.TraceID, "conversation_explicit", finding)
 				if err != nil {
 					return err
 				}
@@ -126,6 +134,14 @@ func (l *Learner) learnCustomerFacts(ctx context.Context, sess session.Session, 
 					prefEvent.Metadata = map[string]any{}
 				}
 				prefEvent.Metadata["event_id"] = event.ID
+				if pref.ID == "" {
+					if prefEvent.ID != "" {
+						if err := l.repo.AppendCustomerPreferenceEvent(ctx, prefEvent); err != nil {
+							return err
+						}
+					}
+					continue
+				}
 				if err := l.repo.SaveCustomerPreference(ctx, pref, prefEvent); err != nil {
 					return err
 				}
@@ -135,7 +151,7 @@ func (l *Learner) learnCustomerFacts(ctx context.Context, sess session.Session, 
 	return nil
 }
 
-func (l *Learner) preferenceRecord(sess session.Session, executionID, traceID, source string, finding preferenceFinding) (customer.Preference, customer.PreferenceEvent, error) {
+func (l *Learner) preferenceRecord(ctx context.Context, sess session.Session, executionID, traceID, source string, finding preferenceFinding) (customer.Preference, customer.PreferenceEvent, error) {
 	if strings.TrimSpace(sess.AgentID) == "" || strings.TrimSpace(sess.CustomerID) == "" {
 		return customer.Preference{}, customer.PreferenceEvent{}, nil
 	}
@@ -148,6 +164,36 @@ func (l *Learner) preferenceRecord(sess session.Session, executionID, traceID, s
 		evidence = append(evidence, "execution:"+executionID)
 	}
 	prefID := stableID("cpref", sess.AgentID, sess.CustomerID, finding.Key)
+	status := customer.PreferenceStatusActive
+	action := "upsert"
+	confidence := 1.0
+	if finding.Inferred {
+		status = customer.PreferenceStatusPending
+		action = "pending"
+		confidence = 0.65
+	}
+	var confirmedAt *time.Time
+	if status == customer.PreferenceStatusActive {
+		confirmedAt = &now
+	}
+	if existing, err := l.repo.GetCustomerPreference(ctx, strings.TrimSpace(sess.AgentID), strings.TrimSpace(sess.CustomerID), finding.Key); err == nil {
+		if existing.Status == customer.PreferenceStatusActive && existing.Value != finding.Value {
+			return customer.Preference{}, customer.PreferenceEvent{
+				ID:           stableID("cpevt", prefID, source, "conflict", finding.Value, now.Format(time.RFC3339Nano)),
+				PreferenceID: prefID,
+				AgentID:      strings.TrimSpace(sess.AgentID),
+				CustomerID:   strings.TrimSpace(sess.CustomerID),
+				Key:          finding.Key,
+				Value:        finding.Value,
+				Action:       "conflict_pending",
+				Source:       source,
+				Confidence:   confidence,
+				EvidenceRefs: evidence,
+				Metadata:     map[string]any{"compiler": "deterministic", "current_value": existing.Value, "proposed_value": finding.Value},
+				CreatedAt:    now,
+			}, nil
+		}
+	}
 	return customer.Preference{
 			ID:              prefID,
 			AgentID:         strings.TrimSpace(sess.AgentID),
@@ -155,11 +201,11 @@ func (l *Learner) preferenceRecord(sess session.Session, executionID, traceID, s
 			Key:             finding.Key,
 			Value:           finding.Value,
 			Source:          source,
-			Confidence:      1,
-			Status:          "active",
+			Confidence:      confidence,
+			Status:          status,
 			EvidenceRefs:    evidence,
 			Metadata:        map[string]any{"compiler": "deterministic"},
-			LastConfirmedAt: &now,
+			LastConfirmedAt: confirmedAt,
 			CreatedAt:       now,
 			UpdatedAt:       now,
 		}, customer.PreferenceEvent{
@@ -169,9 +215,9 @@ func (l *Learner) preferenceRecord(sess session.Session, executionID, traceID, s
 			CustomerID:   strings.TrimSpace(sess.CustomerID),
 			Key:          finding.Key,
 			Value:        finding.Value,
-			Action:       "upsert",
+			Action:       action,
 			Source:       source,
-			Confidence:   1,
+			Confidence:   confidence,
 			EvidenceRefs: evidence,
 			Metadata:     map[string]any{"compiler": "deterministic"},
 			CreatedAt:    now,
@@ -316,20 +362,23 @@ func (l *Learner) baseBundle(ctx context.Context, sess session.Session) (policy.
 }
 
 type preferenceFinding struct {
-	Key   string
-	Value string
+	Key      string
+	Value    string
+	Inferred bool
 }
 
 func preferenceFindings(text string) []preferenceFinding {
 	text = strings.TrimSpace(text)
 	var out []preferenceFinding
 	for _, item := range []struct {
-		re  *regexp.Regexp
-		key func(string) string
+		re       *regexp.Regexp
+		key      func(string) string
+		inferred bool
 	}{
-		{rePrefer, func(value string) string { return "preference." + stableChecksum(strings.ToLower(value))[:12] }},
-		{reCallMe, func(string) string { return "preferred_name" }},
-		{reName, func(string) string { return "name" }},
+		{rePrefer, func(value string) string { return "preference." + stableChecksum(strings.ToLower(value))[:12] }, false},
+		{reCallMe, func(string) string { return "preferred_name" }, false},
+		{reName, func(string) string { return "name" }, false},
+		{reInferredPrefer, func(string) string { return "inferred_preference" }, true},
 	} {
 		match := item.re.FindStringSubmatch(text)
 		if len(match) != 2 {
@@ -339,7 +388,7 @@ func preferenceFindings(text string) []preferenceFinding {
 		if value == "" {
 			continue
 		}
-		out = append(out, preferenceFinding{Key: item.key(value), Value: value})
+		out = append(out, preferenceFinding{Key: item.key(value), Value: value, Inferred: item.inferred})
 	}
 	return out
 }

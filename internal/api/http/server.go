@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -187,6 +188,9 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/operator/feedback/{id}", s.operatorGetFeedback)
 	mux.HandleFunc("GET /v1/operator/customers/{customer_id}/preferences", s.operatorListCustomerPreferences)
 	mux.HandleFunc("PUT /v1/operator/customers/{customer_id}/preferences/{key}", s.operatorUpsertCustomerPreference)
+	mux.HandleFunc("POST /v1/operator/customers/{customer_id}/preferences/{key}/confirm", s.operatorConfirmCustomerPreference)
+	mux.HandleFunc("POST /v1/operator/customers/{customer_id}/preferences/{key}/reject", s.operatorRejectCustomerPreference)
+	mux.HandleFunc("POST /v1/operator/customers/{customer_id}/preferences/{key}/expire", s.operatorExpireCustomerPreference)
 	mux.HandleFunc("GET /v1/operator/customers/{customer_id}/preference-events", s.operatorListCustomerPreferenceEvents)
 	mux.HandleFunc("POST /v1/operator/agents", s.operatorCreateAgentProfile)
 	mux.HandleFunc("GET /v1/operator/agents", s.operatorListAgentProfiles)
@@ -201,6 +205,9 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/operator/knowledge/proposals/{id}/preview", s.operatorPreviewKnowledgeProposal)
 	mux.HandleFunc("POST /v1/operator/knowledge/proposals/{id}/state", s.operatorTransitionKnowledgeProposal)
 	mux.HandleFunc("POST /v1/operator/knowledge/proposals/{id}/apply", s.operatorApplyKnowledgeProposal)
+	mux.HandleFunc("POST /v1/operator/knowledge/lint/run", s.operatorRunKnowledgeLint)
+	mux.HandleFunc("GET /v1/operator/knowledge/lint", s.operatorListKnowledgeLint)
+	mux.HandleFunc("POST /v1/operator/knowledge/lint/{id}/resolve", s.operatorResolveKnowledgeLint)
 	mux.HandleFunc("GET /v1/operator/media/assets", s.operatorListMediaAssets)
 	mux.HandleFunc("GET /v1/operator/media/assets/{id}", s.operatorGetMediaAsset)
 	mux.HandleFunc("POST /v1/operator/media/assets/{id}/reprocess", s.operatorReprocessMediaAsset)
@@ -1383,10 +1390,18 @@ func (s *Server) operatorListCustomerPreferences(w http.ResponseWriter, r *http.
 		http.Error(w, "agent_id is required", http.StatusBadRequest)
 		return
 	}
+	limit, ok := positiveIntQuery(w, r, "limit")
+	if !ok {
+		return
+	}
 	items, err := s.store.ListCustomerPreferences(r.Context(), customer.PreferenceQuery{
-		AgentID:    agentID,
-		CustomerID: r.PathValue("customer_id"),
-		Status:     strings.TrimSpace(r.URL.Query().Get("status")),
+		AgentID:        agentID,
+		CustomerID:     r.PathValue("customer_id"),
+		Status:         strings.TrimSpace(r.URL.Query().Get("status")),
+		Key:            strings.TrimSpace(r.URL.Query().Get("key")),
+		Source:         strings.TrimSpace(r.URL.Query().Get("source")),
+		IncludeExpired: strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_expired")), "true"),
+		Limit:          limit,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1417,7 +1432,7 @@ func (s *Server) operatorUpsertCustomerPreference(w http.ResponseWriter, r *http
 	}
 	now := time.Now().UTC()
 	if req.Status == "" {
-		req.Status = "active"
+		req.Status = customer.PreferenceStatusActive
 	}
 	if req.Confidence == 0 {
 		req.Confidence = 1
@@ -1459,15 +1474,94 @@ func (s *Server) operatorUpsertCustomerPreference(w http.ResponseWriter, r *http
 	writeJSON(w, http.StatusOK, pref)
 }
 
+func (s *Server) operatorConfirmCustomerPreference(w http.ResponseWriter, r *http.Request) {
+	s.operatorTransitionCustomerPreference(w, r, customer.PreferenceStatusActive, "confirm")
+}
+
+func (s *Server) operatorRejectCustomerPreference(w http.ResponseWriter, r *http.Request) {
+	s.operatorTransitionCustomerPreference(w, r, customer.PreferenceStatusRejected, "reject")
+}
+
+func (s *Server) operatorExpireCustomerPreference(w http.ResponseWriter, r *http.Request) {
+	s.operatorTransitionCustomerPreference(w, r, customer.PreferenceStatusExpired, "expire")
+}
+
+func (s *Server) operatorTransitionCustomerPreference(w http.ResponseWriter, r *http.Request, status string, action string) {
+	customerID := r.PathValue("customer_id")
+	key := r.PathValue("key")
+	var req struct {
+		AgentID    string         `json:"agent_id"`
+		Value      string         `json:"value"`
+		OperatorID string         `json:"operator_id"`
+		Metadata   map[string]any `json:"metadata"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.AgentID = strings.TrimSpace(req.AgentID)
+	if req.AgentID == "" || strings.TrimSpace(customerID) == "" || strings.TrimSpace(key) == "" {
+		http.Error(w, "agent_id, customer_id, and key are required", http.StatusBadRequest)
+		return
+	}
+	pref, err := s.store.GetCustomerPreference(r.Context(), req.AgentID, customerID, key)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	now := time.Now().UTC()
+	if strings.TrimSpace(req.Value) != "" {
+		pref.Value = strings.TrimSpace(req.Value)
+	}
+	pref.Status = status
+	pref.UpdatedAt = now
+	pref.Metadata = mergeMaps(pref.Metadata, req.Metadata)
+	if status == customer.PreferenceStatusActive {
+		pref.LastConfirmedAt = &now
+		pref.ExpiresAt = nil
+		if pref.Confidence < 1 {
+			pref.Confidence = 1
+		}
+	} else if status == customer.PreferenceStatusExpired {
+		pref.ExpiresAt = &now
+	}
+	event := customer.PreferenceEvent{
+		ID:           fmt.Sprintf("cpevt_%d", now.UnixNano()),
+		PreferenceID: pref.ID,
+		AgentID:      pref.AgentID,
+		CustomerID:   pref.CustomerID,
+		Key:          pref.Key,
+		Value:        pref.Value,
+		Action:       action,
+		Source:       "operator",
+		Confidence:   pref.Confidence,
+		EvidenceRefs: append([]string(nil), pref.EvidenceRefs...),
+		Metadata:     map[string]any{"operator_id": req.OperatorID},
+		CreatedAt:    now,
+	}
+	if err := s.store.SaveCustomerPreference(r.Context(), pref, event); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, pref)
+}
+
 func (s *Server) operatorListCustomerPreferenceEvents(w http.ResponseWriter, r *http.Request) {
 	agentID := strings.TrimSpace(r.URL.Query().Get("agent_id"))
 	if agentID == "" {
 		http.Error(w, "agent_id is required", http.StatusBadRequest)
 		return
 	}
+	limit, ok := positiveIntQuery(w, r, "limit")
+	if !ok {
+		return
+	}
 	items, err := s.store.ListCustomerPreferenceEvents(r.Context(), customer.PreferenceQuery{
 		AgentID:    agentID,
 		CustomerID: r.PathValue("customer_id"),
+		Key:        strings.TrimSpace(r.URL.Query().Get("key")),
+		Source:     strings.TrimSpace(r.URL.Query().Get("source")),
+		Limit:      limit,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1803,8 +1897,18 @@ func (s *Server) operatorPreviewKnowledgeProposal(w http.ResponseWriter, r *http
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	findings, err := s.lintKnowledgeProposal(r.Context(), item, true)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	blocked, warnings := lintApplyState(findings)
 	payload := map[string]any{
-		"proposal": item,
+		"proposal":        item,
+		"lint_findings":   findings,
+		"apply_blocked":   blocked,
+		"apply_warnings":  warnings,
+		"blocked_reasons": lintMessages(findings, true),
 	}
 	if _, ok := item.Payload["page"].(map[string]any); ok {
 		currentPage, proposedPage := s.proposalPages(r.Context(), item)
@@ -1863,6 +1967,99 @@ func (s *Server) operatorTransitionKnowledgeProposal(w http.ResponseWriter, r *h
 	writeJSON(w, http.StatusOK, item)
 }
 
+func (s *Server) operatorRunKnowledgeLint(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ProposalID string `json:"proposal_id"`
+		ScopeKind  string `json:"scope_kind"`
+		ScopeID    string `json:"scope_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.ProposalID) != "" {
+		item, err := s.store.GetKnowledgeUpdateProposal(r.Context(), strings.TrimSpace(req.ProposalID))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		findings, err := s.lintKnowledgeProposal(r.Context(), item, true)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, findings)
+		return
+	}
+	findings, err := s.lintKnowledgeScope(r.Context(), strings.TrimSpace(req.ScopeKind), strings.TrimSpace(req.ScopeID), true)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, findings)
+}
+
+func (s *Server) operatorListKnowledgeLint(w http.ResponseWriter, r *http.Request) {
+	limit, ok := positiveIntQuery(w, r, "limit")
+	if !ok {
+		return
+	}
+	query := r.URL.Query()
+	findings, err := s.store.ListKnowledgeLintFindings(r.Context(), knowledge.LintQuery{
+		ScopeKind:  strings.TrimSpace(query.Get("scope_kind")),
+		ScopeID:    strings.TrimSpace(query.Get("scope_id")),
+		ProposalID: strings.TrimSpace(query.Get("proposal_id")),
+		PageID:     strings.TrimSpace(query.Get("page_id")),
+		Kind:       strings.TrimSpace(query.Get("kind")),
+		Severity:   strings.TrimSpace(query.Get("severity")),
+		Status:     strings.TrimSpace(query.Get("status")),
+		Limit:      limit,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, findings)
+}
+
+func (s *Server) operatorResolveKnowledgeLint(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	var req struct {
+		Resolution string         `json:"resolution"`
+		OperatorID string         `json:"operator_id"`
+		Metadata   map[string]any `json:"metadata"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	items, err := s.store.ListKnowledgeLintFindings(r.Context(), knowledge.LintQuery{Limit: 10000})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, item := range items {
+		if item.ID != id {
+			continue
+		}
+		item.Status = "resolved"
+		item.UpdatedAt = time.Now().UTC()
+		item.Metadata = mergeMaps(item.Metadata, req.Metadata)
+		if item.Metadata == nil {
+			item.Metadata = map[string]any{}
+		}
+		item.Metadata["resolution"] = strings.TrimSpace(req.Resolution)
+		item.Metadata["operator_id"] = strings.TrimSpace(req.OperatorID)
+		if err := s.store.SaveKnowledgeLintFinding(r.Context(), item); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, item)
+		return
+	}
+	http.Error(w, "knowledge lint finding not found", http.StatusNotFound)
+}
+
 func (s *Server) operatorApplyKnowledgeProposal(w http.ResponseWriter, r *http.Request) {
 	item, err := s.store.GetKnowledgeUpdateProposal(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -1881,13 +2078,33 @@ func (s *Server) operatorApplyKnowledgeProposal(w http.ResponseWriter, r *http.R
 		http.Error(w, "proposal must be draft or approved before apply", http.StatusBadRequest)
 		return
 	}
-	now := time.Now().UTC()
 	if _, ok := item.Payload["page"].(map[string]any); ok {
 		currentPage, proposedPage := s.proposalPages(r.Context(), item)
 		if proposalConflict(currentPage, proposedPage) {
 			http.Error(w, "proposal is stale relative to current page checksum", http.StatusConflict)
 			return
 		}
+	}
+	findings, err := s.lintKnowledgeProposal(r.Context(), item, true)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if blocked, _ := lintApplyState(findings); blocked {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":         "knowledge proposal has blocking lint findings",
+			"lint_findings": findings,
+		})
+		return
+	}
+	now := time.Now().UTC()
+	if pagePayload, ok := item.Payload["page"].(map[string]any); ok {
+		currentPage, proposedPage := s.proposalPages(r.Context(), item)
+		if proposalConflict(currentPage, proposedPage) {
+			http.Error(w, "proposal is stale relative to current page checksum", http.StatusConflict)
+			return
+		}
+		pageCitations := mergeCitations(item.Evidence, citationsFromPayload(pagePayload))
 		page := knowledge.Page{
 			ID:        strings.TrimSpace(fmt.Sprint(proposedPage["id"])),
 			ScopeKind: item.ScopeKind,
@@ -1895,7 +2112,7 @@ func (s *Server) operatorApplyKnowledgeProposal(w http.ResponseWriter, r *http.R
 			Title:     strings.TrimSpace(fmt.Sprint(proposedPage["title"])),
 			Body:      strings.TrimSpace(fmt.Sprint(proposedPage["final_body"])),
 			PageType:  "proposal_applied",
-			Citations: append([]knowledge.Citation(nil), item.Evidence...),
+			Citations: append([]knowledge.Citation(nil), pageCitations...),
 			Metadata:  map[string]any{"proposal_id": item.ID},
 			CreatedAt: now,
 			UpdatedAt: now,
@@ -1964,6 +2181,225 @@ func (s *Server) operatorApplyKnowledgeProposal(w http.ResponseWriter, r *http.R
 		return
 	}
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) lintKnowledgeProposal(ctx context.Context, item knowledge.UpdateProposal, persist bool) ([]knowledge.LintFinding, error) {
+	now := time.Now().UTC()
+	var findings []knowledge.LintFinding
+	if pagePayload, ok := item.Payload["page"].(map[string]any); ok {
+		currentPage, proposedPage := s.proposalPages(ctx, item)
+		if proposalConflict(currentPage, proposedPage) {
+			findings = append(findings, knowledge.LintFinding{
+				ID:         stableServerID("klint", item.ID, "stale_base"),
+				ScopeKind:  item.ScopeKind,
+				ScopeID:    item.ScopeID,
+				ProposalID: item.ID,
+				PageID:     strings.TrimSpace(fmt.Sprint(proposedPage["id"])),
+				Kind:       "stale_base_checksum",
+				Severity:   "high",
+				Status:     "open",
+				Message:    "Proposal base checksum does not match the current page.",
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			})
+		}
+		if len(item.Evidence) == 0 && len(citationsFromPayload(pagePayload)) == 0 {
+			findings = append(findings, knowledge.LintFinding{
+				ID:         stableServerID("klint", item.ID, "missing_citation"),
+				ScopeKind:  item.ScopeKind,
+				ScopeID:    item.ScopeID,
+				ProposalID: item.ID,
+				PageID:     strings.TrimSpace(fmt.Sprint(proposedPage["id"])),
+				Kind:       "missing_citation",
+				Severity:   "high",
+				Status:     "open",
+				Message:    "Shared knowledge proposal has no evidence citations.",
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			})
+		}
+		title := strings.TrimSpace(fmt.Sprint(proposedPage["title"]))
+		if currentPage == nil && title != "" {
+			pages, err := s.store.ListKnowledgePages(ctx, knowledge.PageQuery{ScopeKind: item.ScopeKind, ScopeID: item.ScopeID, Limit: 1000})
+			if err != nil {
+				return nil, err
+			}
+			for _, page := range pages {
+				if strings.EqualFold(strings.TrimSpace(page.Title), title) && page.Checksum != knowledgeChecksum(strings.TrimSpace(fmt.Sprint(proposedPage["final_body"]))) {
+					findings = append(findings, knowledge.LintFinding{
+						ID:         stableServerID("klint", item.ID, "contradiction", page.ID),
+						ScopeKind:  item.ScopeKind,
+						ScopeID:    item.ScopeID,
+						ProposalID: item.ID,
+						PageID:     page.ID,
+						Kind:       "possible_contradiction",
+						Severity:   "high",
+						Status:     "open",
+						Message:    "Proposal may conflict with an existing same-title knowledge page.",
+						CreatedAt:  now,
+						UpdatedAt:  now,
+					})
+					break
+				}
+			}
+		}
+	}
+	findings = s.preserveLintStatuses(ctx, findings)
+	for _, finding := range findings {
+		if persist {
+			if err := s.store.SaveKnowledgeLintFinding(ctx, finding); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return findings, nil
+}
+
+func (s *Server) lintKnowledgeScope(ctx context.Context, scopeKind, scopeID string, persist bool) ([]knowledge.LintFinding, error) {
+	if scopeKind == "" || scopeID == "" {
+		return nil, nil
+	}
+	now := time.Now().UTC()
+	pages, err := s.store.ListKnowledgePages(ctx, knowledge.PageQuery{ScopeKind: scopeKind, ScopeID: scopeID, Limit: 10000})
+	if err != nil {
+		return nil, err
+	}
+	chunks, err := s.store.ListKnowledgeChunks(ctx, knowledge.ChunkQuery{ScopeKind: scopeKind, ScopeID: scopeID, Limit: 10000})
+	if err != nil {
+		return nil, err
+	}
+	sources, err := s.store.ListKnowledgeSources(ctx, scopeKind, scopeID)
+	if err != nil {
+		return nil, err
+	}
+	pageIDs := map[string]knowledge.Page{}
+	titleIndex := map[string]knowledge.Page{}
+	var findings []knowledge.LintFinding
+	for _, page := range pages {
+		pageIDs[page.ID] = page
+		if len(page.Citations) == 0 {
+			findings = append(findings, knowledge.LintFinding{
+				ID:        stableServerID("klint", scopeKind, scopeID, page.ID, "missing_citation"),
+				ScopeKind: scopeKind, ScopeID: scopeID, PageID: page.ID,
+				Kind: "missing_citation", Severity: "medium", Status: "open",
+				Message: "Knowledge page has no citations.", CreatedAt: now, UpdatedAt: now,
+			})
+		}
+		titleKey := strings.ToLower(strings.TrimSpace(page.Title))
+		if titleKey != "" {
+			if existing, ok := titleIndex[titleKey]; ok && existing.Checksum != page.Checksum {
+				findings = append(findings, knowledge.LintFinding{
+					ID:        stableServerID("klint", scopeKind, scopeID, page.ID, existing.ID, "duplicate_title"),
+					ScopeKind: scopeKind, ScopeID: scopeID, PageID: page.ID,
+					Kind: "possible_contradiction", Severity: "high", Status: "open",
+					Message: "Same-title knowledge pages have different checksums.", CreatedAt: now, UpdatedAt: now,
+				})
+			} else {
+				titleIndex[titleKey] = page
+			}
+		}
+	}
+	for _, chunk := range chunks {
+		if _, ok := pageIDs[chunk.PageID]; !ok {
+			findings = append(findings, knowledge.LintFinding{
+				ID:        stableServerID("klint", scopeKind, scopeID, chunk.ID, "orphan_chunk"),
+				ScopeKind: scopeKind, ScopeID: scopeID,
+				Kind: "orphan_chunk", Severity: "low", Status: "open",
+				Message: "Knowledge chunk points to a missing page.", Metadata: map[string]any{"chunk_id": chunk.ID}, CreatedAt: now, UpdatedAt: now,
+			})
+		}
+	}
+	for _, source := range sources {
+		currentChecksum := stringMetadata(source.Metadata, "current_checksum")
+		if source.Checksum != "" && currentChecksum != "" && source.Checksum != currentChecksum {
+			findings = append(findings, knowledge.LintFinding{
+				ID:        stableServerID("klint", scopeKind, scopeID, source.ID, "stale_source"),
+				ScopeKind: scopeKind, ScopeID: scopeID, SourceID: source.ID,
+				Kind: "stale_source_checksum", Severity: "medium", Status: "open",
+				Message: "Knowledge source checksum differs from the latest observed checksum.", CreatedAt: now, UpdatedAt: now,
+			})
+		}
+	}
+	findings = s.preserveLintStatuses(ctx, findings)
+	for _, finding := range findings {
+		if persist {
+			if err := s.store.SaveKnowledgeLintFinding(ctx, finding); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return findings, nil
+}
+
+func (s *Server) preserveLintStatuses(ctx context.Context, findings []knowledge.LintFinding) []knowledge.LintFinding {
+	if len(findings) == 0 {
+		return findings
+	}
+	existing, err := s.store.ListKnowledgeLintFindings(ctx, knowledge.LintQuery{Limit: 10000})
+	if err != nil {
+		return findings
+	}
+	byID := map[string]knowledge.LintFinding{}
+	for _, item := range existing {
+		byID[item.ID] = item
+	}
+	for i := range findings {
+		if prev, ok := byID[findings[i].ID]; ok && prev.Status == "resolved" {
+			findings[i].Status = prev.Status
+			findings[i].Metadata = mergeMaps(prev.Metadata, findings[i].Metadata)
+			findings[i].CreatedAt = prev.CreatedAt
+		}
+	}
+	return findings
+}
+
+func lintApplyState(findings []knowledge.LintFinding) (bool, []knowledge.LintFinding) {
+	var warnings []knowledge.LintFinding
+	for _, finding := range findings {
+		if finding.Status != "" && finding.Status != "open" {
+			continue
+		}
+		if finding.Severity == "high" {
+			return true, warnings
+		}
+		warnings = append(warnings, finding)
+	}
+	return false, warnings
+}
+
+func lintMessages(findings []knowledge.LintFinding, blockedOnly bool) []string {
+	var out []string
+	for _, finding := range findings {
+		if finding.Status != "" && finding.Status != "open" {
+			continue
+		}
+		if blockedOnly && finding.Severity != "high" {
+			continue
+		}
+		out = append(out, finding.Message)
+	}
+	return out
+}
+
+func citationsFromPayload(payload map[string]any) []knowledge.Citation {
+	raw, ok := payload["citations"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]knowledge.Citation, 0, len(raw))
+	for _, item := range raw {
+		data, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		out = append(out, knowledge.Citation{
+			SourceID: strings.TrimSpace(fmt.Sprint(data["source_id"])),
+			URI:      strings.TrimSpace(fmt.Sprint(data["uri"])),
+			Title:    strings.TrimSpace(fmt.Sprint(data["title"])),
+			Anchor:   strings.TrimSpace(fmt.Sprint(data["anchor"])),
+		})
+	}
+	return out
 }
 
 func (s *Server) proposalPages(ctx context.Context, item knowledge.UpdateProposal) (*knowledge.Page, map[string]any) {
@@ -3412,6 +3848,19 @@ func stringMetadata(metadata map[string]any, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func positiveIntQuery(w http.ResponseWriter, r *http.Request, key string) (int, bool) {
+	raw := strings.TrimSpace(r.URL.Query().Get(key))
+	if raw == "" {
+		return 0, true
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		http.Error(w, key+" must be a non-negative integer", http.StatusBadRequest)
+		return 0, false
+	}
+	return value, true
 }
 
 func stringSliceMetadata(metadata map[string]any, key string) []string {

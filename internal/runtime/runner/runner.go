@@ -607,9 +607,10 @@ func (r *Runner) customerPreferences(ctx context.Context, sess session.Session) 
 		return nil
 	}
 	items, err := r.repo.ListCustomerPreferences(ctx, customer.PreferenceQuery{
-		AgentID:    strings.TrimSpace(sess.AgentID),
-		CustomerID: strings.TrimSpace(sess.CustomerID),
-		Status:     "active",
+		AgentID:       strings.TrimSpace(sess.AgentID),
+		CustomerID:    strings.TrimSpace(sess.CustomerID),
+		Status:        customer.PreferenceStatusActive,
+		MinConfidence: 0.5,
 	})
 	if err != nil {
 		return nil
