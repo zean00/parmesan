@@ -21,6 +21,7 @@ import (
 	"github.com/sahal/parmesan/internal/model"
 	rolloutengine "github.com/sahal/parmesan/internal/rollout"
 	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
+	"github.com/sahal/parmesan/internal/sessionsvc"
 	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/toolruntime"
@@ -32,6 +33,7 @@ type Runner struct {
 	broker     *sse.Broker
 	router     *model.Router
 	invoker    *toolruntime.Invoker
+	sessions   *sessionsvc.Service
 	leaseOwner string
 	leaseTTL   time.Duration
 	interval   time.Duration
@@ -46,6 +48,7 @@ func New(repo store.Repository, writes *asyncwrite.Queue, broker *sse.Broker, ro
 		broker:     broker,
 		router:     router,
 		invoker:    toolruntime.New(),
+		sessions:   sessionsvc.New(repo, writes),
 		leaseOwner: leaseOwner,
 		leaseTTL:   10 * time.Second,
 		interval:   500 * time.Millisecond,
@@ -257,6 +260,13 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			},
 			CreatedAt: time.Now().UTC(),
 		})
+		_, _ = r.sessions.UpsertSessionMetadata(ctx, exec.SessionID, map[string]any{
+			"last_trace_id":           exec.TraceID,
+			"applied_guideline_ids":   idsFromGuidelines(view.MatchFinalizeStage.MatchedGuidelines),
+			"active_journey_id":       journeyID(view.ActiveJourney),
+			"active_journey_state_id": journeyStateID(view.ActiveJourneyState),
+			"composition_mode":        view.CompositionMode,
+		})
 		return nil
 	case "match_and_plan":
 		view, _, err := r.resolveView(ctx, *exec)
@@ -315,18 +325,10 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 				respText = verification.Replacement
 			}
 		}
-		assistantEvent := session.Event{
-			ID:          fmt.Sprintf("evt_%d", time.Now().UnixNano()),
-			SessionID:   exec.SessionID,
-			Source:      "ai_agent",
-			Kind:        "message",
-			CreatedAt:   time.Now().UTC(),
-			ExecutionID: exec.ID,
-			Content: []session.ContentPart{
-				{Type: "text", Text: respText},
-			},
-		}
-		if err := r.repo.AppendEvent(ctx, assistantEvent); err != nil {
+		assistantEvent, err := r.sessions.CreateMessageEvent(ctx, exec.SessionID, "ai_agent", respText, exec.ID, exec.TraceID, map[string]any{
+			"step": "compose_response",
+		}, false)
+		if err != nil {
 			return err
 		}
 		journeyDecision := view.JourneyProgressStage.Decision

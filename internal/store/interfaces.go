@@ -23,9 +23,13 @@ type Repository interface {
 	ListBundles(ctx context.Context) ([]policy.Bundle, error)
 	CreateSession(ctx context.Context, sess session.Session) error
 	GetSession(ctx context.Context, sessionID string) (session.Session, error)
+	UpdateSession(ctx context.Context, sess session.Session) error
 	ListSessions(ctx context.Context) ([]session.Session, error)
 	AppendEvent(ctx context.Context, event session.Event) error
+	ReadEvent(ctx context.Context, sessionID string, eventID string) (session.Event, error)
+	UpdateEvent(ctx context.Context, event session.Event) error
 	ListEvents(ctx context.Context, sessionID string) ([]session.Event, error)
+	ListEventsFiltered(ctx context.Context, query session.EventQuery) ([]session.Event, error)
 	UpsertConversationBinding(ctx context.Context, binding gatewaydomain.ConversationBinding) error
 	GetConversationBinding(ctx context.Context, channel string, externalConversationID string) (gatewaydomain.ConversationBinding, error)
 	ListConversationBindings(ctx context.Context) ([]gatewaydomain.ConversationBinding, error)

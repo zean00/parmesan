@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sahal/parmesan/internal/acp"
 	"github.com/sahal/parmesan/internal/api/sse"
 	"github.com/sahal/parmesan/internal/domain/audit"
 	"github.com/sahal/parmesan/internal/domain/execution"
@@ -22,6 +23,7 @@ import (
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/policyyaml"
 	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
+	"github.com/sahal/parmesan/internal/sessionsvc"
 	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/toolsync"
@@ -34,6 +36,8 @@ type Server struct {
 	broker     *sse.Broker
 	router     *model.Router
 	syncer     *toolsync.Syncer
+	sessions   *sessionsvc.Service
+	listener   *sessionsvc.Listener
 }
 
 const adminStreamID = "__admin__"
@@ -47,11 +51,13 @@ type streamItem struct {
 
 func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *sse.Broker, router *model.Router, syncer *toolsync.Syncer) *Server {
 	s := &Server{
-		store:  repo,
-		writes: writes,
-		broker: broker,
-		router: router,
-		syncer: syncer,
+		store:    repo,
+		writes:   writes,
+		broker:   broker,
+		router:   router,
+		syncer:   syncer,
+		sessions: sessionsvc.New(repo, writes),
+		listener: sessionsvc.NewListener(repo),
 	}
 
 	mux := http.NewServeMux()
@@ -76,6 +82,10 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/sessions/{id}/events", s.listEvents)
 	mux.HandleFunc("POST /v1/sessions/{id}/events", s.appendEvent)
 	mux.HandleFunc("GET /v1/sessions/{id}/events/stream", s.streamEvents)
+	mux.HandleFunc("POST /v1/acp/sessions", s.acpCreateSession)
+	mux.HandleFunc("GET /v1/acp/sessions/{id}/events", s.acpListEvents)
+	mux.HandleFunc("POST /v1/acp/sessions/{id}/events", s.acpAppendEvent)
+	mux.HandleFunc("GET /v1/acp/sessions/{id}/events/stream", s.streamEvents)
 	mux.HandleFunc("POST /v1/tools/providers/register", s.registerProvider)
 	mux.HandleFunc("POST /v1/tools/providers/{id}/auth", s.saveProviderAuth)
 	mux.HandleFunc("GET /v1/tools/providers/{id}/auth", s.getProviderAuth)
@@ -541,9 +551,12 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	sess := session.Session{
 		ID:        req.ID,
 		Channel:   req.Channel,
+		Metadata:  map[string]any{},
+		Labels:    []string{},
 		CreatedAt: time.Now().UTC(),
 	}
-	if err := s.store.CreateSession(r.Context(), sess); err != nil {
+	sess, err := s.sessions.CreateSession(r.Context(), sess)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -596,16 +609,18 @@ func (s *Server) appendEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	event := session.Event{
+	event, err := s.sessions.CreateEvent(r.Context(), sessionsvc.CreateEventParams{
 		ID:          req.ID,
 		SessionID:   sessionID,
 		Source:      req.Source,
 		Kind:        req.Kind,
-		CreatedAt:   time.Now().UTC(),
 		Content:     req.Content,
 		ExecutionID: execID,
-	}
-	if err := s.writes.AppendEvent(r.Context(), event); err != nil {
+		TraceID:     traceID,
+		CreatedAt:   time.Now().UTC(),
+		Async:       true,
+	})
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -633,7 +648,7 @@ func (s *Server) appendEvent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
-	events, err := s.store.ListEvents(r.Context(), r.PathValue("id"))
+	events, err := s.sessions.ListEvents(r.Context(), session.EventQuery{SessionID: r.PathValue("id")})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -655,19 +670,90 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	seen := map[string]struct{}{}
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
+	lastOffset := int64(0)
 
 	for {
-		if err := s.flushPersistedStream(ctx, w, flusher, sessionID, seen); err != nil {
+		var err error
+		lastOffset, err = s.flushPersistedStream(ctx, w, flusher, sessionID, seen, lastOffset)
+		if err != nil {
 			return
 		}
+		waitCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		_, _ = s.listener.WaitForMoreEvents(waitCtx, session.EventQuery{
+			SessionID:      sessionID,
+			MinOffset:      lastOffset + 1,
+			ExcludeDeleted: true,
+		})
+		cancel()
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		default:
 		}
 	}
+}
+
+func (s *Server) acpCreateSession(w http.ResponseWriter, r *http.Request) {
+	service := acp.NewService(s.sessions)
+	var req acp.Session
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.ID) == "" {
+		req.ID = fmt.Sprintf("sess_%d", time.Now().UnixNano())
+	}
+	if strings.TrimSpace(req.Channel) == "" {
+		req.Channel = "web"
+	}
+	if req.CreatedAt.IsZero() {
+		req.CreatedAt = time.Now().UTC()
+	}
+	created, err := service.OpenSession(r.Context(), req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusCreated, created)
+}
+
+func (s *Server) acpAppendEvent(w http.ResponseWriter, r *http.Request) {
+	service := acp.NewService(s.sessions)
+	var req acp.Event
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.SessionID = r.PathValue("id")
+	if strings.TrimSpace(req.ID) == "" {
+		req.ID = fmt.Sprintf("evt_%d", time.Now().UnixNano())
+	}
+	if req.CreatedAt.IsZero() {
+		req.CreatedAt = time.Now().UTC()
+	}
+	created, err := service.CreateEvent(r.Context(), req, true)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusCreated, created)
+}
+
+func (s *Server) acpListEvents(w http.ResponseWriter, r *http.Request) {
+	service := acp.NewService(s.sessions)
+	minOffset := int64(0)
+	if raw := strings.TrimSpace(r.URL.Query().Get("min_offset")); raw != "" {
+		if _, err := fmt.Sscan(raw, &minOffset); err != nil {
+			http.Error(w, "invalid min_offset", http.StatusBadRequest)
+			return
+		}
+	}
+	events, err := service.ListEvents(r.Context(), r.PathValue("id"), minOffset)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, events)
 }
 
 func (s *Server) streamAdminEvents(w http.ResponseWriter, r *http.Request) {
@@ -1188,10 +1274,14 @@ func (s *Server) appendTrace(ctx context.Context, record audit.Record) {
 	}
 }
 
-func (s *Server) flushPersistedStream(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, sessionID string, seen map[string]struct{}) error {
-	events, err := s.store.ListEvents(ctx, sessionID)
+func (s *Server) flushPersistedStream(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, sessionID string, seen map[string]struct{}, lastOffset int64) (int64, error) {
+	events, err := s.sessions.ListEvents(ctx, session.EventQuery{
+		SessionID:      sessionID,
+		MinOffset:      lastOffset + 1,
+		ExcludeDeleted: true,
+	})
 	if err != nil {
-		return err
+		return lastOffset, err
 	}
 	var items []streamItem
 	for _, event := range events {
@@ -1204,12 +1294,15 @@ func (s *Server) flushPersistedStream(ctx context.Context, w http.ResponseWriter
 			when: event.CreatedAt,
 			body: event,
 		})
+		if event.Offset > lastOffset {
+			lastOffset = event.Offset
+		}
 	}
 	items, err = s.appendAuditItems(ctx, items, seen, func(record audit.Record) bool {
 		return record.SessionID == sessionID
 	})
 	if err != nil {
-		return err
+		return lastOffset, err
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].when.Before(items[j].when) })
 	for _, item := range items {
@@ -1219,11 +1312,11 @@ func (s *Server) flushPersistedStream(ctx context.Context, w http.ResponseWriter
 			continue
 		}
 		if _, err := fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", item.id, item.name, raw); err != nil {
-			return err
+			return lastOffset, err
 		}
 	}
 	flusher.Flush()
-	return nil
+	return lastOffset, nil
 }
 
 func (s *Server) flushAuditStream(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, seen map[string]struct{}, include func(audit.Record) bool) error {

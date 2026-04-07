@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -62,28 +63,67 @@ func (c *Client) ListBundles(ctx context.Context) ([]policy.Bundle, error) {
 }
 
 func (c *Client) CreateSession(ctx context.Context, sess session.Session) error {
-	_, err := c.Pool.Exec(ctx, `
-		INSERT INTO sessions (id, channel, created_at)
-		VALUES ($1, $2, $3)
+	metadata, err := json.Marshal(sess.Metadata)
+	if err != nil {
+		return err
+	}
+	labels, err := json.Marshal(sess.Labels)
+	if err != nil {
+		return err
+	}
+	_, err = c.Pool.Exec(ctx, `
+		INSERT INTO sessions (id, channel, customer_id, agent_id, mode, title, metadata_json, labels_json, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (id) DO NOTHING
-	`, sess.ID, sess.Channel, sess.CreatedAt)
+	`, sess.ID, sess.Channel, nullString(sess.CustomerID), nullString(sess.AgentID), sess.Mode, nullString(sess.Title), metadata, labels, sess.CreatedAt)
 	return err
 }
 
 func (c *Client) GetSession(ctx context.Context, sessionID string) (session.Session, error) {
-	row := c.Pool.QueryRow(ctx, `SELECT id, channel, created_at FROM sessions WHERE id = $1`, sessionID)
+	row := c.Pool.QueryRow(ctx, `SELECT id, channel, COALESCE(customer_id,''), COALESCE(agent_id,''), COALESCE(mode,''), COALESCE(title,''), metadata_json, labels_json, created_at FROM sessions WHERE id = $1`, sessionID)
 	var sess session.Session
-	if err := row.Scan(&sess.ID, &sess.Channel, &sess.CreatedAt); err != nil {
+	var metadata []byte
+	var labels []byte
+	if err := row.Scan(&sess.ID, &sess.Channel, &sess.CustomerID, &sess.AgentID, &sess.Mode, &sess.Title, &metadata, &labels, &sess.CreatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return session.Session{}, errors.New("session not found")
 		}
 		return session.Session{}, err
 	}
+	if len(metadata) > 0 {
+		_ = json.Unmarshal(metadata, &sess.Metadata)
+	}
+	if len(labels) > 0 {
+		_ = json.Unmarshal(labels, &sess.Labels)
+	}
 	return sess, nil
 }
 
+func (c *Client) UpdateSession(ctx context.Context, sess session.Session) error {
+	metadata, err := json.Marshal(sess.Metadata)
+	if err != nil {
+		return err
+	}
+	labels, err := json.Marshal(sess.Labels)
+	if err != nil {
+		return err
+	}
+	_, err = c.Pool.Exec(ctx, `
+		UPDATE sessions
+		SET channel = $2,
+		    customer_id = $3,
+		    agent_id = $4,
+		    mode = $5,
+		    title = $6,
+		    metadata_json = $7,
+		    labels_json = $8
+		WHERE id = $1
+	`, sess.ID, sess.Channel, nullString(sess.CustomerID), nullString(sess.AgentID), sess.Mode, nullString(sess.Title), metadata, labels)
+	return err
+}
+
 func (c *Client) ListSessions(ctx context.Context) ([]session.Session, error) {
-	rows, err := c.Pool.Query(ctx, `SELECT id, channel, created_at FROM sessions ORDER BY created_at DESC`)
+	rows, err := c.Pool.Query(ctx, `SELECT id, channel, COALESCE(customer_id,''), COALESCE(agent_id,''), COALESCE(mode,''), COALESCE(title,''), metadata_json, labels_json, created_at FROM sessions ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -91,8 +131,16 @@ func (c *Client) ListSessions(ctx context.Context) ([]session.Session, error) {
 	var out []session.Session
 	for rows.Next() {
 		var sess session.Session
-		if err := rows.Scan(&sess.ID, &sess.Channel, &sess.CreatedAt); err != nil {
+		var metadata []byte
+		var labels []byte
+		if err := rows.Scan(&sess.ID, &sess.Channel, &sess.CustomerID, &sess.AgentID, &sess.Mode, &sess.Title, &metadata, &labels, &sess.CreatedAt); err != nil {
 			return nil, err
+		}
+		if len(metadata) > 0 {
+			_ = json.Unmarshal(metadata, &sess.Metadata)
+		}
+		if len(labels) > 0 {
+			_ = json.Unmarshal(labels, &sess.Labels)
 		}
 		out = append(out, sess)
 	}
@@ -104,21 +152,104 @@ func (c *Client) AppendEvent(ctx context.Context, event session.Event) error {
 	if err != nil {
 		return err
 	}
+	metadata, err := json.Marshal(event.Metadata)
+	if err != nil {
+		return err
+	}
 	_, err = c.Pool.Exec(ctx, `
-		INSERT INTO session_events (id, session_id, source, kind, execution_id, payload, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO session_events (id, session_id, source, kind, execution_id, payload, created_at, offset, trace_id, metadata_json, deleted)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (id) DO NOTHING
-	`, event.ID, event.SessionID, event.Source, event.Kind, event.ExecutionID, raw, event.CreatedAt)
+	`, event.ID, event.SessionID, event.Source, event.Kind, nullString(event.ExecutionID), raw, event.CreatedAt, event.Offset, nullString(event.TraceID), metadata, event.Deleted)
 	return err
 }
 
 func (c *Client) ListEvents(ctx context.Context, sessionID string) ([]session.Event, error) {
-	rows, err := c.Pool.Query(ctx, `
-		SELECT payload
+	return c.ListEventsFiltered(ctx, session.EventQuery{SessionID: sessionID})
+}
+
+func (c *Client) ReadEvent(ctx context.Context, sessionID string, eventID string) (session.Event, error) {
+	row := c.Pool.QueryRow(ctx, `
+		SELECT payload, COALESCE(offset,0), COALESCE(trace_id,''), metadata_json, deleted
+		FROM session_events
+		WHERE session_id = $1 AND id = $2
+	`, sessionID, eventID)
+	var raw []byte
+	var metadata []byte
+	var event session.Event
+	if err := row.Scan(&raw, &event.Offset, &event.TraceID, &metadata, &event.Deleted); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return session.Event{}, errors.New("event not found")
+		}
+		return session.Event{}, err
+	}
+	if err := json.Unmarshal(raw, &event); err != nil {
+		return session.Event{}, err
+	}
+	if len(metadata) > 0 && event.Metadata == nil {
+		_ = json.Unmarshal(metadata, &event.Metadata)
+	}
+	return event, nil
+}
+
+func (c *Client) UpdateEvent(ctx context.Context, event session.Event) error {
+	raw, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	metadata, err := json.Marshal(event.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = c.Pool.Exec(ctx, `
+		UPDATE session_events
+		SET source = $3,
+		    kind = $4,
+		    execution_id = $5,
+		    payload = $6,
+		    created_at = $7,
+		    offset = $8,
+		    trace_id = $9,
+		    metadata_json = $10,
+		    deleted = $11
+		WHERE session_id = $1 AND id = $2
+	`, event.SessionID, event.ID, event.Source, event.Kind, nullString(event.ExecutionID), raw, event.CreatedAt, event.Offset, nullString(event.TraceID), metadata, event.Deleted)
+	return err
+}
+
+func (c *Client) ListEventsFiltered(ctx context.Context, query session.EventQuery) ([]session.Event, error) {
+	sql := `
+		SELECT payload, COALESCE(offset,0), COALESCE(trace_id,''), metadata_json, deleted
 		FROM session_events
 		WHERE session_id = $1
-		ORDER BY created_at ASC
-	`, sessionID)
+	`
+	args := []any{query.SessionID}
+	arg := 2
+	if query.Source != "" {
+		sql += ` AND source = $` + strconv.Itoa(arg)
+		args = append(args, query.Source)
+		arg++
+	}
+	if query.TraceID != "" {
+		sql += ` AND trace_id = $` + strconv.Itoa(arg)
+		args = append(args, query.TraceID)
+		arg++
+	}
+	if query.MinOffset > 0 {
+		sql += ` AND COALESCE(offset,0) >= $` + strconv.Itoa(arg)
+		args = append(args, query.MinOffset)
+		arg++
+	}
+	if query.ExcludeDeleted {
+		sql += ` AND deleted = FALSE`
+	}
+	if len(query.Kinds) > 0 {
+		sql += ` AND kind = ANY($` + strconv.Itoa(arg) + `)`
+		args = append(args, query.Kinds)
+		arg++
+	}
+	sql += ` ORDER BY COALESCE(offset,0) ASC, created_at ASC`
+	rows, err := c.Pool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -126,12 +257,16 @@ func (c *Client) ListEvents(ctx context.Context, sessionID string) ([]session.Ev
 	var out []session.Event
 	for rows.Next() {
 		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
+		var event session.Event
+		var metadata []byte
+		if err := rows.Scan(&raw, &event.Offset, &event.TraceID, &metadata, &event.Deleted); err != nil {
 			return nil, err
 		}
-		var event session.Event
 		if err := json.Unmarshal(raw, &event); err != nil {
 			return nil, err
+		}
+		if len(metadata) > 0 && event.Metadata == nil {
+			_ = json.Unmarshal(metadata, &event.Metadata)
 		}
 		out = append(out, event)
 	}

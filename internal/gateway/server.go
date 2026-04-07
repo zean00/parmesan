@@ -15,6 +15,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/execution"
 	gatewaydomain "github.com/sahal/parmesan/internal/domain/gateway"
 	"github.com/sahal/parmesan/internal/domain/session"
+	"github.com/sahal/parmesan/internal/sessionsvc"
 	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 )
@@ -23,6 +24,7 @@ type Server struct {
 	httpServer *http.Server
 	repo       store.Repository
 	writes     *asyncwrite.Queue
+	sessions   *sessionsvc.Service
 	interval   time.Duration
 }
 
@@ -30,6 +32,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue) *Server {
 	s := &Server{
 		repo:     repo,
 		writes:   writes,
+		sessions: sessionsvc.New(repo, writes),
 		interval: time.Second,
 	}
 	mux := http.NewServeMux()
@@ -117,16 +120,22 @@ func (s *Server) inboundMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	event := session.Event{
-		ID:          eventID,
-		SessionID:   binding.SessionID,
-		Source:      "customer",
-		Kind:        "message",
-		CreatedAt:   now,
+	_, err = s.sessions.CreateEvent(r.Context(), sessionsvc.CreateEventParams{
+		ID:        eventID,
+		SessionID: binding.SessionID,
+		Source:    "customer",
+		Kind:      "message",
+		Content:   []session.ContentPart{{Type: "text", Text: req.Text}},
+		Metadata: map[string]any{
+			"conversation_id": req.ConversationID,
+			"user_id":         req.UserID,
+		},
 		ExecutionID: execID,
-		Content:     []session.ContentPart{{Type: "text", Text: req.Text}},
-	}
-	if err := s.writes.AppendEvent(r.Context(), event); err != nil {
+		TraceID:     traceID,
+		CreatedAt:   now,
+		Async:       true,
+	})
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -226,23 +235,24 @@ func (s *Server) respondApproval(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	event := session.Event{
-		ID:          fmt.Sprintf("evt_%d", time.Now().UnixNano()),
+	event, err := s.sessions.CreateEvent(r.Context(), sessionsvc.CreateEventParams{
 		SessionID:   binding.SessionID,
 		Source:      "gateway",
 		Kind:        "approval_result",
-		CreatedAt:   time.Now().UTC(),
 		ExecutionID: item.ExecutionID,
 		Content: []session.ContentPart{{
 			Type: "text",
 			Text: decision,
 			Meta: map[string]any{"approval_id": item.ID, "tool_id": item.ToolID},
 		}},
-	}
-	if err := s.writes.AppendEvent(r.Context(), event); err != nil {
+		Metadata: map[string]any{"approval_id": item.ID, "tool_id": item.ToolID},
+		Async:    true,
+	})
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	_ = event
 	execs, err := s.repo.ListExecutions(r.Context())
 	if err == nil {
 		for _, exec := range execs {
@@ -272,11 +282,14 @@ func (s *Server) ensureBinding(ctx context.Context, conversationID, userID strin
 	}
 	now := time.Now().UTC()
 	sess := session.Session{
-		ID:        fmt.Sprintf("sess_%d", now.UnixNano()),
-		Channel:   "web",
-		CreatedAt: now,
+		ID:         fmt.Sprintf("sess_%d", now.UnixNano()),
+		Channel:    "web",
+		CustomerID: userID,
+		Metadata:   map[string]any{"external_conversation_id": conversationID},
+		Labels:     []string{},
+		CreatedAt:  now,
 	}
-	if err := s.repo.CreateSession(ctx, sess); err != nil {
+	if _, err := s.sessions.CreateSession(ctx, sess); err != nil {
 		return gatewaydomain.ConversationBinding{}, err
 	}
 	binding = gatewaydomain.ConversationBinding{

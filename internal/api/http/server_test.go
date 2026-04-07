@@ -14,6 +14,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/audit"
 	"github.com/sahal/parmesan/internal/domain/replay"
 	"github.com/sahal/parmesan/internal/domain/rollout"
+	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
@@ -616,5 +617,93 @@ func TestProviderAuthEndpointsRedactSecret(t *testing.T) {
 	}
 	if hasSecret, _ := payload["has_secret"].(bool); !hasSecret {
 		t.Fatalf("payload = %#v, want has_secret=true", payload)
+	}
+}
+
+func TestACPSessionEndpointsRoundTrip(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/sessions", strings.NewReader(`{"id":"sess_1","channel":"acp","customer_id":"cust_1","metadata":{"source":"test"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create acp session status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/acp/sessions/sess_1/events", strings.NewReader(`{"id":"evt_1","source":"customer","kind":"message","content":[{"type":"text","text":"hello"}],"trace_id":"trace_1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create acp event status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	waitFor(t, time.Second, func() bool {
+		events, err := repo.ListEvents(context.Background(), "sess_1")
+		return err == nil && len(events) == 1
+	})
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/acp/sessions/sess_1/events?min_offset=1", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list acp events status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var events []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode acp events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("acp events = %#v, want one event", events)
+	}
+}
+
+func TestSessionEventStreamIncludesPersistedEvent(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID:        "sess_1",
+		Channel:   "web",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID:        "evt_1",
+		SessionID: "sess_1",
+		Source:    "customer",
+		Kind:      "message",
+		Offset:    1,
+		TraceID:   "trace_1",
+		Content:   []session.ContentPart{{Type: "text", Text: "hello"}},
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	reqCtx, reqCancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer reqCancel()
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/sess_1/events/stream", nil).WithContext(reqCtx)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: session.event.created") || !strings.Contains(body, `"id":"evt_1"`) {
+		t.Fatalf("stream body = %q, want persisted session event", body)
 	}
 }

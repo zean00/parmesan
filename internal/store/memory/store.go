@@ -84,6 +84,18 @@ func (s *Store) GetSession(_ context.Context, sessionID string) (session.Session
 	return session.Session{}, errors.New("session not found")
 }
 
+func (s *Store) UpdateSession(_ context.Context, updated session.Session) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, sess := range s.sessions {
+		if sess.ID == updated.ID {
+			s.sessions[i] = updated
+			return nil
+		}
+	}
+	return errors.New("session not found")
+}
+
 func (s *Store) ListSessions(_ context.Context) ([]session.Session, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -94,8 +106,36 @@ func (s *Store) ListSessions(_ context.Context) ([]session.Session, error) {
 func (s *Store) AppendEvent(_ context.Context, event session.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if event.Offset == 0 {
+		event.Offset = time.Now().UTC().UnixNano()
+	}
 	s.events[event.SessionID] = append(s.events[event.SessionID], event)
 	return nil
+}
+
+func (s *Store) ReadEvent(_ context.Context, sessionID string, eventID string) (session.Event, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, event := range s.events[sessionID] {
+		if event.ID == eventID {
+			return event, nil
+		}
+	}
+	return session.Event{}, errors.New("event not found")
+}
+
+func (s *Store) UpdateEvent(_ context.Context, updated session.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items := s.events[updated.SessionID]
+	for i, event := range items {
+		if event.ID == updated.ID {
+			items[i] = updated
+			s.events[updated.SessionID] = items
+			return nil
+		}
+	}
+	return errors.New("event not found")
 }
 
 func (s *Store) ListEvents(_ context.Context, sessionID string) ([]session.Event, error) {
@@ -103,6 +143,37 @@ func (s *Store) ListEvents(_ context.Context, sessionID string) ([]session.Event
 	defer s.mu.RUnlock()
 	out := append([]session.Event(nil), s.events[sessionID]...)
 	return out, nil
+}
+
+func (s *Store) ListEventsFiltered(_ context.Context, query session.EventQuery) ([]session.Event, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []session.Event
+	kindSet := map[string]struct{}{}
+	for _, kind := range query.Kinds {
+		kindSet[kind] = struct{}{}
+	}
+	for _, event := range s.events[query.SessionID] {
+		if query.Source != "" && event.Source != query.Source {
+			continue
+		}
+		if query.TraceID != "" && event.TraceID != query.TraceID {
+			continue
+		}
+		if query.MinOffset > 0 && event.Offset < query.MinOffset {
+			continue
+		}
+		if query.ExcludeDeleted && event.Deleted {
+			continue
+		}
+		if len(kindSet) > 0 {
+			if _, ok := kindSet[event.Kind]; !ok {
+				continue
+			}
+		}
+		out = append(out, event)
+	}
+	return append([]session.Event(nil), out...), nil
 }
 
 func (s *Store) UpsertConversationBinding(_ context.Context, binding gatewaydomain.ConversationBinding) error {
