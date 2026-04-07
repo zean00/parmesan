@@ -10,8 +10,10 @@ import (
 	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
+	"github.com/sahal/parmesan/internal/domain/customer"
 	"github.com/sahal/parmesan/internal/domain/delivery"
 	"github.com/sahal/parmesan/internal/domain/execution"
+	"github.com/sahal/parmesan/internal/domain/feedback"
 	gatewaydomain "github.com/sahal/parmesan/internal/domain/gateway"
 	"github.com/sahal/parmesan/internal/domain/journey"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
@@ -28,6 +30,9 @@ type Store struct {
 	mu                       sync.RWMutex
 	bundles                  []policy.Bundle
 	agentProfiles            []agent.Profile
+	customerPreferences      []customer.Preference
+	customerPreferenceEvents []customer.PreferenceEvent
+	feedbackRecords          []feedback.Record
 	sessions                 []session.Session
 	events                   map[string][]session.Event
 	bindings                 []gatewaydomain.ConversationBinding
@@ -109,6 +114,134 @@ func (s *Store) ListAgentProfiles(_ context.Context) ([]agent.Profile, error) {
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].CreatedAt.After(out[j].CreatedAt)
 	})
+	return out, nil
+}
+
+func (s *Store) SaveCustomerPreference(_ context.Context, pref customer.Preference, event customer.PreferenceEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.customerPreferences {
+		if item.AgentID == pref.AgentID && item.CustomerID == pref.CustomerID && item.Key == pref.Key {
+			pref.CreatedAt = item.CreatedAt
+			s.customerPreferences[i] = pref
+			if event.ID != "" {
+				s.customerPreferenceEvents = append(s.customerPreferenceEvents, event)
+			}
+			return nil
+		}
+	}
+	s.customerPreferences = append(s.customerPreferences, pref)
+	if event.ID != "" {
+		s.customerPreferenceEvents = append(s.customerPreferenceEvents, event)
+	}
+	return nil
+}
+
+func (s *Store) GetCustomerPreference(_ context.Context, agentID string, customerID string, key string) (customer.Preference, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.customerPreferences {
+		if item.AgentID == agentID && item.CustomerID == customerID && item.Key == key {
+			return item, nil
+		}
+	}
+	return customer.Preference{}, errors.New("customer preference not found")
+}
+
+func (s *Store) ListCustomerPreferences(_ context.Context, query customer.PreferenceQuery) ([]customer.Preference, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []customer.Preference
+	for _, item := range s.customerPreferences {
+		if query.AgentID != "" && item.AgentID != query.AgentID {
+			continue
+		}
+		if query.CustomerID != "" && item.CustomerID != query.CustomerID {
+			continue
+		}
+		if query.Status != "" && item.Status != query.Status {
+			continue
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	return out, nil
+}
+
+func (s *Store) AppendCustomerPreferenceEvent(_ context.Context, event customer.PreferenceEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.customerPreferenceEvents = append(s.customerPreferenceEvents, event)
+	return nil
+}
+
+func (s *Store) ListCustomerPreferenceEvents(_ context.Context, query customer.PreferenceQuery) ([]customer.PreferenceEvent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []customer.PreferenceEvent
+	for _, item := range s.customerPreferenceEvents {
+		if query.AgentID != "" && item.AgentID != query.AgentID {
+			continue
+		}
+		if query.CustomerID != "" && item.CustomerID != query.CustomerID {
+			continue
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	return out, nil
+}
+
+func (s *Store) SaveFeedbackRecord(_ context.Context, record feedback.Record) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.feedbackRecords {
+		if item.ID == record.ID {
+			s.feedbackRecords[i] = record
+			return nil
+		}
+	}
+	s.feedbackRecords = append(s.feedbackRecords, record)
+	return nil
+}
+
+func (s *Store) GetFeedbackRecord(_ context.Context, feedbackID string) (feedback.Record, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.feedbackRecords {
+		if item.ID == feedbackID {
+			return item, nil
+		}
+	}
+	return feedback.Record{}, errors.New("feedback record not found")
+}
+
+func (s *Store) ListFeedbackRecords(_ context.Context, query feedback.Query) ([]feedback.Record, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []feedback.Record
+	for _, item := range s.feedbackRecords {
+		if query.SessionID != "" && item.SessionID != query.SessionID {
+			continue
+		}
+		if query.OperatorID != "" && item.OperatorID != query.OperatorID {
+			continue
+		}
+		if query.Category != "" && item.Category != query.Category {
+			continue
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	if query.Limit > 0 && len(out) > query.Limit {
+		out = out[:query.Limit]
+	}
 	return out, nil
 }
 

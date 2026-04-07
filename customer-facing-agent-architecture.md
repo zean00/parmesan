@@ -1099,8 +1099,8 @@ Responsibilities:
 
 #### B. Feedback Compiler
 
-**Input:** finished customer session + admin feedback  
-**Output:** targeted policy patch proposal
+**Input:** finished customer session + operator/admin feedback
+**Output:** typed compiler outputs
 
 It should classify root cause as:
 
@@ -1112,11 +1112,11 @@ It should classify root cause as:
 - preference miss
 - one-off exception
 
-Only the first four should normally mutate shared policy.
+Preference misses should update `CustomerPreference` only when explicit and low risk. Shared knowledge gaps should create `KnowledgeUpdateProposal` records. Policy, journey, template, and SOUL/persona feedback should create draft policy proposals only; they should not auto-shadow, auto-canary, or auto-apply.
 
 #### C. Preference Compiler
 
-**Input:** customer session history  
+**Input:** customer session history and operator feedback
 **Output:** durable customer preference updates
 
 It should separate:

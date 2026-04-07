@@ -13,8 +13,10 @@ import (
 	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
+	"github.com/sahal/parmesan/internal/domain/customer"
 	"github.com/sahal/parmesan/internal/domain/delivery"
 	"github.com/sahal/parmesan/internal/domain/execution"
+	"github.com/sahal/parmesan/internal/domain/feedback"
 	gatewaydomain "github.com/sahal/parmesan/internal/domain/gateway"
 	"github.com/sahal/parmesan/internal/domain/journey"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
@@ -133,6 +135,232 @@ func (c *Client) ListAgentProfiles(ctx context.Context) ([]agent.Profile, error)
 		out = append(out, profile)
 	}
 	return out, rows.Err()
+}
+
+func (c *Client) SaveCustomerPreference(ctx context.Context, pref customer.Preference, event customer.PreferenceEvent) error {
+	db := c.sessionQuery()
+	evidence, err := json.Marshal(pref.EvidenceRefs)
+	if err != nil {
+		return err
+	}
+	metadata, err := json.Marshal(pref.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(ctx, `
+		INSERT INTO customer_preferences (id, agent_id, customer_id, key, value, source, confidence, status, evidence_refs_json, metadata_json, last_confirmed_at, expires_at, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		ON CONFLICT (agent_id, customer_id, key) DO UPDATE
+		SET value = EXCLUDED.value,
+		    source = EXCLUDED.source,
+		    confidence = EXCLUDED.confidence,
+		    status = EXCLUDED.status,
+		    evidence_refs_json = EXCLUDED.evidence_refs_json,
+		    metadata_json = EXCLUDED.metadata_json,
+		    last_confirmed_at = EXCLUDED.last_confirmed_at,
+		    expires_at = EXCLUDED.expires_at,
+		    updated_at = EXCLUDED.updated_at
+	`, pref.ID, pref.AgentID, pref.CustomerID, pref.Key, pref.Value, pref.Source, pref.Confidence, pref.Status, evidence, metadata, pref.LastConfirmedAt, pref.ExpiresAt, pref.CreatedAt, pref.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	if event.ID != "" {
+		return c.AppendCustomerPreferenceEvent(ctx, event)
+	}
+	return nil
+}
+
+func (c *Client) GetCustomerPreference(ctx context.Context, agentID string, customerID string, key string) (customer.Preference, error) {
+	db := c.sessionQuery()
+	row := db.QueryRow(ctx, `
+		SELECT id, agent_id, customer_id, key, value, source, confidence, status, evidence_refs_json, metadata_json, last_confirmed_at, expires_at, created_at, updated_at
+		FROM customer_preferences
+		WHERE agent_id = $1 AND customer_id = $2 AND key = $3
+	`, agentID, customerID, key)
+	var pref customer.Preference
+	var evidence, metadata []byte
+	if err := row.Scan(&pref.ID, &pref.AgentID, &pref.CustomerID, &pref.Key, &pref.Value, &pref.Source, &pref.Confidence, &pref.Status, &evidence, &metadata, &pref.LastConfirmedAt, &pref.ExpiresAt, &pref.CreatedAt, &pref.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return customer.Preference{}, errors.New("customer preference not found")
+		}
+		return customer.Preference{}, err
+	}
+	_ = json.Unmarshal(evidence, &pref.EvidenceRefs)
+	_ = json.Unmarshal(metadata, &pref.Metadata)
+	return pref, nil
+}
+
+func (c *Client) ListCustomerPreferences(ctx context.Context, query customer.PreferenceQuery) ([]customer.Preference, error) {
+	db := c.sessionQuery()
+	rows, err := db.Query(ctx, `
+		SELECT id, agent_id, customer_id, key, value, source, confidence, status, evidence_refs_json, metadata_json, last_confirmed_at, expires_at, created_at, updated_at
+		FROM customer_preferences
+		WHERE ($1 = '' OR agent_id = $1)
+		  AND ($2 = '' OR customer_id = $2)
+		  AND ($3 = '' OR status = $3)
+		ORDER BY updated_at DESC
+	`, query.AgentID, query.CustomerID, query.Status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []customer.Preference
+	for rows.Next() {
+		var pref customer.Preference
+		var evidence, metadata []byte
+		if err := rows.Scan(&pref.ID, &pref.AgentID, &pref.CustomerID, &pref.Key, &pref.Value, &pref.Source, &pref.Confidence, &pref.Status, &evidence, &metadata, &pref.LastConfirmedAt, &pref.ExpiresAt, &pref.CreatedAt, &pref.UpdatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(evidence, &pref.EvidenceRefs)
+		_ = json.Unmarshal(metadata, &pref.Metadata)
+		out = append(out, pref)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) AppendCustomerPreferenceEvent(ctx context.Context, event customer.PreferenceEvent) error {
+	db := c.sessionQuery()
+	evidence, err := json.Marshal(event.EvidenceRefs)
+	if err != nil {
+		return err
+	}
+	metadata, err := json.Marshal(event.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(ctx, `
+		INSERT INTO customer_preference_events (id, preference_id, agent_id, customer_id, key, value, action, source, confidence, evidence_refs_json, metadata_json, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+	`, event.ID, nullString(event.PreferenceID), event.AgentID, event.CustomerID, event.Key, event.Value, event.Action, event.Source, event.Confidence, evidence, metadata, event.CreatedAt)
+	return err
+}
+
+func (c *Client) ListCustomerPreferenceEvents(ctx context.Context, query customer.PreferenceQuery) ([]customer.PreferenceEvent, error) {
+	db := c.sessionQuery()
+	rows, err := db.Query(ctx, `
+		SELECT id, COALESCE(preference_id,''), agent_id, customer_id, COALESCE(key,''), COALESCE(value,''), action, source, confidence, evidence_refs_json, metadata_json, created_at
+		FROM customer_preference_events
+		WHERE ($1 = '' OR agent_id = $1)
+		  AND ($2 = '' OR customer_id = $2)
+		ORDER BY created_at DESC
+	`, query.AgentID, query.CustomerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []customer.PreferenceEvent
+	for rows.Next() {
+		var item customer.PreferenceEvent
+		var evidence, metadata []byte
+		if err := rows.Scan(&item.ID, &item.PreferenceID, &item.AgentID, &item.CustomerID, &item.Key, &item.Value, &item.Action, &item.Source, &item.Confidence, &evidence, &metadata, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(evidence, &item.EvidenceRefs)
+		_ = json.Unmarshal(metadata, &item.Metadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) SaveFeedbackRecord(ctx context.Context, record feedback.Record) error {
+	db := c.sessionQuery()
+	labels, err := json.Marshal(record.Labels)
+	if err != nil {
+		return err
+	}
+	targets, err := json.Marshal(record.TargetEventIDs)
+	if err != nil {
+		return err
+	}
+	metadata, err := json.Marshal(record.Metadata)
+	if err != nil {
+		return err
+	}
+	outputs, err := json.Marshal(record.Outputs)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(ctx, `
+		INSERT INTO operator_feedback (id, session_id, execution_id, trace_id, operator_id, rating, category, text, labels_json, target_event_ids_json, metadata_json, outputs_json, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		ON CONFLICT (id) DO UPDATE
+		SET execution_id = EXCLUDED.execution_id,
+		    trace_id = EXCLUDED.trace_id,
+		    operator_id = EXCLUDED.operator_id,
+		    rating = EXCLUDED.rating,
+		    category = EXCLUDED.category,
+		    text = EXCLUDED.text,
+		    labels_json = EXCLUDED.labels_json,
+		    target_event_ids_json = EXCLUDED.target_event_ids_json,
+		    metadata_json = EXCLUDED.metadata_json,
+		    outputs_json = EXCLUDED.outputs_json,
+		    updated_at = EXCLUDED.updated_at
+	`, record.ID, record.SessionID, nullString(record.ExecutionID), nullString(record.TraceID), nullString(record.OperatorID), record.Rating, record.Category, record.Text, labels, targets, metadata, outputs, record.CreatedAt, record.UpdatedAt)
+	return err
+}
+
+func (c *Client) GetFeedbackRecord(ctx context.Context, feedbackID string) (feedback.Record, error) {
+	db := c.sessionQuery()
+	row := db.QueryRow(ctx, `
+		SELECT id, session_id, COALESCE(execution_id,''), COALESCE(trace_id,''), COALESCE(operator_id,''), rating, COALESCE(category,''), text, labels_json, target_event_ids_json, metadata_json, outputs_json, created_at, updated_at
+		FROM operator_feedback
+		WHERE id = $1
+	`, feedbackID)
+	item, err := scanFeedbackRecord(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return feedback.Record{}, errors.New("feedback record not found")
+		}
+		return feedback.Record{}, err
+	}
+	return item, nil
+}
+
+func (c *Client) ListFeedbackRecords(ctx context.Context, query feedback.Query) ([]feedback.Record, error) {
+	db := c.sessionQuery()
+	limit := query.Limit
+	if limit <= 0 {
+		limit = 1000
+	}
+	rows, err := db.Query(ctx, `
+		SELECT id, session_id, COALESCE(execution_id,''), COALESCE(trace_id,''), COALESCE(operator_id,''), rating, COALESCE(category,''), text, labels_json, target_event_ids_json, metadata_json, outputs_json, created_at, updated_at
+		FROM operator_feedback
+		WHERE ($1 = '' OR session_id = $1)
+		  AND ($2 = '' OR operator_id = $2)
+		  AND ($3 = '' OR category = $3)
+		ORDER BY created_at DESC
+		LIMIT $4
+	`, query.SessionID, query.OperatorID, query.Category, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []feedback.Record
+	for rows.Next() {
+		item, err := scanFeedbackRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanFeedbackRecord(row rowScanner) (feedback.Record, error) {
+	var item feedback.Record
+	var labels, targets, metadata, outputs []byte
+	if err := row.Scan(&item.ID, &item.SessionID, &item.ExecutionID, &item.TraceID, &item.OperatorID, &item.Rating, &item.Category, &item.Text, &labels, &targets, &metadata, &outputs, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		return feedback.Record{}, err
+	}
+	_ = json.Unmarshal(labels, &item.Labels)
+	_ = json.Unmarshal(targets, &item.TargetEventIDs)
+	_ = json.Unmarshal(metadata, &item.Metadata)
+	_ = json.Unmarshal(outputs, &item.Outputs)
+	return item, nil
 }
 
 func (c *Client) CreateSession(ctx context.Context, sess session.Session) error {

@@ -7,8 +7,10 @@ import (
 	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
+	"github.com/sahal/parmesan/internal/domain/customer"
 	"github.com/sahal/parmesan/internal/domain/delivery"
 	"github.com/sahal/parmesan/internal/domain/execution"
+	"github.com/sahal/parmesan/internal/domain/feedback"
 	gatewaydomain "github.com/sahal/parmesan/internal/domain/gateway"
 	"github.com/sahal/parmesan/internal/domain/journey"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
@@ -27,6 +29,14 @@ type Repository interface {
 	SaveAgentProfile(ctx context.Context, profile agent.Profile) error
 	GetAgentProfile(ctx context.Context, profileID string) (agent.Profile, error)
 	ListAgentProfiles(ctx context.Context) ([]agent.Profile, error)
+	SaveCustomerPreference(ctx context.Context, pref customer.Preference, event customer.PreferenceEvent) error
+	GetCustomerPreference(ctx context.Context, agentID string, customerID string, key string) (customer.Preference, error)
+	ListCustomerPreferences(ctx context.Context, query customer.PreferenceQuery) ([]customer.Preference, error)
+	AppendCustomerPreferenceEvent(ctx context.Context, event customer.PreferenceEvent) error
+	ListCustomerPreferenceEvents(ctx context.Context, query customer.PreferenceQuery) ([]customer.PreferenceEvent, error)
+	SaveFeedbackRecord(ctx context.Context, record feedback.Record) error
+	GetFeedbackRecord(ctx context.Context, feedbackID string) (feedback.Record, error)
+	ListFeedbackRecords(ctx context.Context, query feedback.Query) ([]feedback.Record, error)
 	CreateSession(ctx context.Context, sess session.Session) error
 	GetSession(ctx context.Context, sessionID string) (session.Session, error)
 	UpdateSession(ctx context.Context, sess session.Session) error

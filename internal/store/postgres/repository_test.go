@@ -10,6 +10,8 @@ import (
 	pgxmock "github.com/pashagolub/pgxmock/v4"
 
 	"github.com/sahal/parmesan/internal/domain/agent"
+	"github.com/sahal/parmesan/internal/domain/customer"
+	"github.com/sahal/parmesan/internal/domain/feedback"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/media"
 	"github.com/sahal/parmesan/internal/domain/session"
@@ -151,6 +153,78 @@ func TestSaveAndGetAgentProfile(t *testing.T) {
 	}
 	if got.DefaultPolicyBundleID != "bundle_1" || got.Metadata["team"] != "support" {
 		t.Fatalf("profile = %#v, want decoded profile", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("ExpectationsWereMet() error = %v", err)
+	}
+}
+
+func TestSaveCustomerPreferenceAndFeedbackRecord(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatalf("NewPool() error = %v", err)
+	}
+	defer mock.Close()
+
+	client := &Client{querier: mock}
+	now := time.Unix(12, 0).UTC()
+	pref := customer.Preference{
+		ID: "pref_1", AgentID: "agent_1", CustomerID: "cust_1", Key: "preferred_name", Value: "Alex",
+		Source: "operator_feedback", Confidence: 1, Status: "active", EvidenceRefs: []string{"session:sess_1"}, Metadata: map[string]any{"compiler": "test"}, CreatedAt: now, UpdatedAt: now,
+	}
+	event := customer.PreferenceEvent{
+		ID: "pevt_1", PreferenceID: "pref_1", AgentID: "agent_1", CustomerID: "cust_1", Key: "preferred_name", Value: "Alex",
+		Action: "upsert", Source: "operator_feedback", Confidence: 1, EvidenceRefs: []string{"session:sess_1"}, Metadata: map[string]any{"compiler": "test"}, CreatedAt: now,
+	}
+	mock.ExpectExec(regexp.QuoteMeta(`
+		INSERT INTO customer_preferences (id, agent_id, customer_id, key, value, source, confidence, status, evidence_refs_json, metadata_json, last_confirmed_at, expires_at, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		ON CONFLICT (agent_id, customer_id, key) DO UPDATE
+		SET value = EXCLUDED.value,
+		    source = EXCLUDED.source,
+		    confidence = EXCLUDED.confidence,
+		    status = EXCLUDED.status,
+		    evidence_refs_json = EXCLUDED.evidence_refs_json,
+		    metadata_json = EXCLUDED.metadata_json,
+		    last_confirmed_at = EXCLUDED.last_confirmed_at,
+		    expires_at = EXCLUDED.expires_at,
+		    updated_at = EXCLUDED.updated_at
+	`)).
+		WithArgs(pref.ID, pref.AgentID, pref.CustomerID, pref.Key, pref.Value, pref.Source, pref.Confidence, pref.Status, pgxmock.AnyArg(), pgxmock.AnyArg(), pref.LastConfirmedAt, pref.ExpiresAt, pref.CreatedAt, pref.UpdatedAt).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec(regexp.QuoteMeta(`
+		INSERT INTO customer_preference_events (id, preference_id, agent_id, customer_id, key, value, action, source, confidence, evidence_refs_json, metadata_json, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+	`)).
+		WithArgs(event.ID, event.PreferenceID, event.AgentID, event.CustomerID, event.Key, event.Value, event.Action, event.Source, event.Confidence, pgxmock.AnyArg(), pgxmock.AnyArg(), event.CreatedAt).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	if err := client.SaveCustomerPreference(context.Background(), pref, event); err != nil {
+		t.Fatalf("SaveCustomerPreference() error = %v", err)
+	}
+
+	record := feedback.Record{
+		ID: "feedback_1", SessionID: "sess_1", OperatorID: "op_1", Category: "preference", Text: "I prefer email.", Outputs: feedback.Outputs{PreferenceIDs: []string{"pref_1"}}, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectExec(regexp.QuoteMeta(`
+		INSERT INTO operator_feedback (id, session_id, execution_id, trace_id, operator_id, rating, category, text, labels_json, target_event_ids_json, metadata_json, outputs_json, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		ON CONFLICT (id) DO UPDATE
+		SET execution_id = EXCLUDED.execution_id,
+		    trace_id = EXCLUDED.trace_id,
+		    operator_id = EXCLUDED.operator_id,
+		    rating = EXCLUDED.rating,
+		    category = EXCLUDED.category,
+		    text = EXCLUDED.text,
+		    labels_json = EXCLUDED.labels_json,
+		    target_event_ids_json = EXCLUDED.target_event_ids_json,
+		    metadata_json = EXCLUDED.metadata_json,
+		    outputs_json = EXCLUDED.outputs_json,
+		    updated_at = EXCLUDED.updated_at
+	`)).
+		WithArgs(record.ID, record.SessionID, nil, nil, record.OperatorID, record.Rating, record.Category, record.Text, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), record.CreatedAt, record.UpdatedAt).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	if err := client.SaveFeedbackRecord(context.Background(), record); err != nil {
+		t.Fatalf("SaveFeedbackRecord() error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("ExpectationsWereMet() error = %v", err)

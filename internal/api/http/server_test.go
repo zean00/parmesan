@@ -16,10 +16,13 @@ import (
 	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
+	"github.com/sahal/parmesan/internal/domain/customer"
 	"github.com/sahal/parmesan/internal/domain/delivery"
 	"github.com/sahal/parmesan/internal/domain/execution"
+	"github.com/sahal/parmesan/internal/domain/feedback"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/media"
+	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/replay"
 	"github.com/sahal/parmesan/internal/domain/rollout"
 	"github.com/sahal/parmesan/internal/domain/session"
@@ -174,6 +177,17 @@ func TestOperatorAgentProfileCRUD(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
 	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.SaveBundle(context.Background(), policy.Bundle{
+		ID: "bundle_support", Version: "v1", Soul: policy.Soul{Tone: "calm"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_agent", Channel: "acp", AgentID: "agent_1", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/operator/agents", strings.NewReader(`{
 		"id":"agent_1",
@@ -201,7 +215,7 @@ func TestOperatorAgentProfileCRUD(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != "active" || got.DefaultPolicyBundleID != "bundle_support" || got.DefaultKnowledgeScopeID != "agent_1" {
+	if got.Status != "active" || got.DefaultPolicyBundleID != "bundle_support" || got.DefaultKnowledgeScopeID != "agent_1" || got.SoulHash == "" || got.ActiveSessionCount != 1 {
 		t.Fatalf("profile = %#v, want defaults persisted", got)
 	}
 
@@ -230,6 +244,174 @@ func TestOperatorAgentProfileCRUD(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].Status != "disabled" || list[0].DefaultPolicyBundleID != "bundle_next" {
 		t.Fatalf("profiles = %#v, want updated profile in list", list)
+	}
+}
+
+func TestOperatorFeedbackCompilesPreferenceAndKnowledgeProposal(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_1", Channel: "acp", AgentID: "agent_1", CustomerID: "cust_1", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID:        "evt_1",
+		SessionID: "sess_1",
+		Source:    "customer",
+		Kind:      "message",
+		TraceID:   "trace_1",
+		CreatedAt: now,
+		Content:   []session.ContentPart{{Type: "text", Text: "hello"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_1/feedback", strings.NewReader(`{
+		"id":"feedback_1",
+		"operator_id":"op_1",
+		"category":"knowledge",
+		"text":"I prefer email updates. Knowledge: update the return exception article."
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("feedback status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var item feedback.Record
+	if err := json.Unmarshal(rec.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	if len(item.Outputs.PreferenceIDs) == 0 || len(item.Outputs.KnowledgeProposalIDs) == 0 {
+		t.Fatalf("feedback outputs = %#v, want preference and knowledge proposal", item.Outputs)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/customers/cust_1/preferences?agent_id=agent_1", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preferences status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var prefs []customer.Preference
+	if err := json.Unmarshal(rec.Body.Bytes(), &prefs); err != nil {
+		t.Fatal(err)
+	}
+	if len(prefs) == 0 || prefs[0].Source != "operator_feedback" {
+		t.Fatalf("preferences = %#v, want operator feedback preference", prefs)
+	}
+}
+
+func TestOperatorFeedbackDoesNotRoutePreferenceOnlyMediaSessionToKnowledge(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_1", Channel: "acp", AgentID: "agent_1", CustomerID: "cust_1", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveDerivedSignal(context.Background(), media.DerivedSignal{
+		ID: "sig_1", SessionID: "sess_1", EventID: "evt_1", AssetID: "asset_1", Kind: "ocr_text", Value: "ORDER-123", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_1/feedback", strings.NewReader(`{
+		"id":"feedback_preference_only",
+		"operator_id":"op_1",
+		"text":"I prefer email updates."
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("feedback status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var item feedback.Record
+	if err := json.Unmarshal(rec.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	if len(item.Outputs.PreferenceIDs) == 0 {
+		t.Fatalf("feedback outputs = %#v, want preference output", item.Outputs)
+	}
+	if len(item.Outputs.KnowledgeProposalIDs) != 0 {
+		t.Fatalf("feedback outputs = %#v, want no shared knowledge proposal for preference-only media session", item.Outputs)
+	}
+	proposals, err := repo.ListKnowledgeUpdateProposals(context.Background(), "agent", "agent_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proposals) != 0 {
+		t.Fatalf("knowledge proposals = %#v, want none", proposals)
+	}
+}
+
+func TestOperatorFeedbackCreatesSoulProposal(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.SaveBundle(context.Background(), policy.Bundle{
+		ID:      "bundle_1",
+		Version: "v1",
+		Guidelines: []policy.Guideline{{
+			ID: "g1", When: "customer asks for help", Then: "help the customer",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveAgentProfile(context.Background(), agent.Profile{
+		ID: "agent_1", Name: "Support", Status: "active", DefaultPolicyBundleID: "bundle_1", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_1", Channel: "acp", AgentID: "agent_1", CustomerID: "cust_1", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_1/feedback", strings.NewReader(`{
+		"id":"feedback_soul",
+		"category":"soul",
+		"text":"Tone should be calmer and more concise for this agent."
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("feedback status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var item feedback.Record
+	if err := json.Unmarshal(rec.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	if len(item.Outputs.PolicyProposalIDs) != 1 {
+		t.Fatalf("outputs = %#v, want one policy/SOUL proposal", item.Outputs)
+	}
+	proposal, err := repo.GetProposal(context.Background(), item.Outputs.PolicyProposalIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proposal.State != rollout.StateProposed || !proposal.RequiresManualApproval {
+		t.Fatalf("proposal = %#v, want draft manual review proposal", proposal)
+	}
+	bundles, err := repo.ListBundles(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, bundle := range bundles {
+		if bundle.ID == proposal.CandidateBundleID && len(bundle.Soul.StyleRules) > 0 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("bundles = %#v, want candidate bundle with SOUL style rule", bundles)
 	}
 }
 

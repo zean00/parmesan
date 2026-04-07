@@ -84,6 +84,12 @@ send either `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
 - `POST /v1/operator/sessions/{id}/messages/on-behalf-of-agent`
 - `POST /v1/operator/sessions/{id}/notes`
 - `POST /v1/operator/sessions/{id}/process`
+- `POST /v1/operator/sessions/{id}/feedback`
+- `GET /v1/operator/feedback` with optional `session_id`, `operator_id`, `category`, and `limit` filters
+- `GET /v1/operator/feedback/{id}`
+- `GET /v1/operator/customers/{customer_id}/preferences` with required `agent_id`
+- `PUT /v1/operator/customers/{customer_id}/preferences/{key}`
+- `GET /v1/operator/customers/{customer_id}/preference-events` with required `agent_id`
 - `POST /v1/operator/agents`
 - `GET /v1/operator/agents`
 - `GET /v1/operator/agents/{id}`
@@ -128,11 +134,13 @@ are rejected by the operator API. Retrieval now supports hybrid lexical plus
 embedding search, with Postgres able to rank chunks via `pgvector` and memory
 or fallback environments still using in-process ranking. Non-text ACP content
 parts are persisted as media assets during ingest and now produce concrete
-image/audio derived signals. Post-turn learning writes low-risk customer facts
-into customer-scoped `customer_agent` snapshots and records shared knowledge as
-draft `KnowledgeUpdateProposal` records until an operator reviews them. Proposal
-workflow now supports preview plus explicit `draft`, `approved`, `rejected`,
-and `applied` states.
+image/audio derived signals. Post-turn learning writes explicit low-risk
+customer facts into first-class `CustomerPreference` records and records shared
+knowledge as draft `KnowledgeUpdateProposal` records until an operator reviews
+them. Operator feedback uses the same compiler path and can create customer
+preferences, shared knowledge proposals, or draft policy/SOUL rollout proposals.
+Proposal workflow now supports preview plus explicit `draft`, `approved`,
+`rejected`, and `applied` states.
 
 Multimodal provider config:
 - `OPENROUTER_API_KEY`
@@ -156,6 +164,8 @@ identity, role, tone, formality, verbosity, supported languages, formatting
 rules, escalation style, and avoid rules. SOUL is injected as strong response
 style guidance, but it does not override hard policy, strict templates,
 approval requirements, tool constraints, or explicit customer constraints.
+Operator agent profile reads include lightweight binding context such as
+`soul_hash` and `active_session_count`.
 
 Operator media inspection now exposes:
 - per-asset signal drilldown

@@ -16,6 +16,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
+	"github.com/sahal/parmesan/internal/domain/customer"
 	"github.com/sahal/parmesan/internal/domain/execution"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/media"
@@ -280,6 +281,7 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 				"response_analysis":     view.ResponseAnalysisStage.Analysis,
 				"composition_mode":      view.CompositionMode,
 				"soul_hash":             bundleSoulHash(view.Bundle),
+				"preference_hash":       preferenceHash(view.CustomerPreferences),
 				"arq_results":           view.ARQResults,
 			},
 			CreatedAt: time.Now().UTC(),
@@ -292,6 +294,7 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			"composition_mode":        view.CompositionMode,
 			"knowledge_snapshot_id":   view.RetrieverStage.KnowledgeSnapshotID,
 			"soul_hash":               bundleSoulHash(view.Bundle),
+			"preference_hash":         preferenceHash(view.CustomerPreferences),
 			"retriever_result_hashes": retrieverResultHashes(view),
 		})
 		if _, err := r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "policy.resolved", "completed", exec.ID, exec.TraceID, map[string]any{
@@ -482,6 +485,7 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 	if err != nil {
 		return resolvedView{}, nil, err
 	}
+	view.CustomerPreferences = r.customerPreferences(ctx, sess)
 	resolvedBundleID := selection.BundleID
 	if resolvedBundleID == "" && len(selectedBundles) > 0 {
 		resolvedBundleID = selectedBundles[0].ID
@@ -596,6 +600,21 @@ func customerKnowledgeScope(sess session.Session) (string, string) {
 		return "", ""
 	}
 	return "customer_agent", strings.TrimSpace(sess.AgentID) + ":" + strings.TrimSpace(sess.CustomerID)
+}
+
+func (r *Runner) customerPreferences(ctx context.Context, sess session.Session) []customer.Preference {
+	if strings.TrimSpace(sess.AgentID) == "" || strings.TrimSpace(sess.CustomerID) == "" {
+		return nil
+	}
+	items, err := r.repo.ListCustomerPreferences(ctx, customer.PreferenceQuery{
+		AgentID:    strings.TrimSpace(sess.AgentID),
+		CustomerID: strings.TrimSpace(sess.CustomerID),
+		Status:     "active",
+	})
+	if err != nil {
+		return nil
+	}
+	return items
 }
 
 func (r *Runner) derivedSignalText(ctx context.Context, sessionID string) []string {
@@ -1361,6 +1380,9 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 	if len(view.Attention.CriticalInstructionIDs) > 0 {
 		parts = append(parts, "Critical policy IDs: "+strings.Join(view.Attention.CriticalInstructionIDs, ", "))
 	}
+	if prefs := customerPreferenceText(view.CustomerPreferences); prefs != "" {
+		parts = append(parts, "Customer preferences (soft constraints):\n"+prefs)
+	}
 	if soul := soulPrompt(bundleSoul(view.Bundle)); soul != "" {
 		parts = append(parts, "Agent SOUL style and brand rules:\n"+soul)
 	}
@@ -1377,6 +1399,43 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 		parts = append(parts, "Tool output: "+mustJSON(toolOutput))
 	}
 	return strings.Join(parts, "\n")
+}
+
+func customerPreferenceText(items []customer.Preference) string {
+	var parts []string
+	for _, item := range items {
+		if strings.TrimSpace(item.Key) == "" || strings.TrimSpace(item.Value) == "" {
+			continue
+		}
+		parts = append(parts, item.Key+": "+item.Value)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func preferenceHash(items []customer.Preference) string {
+	if len(items) == 0 {
+		return ""
+	}
+	type prefHashItem struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	values := make([]prefHashItem, 0, len(items))
+	for _, item := range items {
+		if strings.TrimSpace(item.Key) == "" || strings.TrimSpace(item.Value) == "" {
+			continue
+		}
+		values = append(values, prefHashItem{Key: item.Key, Value: item.Value})
+	}
+	sort.Slice(values, func(i, j int) bool {
+		return values[i].Key < values[j].Key
+	})
+	raw, err := json.Marshal(values)
+	if err != nil || len(values) == 0 {
+		return ""
+	}
+	sum := sha1.Sum(raw)
+	return hex.EncodeToString(sum[:8])
 }
 
 func soulPrompt(soul policy.Soul) string {

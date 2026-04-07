@@ -19,6 +19,8 @@ Conversation-edge rules:
 - Operator supervision uses `/v1/operator/...`; operator notes are hidden from ACP list/stream responses.
 - Operator session listing supports `customer_id`, `agent_id`, `mode`, `label`, `operator_id`, `active=true`, and `limit` filters.
 - Operator event listing supports `min_offset`, `limit`, `source`, `trace_id`, and `kind` filters.
+- Operator feedback uses `POST /v1/operator/sessions/{id}/feedback` and can compile into customer preferences, knowledge proposals, or draft policy/SOUL proposals.
+- Operator customer preferences are available under `/v1/operator/customers/{customer_id}/preferences?agent_id=...`.
 - Trace listing supports `trace_id`, `session_id`, `execution_id`, `kind`, and `limit` filters; `GET /v1/traces/{id}` returns the detailed timeline.
 - If `OPERATOR_API_KEY` is configured, `/v1/operator/...` requires `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
 
@@ -45,6 +47,7 @@ Knowledge workspace routes:
 
 Knowledge rules:
 - Agent profiles bind an ACP `agent_id` to a default policy bundle and default knowledge scope.
+- Operator agent profile reads include `soul_hash` and `active_session_count` when derivable.
 - Policy bundles can carry a `soul` block for identity, brand, language, tone, formatting, escalation, and avoid rules.
 - SOUL is injected as strong response style guidance, but hard policy, strict templates, approval/tool constraints, and explicit customer constraints take precedence.
 - Folder sources require `KNOWLEDGE_SOURCE_ROOT` and cannot point outside that root.
@@ -52,7 +55,8 @@ Knowledge rules:
 - Runtime retrievers inject response-scoped grounding from immutable knowledge snapshots and must not mutate policy or wiki state during ACP turn processing.
 - Non-text ACP content parts are treated as media assets; image/audio parts now produce derived signals like OCR text, summaries, labels, transcripts, and language hints.
 - Retrieval prefers customer-scoped `customer_agent` knowledge when available, then falls back to shared agent or bundle knowledge.
-- Shared conversation learning creates draft knowledge proposals; low-risk customer facts can update customer-scoped knowledge directly.
+- Shared conversation learning creates draft knowledge proposals; low-risk customer facts update first-class customer preferences directly.
+- Policy and SOUL changes inferred from operator feedback always become draft rollout proposals and never auto-apply.
 - Proposal review supports explicit `draft`, `approved`, `rejected`, and `applied` states, plus a preview surface before apply.
 - OpenRouter multimodal enrichers are used when configured:
   - images use `image_url`

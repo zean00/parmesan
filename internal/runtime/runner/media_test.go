@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sahal/parmesan/internal/domain/customer"
 	"github.com/sahal/parmesan/internal/domain/execution"
-	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/media"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/store/memory"
@@ -183,12 +183,12 @@ func TestLearnFromExecutionCreatesCustomerSnapshotAndProposal(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	snapshots, err := repo.ListKnowledgeSnapshots(context.Background(), knowledge.SnapshotQuery{ScopeKind: "customer_agent", ScopeID: "agent_1:cust_1"})
+	prefs, err := repo.ListCustomerPreferences(context.Background(), customer.PreferenceQuery{AgentID: "agent_1", CustomerID: "cust_1", Status: "active"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshots) == 0 {
-		t.Fatalf("snapshots = %#v, want customer-scoped knowledge snapshot", snapshots)
+	if len(prefs) < 2 {
+		t.Fatalf("preferences = %#v, want learned customer preferences", prefs)
 	}
 	proposals, err := repo.ListKnowledgeUpdateProposals(context.Background(), "agent", "agent_1")
 	if err != nil {

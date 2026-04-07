@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/sahal/parmesan/internal/domain/customer"
 	"github.com/sahal/parmesan/internal/domain/journey"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/policy"
@@ -365,6 +366,7 @@ type EngineResult struct {
 	ToolPlanStage               ToolPlanStageResult
 	ToolDecisionStage           ToolDecisionStageResult
 	CompositionMode             string
+	CustomerPreferences         []customer.Preference
 	NoMatch                     string
 	DisambiguationPrompt        string
 	BatchResults                []BatchResult

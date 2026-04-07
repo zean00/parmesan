@@ -12,6 +12,7 @@ import (
 	"github.com/sahal/parmesan/internal/config"
 	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
+	"github.com/sahal/parmesan/internal/domain/customer"
 	"github.com/sahal/parmesan/internal/domain/execution"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/session"
@@ -633,6 +634,10 @@ func TestComposePromptIncludesSoulGuidance(t *testing.T) {
 			StyleRules:      []string{"ask one question at a time"},
 			AvoidRules:      []string{"unsupported promises"},
 		}},
+		CustomerPreferences: []customer.Preference{{
+			Key:   "preferred_name",
+			Value: "Alex",
+		}},
 	}, []session.Event{{
 		Source:  "customer",
 		Kind:    "message",
@@ -642,7 +647,8 @@ func TestComposePromptIncludesSoulGuidance(t *testing.T) {
 	if !strings.Contains(prompt, "Agent SOUL style and brand rules:") ||
 		!strings.Contains(prompt, "Brand: Parmesan") ||
 		!strings.Contains(prompt, "ask one question at a time") ||
-		!strings.Contains(prompt, "Avoid rules: unsupported promises") {
+		!strings.Contains(prompt, "Avoid rules: unsupported promises") ||
+		!strings.Contains(prompt, "Customer preferences (soft constraints):\npreferred_name: Alex") {
 		t.Fatalf("prompt = %q, want SOUL style guidance", prompt)
 	}
 }

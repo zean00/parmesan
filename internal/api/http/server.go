@@ -22,7 +22,9 @@ import (
 	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
+	"github.com/sahal/parmesan/internal/domain/customer"
 	"github.com/sahal/parmesan/internal/domain/execution"
+	"github.com/sahal/parmesan/internal/domain/feedback"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/media"
 	"github.com/sahal/parmesan/internal/domain/policy"
@@ -32,6 +34,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/tool"
 	knowledgecompiler "github.com/sahal/parmesan/internal/knowledge/compiler"
 	knowledgeenrichment "github.com/sahal/parmesan/internal/knowledge/enrichment"
+	knowledgelearning "github.com/sahal/parmesan/internal/knowledge/learning"
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/policyyaml"
 	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
@@ -71,6 +74,7 @@ type sessionSummary struct {
 	CompositionMode       string   `json:"composition_mode,omitempty"`
 	KnowledgeSnapshotID   string   `json:"knowledge_snapshot_id,omitempty"`
 	SoulHash              string   `json:"soul_hash,omitempty"`
+	PreferenceHash        string   `json:"preference_hash,omitempty"`
 	RetrieverResultHashes []string `json:"retriever_result_hashes,omitempty"`
 }
 
@@ -178,6 +182,12 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/messages/on-behalf-of-agent", s.operatorCreateMessageOnBehalfOfAgent)
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/notes", s.operatorCreateNote)
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/process", s.operatorProcessEvent)
+	mux.HandleFunc("POST /v1/operator/sessions/{id}/feedback", s.operatorCreateFeedback)
+	mux.HandleFunc("GET /v1/operator/feedback", s.operatorListFeedback)
+	mux.HandleFunc("GET /v1/operator/feedback/{id}", s.operatorGetFeedback)
+	mux.HandleFunc("GET /v1/operator/customers/{customer_id}/preferences", s.operatorListCustomerPreferences)
+	mux.HandleFunc("PUT /v1/operator/customers/{customer_id}/preferences/{key}", s.operatorUpsertCustomerPreference)
+	mux.HandleFunc("GET /v1/operator/customers/{customer_id}/preference-events", s.operatorListCustomerPreferenceEvents)
 	mux.HandleFunc("POST /v1/operator/agents", s.operatorCreateAgentProfile)
 	mux.HandleFunc("GET /v1/operator/agents", s.operatorListAgentProfiles)
 	mux.HandleFunc("GET /v1/operator/agents/{id}", s.operatorGetAgentProfile)
@@ -868,6 +878,7 @@ func (s *Server) acpGetSession(w http.ResponseWriter, r *http.Request) {
 		CompositionMode:       summary.CompositionMode,
 		KnowledgeSnapshotID:   summary.KnowledgeSnapshotID,
 		SoulHash:              summary.SoulHash,
+		PreferenceHash:        summary.PreferenceHash,
 		RetrieverResultHashes: append([]string(nil), summary.RetrieverResultHashes...),
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -1267,6 +1278,221 @@ func (s *Server) operatorProcessEvent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, exec)
 }
 
+func (s *Server) operatorCreateFeedback(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	sess, err := s.store.GetSession(r.Context(), sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	var record feedback.Record
+	if err := json.NewDecoder(r.Body).Decode(&record); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(record.Text) == "" {
+		http.Error(w, "text is required", http.StatusBadRequest)
+		return
+	}
+	now := time.Now().UTC()
+	if strings.TrimSpace(record.ID) == "" {
+		record.ID = fmt.Sprintf("feedback_%d", now.UnixNano())
+	}
+	record.SessionID = sessionID
+	if record.Metadata == nil {
+		record.Metadata = map[string]any{}
+	}
+	if strings.TrimSpace(record.ExecutionID) == "" || strings.TrimSpace(record.TraceID) == "" {
+		if exec, ok := s.latestSessionExecution(r.Context(), sessionID); ok {
+			if strings.TrimSpace(record.ExecutionID) == "" {
+				record.ExecutionID = exec.ID
+			}
+			if strings.TrimSpace(record.TraceID) == "" {
+				record.TraceID = exec.TraceID
+			}
+		}
+	}
+	events, err := s.store.ListEvents(r.Context(), sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	signals, err := s.store.ListDerivedSignals(r.Context(), sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	outputs, err := knowledgelearning.New(s.store).CompileFeedback(r.Context(), record, sess, events, signals)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	record.Outputs = outputs
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = now
+	}
+	record.UpdatedAt = now
+	if err := s.store.SaveFeedbackRecord(r.Context(), record); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.appendTrace(r.Context(), audit.Record{
+		ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+		Kind:        "operator.feedback.compiled",
+		SessionID:   sessionID,
+		ExecutionID: record.ExecutionID,
+		TraceID:     record.TraceID,
+		Message:     "operator feedback compiled",
+		Fields:      map[string]any{"feedback_id": record.ID, "outputs": record.Outputs, "category": record.Category},
+		CreatedAt:   now,
+	})
+	writeJSON(w, http.StatusCreated, record)
+}
+
+func (s *Server) operatorListFeedback(w http.ResponseWriter, r *http.Request) {
+	limit, err := positiveQueryInt(r.URL.Query().Get("limit"), "limit")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	items, err := s.store.ListFeedbackRecords(r.Context(), feedback.Query{
+		SessionID:  strings.TrimSpace(r.URL.Query().Get("session_id")),
+		OperatorID: strings.TrimSpace(r.URL.Query().Get("operator_id")),
+		Category:   strings.TrimSpace(r.URL.Query().Get("category")),
+		Limit:      limit,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) operatorGetFeedback(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetFeedbackRecord(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) operatorListCustomerPreferences(w http.ResponseWriter, r *http.Request) {
+	agentID := strings.TrimSpace(r.URL.Query().Get("agent_id"))
+	if agentID == "" {
+		http.Error(w, "agent_id is required", http.StatusBadRequest)
+		return
+	}
+	items, err := s.store.ListCustomerPreferences(r.Context(), customer.PreferenceQuery{
+		AgentID:    agentID,
+		CustomerID: r.PathValue("customer_id"),
+		Status:     strings.TrimSpace(r.URL.Query().Get("status")),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) operatorUpsertCustomerPreference(w http.ResponseWriter, r *http.Request) {
+	customerID := r.PathValue("customer_id")
+	key := r.PathValue("key")
+	var req struct {
+		AgentID      string         `json:"agent_id"`
+		Value        string         `json:"value"`
+		Status       string         `json:"status"`
+		Confidence   float64        `json:"confidence"`
+		OperatorID   string         `json:"operator_id"`
+		Metadata     map[string]any `json:"metadata"`
+		EvidenceRefs []string       `json:"evidence_refs"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.AgentID) == "" || strings.TrimSpace(key) == "" || strings.TrimSpace(req.Value) == "" {
+		http.Error(w, "agent_id, key, and value are required", http.StatusBadRequest)
+		return
+	}
+	now := time.Now().UTC()
+	if req.Status == "" {
+		req.Status = "active"
+	}
+	if req.Confidence == 0 {
+		req.Confidence = 1
+	}
+	prefID := stableServerID("cpref", req.AgentID, customerID, key)
+	pref := customer.Preference{
+		ID:              prefID,
+		AgentID:         req.AgentID,
+		CustomerID:      customerID,
+		Key:             key,
+		Value:           req.Value,
+		Source:          "operator",
+		Confidence:      req.Confidence,
+		Status:          req.Status,
+		EvidenceRefs:    req.EvidenceRefs,
+		Metadata:        cloneMap(req.Metadata),
+		LastConfirmedAt: &now,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	event := customer.PreferenceEvent{
+		ID:           fmt.Sprintf("cpevt_%d", now.UnixNano()),
+		PreferenceID: prefID,
+		AgentID:      req.AgentID,
+		CustomerID:   customerID,
+		Key:          key,
+		Value:        req.Value,
+		Action:       "operator_upsert",
+		Source:       "operator",
+		Confidence:   req.Confidence,
+		EvidenceRefs: req.EvidenceRefs,
+		Metadata:     map[string]any{"operator_id": req.OperatorID},
+		CreatedAt:    now,
+	}
+	if err := s.store.SaveCustomerPreference(r.Context(), pref, event); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, pref)
+}
+
+func (s *Server) operatorListCustomerPreferenceEvents(w http.ResponseWriter, r *http.Request) {
+	agentID := strings.TrimSpace(r.URL.Query().Get("agent_id"))
+	if agentID == "" {
+		http.Error(w, "agent_id is required", http.StatusBadRequest)
+		return
+	}
+	items, err := s.store.ListCustomerPreferenceEvents(r.Context(), customer.PreferenceQuery{
+		AgentID:    agentID,
+		CustomerID: r.PathValue("customer_id"),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) latestSessionExecution(ctx context.Context, sessionID string) (execution.TurnExecution, bool) {
+	execs, err := s.store.ListExecutions(ctx)
+	if err != nil {
+		return execution.TurnExecution{}, false
+	}
+	var out execution.TurnExecution
+	for _, item := range execs {
+		if item.SessionID != sessionID {
+			continue
+		}
+		if out.ID == "" || item.CreatedAt.After(out.CreatedAt) {
+			out = item
+		}
+	}
+	return out, out.ID != ""
+}
+
 func (s *Server) operatorCreateVisibleMessage(w http.ResponseWriter, r *http.Request, source string) {
 	sessionID := r.PathValue("id")
 	var req struct {
@@ -1338,7 +1564,7 @@ func (s *Server) operatorCreateAgentProfile(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusCreated, profile)
+	writeJSON(w, http.StatusCreated, s.agentProfileView(r.Context(), profile))
 }
 
 func (s *Server) operatorListAgentProfiles(w http.ResponseWriter, r *http.Request) {
@@ -1347,7 +1573,11 @@ func (s *Server) operatorListAgentProfiles(w http.ResponseWriter, r *http.Reques
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, items)
+	out := make([]agent.Profile, 0, len(items))
+	for _, item := range items {
+		out = append(out, s.agentProfileView(r.Context(), item))
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) operatorGetAgentProfile(w http.ResponseWriter, r *http.Request) {
@@ -1356,7 +1586,7 @@ func (s *Server) operatorGetAgentProfile(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	writeJSON(w, http.StatusOK, profile)
+	writeJSON(w, http.StatusOK, s.agentProfileView(r.Context(), profile))
 }
 
 func (s *Server) operatorUpdateAgentProfile(w http.ResponseWriter, r *http.Request) {
@@ -1387,7 +1617,52 @@ func (s *Server) operatorUpdateAgentProfile(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, profile)
+	writeJSON(w, http.StatusOK, s.agentProfileView(r.Context(), profile))
+}
+
+func (s *Server) agentProfileView(ctx context.Context, profile agent.Profile) agent.Profile {
+	profile.SoulHash = s.policyBundleSoulHash(ctx, profile.DefaultPolicyBundleID)
+	profile.ActiveSessionCount = s.activeSessionCount(ctx, profile.ID)
+	return profile
+}
+
+func (s *Server) activeSessionCount(ctx context.Context, agentID string) int {
+	sessions, err := s.store.ListSessions(ctx)
+	if err != nil {
+		return 0
+	}
+	var count int
+	for _, sess := range sessions {
+		if sess.AgentID == agentID && sessionMode(sess) != "closed" {
+			count++
+		}
+	}
+	return count
+}
+
+func (s *Server) policyBundleSoulHash(ctx context.Context, bundleID string) string {
+	if strings.TrimSpace(bundleID) == "" {
+		return ""
+	}
+	bundles, err := s.store.ListBundles(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, bundle := range bundles {
+		if bundle.ID == bundleID {
+			return serverSoulHash(bundle.Soul)
+		}
+	}
+	return ""
+}
+
+func serverSoulHash(soul policy.Soul) string {
+	raw, err := json.Marshal(soul)
+	if err != nil || string(raw) == "{}" {
+		return ""
+	}
+	sum := sha1.Sum(raw)
+	return hex.EncodeToString(sum[:8])
 }
 
 func (s *Server) operatorCreateKnowledgeSource(w http.ResponseWriter, r *http.Request) {
@@ -2913,6 +3188,11 @@ func cloneMap(src map[string]any) map[string]any {
 	return out
 }
 
+func stableServerID(prefix string, parts ...string) string {
+	sum := sha1.Sum([]byte(strings.Join(parts, "\x00")))
+	return prefix + "_" + hex.EncodeToString(sum[:8])
+}
+
 func (s *Server) resolveSessionApproval(ctx context.Context, sessionID, approvalID, decision, source string) (approval.Session, error) {
 	item, err := s.store.GetApprovalSession(ctx, approvalID)
 	if err != nil || item.SessionID != sessionID {
@@ -3079,6 +3359,7 @@ func (s *Server) sessionSummaryFor(ctx context.Context, sess session.Session) se
 		summary.CompositionMode = stringMetadata(sess.Metadata, "composition_mode")
 		summary.KnowledgeSnapshotID = stringMetadata(sess.Metadata, "knowledge_snapshot_id")
 		summary.SoulHash = stringMetadata(sess.Metadata, "soul_hash")
+		summary.PreferenceHash = stringMetadata(sess.Metadata, "preference_hash")
 		summary.RetrieverResultHashes = stringSliceMetadata(sess.Metadata, "retriever_result_hashes")
 	}
 	execs, err := s.store.ListExecutions(ctx)

@@ -41,6 +41,7 @@ type SessionSummary struct {
 	CompositionMode       string   `json:"composition_mode,omitempty"`
 	KnowledgeSnapshotID   string   `json:"knowledge_snapshot_id,omitempty"`
 	SoulHash              string   `json:"soul_hash,omitempty"`
+	PreferenceHash        string   `json:"preference_hash,omitempty"`
 	RetrieverResultHashes []string `json:"retriever_result_hashes,omitempty"`
 }
 
