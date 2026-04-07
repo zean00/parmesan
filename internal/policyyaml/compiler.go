@@ -123,6 +123,36 @@ func ValidateBundle(bundle policy.Bundle) error {
 			return fmt.Errorf("tool_policy %q requires tool_ids", item.ID)
 		}
 	}
+	for _, item := range bundle.Retrievers {
+		if err := validateID("retriever", item.ID, seen); err != nil {
+			return err
+		}
+		if strings.TrimSpace(item.Kind) == "" {
+			return fmt.Errorf("retriever %q requires kind", item.ID)
+		}
+		if strings.TrimSpace(item.Kind) != "knowledge" {
+			return fmt.Errorf("retriever %q has unsupported kind %q", item.ID, item.Kind)
+		}
+		scope := strings.TrimSpace(item.Scope)
+		if scope == "" {
+			return fmt.Errorf("retriever %q requires scope", item.ID)
+		}
+		switch scope {
+		case "agent":
+		case "guideline", "journey", "journey_state":
+			if strings.TrimSpace(item.TargetID) == "" {
+				return fmt.Errorf("retriever %q requires target_id for scope %q", item.ID, scope)
+			}
+		default:
+			return fmt.Errorf("retriever %q has unsupported scope %q", item.ID, scope)
+		}
+		if item.MaxResults < 0 {
+			return fmt.Errorf("retriever %q max_results cannot be negative", item.ID)
+		}
+		if item.Mode != "" && item.Mode != "eager" && item.Mode != "scoped" && item.Mode != "deferred" {
+			return fmt.Errorf("retriever %q has unsupported mode %q", item.ID, item.Mode)
+		}
+	}
 
 	return nil
 }

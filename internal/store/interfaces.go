@@ -10,6 +10,8 @@ import (
 	"github.com/sahal/parmesan/internal/domain/execution"
 	gatewaydomain "github.com/sahal/parmesan/internal/domain/gateway"
 	"github.com/sahal/parmesan/internal/domain/journey"
+	"github.com/sahal/parmesan/internal/domain/knowledge"
+	"github.com/sahal/parmesan/internal/domain/media"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/replay"
 	"github.com/sahal/parmesan/internal/domain/rollout"
@@ -68,4 +70,21 @@ type Repository interface {
 	SaveRollout(ctx context.Context, record rollout.Record) error
 	GetRollout(ctx context.Context, rolloutID string) (rollout.Record, error)
 	ListRollouts(ctx context.Context) ([]rollout.Record, error)
+	SaveKnowledgeSource(ctx context.Context, source knowledge.Source) error
+	GetKnowledgeSource(ctx context.Context, sourceID string) (knowledge.Source, error)
+	ListKnowledgeSources(ctx context.Context, scopeKind string, scopeID string) ([]knowledge.Source, error)
+	SaveKnowledgePage(ctx context.Context, page knowledge.Page, chunks []knowledge.Chunk) error
+	ListKnowledgePages(ctx context.Context, query knowledge.PageQuery) ([]knowledge.Page, error)
+	ListKnowledgeChunks(ctx context.Context, query knowledge.ChunkQuery) ([]knowledge.Chunk, error)
+	SearchKnowledgeChunks(ctx context.Context, query knowledge.ChunkSearchQuery) ([]knowledge.Chunk, error)
+	SaveKnowledgeSnapshot(ctx context.Context, snapshot knowledge.Snapshot) error
+	GetKnowledgeSnapshot(ctx context.Context, snapshotID string) (knowledge.Snapshot, error)
+	ListKnowledgeSnapshots(ctx context.Context, query knowledge.SnapshotQuery) ([]knowledge.Snapshot, error)
+	SaveKnowledgeUpdateProposal(ctx context.Context, proposal knowledge.UpdateProposal) error
+	GetKnowledgeUpdateProposal(ctx context.Context, proposalID string) (knowledge.UpdateProposal, error)
+	ListKnowledgeUpdateProposals(ctx context.Context, scopeKind string, scopeID string) ([]knowledge.UpdateProposal, error)
+	SaveMediaAsset(ctx context.Context, asset media.Asset) error
+	ListMediaAssets(ctx context.Context, sessionID string) ([]media.Asset, error)
+	SaveDerivedSignal(ctx context.Context, signal media.DerivedSignal) error
+	ListDerivedSignals(ctx context.Context, sessionID string) ([]media.DerivedSignal, error)
 }

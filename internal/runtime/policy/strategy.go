@@ -7,6 +7,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/journey"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/tool"
+	retrieverdomain "github.com/sahal/parmesan/internal/knowledge/retriever"
 	"github.com/sahal/parmesan/internal/model"
 	semantics "github.com/sahal/parmesan/internal/runtime/semantics"
 )
@@ -96,52 +97,54 @@ type matchingState struct {
 	catalog          []tool.CatalogEntry
 	journeyInstances []journey.Instance
 
-	projectedNodes       []ProjectedJourneyNode
-	attention            PolicyAttention
-	observationStage     ObservationMatchStageResult
-	activeJourney        *policy.Journey
-	activeJourneyState   *policy.JourneyNode
-	journeyInstance      *journey.Instance
-	matchFinalizeStage   FinalizeStageResult
-	previouslyAppliedStage PreviouslyAppliedStageResult
-	conditionArtifactsStage ConditionArtifactsStageResult
-	journeyBacktrackStage JourneyBacktrackStageResult
-	journeyProgressStage  JourneyProgressStageResult
-	customerDependencyStage CustomerDependencyStageResult
+	projectedNodes              []ProjectedJourneyNode
+	attention                   PolicyAttention
+	observationStage            ObservationMatchStageResult
+	activeJourney               *policy.Journey
+	activeJourneyState          *policy.JourneyNode
+	journeyInstance             *journey.Instance
+	matchFinalizeStage          FinalizeStageResult
+	previouslyAppliedStage      PreviouslyAppliedStageResult
+	conditionArtifactsStage     ConditionArtifactsStageResult
+	journeyBacktrackStage       JourneyBacktrackStageResult
+	journeyProgressStage        JourneyProgressStageResult
+	customerDependencyStage     CustomerDependencyStageResult
 	relationshipResolutionStage RelationshipResolutionStageResult
-	disambiguationStage DisambiguationStageResult
-	responseAnalysisStage ResponseAnalysisStageResult
-	toolExposureStage    ToolExposureStageResult
-	toolPlanStage        ToolPlanStageResult
-	toolDecisionStage    ToolDecisionStageResult
-	batchResults         []BatchResult
-	promptSetVersions    map[string]string
+	disambiguationStage         DisambiguationStageResult
+	retrieverStage              RetrieverStageResult
+	responseAnalysisStage       ResponseAnalysisStageResult
+	toolExposureStage           ToolExposureStageResult
+	toolPlanStage               ToolPlanStageResult
+	toolDecisionStage           ToolDecisionStageResult
+	batchResults                []BatchResult
+	promptSetVersions           map[string]string
 }
 
 type matchingSnapshot struct {
-	router              *model.Router
-	bundle              policy.Bundle
-	context             MatchingContext
-	catalog             []tool.CatalogEntry
-	journeyInstances    []journey.Instance
-	projectedNodes      []ProjectedJourneyNode
-	attention           PolicyAttention
-	observationStage    ObservationMatchStageResult
-	activeJourney       *policy.Journey
-	activeJourneyState  *policy.JourneyNode
-	journeyInstance     *journey.Instance
-	matchFinalizeStage  FinalizeStageResult
-	previouslyAppliedStage PreviouslyAppliedStageResult
-	conditionArtifactsStage ConditionArtifactsStageResult
-	journeyBacktrackStage JourneyBacktrackStageResult
-	journeyProgressStage  JourneyProgressStageResult
-	customerDependencyStage CustomerDependencyStageResult
+	router                      *model.Router
+	bundle                      policy.Bundle
+	context                     MatchingContext
+	catalog                     []tool.CatalogEntry
+	journeyInstances            []journey.Instance
+	projectedNodes              []ProjectedJourneyNode
+	attention                   PolicyAttention
+	observationStage            ObservationMatchStageResult
+	activeJourney               *policy.Journey
+	activeJourneyState          *policy.JourneyNode
+	journeyInstance             *journey.Instance
+	matchFinalizeStage          FinalizeStageResult
+	previouslyAppliedStage      PreviouslyAppliedStageResult
+	conditionArtifactsStage     ConditionArtifactsStageResult
+	journeyBacktrackStage       JourneyBacktrackStageResult
+	journeyProgressStage        JourneyProgressStageResult
+	customerDependencyStage     CustomerDependencyStageResult
 	relationshipResolutionStage RelationshipResolutionStageResult
-	disambiguationStage DisambiguationStageResult
-	responseAnalysisStage ResponseAnalysisStageResult
-	toolExposureStage    ToolExposureStageResult
-	toolPlanStage       ToolPlanStageResult
-	toolDecisionStage   ToolDecisionStageResult
+	disambiguationStage         DisambiguationStageResult
+	retrieverStage              RetrieverStageResult
+	responseAnalysisStage       ResponseAnalysisStageResult
+	toolExposureStage           ToolExposureStageResult
+	toolPlanStage               ToolPlanStageResult
+	toolDecisionStage           ToolDecisionStageResult
 }
 
 func snapshotFromState(state *matchingState) matchingSnapshot {
@@ -149,31 +152,32 @@ func snapshotFromState(state *matchingState) matchingSnapshot {
 		return matchingSnapshot{}
 	}
 	return matchingSnapshot{
-		router:               state.router,
-		bundle:               state.bundle,
-		context:              state.context,
+		router:  state.router,
+		bundle:  state.bundle,
+		context: state.context,
 		// Snapshots are read-only views for batch creation/execution, so keep
 		// them shallow to avoid re-cloning large stage artifacts on every step.
-		catalog:              state.catalog,
-		journeyInstances:     state.journeyInstances,
-		projectedNodes:       state.projectedNodes,
-		attention:            state.attention,
-		observationStage:     state.observationStage,
-		activeJourney:        state.activeJourney,
-		activeJourneyState:   state.activeJourneyState,
-		journeyInstance:      state.journeyInstance,
-		matchFinalizeStage:   state.matchFinalizeStage,
-		previouslyAppliedStage: state.previouslyAppliedStage,
-		conditionArtifactsStage: state.conditionArtifactsStage,
-		journeyBacktrackStage: state.journeyBacktrackStage,
-		journeyProgressStage:  state.journeyProgressStage,
-		customerDependencyStage: state.customerDependencyStage,
+		catalog:                     state.catalog,
+		journeyInstances:            state.journeyInstances,
+		projectedNodes:              state.projectedNodes,
+		attention:                   state.attention,
+		observationStage:            state.observationStage,
+		activeJourney:               state.activeJourney,
+		activeJourneyState:          state.activeJourneyState,
+		journeyInstance:             state.journeyInstance,
+		matchFinalizeStage:          state.matchFinalizeStage,
+		previouslyAppliedStage:      state.previouslyAppliedStage,
+		conditionArtifactsStage:     state.conditionArtifactsStage,
+		journeyBacktrackStage:       state.journeyBacktrackStage,
+		journeyProgressStage:        state.journeyProgressStage,
+		customerDependencyStage:     state.customerDependencyStage,
 		relationshipResolutionStage: state.relationshipResolutionStage,
-		disambiguationStage: state.disambiguationStage,
-		responseAnalysisStage: state.responseAnalysisStage,
-		toolExposureStage:    state.toolExposureStage,
-		toolPlanStage:        state.toolPlanStage,
-		toolDecisionStage:    state.toolDecisionStage,
+		disambiguationStage:         state.disambiguationStage,
+		retrieverStage:              state.retrieverStage,
+		responseAnalysisStage:       state.responseAnalysisStage,
+		toolExposureStage:           state.toolExposureStage,
+		toolPlanStage:               state.toolPlanStage,
+		toolDecisionStage:           state.toolDecisionStage,
 	}
 }
 
@@ -390,6 +394,12 @@ func cloneToolPlanEvaluation(src ToolPlanEvaluation) ToolPlanEvaluation {
 func cloneToolExposureStageResult(src ToolExposureStageResult) ToolExposureStageResult {
 	src.ExposedTools = append([]string(nil), src.ExposedTools...)
 	src.ToolApprovals = cloneStringMap(src.ToolApprovals)
+	return src
+}
+
+func cloneRetrieverStageResult(src RetrieverStageResult) RetrieverStageResult {
+	src.Results = append([]retrieverdomain.Result(nil), src.Results...)
+	src.TransientGuidelines = append([]policy.Guideline(nil), src.TransientGuidelines...)
 	return src
 }
 

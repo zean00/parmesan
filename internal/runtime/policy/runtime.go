@@ -22,15 +22,24 @@ func Resolve(events []session.Event, bundles []policy.Bundle, journeyInstances [
 }
 
 func ResolveWithRouter(ctx context.Context, router *model.Router, events []session.Event, bundles []policy.Bundle, journeyInstances []journey.Instance, catalog []tool.CatalogEntry) (EngineResult, error) {
+	return ResolveWithOptions(ctx, events, bundles, journeyInstances, catalog, ResolveOptions{Router: router})
+}
+
+func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []policy.Bundle, journeyInstances []journey.Instance, catalog []tool.CatalogEntry, options ResolveOptions) (EngineResult, error) {
 	if len(bundles) == 0 {
 		return EngineResult{}, nil
 	}
 	bundle := bundles[0]
 	matchCtx := buildMatchingContext(events)
+	matchCtx.DerivedSignals = append([]string(nil), options.DerivedSignals...)
+	if len(matchCtx.DerivedSignals) > 0 {
+		matchCtx.ConversationText = strings.TrimSpace(matchCtx.ConversationText + " " + strings.Join(matchCtx.DerivedSignals, " "))
+	}
+	agentRetrieverTasks := startAgentRetrieverTasks(ctx, options, bundle.Retrievers, matchCtx)
 	resolver := newStrategyResolver(genericStrategy{})
 	resolver.Register(customStrategy{})
 	matcher := newGuidelineMatcher(resolver)
-	state, err := matcher.Run(ctx, router, bundle, matchCtx, journeyInstances, catalog)
+	state, err := matcher.Run(ctx, options.Router, bundle, matchCtx, journeyInstances, catalog)
 	if err != nil {
 		return EngineResult{}, err
 	}
@@ -42,9 +51,17 @@ func ResolveWithRouter(ctx context.Context, router *model.Router, events []sessi
 			rebuildProjectedGuidelineStages(ctx, state)
 		}
 	}
+	if len(bundle.Retrievers) > 0 {
+		retrieverResult := buildRetrieverStageResult(ctx, options, state, agentRetrieverTasks)
+		retrieverResult.Apply(state)
+		recordBatchResult(state, "retriever", "generic", promptVersion("retriever"), 0, len(bundle.Retrievers), 0, retrieverResult)
+		if len(retrieverResult.TransientGuidelines) > 0 {
+			rebuildProjectedGuidelineStages(ctx, state)
+		}
+	}
 	exposedTools, toolApprovals := resolveToolExposure(bundle.GuidelineToolAssociations, state.observationStage.Observations, state.matchFinalizeStage.MatchedGuidelines, state.activeJourneyState, bundle.ToolPolicies, catalog)
 	ToolExposureStageResult{ExposedTools: exposedTools, ToolApprovals: toolApprovals}.Apply(state)
-	toolPlanResult, toolDecisionResult := buildToolStageResults(ctx, router, matchCtx, state, bundle.Relationships, catalog)
+	toolPlanResult, toolDecisionResult := buildToolStageResults(ctx, options.Router, state.context, state, bundle.Relationships, catalog)
 	toolPlanResult.Apply(state)
 	toolDecisionResult.Apply(state)
 	toolPlanOutput := toolPlanResult.BatchOutput()
@@ -86,34 +103,35 @@ func resolvedViewFromState(bundle policy.Bundle, state *matchingState, mode stri
 	resolutions := effectiveResolutionRecords(state.relationshipResolutionStage, state.disambiguationStage)
 	prompt := effectiveDisambiguationPrompt(state.relationshipResolutionStage, state.disambiguationStage)
 	return EngineResult{
-		Bundle:                     &bundle,
-		Context:                    state.context,
-		Attention:                  state.attention,
-		ObservationStage:           state.observationStage,
-		MatchFinalizeStage:         state.matchFinalizeStage,
-		PreviouslyAppliedStage:     state.previouslyAppliedStage,
-		SuppressedGuidelines:       suppressed,
-		ActiveJourney:              state.activeJourney,
-		ActiveJourneyState:         state.activeJourneyState,
-		JourneyInstance:            state.journeyInstance,
-		ProjectedNodes:             state.projectedNodes,
-		ResolutionRecords:          resolutions,
-		ConditionArtifactsStage:    state.conditionArtifactsStage,
-		JourneyBacktrackStage:      state.journeyBacktrackStage,
-		JourneyProgressStage:       state.journeyProgressStage,
-		CustomerDependencyStage:    state.customerDependencyStage,
+		Bundle:                      &bundle,
+		Context:                     state.context,
+		Attention:                   state.attention,
+		ObservationStage:            state.observationStage,
+		MatchFinalizeStage:          state.matchFinalizeStage,
+		PreviouslyAppliedStage:      state.previouslyAppliedStage,
+		SuppressedGuidelines:        suppressed,
+		ActiveJourney:               state.activeJourney,
+		ActiveJourneyState:          state.activeJourneyState,
+		JourneyInstance:             state.journeyInstance,
+		ProjectedNodes:              state.projectedNodes,
+		ResolutionRecords:           resolutions,
+		ConditionArtifactsStage:     state.conditionArtifactsStage,
+		JourneyBacktrackStage:       state.journeyBacktrackStage,
+		JourneyProgressStage:        state.journeyProgressStage,
+		CustomerDependencyStage:     state.customerDependencyStage,
 		RelationshipResolutionStage: state.relationshipResolutionStage,
-		DisambiguationStage:        state.disambiguationStage,
-		ResponseAnalysisStage:      state.responseAnalysisStage,
-		ToolExposureStage:          state.toolExposureStage,
-		ToolPlanStage:              state.toolPlanStage,
-		ToolDecisionStage:          state.toolDecisionStage,
-		CompositionMode:            mode,
-		NoMatch:                    bundle.NoMatch,
-		DisambiguationPrompt:       prompt,
-		BatchResults:               state.batchResults,
-		PromptSetVersions:          state.promptSetVersions,
-		ARQResults:                 arqs,
+		DisambiguationStage:         state.disambiguationStage,
+		RetrieverStage:              state.retrieverStage,
+		ResponseAnalysisStage:       state.responseAnalysisStage,
+		ToolExposureStage:           state.toolExposureStage,
+		ToolPlanStage:               state.toolPlanStage,
+		ToolDecisionStage:           state.toolDecisionStage,
+		CompositionMode:             mode,
+		NoMatch:                     bundle.NoMatch,
+		DisambiguationPrompt:        prompt,
+		BatchResults:                state.batchResults,
+		PromptSetVersions:           state.promptSetVersions,
+		ARQResults:                  arqs,
 	}
 }
 

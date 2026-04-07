@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 	"github.com/sahal/parmesan/internal/domain/execution"
 	gatewaydomain "github.com/sahal/parmesan/internal/domain/gateway"
 	"github.com/sahal/parmesan/internal/domain/journey"
+	"github.com/sahal/parmesan/internal/domain/knowledge"
+	"github.com/sahal/parmesan/internal/domain/media"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/replay"
 	"github.com/sahal/parmesan/internal/domain/rollout"
@@ -21,24 +24,31 @@ import (
 )
 
 type Store struct {
-	mu           sync.RWMutex
-	bundles      []policy.Bundle
-	sessions     []session.Session
-	events       map[string][]session.Event
-	bindings     []gatewaydomain.ConversationBinding
-	execs        []execution.TurnExecution
-	steps        map[string][]execution.ExecutionStep
-	journeys     map[string][]journey.Instance
-	providers    []tool.ProviderBinding
-	authBindings []tool.AuthBinding
-	catalog      []tool.CatalogEntry
-	audit        []audit.Record
-	approvals    []approval.Session
-	toolRuns     []toolrun.Run
-	deliveries   []delivery.Attempt
-	evalRuns     []replay.Run
-	proposals    []rollout.Proposal
-	rollouts     []rollout.Record
+	mu                       sync.RWMutex
+	bundles                  []policy.Bundle
+	sessions                 []session.Session
+	events                   map[string][]session.Event
+	bindings                 []gatewaydomain.ConversationBinding
+	execs                    []execution.TurnExecution
+	steps                    map[string][]execution.ExecutionStep
+	journeys                 map[string][]journey.Instance
+	providers                []tool.ProviderBinding
+	authBindings             []tool.AuthBinding
+	catalog                  []tool.CatalogEntry
+	audit                    []audit.Record
+	approvals                []approval.Session
+	toolRuns                 []toolrun.Run
+	deliveries               []delivery.Attempt
+	evalRuns                 []replay.Run
+	proposals                []rollout.Proposal
+	rollouts                 []rollout.Record
+	knowledgeSources         []knowledge.Source
+	knowledgePages           []knowledge.Page
+	knowledgeChunks          []knowledge.Chunk
+	knowledgeSnapshots       []knowledge.Snapshot
+	knowledgeUpdateProposals []knowledge.UpdateProposal
+	mediaAssets              []media.Asset
+	derivedSignals           []media.DerivedSignal
 }
 
 func New() *Store {
@@ -584,4 +594,365 @@ func (s *Store) ListRollouts(_ context.Context) ([]rollout.Record, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return append([]rollout.Record(nil), s.rollouts...), nil
+}
+
+func (s *Store) SaveKnowledgeSource(_ context.Context, source knowledge.Source) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.knowledgeSources {
+		if item.ID == source.ID {
+			s.knowledgeSources[i] = source
+			return nil
+		}
+	}
+	s.knowledgeSources = append(s.knowledgeSources, source)
+	return nil
+}
+
+func (s *Store) GetKnowledgeSource(_ context.Context, sourceID string) (knowledge.Source, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.knowledgeSources {
+		if item.ID == sourceID {
+			return item, nil
+		}
+	}
+	return knowledge.Source{}, errors.New("knowledge source not found")
+}
+
+func (s *Store) ListKnowledgeSources(_ context.Context, scopeKind string, scopeID string) ([]knowledge.Source, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []knowledge.Source
+	for _, item := range s.knowledgeSources {
+		if scopeKind != "" && item.ScopeKind != scopeKind {
+			continue
+		}
+		if scopeID != "" && item.ScopeID != scopeID {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+func (s *Store) SaveKnowledgePage(_ context.Context, page knowledge.Page, chunks []knowledge.Chunk) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	replaced := false
+	for i, item := range s.knowledgePages {
+		if item.ID == page.ID {
+			s.knowledgePages[i] = page
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		s.knowledgePages = append(s.knowledgePages, page)
+	}
+	filtered := s.knowledgeChunks[:0]
+	for _, item := range s.knowledgeChunks {
+		if item.PageID != page.ID {
+			filtered = append(filtered, item)
+		}
+	}
+	s.knowledgeChunks = append(filtered, chunks...)
+	return nil
+}
+
+func (s *Store) ListKnowledgePages(_ context.Context, query knowledge.PageQuery) ([]knowledge.Page, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	pageIDs := map[string]struct{}{}
+	if query.SnapshotID != "" {
+		for _, snap := range s.knowledgeSnapshots {
+			if snap.ID == query.SnapshotID {
+				for _, id := range snap.PageIDs {
+					pageIDs[id] = struct{}{}
+				}
+				break
+			}
+		}
+	}
+	var out []knowledge.Page
+	for _, item := range s.knowledgePages {
+		if query.ScopeKind != "" && item.ScopeKind != query.ScopeKind {
+			continue
+		}
+		if query.ScopeID != "" && item.ScopeID != query.ScopeID {
+			continue
+		}
+		if query.SnapshotID != "" {
+			if _, ok := pageIDs[item.ID]; !ok {
+				continue
+			}
+		}
+		out = append(out, item)
+		if query.Limit > 0 && len(out) >= query.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) ListKnowledgeChunks(_ context.Context, query knowledge.ChunkQuery) ([]knowledge.Chunk, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	chunkIDs := map[string]struct{}{}
+	if query.SnapshotID != "" {
+		for _, snap := range s.knowledgeSnapshots {
+			if snap.ID == query.SnapshotID {
+				for _, id := range snap.ChunkIDs {
+					chunkIDs[id] = struct{}{}
+				}
+				break
+			}
+		}
+	}
+	var out []knowledge.Chunk
+	for _, item := range s.knowledgeChunks {
+		if query.ScopeKind != "" && item.ScopeKind != query.ScopeKind {
+			continue
+		}
+		if query.ScopeID != "" && item.ScopeID != query.ScopeID {
+			continue
+		}
+		if query.SnapshotID != "" {
+			if _, ok := chunkIDs[item.ID]; !ok {
+				continue
+			}
+		}
+		out = append(out, item)
+		if query.Limit > 0 && len(out) >= query.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) SearchKnowledgeChunks(_ context.Context, query knowledge.ChunkSearchQuery) ([]knowledge.Chunk, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	chunkIDs := map[string]struct{}{}
+	if query.SnapshotID != "" {
+		for _, snap := range s.knowledgeSnapshots {
+			if snap.ID == query.SnapshotID {
+				for _, id := range snap.ChunkIDs {
+					chunkIDs[id] = struct{}{}
+				}
+				break
+			}
+		}
+	}
+	var chunks []knowledge.Chunk
+	for _, item := range s.knowledgeChunks {
+		if query.ScopeKind != "" && item.ScopeKind != query.ScopeKind {
+			continue
+		}
+		if query.ScopeID != "" && item.ScopeID != query.ScopeID {
+			continue
+		}
+		if query.SnapshotID != "" {
+			if _, ok := chunkIDs[item.ID]; !ok {
+				continue
+			}
+		}
+		chunks = append(chunks, item)
+	}
+	type scored struct {
+		score float64
+		chunk knowledge.Chunk
+	}
+	var scoredChunks []scored
+	for _, chunk := range chunks {
+		if len(query.Vector) == 0 || len(chunk.Vector) == 0 {
+			scoredChunks = append(scoredChunks, scored{score: 0, chunk: chunk})
+			continue
+		}
+		scoredChunks = append(scoredChunks, scored{score: cosine(query.Vector, chunk.Vector), chunk: chunk})
+	}
+	sort.SliceStable(scoredChunks, func(i, j int) bool {
+		if scoredChunks[i].score == scoredChunks[j].score {
+			return scoredChunks[i].chunk.ID < scoredChunks[j].chunk.ID
+		}
+		return scoredChunks[i].score > scoredChunks[j].score
+	})
+	limit := query.Limit
+	if limit <= 0 || limit > len(scoredChunks) {
+		limit = len(scoredChunks)
+	}
+	out := make([]knowledge.Chunk, 0, limit)
+	for _, item := range scoredChunks[:limit] {
+		out = append(out, item.chunk)
+	}
+	return out, nil
+}
+
+func cosine(a, b []float32) float64 {
+	size := len(a)
+	if len(b) < size {
+		size = len(b)
+	}
+	if size == 0 {
+		return 0
+	}
+	var dot float64
+	var normA float64
+	var normB float64
+	for i := 0; i < size; i++ {
+		ai := float64(a[i])
+		bi := float64(b[i])
+		dot += ai * bi
+		normA += ai * ai
+		normB += bi * bi
+	}
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+	return dot / (sqrt(normA) * sqrt(normB))
+}
+
+func sqrt(v float64) float64 {
+	if v == 0 {
+		return 0
+	}
+	z := v
+	for i := 0; i < 8; i++ {
+		z -= (z*z - v) / (2 * z)
+	}
+	return z
+}
+
+func (s *Store) SaveKnowledgeSnapshot(_ context.Context, snapshot knowledge.Snapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.knowledgeSnapshots {
+		if item.ID == snapshot.ID {
+			s.knowledgeSnapshots[i] = snapshot
+			return nil
+		}
+	}
+	s.knowledgeSnapshots = append(s.knowledgeSnapshots, snapshot)
+	return nil
+}
+
+func (s *Store) GetKnowledgeSnapshot(_ context.Context, snapshotID string) (knowledge.Snapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.knowledgeSnapshots {
+		if item.ID == snapshotID {
+			return item, nil
+		}
+	}
+	return knowledge.Snapshot{}, errors.New("knowledge snapshot not found")
+}
+
+func (s *Store) ListKnowledgeSnapshots(_ context.Context, query knowledge.SnapshotQuery) ([]knowledge.Snapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []knowledge.Snapshot
+	for i := len(s.knowledgeSnapshots) - 1; i >= 0; i-- {
+		item := s.knowledgeSnapshots[i]
+		if query.ScopeKind != "" && item.ScopeKind != query.ScopeKind {
+			continue
+		}
+		if query.ScopeID != "" && item.ScopeID != query.ScopeID {
+			continue
+		}
+		out = append(out, item)
+		if query.Limit > 0 && len(out) >= query.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) SaveKnowledgeUpdateProposal(_ context.Context, proposal knowledge.UpdateProposal) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.knowledgeUpdateProposals {
+		if item.ID == proposal.ID {
+			s.knowledgeUpdateProposals[i] = proposal
+			return nil
+		}
+	}
+	s.knowledgeUpdateProposals = append(s.knowledgeUpdateProposals, proposal)
+	return nil
+}
+
+func (s *Store) ListKnowledgeUpdateProposals(_ context.Context, scopeKind string, scopeID string) ([]knowledge.UpdateProposal, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []knowledge.UpdateProposal
+	for _, item := range s.knowledgeUpdateProposals {
+		if scopeKind != "" && item.ScopeKind != scopeKind {
+			continue
+		}
+		if scopeID != "" && item.ScopeID != scopeID {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+func (s *Store) GetKnowledgeUpdateProposal(_ context.Context, proposalID string) (knowledge.UpdateProposal, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.knowledgeUpdateProposals {
+		if item.ID == proposalID {
+			return item, nil
+		}
+	}
+	return knowledge.UpdateProposal{}, errors.New("knowledge update proposal not found")
+}
+
+func (s *Store) SaveMediaAsset(_ context.Context, asset media.Asset) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.mediaAssets {
+		if item.ID == asset.ID {
+			s.mediaAssets[i] = asset
+			return nil
+		}
+	}
+	s.mediaAssets = append(s.mediaAssets, asset)
+	return nil
+}
+
+func (s *Store) ListMediaAssets(_ context.Context, sessionID string) ([]media.Asset, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []media.Asset
+	for _, item := range s.mediaAssets {
+		if sessionID == "" || item.SessionID == sessionID {
+			out = append(out, item)
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) SaveDerivedSignal(_ context.Context, signal media.DerivedSignal) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.derivedSignals {
+		if item.ID == signal.ID {
+			s.derivedSignals[i] = signal
+			return nil
+		}
+	}
+	s.derivedSignals = append(s.derivedSignals, signal)
+	return nil
+}
+
+func (s *Store) ListDerivedSignals(_ context.Context, sessionID string) ([]media.DerivedSignal, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []media.DerivedSignal
+	for _, item := range s.derivedSignals {
+		if sessionID == "" || item.SessionID == sessionID {
+			out = append(out, item)
+		}
+	}
+	return out, nil
 }

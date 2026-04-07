@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,8 @@ import (
 	"github.com/sahal/parmesan/internal/domain/audit"
 	"github.com/sahal/parmesan/internal/domain/delivery"
 	"github.com/sahal/parmesan/internal/domain/execution"
+	"github.com/sahal/parmesan/internal/domain/knowledge"
+	"github.com/sahal/parmesan/internal/domain/media"
 	"github.com/sahal/parmesan/internal/domain/replay"
 	"github.com/sahal/parmesan/internal/domain/rollout"
 	"github.com/sahal/parmesan/internal/domain/session"
@@ -1638,5 +1642,554 @@ func TestTraceTimelineIncludesCrossArtifactEntries(t *testing.T) {
 	entries, ok := payload["entries"].([]any)
 	if !ok || len(entries) < 5 {
 		t.Fatalf("entries = %#v, want timeline entries", payload["entries"])
+	}
+}
+
+func TestOperatorKnowledgeSourceCompileCreatesSnapshot(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	root := t.TempDir()
+	t.Setenv("KNOWLEDGE_SOURCE_ROOT", root)
+	docDir := filepath.Join(root, "docs")
+	if err := os.Mkdir(docDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(docDir, "returns.md"), []byte("# Returns\n\nDamaged orders can be refunded."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/sources", strings.NewReader(`{
+		"id":"src_1",
+		"scope_kind":"agent",
+		"scope_id":"agent_1",
+		"kind":"folder",
+		"uri":"`+docDir+`"
+	}`))
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create source status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/sources/src_1/compile", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("compile source status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var snapshot struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.ID == "" {
+		t.Fatalf("snapshot response = %s, want id", rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/knowledge/pages?scope_kind=agent&scope_id=agent_1", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list pages status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var pages []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &pages); err != nil {
+		t.Fatal(err)
+	}
+	if len(pages) != 1 || pages[0]["title"] != "Returns" {
+		t.Fatalf("pages = %#v, want Returns page", pages)
+	}
+}
+
+func TestOperatorKnowledgeSourceRejectsPathOutsideRoot(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	root := t.TempDir()
+	t.Setenv("KNOWLEDGE_SOURCE_ROOT", root)
+	outside := t.TempDir()
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/sources", strings.NewReader(`{
+		"id":"src_1",
+		"scope_kind":"agent",
+		"scope_id":"agent_1",
+		"kind":"folder",
+		"uri":"`+outside+`"
+	}`))
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create source status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestOperatorKnowledgeProposalAndMediaEndpoints(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.SaveKnowledgePage(context.Background(), knowledge.Page{
+		ID:        "page_returns",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		Title:     "Returns",
+		Body:      "Old returns copy",
+		Checksum:  "base123",
+		CreatedAt: now.Add(-time.Minute),
+		UpdatedAt: now.Add(-time.Minute),
+	}, []knowledge.Chunk{{
+		ID:        "chunk_returns",
+		PageID:    "page_returns",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		Text:      "Old returns copy",
+		CreatedAt: now.Add(-time.Minute),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveKnowledgeUpdateProposal(context.Background(), knowledge.UpdateProposal{
+		ID:        "prop_1",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		Kind:      "conversation_insight",
+		State:     "draft",
+		Payload: map[string]any{
+			"page": map[string]any{"title": "Returns", "body": "Damaged orders can be refunded.", "base_checksum": "base123"},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_1", Channel: "acp", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveMediaAsset(context.Background(), media.Asset{
+		ID: "asset_1", SessionID: "sess_1", EventID: "evt_1", PartIndex: 0, Type: "image", Status: "succeeded", Metadata: map[string]any{"enrichment_status": "succeeded", "retry_count": 1, "last_retry_at": "2026-04-07T10:00:00Z"}, CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveMediaAsset(context.Background(), media.Asset{
+		ID: "asset_2", SessionID: "sess_1", EventID: "evt_2", PartIndex: 0, Type: "audio", Status: "failed", Metadata: map[string]any{"enrichment_status": "failed", "error": "decode error", "retry_count": 2, "next_retry_at": now.Add(2 * time.Minute).Format(time.RFC3339Nano)}, CreatedAt: now.Add(time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveDerivedSignal(context.Background(), media.DerivedSignal{
+		ID: "sig_1", AssetID: "asset_1", SessionID: "sess_1", EventID: "evt_1", Kind: "ocr_text", Value: "ORDER-123", Metadata: map[string]any{"provider": "openrouter", "model": "openai/gpt-4.1-mini"}, CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/knowledge/proposals?scope_kind=agent&scope_id=agent_1", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list proposals status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/knowledge/proposals/prop_1/preview", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview proposal status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var preview map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	previewSection, ok := preview["preview"].(map[string]any)
+	if !ok {
+		t.Fatalf("preview payload = %#v, want preview section", preview)
+	}
+	changes, ok := previewSection["changes"].(map[string]any)
+	if !ok || changes["conflict"] != false {
+		t.Fatalf("preview changes = %#v, want non-conflicting preview", changes)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/proposals/prop_1/state", strings.NewReader(`{"state":"approved"}`))
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve proposal status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/proposals/prop_1/apply", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply proposal status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	item, err := repo.GetKnowledgeUpdateProposal(context.Background(), "prop_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.State != "applied" {
+		t.Fatalf("proposal state = %q, want applied", item.State)
+	}
+	pages, err := repo.ListKnowledgePages(context.Background(), knowledge.PageQuery{ScopeKind: "agent", ScopeID: "agent_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pages) == 0 {
+		t.Fatalf("pages = %#v, want applied knowledge page", pages)
+	}
+	if pages[0].ID != "page_returns" || pages[0].Body != "Damaged orders can be refunded." {
+		t.Fatalf("pages = %#v, want existing page updated in place", pages)
+	}
+	snapshots, err := repo.ListKnowledgeSnapshots(context.Background(), knowledge.SnapshotQuery{ScopeKind: "agent", ScopeID: "agent_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) == 0 {
+		t.Fatalf("snapshots = %#v, want applied knowledge snapshot", snapshots)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/media/assets?session_id=sess_1&status=failed&type=audio", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list media assets status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var assets []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &assets); err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 1 || assets[0]["status"] != "failed" || assets[0]["type"] != "audio" {
+		t.Fatalf("assets = %#v, want one failed audio asset", assets)
+	}
+	if got := int(assets[0]["retry_count"].(float64)); got != 2 {
+		t.Fatalf("asset retry_count = %d, want 2", got)
+	}
+	if got := assets[0]["next_retry_at"]; got == "" || got == nil {
+		t.Fatalf("asset next_retry_at = %#v, want explicit retry cursor", got)
+	}
+	if got := assets[0]["enrichment_status"]; got != "failed" {
+		t.Fatalf("asset enrichment_status = %#v, want failed", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/media/assets/asset_1?session_id=sess_1", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get media asset status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var assetDetail map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &assetDetail); err != nil {
+		t.Fatal(err)
+	}
+	detailSignals, ok := assetDetail["signals"].([]any)
+	if !ok || len(detailSignals) != 1 {
+		t.Fatalf("asset detail = %#v, want one associated signal", assetDetail)
+	}
+	assetPayload, ok := assetDetail["asset"].(map[string]any)
+	if !ok {
+		t.Fatalf("asset detail payload = %#v, want object", assetDetail["asset"])
+	}
+	if got := int(assetPayload["retry_count"].(float64)); got != 1 {
+		t.Fatalf("asset detail retry_count = %d, want 1", got)
+	}
+	if got := assetPayload["last_retry_at"]; got != "2026-04-07T10:00:00Z" {
+		t.Fatalf("asset detail last_retry_at = %#v, want %q", got, "2026-04-07T10:00:00Z")
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/media/assets/asset_2/reprocess?session_id=sess_1", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("reprocess failed asset status = %d, want %d body=%s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/media/signals?session_id=sess_1", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list derived signals status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var signals []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &signals); err != nil {
+		t.Fatal(err)
+	}
+	if len(signals) != 1 || signals[0]["kind"] != "ocr_text" {
+		t.Fatalf("signals = %#v, want one ocr_text signal", signals)
+	}
+	metadata, ok := signals[0]["metadata"].(map[string]any)
+	if !ok || metadata["provider"] != "openrouter" {
+		t.Fatalf("signal metadata = %#v, want provider metadata", signals[0]["metadata"])
+	}
+}
+
+func TestOperatorReprocessMediaAssetSuccess(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_2", Channel: "acp", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID:        "evt_2",
+		SessionID: "sess_2",
+		Source:    "customer",
+		Kind:      "message",
+		CreatedAt: now,
+		Content: []session.ContentPart{{
+			Type: "image",
+			URL:  "https://example.test/return.png",
+			Meta: map[string]any{"summary": "Photo of returned item"},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveMediaAsset(context.Background(), media.Asset{
+		ID:        "asset_3",
+		SessionID: "sess_2",
+		EventID:   "evt_2",
+		PartIndex: 0,
+		Type:      "image",
+		Status:    "failed",
+		Metadata:  map[string]any{"enrichment_status": "failed", "error": "old failure"},
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/media/assets/asset_3/reprocess?session_id=sess_2", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reprocess asset status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	assets, err := repo.ListMediaAssets(context.Background(), "sess_2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 1 || assets[0].Status != "succeeded" {
+		t.Fatalf("assets = %#v, want succeeded asset", assets)
+	}
+	if assets[0].Metadata["reprocessed_at"] == nil {
+		t.Fatalf("asset metadata = %#v, want reprocessed_at", assets[0].Metadata)
+	}
+	signals, err := repo.ListDerivedSignals(context.Background(), "sess_2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(signals) == 0 {
+		t.Fatalf("signals = %#v, want reprocessed derived signals", signals)
+	}
+	var traceID string
+	waitFor(t, time.Second, func() bool {
+		records, err := repo.ListAuditRecords(context.Background())
+		if err != nil {
+			return false
+		}
+		for _, record := range records {
+			if record.Kind == "media.reprocess.succeeded" {
+				traceID = record.TraceID
+				return true
+			}
+		}
+		return false
+	})
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/traces/"+traceID, nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("media trace timeline status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var timeline traceTimelineResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &timeline); err != nil {
+		t.Fatal(err)
+	}
+	foundMedia := false
+	for _, entry := range timeline.Entries {
+		if entry.Kind != "media.reprocess.succeeded" {
+			continue
+		}
+		foundMedia = true
+		payload, ok := entry.Payload.(map[string]any)
+		if !ok {
+			t.Fatalf("media payload = %#v, want object", entry.Payload)
+		}
+		if _, ok := payload["asset"].(map[string]any); !ok {
+			t.Fatalf("media payload = %#v, want asset", payload)
+		}
+		if signals, ok := payload["signals"].([]any); !ok || len(signals) == 0 {
+			t.Fatalf("media payload = %#v, want signals", payload)
+		}
+	}
+	if !foundMedia {
+		t.Fatalf("timeline entries = %#v, want media.reprocess.succeeded", timeline.Entries)
+	}
+}
+
+func TestOperatorBatchReprocessMediaAssets(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_3", Channel: "acp", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i, item := range []struct {
+		eventID string
+		assetID string
+		kind    string
+		part    session.ContentPart
+	}{
+		{eventID: "evt_3a", assetID: "asset_4", kind: "image", part: session.ContentPart{Type: "image", URL: "https://example.test/a.png", Meta: map[string]any{"summary": "Photo A"}}},
+		{eventID: "evt_3b", assetID: "asset_5", kind: "audio", part: session.ContentPart{Type: "audio", Meta: map[string]any{"transcript": "Audio B", "language": "en"}}},
+	} {
+		if err := repo.AppendEvent(context.Background(), session.Event{
+			ID:        item.eventID,
+			SessionID: "sess_3",
+			Source:    "customer",
+			Kind:      "message",
+			CreatedAt: now.Add(time.Duration(i) * time.Second),
+			Content:   []session.ContentPart{item.part},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.SaveMediaAsset(context.Background(), media.Asset{
+			ID:        item.assetID,
+			SessionID: "sess_3",
+			EventID:   item.eventID,
+			PartIndex: 0,
+			Type:      item.kind,
+			Status:    "failed",
+			Metadata:  map[string]any{"enrichment_status": "failed"},
+			CreatedAt: now.Add(time.Duration(i) * time.Second),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/media/assets/reprocess?session_id=sess_3&status=failed&limit=1", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch reprocess status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	results, ok := payload["results"].([]any)
+	if !ok || len(results) != 1 {
+		t.Fatalf("payload = %#v, want one batch result", payload)
+	}
+	first, ok := results[0].(map[string]any)
+	if !ok {
+		t.Fatalf("result = %#v, want object", results[0])
+	}
+	if _, ok := first["enrichment_status"]; !ok {
+		t.Fatalf("result = %#v, want enrichment_status", first)
+	}
+}
+
+func TestRejectedKnowledgeProposalCannotBeApplied(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.SaveKnowledgeUpdateProposal(context.Background(), knowledge.UpdateProposal{
+		ID:        "prop_2",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		Kind:      "conversation_insight",
+		State:     "draft",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/proposals/prop_2/state", strings.NewReader(`{"state":"rejected"}`))
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reject proposal status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/proposals/prop_2/apply", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("apply rejected proposal status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestStaleKnowledgeProposalConflictsOnApply(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.SaveKnowledgePage(context.Background(), knowledge.Page{
+		ID:        "page_1",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		Title:     "Returns",
+		Body:      "Current copy",
+		Checksum:  "current123",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, []knowledge.Chunk{{
+		ID:        "chunk_1",
+		PageID:    "page_1",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		Text:      "Current copy",
+		CreatedAt: now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveKnowledgeUpdateProposal(context.Background(), knowledge.UpdateProposal{
+		ID:        "prop_3",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		Kind:      "conversation_insight",
+		State:     "approved",
+		Payload: map[string]any{
+			"page": map[string]any{"id": "page_1", "title": "Returns", "body": "New copy", "base_checksum": "stale000"},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/knowledge/proposals/prop_3/preview", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview stale proposal status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var preview map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	section := preview["preview"].(map[string]any)
+	changes := section["changes"].(map[string]any)
+	if changes["conflict"] != true {
+		t.Fatalf("changes = %#v, want conflict=true", changes)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/proposals/prop_3/apply", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("apply stale proposal status = %d, want %d body=%s", rec.Code, http.StatusConflict, rec.Body.String())
 	}
 }

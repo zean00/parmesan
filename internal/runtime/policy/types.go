@@ -1,10 +1,14 @@
 package policyruntime
 
 import (
+	"context"
 	"time"
 
 	"github.com/sahal/parmesan/internal/domain/journey"
+	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/policy"
+	retrieverdomain "github.com/sahal/parmesan/internal/knowledge/retriever"
+	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/runtime/semantics"
 )
 
@@ -18,6 +22,8 @@ type MatchingContext struct {
 	ConversationText    string
 	AppliedGuidelines   []string
 	AppliedInstructions []string
+	DerivedSignals      []string
+	RetrievedKnowledge  []retrieverdomain.Result
 	OccurredAt          time.Time
 	cache               *matchingEvalCache
 }
@@ -130,11 +136,11 @@ type JourneyBacktrackIntent = semantics.JourneyBacktrackIntent
 type JourneyNodeSelection = semantics.JourneyNodeSelection
 
 type JourneyNodeEvidence struct {
-	RelevanceScore      int                       `json:"relevance_score,omitempty"`
-	RelevanceConditions []ConditionEvidence       `json:"relevance_conditions,omitempty"`
-	LatestSatisfaction  JourneyStateSatisfaction  `json:"latest_satisfaction,omitempty"`
-	HistorySatisfaction JourneyStateSatisfaction  `json:"history_satisfaction,omitempty"`
-	EdgeCondition       ConditionEvidence         `json:"edge_condition,omitempty"`
+	RelevanceScore      int                      `json:"relevance_score,omitempty"`
+	RelevanceConditions []ConditionEvidence      `json:"relevance_conditions,omitempty"`
+	LatestSatisfaction  JourneyStateSatisfaction `json:"latest_satisfaction,omitempty"`
+	HistorySatisfaction JourneyStateSatisfaction `json:"history_satisfaction,omitempty"`
+	EdgeCondition       ConditionEvidence        `json:"edge_condition,omitempty"`
 }
 
 type BacktrackCandidateEvaluation struct {
@@ -153,26 +159,26 @@ type BacktrackSelectionEvaluation struct {
 }
 
 type JourneyBacktrackEvaluation struct {
-	ActiveJourney        *policy.Journey                      `json:"active_journey,omitempty"`
-	ActiveJourneyState   *policy.JourneyNode                  `json:"active_journey_state,omitempty"`
-	JourneyInstance      *journey.Instance                    `json:"journey_instance,omitempty"`
-	BacktrackIntent      JourneyBacktrackIntent               `json:"backtrack_intent,omitempty"`
+	ActiveJourney        *policy.Journey                         `json:"active_journey,omitempty"`
+	ActiveJourneyState   *policy.JourneyNode                     `json:"active_journey_state,omitempty"`
+	JourneyInstance      *journey.Instance                       `json:"journey_instance,omitempty"`
+	BacktrackIntent      JourneyBacktrackIntent                  `json:"backtrack_intent,omitempty"`
 	BacktrackEvaluations map[string]BacktrackCandidateEvaluation `json:"backtrack_evaluations,omitempty"`
-	SelectedBacktrack    BacktrackSelectionEvaluation         `json:"selected_backtrack,omitempty"`
+	SelectedBacktrack    BacktrackSelectionEvaluation            `json:"selected_backtrack,omitempty"`
 }
 
 type JourneyNextNodeEvaluation struct {
-	Selection      JourneyNodeSelection `json:"selection"`
-	Evidence       JourneyNodeEvidence  `json:"evidence,omitempty"`
-	RelevanceScore int                  `json:"relevance_score,omitempty"`
-	EdgeScore      int                  `json:"edge_score,omitempty"`
-	LatestSatisfied bool                `json:"latest_satisfied,omitempty"`
+	Selection       JourneyNodeSelection `json:"selection"`
+	Evidence        JourneyNodeEvidence  `json:"evidence,omitempty"`
+	RelevanceScore  int                  `json:"relevance_score,omitempty"`
+	EdgeScore       int                  `json:"edge_score,omitempty"`
+	LatestSatisfied bool                 `json:"latest_satisfied,omitempty"`
 }
 
 type JourneyProgressEvaluation struct {
-	JourneySatisfactions map[string]JourneyStateSatisfaction `json:"journey_satisfactions,omitempty"`
+	JourneySatisfactions map[string]JourneyStateSatisfaction  `json:"journey_satisfactions,omitempty"`
 	NextNodeEvaluations  map[string]JourneyNextNodeEvaluation `json:"next_node_evaluations,omitempty"`
-	SelectedNextNode     JourneyNextNodeEvaluation          `json:"selected_next_node,omitempty"`
+	SelectedNextNode     JourneyNextNodeEvaluation            `json:"selected_next_node,omitempty"`
 }
 
 type SiblingSuppressionDecision struct {
@@ -209,7 +215,7 @@ type ToolDecisionEvaluation struct {
 }
 
 type ToolPlanEvaluation struct {
-	Candidates        []ToolCandidate                   `json:"candidates,omitempty"`
+	Candidates        []ToolCandidate                  `json:"candidates,omitempty"`
 	Batches           []ToolCallBatchResult            `json:"batches,omitempty"`
 	Grounding         map[string]ToolGroundingEvidence `json:"grounding,omitempty"`
 	SelectionEvidence map[string]ToolSelectionEvidence `json:"selection_evidence,omitempty"`
@@ -335,32 +341,56 @@ type BatchResult struct {
 }
 
 type EngineResult struct {
-	Bundle               *policy.Bundle
-	Context              MatchingContext
-	Attention            PolicyAttention
-	ObservationStage     ObservationMatchStageResult
-	MatchFinalizeStage   FinalizeStageResult
-	PreviouslyAppliedStage PreviouslyAppliedStageResult
-	SuppressedGuidelines []SuppressedGuideline
-	ActiveJourney        *policy.Journey
-	ActiveJourneyState   *policy.JourneyNode
-	JourneyInstance      *journey.Instance
-	ProjectedNodes       []ProjectedJourneyNode
-	ResolutionRecords    []ResolutionRecord
-	ConditionArtifactsStage ConditionArtifactsStageResult
-	JourneyBacktrackStage JourneyBacktrackStageResult
-	JourneyProgressStage  JourneyProgressStageResult
-	CustomerDependencyStage CustomerDependencyStageResult
+	Bundle                      *policy.Bundle
+	Context                     MatchingContext
+	Attention                   PolicyAttention
+	ObservationStage            ObservationMatchStageResult
+	MatchFinalizeStage          FinalizeStageResult
+	PreviouslyAppliedStage      PreviouslyAppliedStageResult
+	SuppressedGuidelines        []SuppressedGuideline
+	ActiveJourney               *policy.Journey
+	ActiveJourneyState          *policy.JourneyNode
+	JourneyInstance             *journey.Instance
+	ProjectedNodes              []ProjectedJourneyNode
+	ResolutionRecords           []ResolutionRecord
+	ConditionArtifactsStage     ConditionArtifactsStageResult
+	JourneyBacktrackStage       JourneyBacktrackStageResult
+	JourneyProgressStage        JourneyProgressStageResult
+	CustomerDependencyStage     CustomerDependencyStageResult
 	RelationshipResolutionStage RelationshipResolutionStageResult
-	DisambiguationStage DisambiguationStageResult
-	ResponseAnalysisStage ResponseAnalysisStageResult
-	ToolExposureStage    ToolExposureStageResult
-	ToolPlanStage        ToolPlanStageResult
-	ToolDecisionStage    ToolDecisionStageResult
-	CompositionMode      string
-	NoMatch              string
-	DisambiguationPrompt string
-	BatchResults         []BatchResult
-	PromptSetVersions    map[string]string
-	ARQResults           []ARQResult
+	DisambiguationStage         DisambiguationStageResult
+	RetrieverStage              RetrieverStageResult
+	ResponseAnalysisStage       ResponseAnalysisStageResult
+	ToolExposureStage           ToolExposureStageResult
+	ToolPlanStage               ToolPlanStageResult
+	ToolDecisionStage           ToolDecisionStageResult
+	CompositionMode             string
+	NoMatch                     string
+	DisambiguationPrompt        string
+	BatchResults                []BatchResult
+	PromptSetVersions           map[string]string
+	ARQResults                  []ARQResult
+}
+
+type RetrieverRegistry interface {
+	GetRetriever(id string) retrieverdomain.Interface
+}
+
+type KnowledgeSearcher interface {
+	SearchKnowledgeChunks(ctx context.Context, query knowledge.ChunkSearchQuery) ([]knowledge.Chunk, error)
+}
+
+type RetrieverMap map[string]retrieverdomain.Interface
+
+func (m RetrieverMap) GetRetriever(id string) retrieverdomain.Interface {
+	return m[id]
+}
+
+type ResolveOptions struct {
+	Router            *model.Router
+	RetrieverRegistry RetrieverRegistry
+	KnowledgeSearcher KnowledgeSearcher
+	KnowledgeSnapshot *knowledge.Snapshot
+	KnowledgeChunks   []knowledge.Chunk
+	DerivedSignals    []string
 }

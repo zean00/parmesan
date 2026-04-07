@@ -84,6 +84,21 @@ send either `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
 - `POST /v1/operator/sessions/{id}/messages/on-behalf-of-agent`
 - `POST /v1/operator/sessions/{id}/notes`
 - `POST /v1/operator/sessions/{id}/process`
+- `POST /v1/operator/knowledge/sources`
+- `POST /v1/operator/knowledge/sources/{id}/compile`
+- `GET /v1/operator/knowledge/snapshots/{id}`
+- `GET /v1/operator/knowledge/pages` with optional `scope_kind`, `scope_id`, `snapshot_id`, and `limit` filters
+- `GET /v1/operator/knowledge/proposals` with optional `scope_kind` and `scope_id`
+- `GET /v1/operator/knowledge/proposals/{id}`
+- `GET /v1/operator/knowledge/proposals/{id}/preview`
+- `POST /v1/operator/knowledge/proposals/{id}/state`
+- `POST /v1/operator/knowledge/proposals/{id}/apply`
+- `GET /v1/operator/media/assets` with optional `session_id`
+- `GET /v1/operator/media/assets/{id}` with optional `session_id`
+- `POST /v1/operator/media/assets/{id}/reprocess` with optional `session_id`
+- `POST /v1/operator/media/assets/reprocess` with optional `session_id`, `status`, `type`, and `limit`
+- media asset responses now surface `retry_count`, `next_retry_at`, `last_retry_at`, `enrichment_status`, and `error` as top-level fields
+- `GET /v1/operator/media/signals` with optional `session_id`
 - `POST /v1/tools/providers/register`
 - `POST /v1/tools/providers/{id}/auth`
 - `GET /v1/tools/providers/{id}/auth`
@@ -93,6 +108,49 @@ send either `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
 - `GET /v1/executions`
 - `GET /v1/executions/{id}`
 - `GET /v1/executions/{id}/resolved-policy`
+
+## Knowledge and Retrievers
+
+Parmesan now has a first-pass agent knowledge workspace that follows the
+LLM-wiki pattern without making Markdown the serving source of truth. Operators
+register folder-backed knowledge sources, compile them into typed
+`KnowledgePage`/`KnowledgeChunk` records, and publish immutable
+`KnowledgeSnapshot` records. Runtime retrievers read from the active snapshot
+and inject response-scoped grounding into the policy result; they do not mutate
+policy, session memory, or the wiki during a customer turn.
+
+Folder-backed sources require `KNOWLEDGE_SOURCE_ROOT`; paths outside that root
+are rejected by the operator API. Retrieval now supports hybrid lexical plus
+embedding search, with Postgres able to rank chunks via `pgvector` and memory
+or fallback environments still using in-process ranking. Non-text ACP content
+parts are persisted as media assets during ingest and now produce concrete
+image/audio derived signals. Post-turn learning writes low-risk customer facts
+into customer-scoped `customer_agent` snapshots and records shared knowledge as
+draft `KnowledgeUpdateProposal` records until an operator reviews them. Proposal
+workflow now supports preview plus explicit `draft`, `approved`, `rejected`,
+and `applied` states.
+
+Multimodal provider config:
+- `OPENROUTER_API_KEY`
+- `OPENROUTER_BASE_URL` (defaults to `https://openrouter.ai/api/v1`)
+- `OPENROUTER_MULTIMODAL_MODEL`
+
+OpenRouter-backed enrichers now support:
+- images via `image_url`
+- audio via `input_audio`
+- PDFs via `file`
+- video via `video_url`
+
+If OpenRouter is unavailable or a modality call fails, Parmesan falls back to
+local heuristic extraction for the supported media types.
+
+Operator media inspection now exposes:
+- per-asset signal drilldown
+- asset filtering by `status` and `type`
+- stored provenance such as provider, model, request IDs, and enrichment latency when available
+- asset-level reprocessing for failed or outdated enrichment without replaying the whole turn
+- batch reprocessing for filtered asset sets
+- media retry/reprocess lifecycle emits traceable audit records like `media.retry.started`, `media.enrichment.succeeded`, and `media.reprocess.succeeded`
 - `GET /v1/executions/{id}/tool-runs`
 - `GET /v1/executions/{id}/delivery-attempts`
 - `POST /v1/replays`

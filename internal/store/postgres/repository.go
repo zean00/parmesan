@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -15,6 +16,8 @@ import (
 	"github.com/sahal/parmesan/internal/domain/execution"
 	gatewaydomain "github.com/sahal/parmesan/internal/domain/gateway"
 	"github.com/sahal/parmesan/internal/domain/journey"
+	"github.com/sahal/parmesan/internal/domain/knowledge"
+	"github.com/sahal/parmesan/internal/domain/media"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/replay"
 	"github.com/sahal/parmesan/internal/domain/rollout"
@@ -278,6 +281,478 @@ func (c *Client) ListEventsFiltered(ctx context.Context, query session.EventQuer
 			_ = json.Unmarshal(metadata, &event.Metadata)
 		}
 		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) SaveKnowledgeSource(ctx context.Context, source knowledge.Source) error {
+	metadata, err := json.Marshal(source.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = c.sessionQuery().Exec(ctx, `
+		INSERT INTO knowledge_sources (id, scope_kind, scope_id, kind, uri, checksum, status, metadata_json, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		ON CONFLICT (id) DO UPDATE
+		SET scope_kind = EXCLUDED.scope_kind,
+		    scope_id = EXCLUDED.scope_id,
+		    kind = EXCLUDED.kind,
+		    uri = EXCLUDED.uri,
+		    checksum = EXCLUDED.checksum,
+		    status = EXCLUDED.status,
+		    metadata_json = EXCLUDED.metadata_json,
+		    updated_at = EXCLUDED.updated_at
+	`, source.ID, source.ScopeKind, source.ScopeID, source.Kind, source.URI, nullString(source.Checksum), source.Status, metadata, source.CreatedAt, source.UpdatedAt)
+	return err
+}
+
+func (c *Client) GetKnowledgeSource(ctx context.Context, sourceID string) (knowledge.Source, error) {
+	row := c.sessionQuery().QueryRow(ctx, `
+		SELECT id, scope_kind, scope_id, kind, uri, COALESCE(checksum,''), status, metadata_json, created_at, updated_at
+		FROM knowledge_sources WHERE id = $1
+	`, sourceID)
+	var out knowledge.Source
+	var metadata []byte
+	if err := row.Scan(&out.ID, &out.ScopeKind, &out.ScopeID, &out.Kind, &out.URI, &out.Checksum, &out.Status, &metadata, &out.CreatedAt, &out.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return knowledge.Source{}, errors.New("knowledge source not found")
+		}
+		return knowledge.Source{}, err
+	}
+	_ = json.Unmarshal(metadata, &out.Metadata)
+	return out, nil
+}
+
+func (c *Client) ListKnowledgeSources(ctx context.Context, scopeKind string, scopeID string) ([]knowledge.Source, error) {
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT id, scope_kind, scope_id, kind, uri, COALESCE(checksum,''), status, metadata_json, created_at, updated_at
+		FROM knowledge_sources
+		WHERE ($1 = '' OR scope_kind = $1) AND ($2 = '' OR scope_id = $2)
+		ORDER BY created_at DESC
+	`, scopeKind, scopeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []knowledge.Source
+	for rows.Next() {
+		var item knowledge.Source
+		var metadata []byte
+		if err := rows.Scan(&item.ID, &item.ScopeKind, &item.ScopeID, &item.Kind, &item.URI, &item.Checksum, &item.Status, &metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(metadata, &item.Metadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) SaveKnowledgePage(ctx context.Context, page knowledge.Page, chunks []knowledge.Chunk) error {
+	citations, err := json.Marshal(page.Citations)
+	if err != nil {
+		return err
+	}
+	metadata, err := json.Marshal(page.Metadata)
+	if err != nil {
+		return err
+	}
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, `
+		INSERT INTO knowledge_pages (id, scope_kind, scope_id, source_id, title, body, page_type, citations_json, metadata_json, checksum, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		ON CONFLICT (id) DO UPDATE
+		SET scope_kind = EXCLUDED.scope_kind,
+		    scope_id = EXCLUDED.scope_id,
+		    source_id = EXCLUDED.source_id,
+		    title = EXCLUDED.title,
+		    body = EXCLUDED.body,
+		    page_type = EXCLUDED.page_type,
+		    citations_json = EXCLUDED.citations_json,
+		    metadata_json = EXCLUDED.metadata_json,
+		    checksum = EXCLUDED.checksum,
+		    updated_at = EXCLUDED.updated_at
+	`, page.ID, page.ScopeKind, page.ScopeID, nullString(page.SourceID), page.Title, page.Body, page.PageType, citations, metadata, nullString(page.Checksum), page.CreatedAt, page.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM knowledge_chunks WHERE page_id = $1`, page.ID); err != nil {
+		return err
+	}
+	for _, chunk := range chunks {
+		vector, err := json.Marshal(chunk.Vector)
+		if err != nil {
+			return err
+		}
+		citations, err := json.Marshal(chunk.Citations)
+		if err != nil {
+			return err
+		}
+		metadata, err := json.Marshal(chunk.Metadata)
+		if err != nil {
+			return err
+		}
+		embedding := nullString(vectorLiteral(chunk.Vector))
+		if _, err = tx.Exec(ctx, `
+			INSERT INTO knowledge_chunks (id, page_id, scope_kind, scope_id, text, embedding, embedding_json, citations_json, metadata_json, created_at)
+			VALUES ($1,$2,$3,$4,$5,$6::vector,$7,$8,$9,$10)
+		`, chunk.ID, chunk.PageID, chunk.ScopeKind, chunk.ScopeID, chunk.Text, embedding, vector, citations, metadata, chunk.CreatedAt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (c *Client) ListKnowledgePages(ctx context.Context, query knowledge.PageQuery) ([]knowledge.Page, error) {
+	limit := query.Limit
+	if limit <= 0 {
+		limit = 1000
+	}
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT p.id, p.scope_kind, p.scope_id, COALESCE(p.source_id,''), p.title, p.body, p.page_type, p.citations_json, p.metadata_json, COALESCE(p.checksum,''), p.created_at, p.updated_at
+		FROM knowledge_pages p
+		WHERE ($1 = '' OR p.scope_kind = $1)
+		  AND ($2 = '' OR p.scope_id = $2)
+		  AND ($3 = '' OR p.id IN (
+		    SELECT jsonb_array_elements_text(page_ids_json) FROM knowledge_snapshots WHERE id = $3
+		  ))
+		ORDER BY p.updated_at DESC
+		LIMIT $4
+	`, query.ScopeKind, query.ScopeID, query.SnapshotID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []knowledge.Page
+	for rows.Next() {
+		var item knowledge.Page
+		var citations, metadata []byte
+		if err := rows.Scan(&item.ID, &item.ScopeKind, &item.ScopeID, &item.SourceID, &item.Title, &item.Body, &item.PageType, &citations, &metadata, &item.Checksum, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(citations, &item.Citations)
+		_ = json.Unmarshal(metadata, &item.Metadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) ListKnowledgeChunks(ctx context.Context, query knowledge.ChunkQuery) ([]knowledge.Chunk, error) {
+	limit := query.Limit
+	if limit <= 0 {
+		limit = 1000
+	}
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT ch.id, ch.page_id, ch.scope_kind, ch.scope_id, ch.text, ch.embedding_json, ch.citations_json, ch.metadata_json, ch.created_at
+		FROM knowledge_chunks ch
+		WHERE ($1 = '' OR ch.scope_kind = $1)
+		  AND ($2 = '' OR ch.scope_id = $2)
+		  AND ($3 = '' OR ch.id IN (
+		    SELECT jsonb_array_elements_text(chunk_ids_json) FROM knowledge_snapshots WHERE id = $3
+		  ))
+		ORDER BY ch.created_at DESC
+		LIMIT $4
+	`, query.ScopeKind, query.ScopeID, query.SnapshotID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []knowledge.Chunk
+	for rows.Next() {
+		var item knowledge.Chunk
+		var vector, citations, metadata []byte
+		if err := rows.Scan(&item.ID, &item.PageID, &item.ScopeKind, &item.ScopeID, &item.Text, &vector, &citations, &metadata, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(vector, &item.Vector)
+		_ = json.Unmarshal(citations, &item.Citations)
+		_ = json.Unmarshal(metadata, &item.Metadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) SearchKnowledgeChunks(ctx context.Context, query knowledge.ChunkSearchQuery) ([]knowledge.Chunk, error) {
+	limit := query.Limit
+	if limit <= 0 {
+		limit = 3
+	}
+	if len(query.Vector) == 0 {
+		return c.ListKnowledgeChunks(ctx, knowledge.ChunkQuery{
+			ScopeKind:  query.ScopeKind,
+			ScopeID:    query.ScopeID,
+			SnapshotID: query.SnapshotID,
+			Limit:      limit,
+		})
+	}
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT ch.id, ch.page_id, ch.scope_kind, ch.scope_id, ch.text, ch.embedding_json, ch.citations_json, ch.metadata_json, ch.created_at
+		FROM knowledge_chunks ch
+		WHERE ($1 = '' OR ch.scope_kind = $1)
+		  AND ($2 = '' OR ch.scope_id = $2)
+		  AND ($3 = '' OR ch.id IN (
+		    SELECT jsonb_array_elements_text(chunk_ids_json) FROM knowledge_snapshots WHERE id = $3
+		  ))
+		  AND ch.embedding IS NOT NULL
+		ORDER BY ch.embedding <=> $4::vector ASC, ch.created_at DESC
+		LIMIT $5
+	`, query.ScopeKind, query.ScopeID, query.SnapshotID, vectorLiteral(query.Vector), limit)
+	if err != nil {
+		return c.ListKnowledgeChunks(ctx, knowledge.ChunkQuery{
+			ScopeKind:  query.ScopeKind,
+			ScopeID:    query.ScopeID,
+			SnapshotID: query.SnapshotID,
+			Limit:      limit,
+		})
+	}
+	defer rows.Close()
+	var out []knowledge.Chunk
+	for rows.Next() {
+		var item knowledge.Chunk
+		var vector, citations, metadata []byte
+		if err := rows.Scan(&item.ID, &item.PageID, &item.ScopeKind, &item.ScopeID, &item.Text, &vector, &citations, &metadata, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(vector, &item.Vector)
+		_ = json.Unmarshal(citations, &item.Citations)
+		_ = json.Unmarshal(metadata, &item.Metadata)
+		out = append(out, item)
+	}
+	if len(out) > 0 || rows.Err() == nil {
+		return out, rows.Err()
+	}
+	return c.ListKnowledgeChunks(ctx, knowledge.ChunkQuery{
+		ScopeKind:  query.ScopeKind,
+		ScopeID:    query.ScopeID,
+		SnapshotID: query.SnapshotID,
+		Limit:      limit,
+	})
+}
+
+func (c *Client) SaveKnowledgeSnapshot(ctx context.Context, snapshot knowledge.Snapshot) error {
+	pageIDs, err := json.Marshal(snapshot.PageIDs)
+	if err != nil {
+		return err
+	}
+	chunkIDs, err := json.Marshal(snapshot.ChunkIDs)
+	if err != nil {
+		return err
+	}
+	metadata, err := json.Marshal(snapshot.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = c.sessionQuery().Exec(ctx, `
+		INSERT INTO knowledge_snapshots (id, scope_kind, scope_id, page_ids_json, chunk_ids_json, metadata_json, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)
+		ON CONFLICT (id) DO UPDATE
+		SET scope_kind = EXCLUDED.scope_kind,
+		    scope_id = EXCLUDED.scope_id,
+		    page_ids_json = EXCLUDED.page_ids_json,
+		    chunk_ids_json = EXCLUDED.chunk_ids_json,
+		    metadata_json = EXCLUDED.metadata_json
+	`, snapshot.ID, snapshot.ScopeKind, snapshot.ScopeID, pageIDs, chunkIDs, metadata, snapshot.CreatedAt)
+	return err
+}
+
+func (c *Client) GetKnowledgeSnapshot(ctx context.Context, snapshotID string) (knowledge.Snapshot, error) {
+	row := c.sessionQuery().QueryRow(ctx, `
+		SELECT id, scope_kind, scope_id, page_ids_json, chunk_ids_json, metadata_json, created_at
+		FROM knowledge_snapshots WHERE id = $1
+	`, snapshotID)
+	var out knowledge.Snapshot
+	var pageIDs, chunkIDs, metadata []byte
+	if err := row.Scan(&out.ID, &out.ScopeKind, &out.ScopeID, &pageIDs, &chunkIDs, &metadata, &out.CreatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return knowledge.Snapshot{}, errors.New("knowledge snapshot not found")
+		}
+		return knowledge.Snapshot{}, err
+	}
+	_ = json.Unmarshal(pageIDs, &out.PageIDs)
+	_ = json.Unmarshal(chunkIDs, &out.ChunkIDs)
+	_ = json.Unmarshal(metadata, &out.Metadata)
+	return out, nil
+}
+
+func (c *Client) ListKnowledgeSnapshots(ctx context.Context, query knowledge.SnapshotQuery) ([]knowledge.Snapshot, error) {
+	limit := query.Limit
+	if limit <= 0 {
+		limit = 1000
+	}
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT id, scope_kind, scope_id, page_ids_json, chunk_ids_json, metadata_json, created_at
+		FROM knowledge_snapshots
+		WHERE ($1 = '' OR scope_kind = $1) AND ($2 = '' OR scope_id = $2)
+		ORDER BY created_at DESC
+		LIMIT $3
+	`, query.ScopeKind, query.ScopeID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []knowledge.Snapshot
+	for rows.Next() {
+		var item knowledge.Snapshot
+		var pageIDs, chunkIDs, metadata []byte
+		if err := rows.Scan(&item.ID, &item.ScopeKind, &item.ScopeID, &pageIDs, &chunkIDs, &metadata, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(pageIDs, &item.PageIDs)
+		_ = json.Unmarshal(chunkIDs, &item.ChunkIDs)
+		_ = json.Unmarshal(metadata, &item.Metadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) SaveKnowledgeUpdateProposal(ctx context.Context, proposal knowledge.UpdateProposal) error {
+	evidence, err := json.Marshal(proposal.Evidence)
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(proposal.Payload)
+	if err != nil {
+		return err
+	}
+	_, err = c.sessionQuery().Exec(ctx, `
+		INSERT INTO knowledge_update_proposals (id, scope_kind, scope_id, kind, state, rationale, evidence_json, payload_json, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		ON CONFLICT (id) DO UPDATE
+		SET kind = EXCLUDED.kind,
+		    state = EXCLUDED.state,
+		    rationale = EXCLUDED.rationale,
+		    evidence_json = EXCLUDED.evidence_json,
+		    payload_json = EXCLUDED.payload_json,
+		    updated_at = EXCLUDED.updated_at
+	`, proposal.ID, proposal.ScopeKind, proposal.ScopeID, proposal.Kind, proposal.State, proposal.Rationale, evidence, payload, proposal.CreatedAt, proposal.UpdatedAt)
+	return err
+}
+
+func (c *Client) GetKnowledgeUpdateProposal(ctx context.Context, proposalID string) (knowledge.UpdateProposal, error) {
+	row := c.sessionQuery().QueryRow(ctx, `
+		SELECT id, scope_kind, scope_id, kind, state, rationale, evidence_json, payload_json, created_at, updated_at
+		FROM knowledge_update_proposals
+		WHERE id = $1
+	`, proposalID)
+	var item knowledge.UpdateProposal
+	var evidence, payload []byte
+	if err := row.Scan(&item.ID, &item.ScopeKind, &item.ScopeID, &item.Kind, &item.State, &item.Rationale, &evidence, &payload, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return knowledge.UpdateProposal{}, errors.New("knowledge update proposal not found")
+		}
+		return knowledge.UpdateProposal{}, err
+	}
+	_ = json.Unmarshal(evidence, &item.Evidence)
+	_ = json.Unmarshal(payload, &item.Payload)
+	return item, nil
+}
+
+func (c *Client) ListKnowledgeUpdateProposals(ctx context.Context, scopeKind string, scopeID string) ([]knowledge.UpdateProposal, error) {
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT id, scope_kind, scope_id, kind, state, rationale, evidence_json, payload_json, created_at, updated_at
+		FROM knowledge_update_proposals
+		WHERE ($1 = '' OR scope_kind = $1) AND ($2 = '' OR scope_id = $2)
+		ORDER BY created_at DESC
+	`, scopeKind, scopeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []knowledge.UpdateProposal
+	for rows.Next() {
+		var item knowledge.UpdateProposal
+		var evidence, payload []byte
+		if err := rows.Scan(&item.ID, &item.ScopeKind, &item.ScopeID, &item.Kind, &item.State, &item.Rationale, &evidence, &payload, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(evidence, &item.Evidence)
+		_ = json.Unmarshal(payload, &item.Payload)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) SaveMediaAsset(ctx context.Context, asset media.Asset) error {
+	metadata, err := json.Marshal(asset.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = c.sessionQuery().Exec(ctx, `
+		INSERT INTO media_assets (id, session_id, event_id, part_index, type, url, mime_type, checksum, status, retention, metadata_json, created_at, enriched_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		ON CONFLICT (id) DO UPDATE
+		SET status = EXCLUDED.status,
+		    metadata_json = EXCLUDED.metadata_json,
+		    enriched_at = EXCLUDED.enriched_at
+	`, asset.ID, asset.SessionID, asset.EventID, asset.PartIndex, asset.Type, nullString(asset.URL), nullString(asset.MimeType), nullString(asset.Checksum), asset.Status, nullString(asset.Retention), metadata, asset.CreatedAt, nullTime(asset.EnrichedAt))
+	return err
+}
+
+func (c *Client) ListMediaAssets(ctx context.Context, sessionID string) ([]media.Asset, error) {
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT id, session_id, event_id, part_index, type, COALESCE(url,''), COALESCE(mime_type,''), COALESCE(checksum,''), status, COALESCE(retention,''), metadata_json, created_at, COALESCE(enriched_at, '0001-01-01'::timestamptz)
+		FROM media_assets
+		WHERE ($1 = '' OR session_id = $1)
+		ORDER BY created_at ASC
+	`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []media.Asset
+	for rows.Next() {
+		var item media.Asset
+		var metadata []byte
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.EventID, &item.PartIndex, &item.Type, &item.URL, &item.MimeType, &item.Checksum, &item.Status, &item.Retention, &metadata, &item.CreatedAt, &item.EnrichedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(metadata, &item.Metadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) SaveDerivedSignal(ctx context.Context, signal media.DerivedSignal) error {
+	metadata, err := json.Marshal(signal.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = c.sessionQuery().Exec(ctx, `
+		INSERT INTO derived_signals (id, asset_id, session_id, event_id, kind, value, confidence, metadata_json, extractor, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		ON CONFLICT (id) DO UPDATE
+		SET kind = EXCLUDED.kind,
+		    value = EXCLUDED.value,
+		    confidence = EXCLUDED.confidence,
+		    metadata_json = EXCLUDED.metadata_json,
+		    extractor = EXCLUDED.extractor
+	`, signal.ID, signal.AssetID, signal.SessionID, signal.EventID, signal.Kind, signal.Value, signal.Confidence, metadata, signal.Extractor, signal.CreatedAt)
+	return err
+}
+
+func (c *Client) ListDerivedSignals(ctx context.Context, sessionID string) ([]media.DerivedSignal, error) {
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT id, asset_id, session_id, event_id, kind, value, confidence, metadata_json, extractor, created_at
+		FROM derived_signals
+		WHERE ($1 = '' OR session_id = $1)
+		ORDER BY created_at ASC
+	`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []media.DerivedSignal
+	for rows.Next() {
+		var item media.DerivedSignal
+		var metadata []byte
+		if err := rows.Scan(&item.ID, &item.AssetID, &item.SessionID, &item.EventID, &item.Kind, &item.Value, &item.Confidence, &metadata, &item.Extractor, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(metadata, &item.Metadata)
+		out = append(out, item)
 	}
 	return out, rows.Err()
 }
@@ -1054,6 +1529,17 @@ func nullTime(v time.Time) any {
 		return nil
 	}
 	return v
+}
+
+func vectorLiteral(values []float32) string {
+	if len(values) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, strconv.FormatFloat(float64(value), 'f', -1, 32))
+	}
+	return "[" + strings.Join(parts, ",") + "]"
 }
 
 func mustJSONString(v string) string {

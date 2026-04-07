@@ -33,6 +33,11 @@ type Response struct {
 	Text     string `json:"text"`
 }
 
+type EmbeddingResponse struct {
+	Provider string      `json:"provider"`
+	Vectors  [][]float32 `json:"vectors"`
+}
+
 type ProviderStats struct {
 	Name           string        `json:"name"`
 	Capability     Capability    `json:"capability"`
@@ -50,6 +55,11 @@ type Provider interface {
 	Generate(ctx context.Context, req Request) (Response, error)
 }
 
+type EmbeddingProvider interface {
+	Provider
+	Embed(ctx context.Context, texts []string) (EmbeddingResponse, error)
+}
+
 type Router struct {
 	providers map[string]Provider
 	defaults  map[Capability]string
@@ -64,6 +74,7 @@ func NewRouter(cfg config.ProviderConfig) *Router {
 		defaults: map[Capability]string{
 			CapabilityReasoning:  capabilityDefault(cfg.DefaultReasoning),
 			CapabilityStructured: capabilityDefault(cfg.DefaultStructured),
+			CapabilityEmbedding:  capabilityDefault(cfg.DefaultEmbedding),
 		},
 		health: map[string]bool{},
 		stats:  map[string]ProviderStats{},
@@ -73,6 +84,8 @@ func NewRouter(cfg config.ProviderConfig) *Router {
 	router.Register(NewHTTPProvider("openrouter", CapabilityReasoning, cfg.OpenRouterBase, cfg.OpenRouterAPIKey))
 	router.Register(NewHTTPProvider("openai-structured", CapabilityStructured, "https://api.openai.com/v1", cfg.OpenAIAPIKey))
 	router.Register(NewHTTPProvider("openrouter-structured", CapabilityStructured, cfg.OpenRouterBase, cfg.OpenRouterAPIKey))
+	router.Register(NewHTTPProvider("openai-embedding", CapabilityEmbedding, "https://api.openai.com/v1", cfg.OpenAIAPIKey))
+	router.Register(NewHTTPProvider("openrouter-embedding", CapabilityEmbedding, cfg.OpenRouterBase, cfg.OpenRouterAPIKey))
 
 	return router
 }
@@ -126,6 +139,34 @@ func (r *Router) Generate(ctx context.Context, cap Capability, req Request) (Res
 	return Response{}, lastErr
 }
 
+func (r *Router) Embed(ctx context.Context, texts []string) (EmbeddingResponse, error) {
+	candidates := r.candidates(CapabilityEmbedding)
+	if len(candidates) == 0 {
+		return EmbeddingResponse{}, errors.New("no embedding providers registered")
+	}
+	var lastErr error
+	for _, provider := range candidates {
+		embedder, ok := provider.(EmbeddingProvider)
+		if !ok {
+			continue
+		}
+		start := time.Now()
+		resp, err := embedder.Embed(ctx, texts)
+		if err == nil {
+			r.setHealthy(provider.Name(), true)
+			r.recordResult(provider, true, time.Since(start), "")
+			return resp, nil
+		}
+		r.setHealthy(provider.Name(), false)
+		r.recordResult(provider, false, time.Since(start), err.Error())
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("all embedding providers failed")
+	}
+	return EmbeddingResponse{}, lastErr
+}
+
 func (r *Router) candidates(cap Capability) []Provider {
 	name, ok := r.defaults[cap]
 	if !ok {
@@ -141,7 +182,7 @@ func (r *Router) candidates(cap Capability) []Provider {
 		}
 		healthy := r.health[provider.Name()]
 		target := &fallback
-		if provider.Name() == name || strings.TrimSuffix(provider.Name(), "-structured") == name {
+		if provider.Name() == name || providerDefaultName(provider.Name()) == name {
 			target = &preferred
 		} else if !healthy {
 			// keep unhealthy providers last
@@ -165,6 +206,12 @@ func (r *Router) candidates(cap Capability) []Provider {
 		return fallback[i].Name() < fallback[j].Name()
 	})
 	return append(preferred, fallback...)
+}
+
+func providerDefaultName(name string) string {
+	name = strings.TrimSuffix(name, "-structured")
+	name = strings.TrimSuffix(name, "-embedding")
+	return name
 }
 
 func (r *Router) setHealthy(name string, healthy bool) {
@@ -238,6 +285,9 @@ func (p *HTTPProvider) Capability() Capability {
 }
 
 func (p *HTTPProvider) Generate(ctx context.Context, req Request) (Response, error) {
+	if p.capability == CapabilityEmbedding {
+		return Response{}, errors.New("embedding provider does not support Generate")
+	}
 	if strings.TrimSpace(p.apiKey) == "" {
 		return Response{
 			Provider: p.name,
@@ -300,6 +350,61 @@ func (p *HTTPProvider) Generate(ctx context.Context, req Request) (Response, err
 	}, nil
 }
 
+func (p *HTTPProvider) Embed(ctx context.Context, texts []string) (EmbeddingResponse, error) {
+	if p.capability != CapabilityEmbedding {
+		return EmbeddingResponse{}, errors.New("provider does not support embedding")
+	}
+	if len(texts) == 0 {
+		return EmbeddingResponse{Provider: p.name, Vectors: nil}, nil
+	}
+	if strings.TrimSpace(p.apiKey) == "" {
+		return EmbeddingResponse{Provider: p.name, Vectors: deterministicEmbeddings(texts)}, nil
+	}
+	baseURL := strings.TrimRight(p.baseURL, "/")
+	if baseURL == "" {
+		return EmbeddingResponse{}, errors.New("provider base URL is empty")
+	}
+	body := map[string]any{
+		"model": defaultModelForProvider(p.name, p.capability),
+		"input": texts,
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return EmbeddingResponse{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/embeddings", bytes.NewReader(payload))
+	if err != nil {
+		return EmbeddingResponse{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return EmbeddingResponse{}, err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return EmbeddingResponse{}, err
+	}
+	if resp.StatusCode >= 300 {
+		return EmbeddingResponse{}, fmt.Errorf("%s embeddings failed: status=%d body=%s", p.name, resp.StatusCode, string(respBody))
+	}
+	var decoded struct {
+		Data []struct {
+			Embedding []float32 `json:"embedding"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &decoded); err != nil {
+		return EmbeddingResponse{}, err
+	}
+	vectors := make([][]float32, 0, len(decoded.Data))
+	for _, item := range decoded.Data {
+		vectors = append(vectors, item.Embedding)
+	}
+	return EmbeddingResponse{Provider: p.name, Vectors: vectors}, nil
+}
+
 func defaultModelForProvider(name string, capability Capability) string {
 	switch capability {
 	case CapabilityStructured:
@@ -307,10 +412,31 @@ func defaultModelForProvider(name string, capability Capability) string {
 			return "openai/gpt-4.1-mini"
 		}
 		return "gpt-4.1-mini"
+	case CapabilityEmbedding:
+		if strings.Contains(name, "openrouter") {
+			return "openai/text-embedding-3-small"
+		}
+		return "text-embedding-3-small"
 	default:
 		if strings.Contains(name, "openrouter") {
 			return "openai/gpt-4.1-mini"
 		}
 		return "gpt-4.1-mini"
 	}
+}
+
+func deterministicEmbeddings(texts []string) [][]float32 {
+	out := make([][]float32, 0, len(texts))
+	for _, text := range texts {
+		vector := make([]float32, 64)
+		for _, token := range strings.Fields(strings.ToLower(text)) {
+			hash := 0
+			for _, r := range token {
+				hash = (hash*31 + int(r)) % len(vector)
+			}
+			vector[hash]++
+		}
+		out = append(out, vector)
+	}
+	return out
 }

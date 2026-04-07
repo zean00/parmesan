@@ -33,12 +33,14 @@ type Session struct {
 }
 
 type SessionSummary struct {
-	LastTraceID          string   `json:"last_trace_id,omitempty"`
-	LastExecutionID      string   `json:"last_execution_id,omitempty"`
-	AppliedGuidelineIDs  []string `json:"applied_guideline_ids,omitempty"`
-	ActiveJourneyID      string   `json:"active_journey_id,omitempty"`
-	ActiveJourneyStateID string   `json:"active_journey_state_id,omitempty"`
-	CompositionMode      string   `json:"composition_mode,omitempty"`
+	LastTraceID           string   `json:"last_trace_id,omitempty"`
+	LastExecutionID       string   `json:"last_execution_id,omitempty"`
+	AppliedGuidelineIDs   []string `json:"applied_guideline_ids,omitempty"`
+	ActiveJourneyID       string   `json:"active_journey_id,omitempty"`
+	ActiveJourneyStateID  string   `json:"active_journey_state_id,omitempty"`
+	CompositionMode       string   `json:"composition_mode,omitempty"`
+	KnowledgeSnapshotID   string   `json:"knowledge_snapshot_id,omitempty"`
+	RetrieverResultHashes []string `json:"retriever_result_hashes,omitempty"`
 }
 
 type Event struct {

@@ -2,6 +2,7 @@ package policyruntime
 
 import (
 	"github.com/sahal/parmesan/internal/domain/policy"
+	retrieverdomain "github.com/sahal/parmesan/internal/knowledge/retriever"
 	semantics "github.com/sahal/parmesan/internal/runtime/semantics"
 )
 
@@ -111,14 +112,14 @@ func (r JourneyBacktrackStageResult) Apply(state *matchingState) {
 
 func (r JourneyBacktrackStageResult) BatchOutput() map[string]any {
 	return map[string]any{
-		"evaluation":    r.Evaluation,
-		"intent":        r.Evaluation.BacktrackIntent,
-		"selected":      r.Evaluation.SelectedBacktrack,
-		"evaluations":   r.Evaluation.BacktrackEvaluations,
-		"action":        r.Decision.Action,
-		"backtrack_to":  r.Decision.BacktrackTo,
-		"rationale":     r.Decision.Rationale,
-		"missing":       r.Decision.Missing,
+		"evaluation":   r.Evaluation,
+		"intent":       r.Evaluation.BacktrackIntent,
+		"selected":     r.Evaluation.SelectedBacktrack,
+		"evaluations":  r.Evaluation.BacktrackEvaluations,
+		"action":       r.Decision.Action,
+		"backtrack_to": r.Decision.BacktrackTo,
+		"rationale":    r.Decision.Rationale,
+		"missing":      r.Decision.Missing,
 	}
 }
 
@@ -147,8 +148,8 @@ func (r JourneyProgressStageResult) BatchOutput() map[string]any {
 }
 
 type CustomerDependencyStageResult struct {
-	Decisions []CustomerDependencyDecision
-	Evidence  map[string]semantics.CustomerDependencyEvidence
+	Decisions  []CustomerDependencyDecision
+	Evidence   map[string]semantics.CustomerDependencyEvidence
 	Guidelines []policy.Guideline
 }
 
@@ -204,6 +205,30 @@ func (r DisambiguationStageResult) BatchOutput() map[string]any {
 	return map[string]any{"prompt": r.Prompt}
 }
 
+type RetrieverStageResult struct {
+	Results             []retrieverdomain.Result `json:"results,omitempty"`
+	KnowledgeSnapshotID string                   `json:"knowledge_snapshot_id,omitempty"`
+	TransientGuidelines []policy.Guideline       `json:"transient_guidelines,omitempty"`
+}
+
+func (r RetrieverStageResult) Apply(state *matchingState) {
+	state.retrieverStage = cloneRetrieverStageResult(r)
+	state.context.RetrievedKnowledge = append([]retrieverdomain.Result(nil), r.Results...)
+	if len(r.TransientGuidelines) > 0 {
+		state.matchFinalizeStage.MatchedGuidelines = append(state.matchFinalizeStage.MatchedGuidelines, r.TransientGuidelines...)
+		state.matchFinalizeStage.MatchedGuidelines = dedupeGuidelines(state.matchFinalizeStage.MatchedGuidelines)
+		syncFinalizeStageToState(state)
+	}
+}
+
+func (r RetrieverStageResult) BatchOutput() map[string]any {
+	return map[string]any{
+		"results":               r.Results,
+		"knowledge_snapshot_id": r.KnowledgeSnapshotID,
+		"transient_guidelines":  r.TransientGuidelines,
+	}
+}
+
 type ResponseAnalysisStageResult struct {
 	CandidateTemplates []policy.Template
 	Analysis           ResponseAnalysis
@@ -237,8 +262,8 @@ func (r ToolExposureStageResult) Apply(state *matchingState) {
 
 func (r ToolExposureStageResult) BatchOutput() map[string]any {
 	return map[string]any{
-		"exposed_tools":   append([]string(nil), r.ExposedTools...),
-		"tool_approvals":  cloneStringMap(r.ToolApprovals),
+		"exposed_tools":  append([]string(nil), r.ExposedTools...),
+		"tool_approvals": cloneStringMap(r.ToolApprovals),
 	}
 }
 

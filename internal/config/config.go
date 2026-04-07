@@ -17,6 +17,7 @@ type ProviderConfig struct {
 	OpenRouterBase    string
 	DefaultReasoning  string
 	DefaultStructured string
+	DefaultEmbedding  string
 }
 
 type Config struct {
@@ -43,6 +44,7 @@ func Load(service string) Config {
 			OpenRouterBase:    env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
 			DefaultReasoning:  env("DEFAULT_REASONING_PROVIDER", "openrouter"),
 			DefaultStructured: env("DEFAULT_STRUCTURED_PROVIDER", "openrouter"),
+			DefaultEmbedding:  env("DEFAULT_EMBEDDING_PROVIDER", "openrouter"),
 		},
 		AsyncWriteQueueSize: intEnv("ASYNC_WRITE_QUEUE_SIZE", 256),
 		RequestTimeout:      durationEnv("REQUEST_TIMEOUT_SECONDS", 15),

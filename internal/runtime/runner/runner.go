@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,10 +16,14 @@ import (
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
 	"github.com/sahal/parmesan/internal/domain/execution"
+	"github.com/sahal/parmesan/internal/domain/knowledge"
+	"github.com/sahal/parmesan/internal/domain/media"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/domain/toolrun"
+	knowledgeenrichment "github.com/sahal/parmesan/internal/knowledge/enrichment"
+	knowledgelearning "github.com/sahal/parmesan/internal/knowledge/learning"
 	"github.com/sahal/parmesan/internal/model"
 	rolloutengine "github.com/sahal/parmesan/internal/rollout"
 	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
@@ -75,6 +81,7 @@ func (r *Runner) loop(ctx context.Context) {
 }
 
 func (r *Runner) runOnce(ctx context.Context) {
+	r.retryFailedMediaAssets(ctx, time.Now().UTC())
 	executions, err := r.repo.ListRunnableExecutions(ctx, time.Now().UTC())
 	if err != nil {
 		return
@@ -199,12 +206,22 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 
 	exec.Status = execution.StatusSucceeded
 	exec.UpdatedAt = time.Now().UTC()
-	return r.repo.UpdateExecution(ctx, exec)
+	if err := r.repo.UpdateExecution(ctx, exec); err != nil {
+		return err
+	}
+	return r.learnFromExecution(ctx, exec)
 }
 
 func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution, step *execution.ExecutionStep) error {
 	switch step.Name {
 	case "ingest":
+		events, err := r.repo.ListEvents(ctx, exec.SessionID)
+		if err != nil {
+			return err
+		}
+		if err := r.ingestMediaAssets(ctx, events); err != nil {
+			return err
+		}
 		if _, err := r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "execution.ingest", "completed", exec.ID, exec.TraceID, map[string]any{
 			"step": "ingest",
 		}, nil, false); err != nil {
@@ -271,6 +288,8 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			"active_journey_id":       journeyID(view.ActiveJourney),
 			"active_journey_state_id": journeyStateID(view.ActiveJourneyState),
 			"composition_mode":        view.CompositionMode,
+			"knowledge_snapshot_id":   view.RetrieverStage.KnowledgeSnapshotID,
+			"retriever_result_hashes": retrieverResultHashes(view),
 		})
 		if _, err := r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "policy.resolved", "completed", exec.ID, exec.TraceID, map[string]any{
 			"bundle_id":          exec.PolicyBundleID,
@@ -443,7 +462,15 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 	}
 	selection := rolloutengine.SelectBundle(sess, proposals, rollouts, exec.PolicyBundleID)
 	selectedBundles := selectPolicyBundles(bundles, selection.BundleID, exec.PolicyBundleID)
-	view, err := policyruntime.ResolveWithRouter(ctx, r.router, events, selectedBundles, journeys, catalog)
+	knowledgeSnapshot, knowledgeChunks := r.resolveKnowledgeSnapshot(ctx, sess, selectedBundles)
+	derivedSignals := r.derivedSignalText(ctx, exec.SessionID)
+	view, err := policyruntime.ResolveWithOptions(ctx, events, selectedBundles, journeys, catalog, policyruntime.ResolveOptions{
+		Router:            r.router,
+		KnowledgeSearcher: r.repo,
+		KnowledgeSnapshot: knowledgeSnapshot,
+		KnowledgeChunks:   knowledgeChunks,
+		DerivedSignals:    derivedSignals,
+	})
 	if err != nil {
 		return resolvedView{}, nil, err
 	}
@@ -487,6 +514,354 @@ func selectPolicyBundles(bundles []policy.Bundle, preferred string, fallback str
 		return nil
 	}
 	return []policy.Bundle{bundles[0]}
+}
+
+func (r *Runner) resolveKnowledgeSnapshot(ctx context.Context, sess session.Session, bundles []policy.Bundle) (*knowledge.Snapshot, []knowledge.Chunk) {
+	var snapshots []knowledge.Snapshot
+	var chunks []knowledge.Chunk
+	customerScopeKind, customerScopeID := customerKnowledgeScope(sess)
+	if customerScopeID != "" {
+		customerSnapshots, err := r.repo.ListKnowledgeSnapshots(ctx, knowledge.SnapshotQuery{ScopeKind: customerScopeKind, ScopeID: customerScopeID, Limit: 1})
+		if err == nil && len(customerSnapshots) > 0 {
+			snapshots = append(snapshots, customerSnapshots[0])
+			customerChunks, _ := r.repo.ListKnowledgeChunks(ctx, knowledge.ChunkQuery{ScopeKind: customerScopeKind, ScopeID: customerScopeID, SnapshotID: customerSnapshots[0].ID})
+			chunks = append(chunks, customerChunks...)
+		}
+	}
+	scopeKind, scopeID := knowledgeScope(sess, bundles)
+	if scopeID != "" {
+		sharedSnapshots, err := r.repo.ListKnowledgeSnapshots(ctx, knowledge.SnapshotQuery{ScopeKind: scopeKind, ScopeID: scopeID, Limit: 1})
+		if err == nil && len(sharedSnapshots) > 0 {
+			snapshots = append(snapshots, sharedSnapshots[0])
+			sharedChunks, _ := r.repo.ListKnowledgeChunks(ctx, knowledge.ChunkQuery{ScopeKind: scopeKind, ScopeID: scopeID, SnapshotID: sharedSnapshots[0].ID})
+			chunks = append(chunks, sharedChunks...)
+		}
+	}
+	if len(snapshots) == 0 {
+		return nil, nil
+	}
+	snapshot := snapshots[0]
+	return &snapshot, chunks
+}
+
+func knowledgeScope(sess session.Session, bundles []policy.Bundle) (string, string) {
+	if strings.TrimSpace(sess.AgentID) != "" {
+		return "agent", strings.TrimSpace(sess.AgentID)
+	}
+	if len(bundles) > 0 && strings.TrimSpace(bundles[0].ID) != "" {
+		return "bundle", strings.TrimSpace(bundles[0].ID)
+	}
+	return "", ""
+}
+
+func customerKnowledgeScope(sess session.Session) (string, string) {
+	if strings.TrimSpace(sess.AgentID) == "" || strings.TrimSpace(sess.CustomerID) == "" {
+		return "", ""
+	}
+	return "customer_agent", strings.TrimSpace(sess.AgentID) + ":" + strings.TrimSpace(sess.CustomerID)
+}
+
+func (r *Runner) derivedSignalText(ctx context.Context, sessionID string) []string {
+	signals, err := r.repo.ListDerivedSignals(ctx, sessionID)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, signal := range signals {
+		if strings.TrimSpace(signal.Value) == "" {
+			continue
+		}
+		out = append(out, signal.Kind+": "+signal.Value)
+	}
+	return out
+}
+
+func (r *Runner) ingestMediaAssets(ctx context.Context, events []session.Event) error {
+	now := time.Now().UTC()
+	existingAssets, err := r.repo.ListMediaAssets(ctx, "")
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]struct{}, len(existingAssets))
+	for _, asset := range existingAssets {
+		seen[mediaAssetID(asset.EventID, asset.PartIndex)] = struct{}{}
+	}
+	for _, event := range events {
+		for i, part := range event.Content {
+			if part.Type == "" || part.Type == "text" {
+				continue
+			}
+			assetID := mediaAssetID(event.ID, i)
+			if _, ok := seen[assetID]; ok {
+				continue
+			}
+			asset := media.Asset{
+				ID:        assetID,
+				SessionID: event.SessionID,
+				EventID:   event.ID,
+				PartIndex: i,
+				Type:      part.Type,
+				URL:       part.URL,
+				MimeType:  fmt.Sprint(part.Meta["mime_type"]),
+				Status:    "pending",
+				Metadata:  cloneAnyMap(part.Meta),
+				CreatedAt: now,
+			}
+			if err := r.repo.SaveMediaAsset(ctx, asset); err != nil {
+				return err
+			}
+			if err := r.processMediaAsset(ctx, event, &asset, part, false); err != nil {
+				return err
+			}
+			seen[assetID] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func mediaAssetID(eventID string, partIndex int) string {
+	return fmt.Sprintf("media_%s_%d", eventID, partIndex)
+}
+
+func (r *Runner) retryFailedMediaAssets(ctx context.Context, now time.Time) {
+	assets, err := r.repo.ListMediaAssets(ctx, "")
+	if err != nil {
+		return
+	}
+	for _, asset := range assets {
+		if asset.Status != "failed" {
+			continue
+		}
+		if !shouldRetryMediaAsset(asset, now) {
+			continue
+		}
+		event, err := r.sessions.ReadEvent(ctx, asset.SessionID, asset.EventID)
+		if err != nil {
+			continue
+		}
+		if asset.PartIndex < 0 || asset.PartIndex >= len(event.Content) {
+			continue
+		}
+		traceID := strings.TrimSpace(event.TraceID)
+		if traceID == "" {
+			traceID = traceIDForExecution(asset.EventID, event.SessionID)
+		}
+		r.appendTrace(ctx, audit.Record{
+			ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+			Kind:      "media.retry.started",
+			SessionID: asset.SessionID,
+			TraceID:   traceID,
+			Message:   "media enrichment retry started",
+			Fields: map[string]any{
+				"asset_id":    asset.ID,
+				"event_id":    asset.EventID,
+				"part_index":  asset.PartIndex,
+				"type":        asset.Type,
+				"retry_count": mediaRetryCount(asset.Metadata),
+			},
+			CreatedAt: time.Now().UTC(),
+		})
+		_ = r.processMediaAsset(ctx, event, &asset, event.Content[asset.PartIndex], true)
+	}
+}
+
+func (r *Runner) processMediaAsset(ctx context.Context, event session.Event, asset *media.Asset, part session.ContentPart, isRetry bool) error {
+	traceID := strings.TrimSpace(event.TraceID)
+	if traceID == "" {
+		traceID = traceIDForExecution(asset.EventID, event.SessionID)
+	}
+	signals, err := knowledgeenrichment.ForPart(part.Type).Enrich(ctx, event, *asset, part)
+	if err != nil {
+		asset.Status = "failed"
+		asset.EnrichedAt = time.Now().UTC()
+		asset.Metadata["error"] = err.Error()
+		asset.Metadata["enrichment_status"] = "failed"
+		retryCount := mediaRetryCount(asset.Metadata) + 1
+		asset.Metadata["retry_count"] = retryCount
+		asset.Metadata["next_retry_at"] = nextMediaRetryAt(time.Now().UTC(), retryCount).Format(time.RFC3339Nano)
+		if isRetry {
+			asset.Metadata["last_retry_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+		if saveErr := r.repo.SaveMediaAsset(ctx, *asset); saveErr != nil {
+			return saveErr
+		}
+		r.appendTrace(ctx, audit.Record{
+			ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+			Kind:      "media.enrichment.failed",
+			SessionID: asset.SessionID,
+			TraceID:   traceID,
+			Message:   "media enrichment failed",
+			Fields: map[string]any{
+				"asset_id":          asset.ID,
+				"event_id":          asset.EventID,
+				"part_index":        asset.PartIndex,
+				"type":              asset.Type,
+				"error":             err.Error(),
+				"retry_count":       retryCount,
+				"next_retry_at":     asset.Metadata["next_retry_at"],
+				"enrichment_status": asset.Metadata["enrichment_status"],
+				"is_retry":          isRetry,
+			},
+			CreatedAt: time.Now().UTC(),
+		})
+		return nil
+	}
+	extractors := map[string]struct{}{}
+	providers := map[string]struct{}{}
+	requestIDs := map[string]struct{}{}
+	var maxLatency int64
+	for _, signal := range signals {
+		if strings.TrimSpace(signal.Extractor) != "" {
+			extractors[signal.Extractor] = struct{}{}
+		}
+		if provider := strings.TrimSpace(fmt.Sprint(signal.Metadata["provider"])); provider != "" {
+			providers[provider] = struct{}{}
+		}
+		if requestID := strings.TrimSpace(fmt.Sprint(signal.Metadata["request_id"])); requestID != "" {
+			requestIDs[requestID] = struct{}{}
+		}
+		if latency, ok := signal.Metadata["latency_ms"]; ok {
+			switch typed := latency.(type) {
+			case int64:
+				if typed > maxLatency {
+					maxLatency = typed
+				}
+			case int:
+				if int64(typed) > maxLatency {
+					maxLatency = int64(typed)
+				}
+			case float64:
+				if int64(typed) > maxLatency {
+					maxLatency = int64(typed)
+				}
+			}
+		}
+		if err := r.repo.SaveDerivedSignal(ctx, signal); err != nil {
+			return err
+		}
+	}
+	asset.Status = "succeeded"
+	asset.EnrichedAt = time.Now().UTC()
+	asset.Metadata["enrichment_status"] = "succeeded"
+	if len(extractors) > 0 {
+		names := make([]string, 0, len(extractors))
+		for name := range extractors {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		asset.Metadata["extractors"] = names
+	}
+	if len(providers) > 0 {
+		names := make([]string, 0, len(providers))
+		for name := range providers {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		asset.Metadata["providers"] = names
+	}
+	if len(requestIDs) > 0 {
+		names := make([]string, 0, len(requestIDs))
+		for name := range requestIDs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		asset.Metadata["request_ids"] = names
+	}
+	if maxLatency > 0 {
+		asset.Metadata["latency_ms"] = maxLatency
+	}
+	delete(asset.Metadata, "error")
+	delete(asset.Metadata, "next_retry_at")
+	if isRetry {
+		asset.Metadata["last_retry_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	if err := r.repo.SaveMediaAsset(ctx, *asset); err != nil {
+		return err
+	}
+	r.appendTrace(ctx, audit.Record{
+		ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+		Kind:      "media.enrichment.succeeded",
+		SessionID: asset.SessionID,
+		TraceID:   traceID,
+		Message:   "media enrichment succeeded",
+		Fields: map[string]any{
+			"asset_id":          asset.ID,
+			"event_id":          asset.EventID,
+			"part_index":        asset.PartIndex,
+			"type":              asset.Type,
+			"signal_count":      len(signals),
+			"enrichment_status": asset.Metadata["enrichment_status"],
+			"providers":         asset.Metadata["providers"],
+			"request_ids":       asset.Metadata["request_ids"],
+			"latency_ms":        asset.Metadata["latency_ms"],
+			"is_retry":          isRetry,
+		},
+		CreatedAt: time.Now().UTC(),
+	})
+	return nil
+}
+
+func shouldRetryMediaAsset(asset media.Asset, now time.Time) bool {
+	if asset.Status != "failed" {
+		return false
+	}
+	if mediaRetryCount(asset.Metadata) >= 3 {
+		return false
+	}
+	raw := strings.TrimSpace(fmt.Sprint(asset.Metadata["next_retry_at"]))
+	if raw == "" {
+		return true
+	}
+	next, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return true
+	}
+	return !next.After(now)
+}
+
+func mediaRetryCount(metadata map[string]any) int {
+	switch v := metadata["retry_count"].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case string:
+		if parsed, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
+func nextMediaRetryAt(now time.Time, retryCount int) time.Time {
+	backoff := time.Duration(retryCount*30) * time.Second
+	if backoff > 5*time.Minute {
+		backoff = 5 * time.Minute
+	}
+	return now.Add(backoff)
+}
+
+func traceIDForExecution(eventID, sessionID string) string {
+	sum := sha1.Sum([]byte(eventID + ":" + sessionID))
+	return "trace_" + hex.EncodeToString(sum[:8])
+}
+
+func (r *Runner) learnFromExecution(ctx context.Context, exec execution.TurnExecution) error {
+	sess, err := r.repo.GetSession(ctx, exec.SessionID)
+	if err != nil {
+		return err
+	}
+	events, err := r.repo.ListEvents(ctx, exec.SessionID)
+	if err != nil {
+		return err
+	}
+	signals, err := r.repo.ListDerivedSignals(ctx, exec.SessionID)
+	if err != nil {
+		return err
+	}
+	return knowledgelearning.New(r.repo).LearnFromSession(ctx, sess, exec, events, signals)
 }
 
 func (r *Runner) maybeRunTool(ctx context.Context, exec execution.TurnExecution, view resolvedView) (map[string]any, error) {
@@ -952,6 +1327,9 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 	if view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
 		parts = append(parts, "Current journey instruction: "+view.ActiveJourneyState.Instruction)
 	}
+	if knowledge := retrievedKnowledgeText(view); knowledge != "" {
+		parts = append(parts, "Retrieved knowledge:\n"+knowledge)
+	}
 	if toolDecision := view.ToolDecisionStage.Decision; toolDecision.SelectedTool != "" {
 		parts = append(parts, "Selected tool: "+toolDecision.SelectedTool)
 	}
@@ -959,6 +1337,27 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 		parts = append(parts, "Tool output: "+mustJSON(toolOutput))
 	}
 	return strings.Join(parts, "\n")
+}
+
+func retrievedKnowledgeText(view resolvedView) string {
+	var parts []string
+	for _, item := range view.RetrieverStage.Results {
+		if strings.TrimSpace(item.Data) == "" {
+			continue
+		}
+		parts = append(parts, strings.TrimSpace(item.Data))
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func retrieverResultHashes(view resolvedView) []string {
+	var out []string
+	for _, item := range view.RetrieverStage.Results {
+		if strings.TrimSpace(item.ResultHash) != "" {
+			out = append(out, item.ResultHash)
+		}
+	}
+	return out
 }
 
 func journeyID(item *policy.Journey) string {

@@ -26,6 +26,7 @@ type Bundle struct {
 	Journeys                  []Journey                  `json:"journeys" yaml:"journeys"`
 	Templates                 []Template                 `json:"templates" yaml:"templates"`
 	ToolPolicies              []ToolPolicy               `json:"tool_policies" yaml:"tool_policies"`
+	Retrievers                []RetrieverBinding         `json:"retrievers,omitempty" yaml:"retrievers,omitempty"`
 	GuidelineToolAssociations []GuidelineToolAssociation `json:"guideline_tool_associations,omitempty" yaml:"-"`
 }
 
@@ -100,11 +101,11 @@ type JourneyNode struct {
 }
 
 type JourneyEdge struct {
-	ID       string         `json:"id" yaml:"id"`
-	Source   string         `json:"source" yaml:"source"`
-	Target   string         `json:"target" yaml:"target"`
-	Condition string        `json:"condition,omitempty" yaml:"condition,omitempty"`
-	Metadata map[string]any `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	ID        string         `json:"id" yaml:"id"`
+	Source    string         `json:"source" yaml:"source"`
+	Target    string         `json:"target" yaml:"target"`
+	Condition string         `json:"condition,omitempty" yaml:"condition,omitempty"`
+	Metadata  map[string]any `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 
 type Template struct {
@@ -119,6 +120,16 @@ type ToolPolicy struct {
 	ToolIDs  []string `json:"tool_ids" yaml:"tool_ids"`
 	Exposure string   `json:"exposure" yaml:"exposure"`
 	Approval string   `json:"approval,omitempty" yaml:"approval,omitempty"`
+}
+
+type RetrieverBinding struct {
+	ID         string         `json:"id" yaml:"id"`
+	Kind       string         `json:"kind" yaml:"kind"`
+	Scope      string         `json:"scope" yaml:"scope"`
+	TargetID   string         `json:"target_id,omitempty" yaml:"target_id,omitempty"`
+	Mode       string         `json:"mode,omitempty" yaml:"mode,omitempty"`
+	MaxResults int            `json:"max_results,omitempty" yaml:"max_results,omitempty"`
+	Config     map[string]any `json:"config,omitempty" yaml:"config,omitempty"`
 }
 
 type GuidelineToolAssociation struct {

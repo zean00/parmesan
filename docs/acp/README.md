@@ -22,6 +22,42 @@ Conversation-edge rules:
 - Trace listing supports `trace_id`, `session_id`, `execution_id`, `kind`, and `limit` filters; `GET /v1/traces/{id}` returns the detailed timeline.
 - If `OPERATOR_API_KEY` is configured, `/v1/operator/...` requires `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
 
+Knowledge workspace routes:
+- `POST /v1/operator/knowledge/sources`
+- `POST /v1/operator/knowledge/sources/{id}/compile`
+- `GET /v1/operator/knowledge/snapshots/{id}`
+- `GET /v1/operator/knowledge/pages`
+- `GET /v1/operator/knowledge/proposals`
+- `GET /v1/operator/knowledge/proposals/{id}`
+- `GET /v1/operator/knowledge/proposals/{id}/preview`
+- `POST /v1/operator/knowledge/proposals/{id}/state`
+- `POST /v1/operator/knowledge/proposals/{id}/apply`
+- `GET /v1/operator/media/assets`
+- `GET /v1/operator/media/assets/{id}`
+- `POST /v1/operator/media/assets/{id}/reprocess`
+- `POST /v1/operator/media/assets/reprocess`
+- Media asset responses expose retry state directly: `retry_count`, `next_retry_at`, `last_retry_at`, `enrichment_status`, and `error`.
+- `GET /v1/operator/media/signals`
+
+Knowledge rules:
+- Folder sources require `KNOWLEDGE_SOURCE_ROOT` and cannot point outside that root.
+- Compiled wiki pages and chunks are stored as typed records; Markdown files are source input, not runtime truth.
+- Runtime retrievers inject response-scoped grounding from immutable knowledge snapshots and must not mutate policy or wiki state during ACP turn processing.
+- Non-text ACP content parts are treated as media assets; image/audio parts now produce derived signals like OCR text, summaries, labels, transcripts, and language hints.
+- Retrieval prefers customer-scoped `customer_agent` knowledge when available, then falls back to shared agent or bundle knowledge.
+- Shared conversation learning creates draft knowledge proposals; low-risk customer facts can update customer-scoped knowledge directly.
+- Proposal review supports explicit `draft`, `approved`, `rejected`, and `applied` states, plus a preview surface before apply.
+- OpenRouter multimodal enrichers are used when configured:
+  - images use `image_url`
+  - audio uses `input_audio`
+  - PDFs use `file`
+  - video uses `video_url`
+- `OPENROUTER_MULTIMODAL_MODEL` can override the default multimodal model selection.
+- Media assets can be inspected by `status` and `type`, and individual asset drilldowns include the derived signals plus stored enrichment provenance.
+- Failed or outdated media assets can be reprocessed directly through the operator API without re-running the full conversation turn.
+- Filtered media batches can also be reprocessed in one request for operator recovery workflows.
+- Automatic retries and operator reprocess operations are also written into the trace/audit stream for operator debugging.
+
 Core event families:
 - `message`
 - `status`

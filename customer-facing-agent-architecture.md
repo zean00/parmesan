@@ -21,6 +21,8 @@ At the same time, it should borrow Hermes-style runtime ideas:
 - cached vs ephemeral prompt assembly
 - compact injected memory
 - cross-session search
+- response-scoped retrievers for grounding data
+- maintained agent knowledge workspaces
 - progressive loading of reusable artifacts
 - first-class messaging gateway
 
@@ -124,10 +126,18 @@ Your product will work if these rules remain true:
 - **Raw media is not runtime context.**
   - Runtime should reason mostly over derived structured signals, with links back to originals.
 
+- **Retrieval is not learning.**
+  - Retrievers may inject response-scoped grounding data into a turn.
+  - They must not silently mutate policy, preferences, or the agent knowledge workspace.
+
+- **The knowledge workspace is not active policy.**
+  - LLM-maintained knowledge pages can synthesize documents and sessions.
+  - Serving behavior changes still flow through typed proposals, replay, and rollout.
+
 - **Live customer sessions do not directly mutate active policy.**
   - They can generate proposals, but never silently update production policy.
 
-- **Every turn stores the exact policy snapshot hash used.**
+- **Every turn stores the exact policy and knowledge snapshot hashes used.**
   - This is what makes replay, rollback, and debugging real.
 
 - **Gateway owns transport semantics.**
@@ -219,6 +229,11 @@ Use these canonical artifact types:
 - `TemplateVariant`
 - `ToolPolicy`
 - `GlossaryTerm`
+- `Retriever`
+- `KnowledgeSource`
+- `KnowledgePage`
+- `KnowledgeSnapshot`
+- `KnowledgeUpdateProposal`
 - `CustomerPreference`
 - `PolicyProposal`
 - `PolicySnapshot`
@@ -412,6 +427,125 @@ Add explicit gateway entities:
 
 This matters because a customer-facing agent is not just “a session with messages.” Slack threads, Telegram chats, WhatsApp conversations, email threads, and voice-note channels all have different routing and reply semantics.
 
+### 4.8 Retriever Model
+
+Retrievers are runtime grounding adapters, not tools and not learning jobs.
+
+Use them for data the agent should normally “know” while composing the current response:
+
+- relevant knowledge pages
+- FAQ entries
+- product documentation snippets
+- account or customer context that is safe to read as background
+- response-scoped transient guidance
+
+Use tools for data that the agent must explicitly load, change, or act on.
+
+Retriever scope should be explicit:
+
+- agent-level retrievers run on every turn and may execute in parallel with matching
+- guideline retrievers run only when the guideline matches
+- journey retrievers run only when the journey is active
+- journey-state retrievers run only when that specific state is active
+- deferred retrievers may start work early but decide whether to inject results after matched guidelines and journeys are known
+
+A retriever result may contain:
+
+- `data`
+- `metadata`
+- `citations`
+- `canned_response_fields`
+- optional transient guidelines
+
+Retriever results are **response-scoped**.
+
+They may be persisted as trace evidence for replay/debugging, but they should not become durable memory or active policy by themselves.
+
+If a retriever returns transient guidelines, the runtime should re-run relationship resolution before response planning.
+
+Every served turn that uses retrievers should record:
+
+- retriever IDs
+- retriever result hashes
+- citation refs
+- `knowledge_snapshot_id` when the retriever reads from the agent knowledge workspace
+
+### 4.9 Knowledge Workspace Model
+
+Adopt the LLM-wiki pattern as a controlled knowledge workspace, not as the serving source of policy truth.
+
+Model it as three layers:
+
+1. **Raw sources**
+   - uploaded files
+   - configured document folders
+   - URLs and imported pages
+   - session transcripts
+   - operator notes and feedback
+   - tool results selected as evidence
+   - media-derived signals
+
+2. **Agent wiki**
+   - LLM-maintained structured pages
+   - topic pages
+   - product pages
+   - FAQ pages
+   - troubleshooting pages
+   - known-issue pages
+   - policy-rationale pages
+   - contradiction and stale-claim notes
+   - source-backed citations
+
+3. **Compiled knowledge index**
+   - page digests
+   - entity and concept links
+   - citation graph
+   - lexical and vector indexes
+   - immutable `KnowledgeSnapshot` records used by retrievers
+
+The agent wiki should be updated outside the customer response hot path.
+
+Updates can come from:
+
+- explicit admin document ingestion
+- scheduled folder sync
+- session-review feedback
+- post-turn learning jobs
+- lint jobs that detect contradictions, stale pages, orphan pages, or missing citations
+
+The wiki can generate:
+
+- `KnowledgeUpdateProposal`
+- `GlossaryTerm` proposals
+- `PolicyProposal` candidates when knowledge implies behavior changes
+- `CustomerPreference` updates when evidence is customer-scoped and low risk
+
+The wiki must not directly mutate active policy.
+
+Runtime should read from a stable `KnowledgeSnapshot`.
+
+The serving path should be:
+
+```text
+raw sources
+  -> knowledge compiler
+  -> agent wiki
+  -> knowledge snapshot
+  -> wiki retriever
+  -> response-scoped grounding data
+```
+
+When a document update changes behavior, the flow should be:
+
+```text
+knowledge update
+  -> proposal
+  -> replay / eval
+  -> review
+  -> rollout
+  -> active policy snapshot
+```
+
 ---
 
 ## 5. Runtime Engine
@@ -437,6 +571,8 @@ For each turn:
    - text normalization
    - audio transcription + language ID
    - image OCR / basic vision extraction
+   - video keyframe / transcript extraction when cheap enough
+   - persist derived signals with extractor version and confidence
    - safety / moderation
    - channel metadata extraction
 
@@ -445,6 +581,8 @@ For each turn:
    - active journey instances
    - durable customer preferences
    - approved policy snapshot candidates
+   - active knowledge snapshot ID
+   - derived multimodal signals
    - recent tool outputs
 
 5. **Resolve policy view**
@@ -474,7 +612,15 @@ For each turn:
    - criticality / risk precedence
    - disambiguation
 
-9. **Tool planning**
+9. **Retriever grounding**
+   - await agent-level retrievers already running in parallel with matching
+   - run matched guideline / active journey / active journey-state scoped retrievers
+   - inject response-scoped retrieved data, citations, and canned-response fields
+   - inject transient guidelines if returned
+   - re-run relationship resolution if transient guidelines were added
+   - record retriever IDs, result hashes, and knowledge snapshot IDs in the trace
+
+10. **Tool planning**
    - expose only justified tools
    - infer parameters
    - evaluate:
@@ -484,28 +630,29 @@ For each turn:
    - run tools
    - append results and blocked-tool insights
 
-10. **Journey update**
+11. **Journey update**
     - activate journey
     - advance node
     - backtrack
     - pause / wait-for-input
     - escalate
 
-11. **Response planning**
+12. **Response planning**
     - choose response mode: `fluid`, `guided`, or `strict`
     - select candidate templates
     - decide whether to ask for text, image, or audio next
     - decide whether to emit preamble / progress events
     - decide whether to stream partial output
 
-12. **Gateway delivery**
+13. **Gateway delivery**
     - map response plan to channel capabilities
     - send text, media request, attachment, or audio reply
     - handle retries and delivery audit
 
-13. **Post-turn**
+14. **Post-turn**
     - store trace
     - store policy snapshot hash
+    - store knowledge snapshot hash
     - emit async learning jobs
     - update session summary
 
@@ -951,6 +1098,41 @@ It should separate:
 - repeated inferred preferences
 - weak one-turn hints
 
+#### D. Knowledge Workspace Compiler
+
+**Input:** configured document sources, finished sessions, operator notes, feedback, tool results, and derived multimodal signals
+**Output:** versioned agent wiki updates, `KnowledgeSnapshot` records, and optional typed proposals
+
+Responsibilities:
+
+- ingest configured folders and uploaded documents
+- preserve raw-source checksums and citation refs
+- create and update knowledge pages
+- maintain an index of pages, entities, concepts, and citations
+- detect contradictions and stale claims
+- flag missing citations and orphan pages
+- create `KnowledgeUpdateProposal` records for review when updates are risky
+- create `PolicyProposal` records when a knowledge update implies behavior changes
+- create `GlossaryTerm` proposals for business-specific terms
+- avoid directly mutating active policy or active retriever snapshots
+
+The knowledge workspace should follow the LLM-wiki pattern:
+
+```text
+raw sources
+  -> maintained agent wiki
+  -> compiled knowledge snapshot
+  -> retriever-readable index
+```
+
+But it must remain governed by Parmesan's safety rules:
+
+- raw sources are immutable or append-only
+- wiki pages are synthesized artifacts with citations
+- snapshots are versioned and stable for replay
+- customer turns read from a snapshot, not a mutable working tree
+- high-risk changes require review before they can influence shared behavior
+
 ### 7.2 Proposal Lifecycle
 
 Every proposal moves through:
@@ -1234,6 +1416,35 @@ Raw media should only be fetched when needed for:
 - human review
 - deeper analysis
 
+Multimodal support should not be implemented as a retriever-first feature.
+
+The durable path is:
+
+```text
+ACP content part
+  -> media asset
+  -> enrichment job
+  -> derived signals
+  -> runtime context
+  -> optional retriever query
+```
+
+Use retrievers after enrichment, when derived signals can ground a knowledge lookup.
+
+Examples:
+
+- image OCR detects an order number, then a retriever fetches relevant return-policy pages
+- image classification detects product damage, then a retriever fetches damage-handling guidance
+- audio transcription detects a warranty question, then a retriever fetches warranty FAQ pages
+- video keyframes detect a setup issue, then a retriever fetches troubleshooting pages
+
+If derived signals are not ready:
+
+- the runtime may ask the customer for text clarification
+- the runtime may emit a status event and pause
+- the runtime may continue with lower-confidence text-only matching
+- the worker may resume when async enrichment finishes
+
 ---
 
 ## 10. Admin Control Plane
@@ -1350,6 +1561,14 @@ internal/
     teaching/
     feedback/
     preference/
+    knowledge/
+
+  knowledge/
+    sources/
+    wiki/
+    index/
+    retriever/
+    lint/
 
   rollout/
     snapshot/
@@ -1417,6 +1636,14 @@ type Matcher interface {
 
 type MediaEnricher interface {
     Enrich(ctx context.Context, part ContentPart) ([]DerivedSignal, error)
+}
+
+type Retriever interface {
+    Retrieve(ctx context.Context, in RetrieverContext) (RetrieverResult, error)
+}
+
+type KnowledgeCompiler interface {
+    Compile(ctx context.Context, in KnowledgeCompileInput) (KnowledgeSnapshot, error)
 }
 
 type ProposalCompiler interface {
@@ -1500,6 +1727,7 @@ The runtime should also support:
 - separate embedder
   - policy retrieval
   - session retrieval
+  - knowledge page retrieval
 
 Later, distill replay traces and approved proposals into smaller in-house matchers.
 
@@ -1518,6 +1746,8 @@ Every turn should emit a trace tree like:
 - candidate generation
 - matcher evaluations
 - relationship resolution
+- retriever execution and result hashes
+- knowledge snapshot ID and citation refs
 - tool planning
 - tool execution
 - journey transition
@@ -1529,6 +1759,7 @@ Store an audit record for:
 
 - who created or approved a policy artifact
 - which snapshot served a turn
+- which knowledge snapshot and retrievers grounded the response
 - which proposal modified a lineage
 - which preferences were inferred and why
 - which channel delivered the response
@@ -1706,7 +1937,31 @@ Hard requirements:
 
 ---
 
-### Phase 7: Native Image Support
+### Phase 7: Knowledge Workspace and Retrievers
+
+**Deliver:**
+
+- `KnowledgeSource`
+- `KnowledgePage`
+- `KnowledgeSnapshot`
+- `KnowledgeUpdateProposal`
+- source checksum and citation tracking
+- document-folder ingestion job
+- maintained agent wiki index
+- wiki retriever attached to an agent
+- response-scoped retriever stage
+- trace recording of retriever IDs, result hashes, and `knowledge_snapshot_id`
+
+**Exit criteria:**
+
+- configured documents are compiled into a versioned agent knowledge snapshot
+- runtime can retrieve relevant knowledge from the snapshot without mutating it
+- every retrieved answer includes citations
+- risky knowledge changes produce proposals instead of directly changing active behavior
+
+---
+
+### Phase 8: Native Image Support
 
 **Deliver:**
 
@@ -1724,7 +1979,7 @@ Hard requirements:
 
 ---
 
-### Phase 8: Native Audio Support
+### Phase 9: Native Audio Support
 
 **Deliver:**
 
@@ -1743,7 +1998,27 @@ Hard requirements:
 
 ---
 
-### Phase 9: Hardening
+### Phase 10: Native Video Support
+
+**Deliver:**
+
+- video content parts
+- object storage + metadata
+- keyframe extraction
+- transcript extraction when audio is present
+- video OCR / scene labels
+- video-derived signals
+- video-aware observations
+
+**Exit criteria:**
+
+- short customer videos can produce durable derived signals
+- video-derived signals can trigger journeys, tools, and retrievers
+- raw video is only fetched for deeper analysis or human review
+
+---
+
+### Phase 11: Hardening
 
 **Deliver:**
 
@@ -1787,13 +2062,14 @@ Do **not** start with live phone calls as the first slice.
 
 1. The serving agent never directly edits active policy.
 2. All learned changes are stored as proposals and patches.
-3. Every served turn stores the exact policy snapshot.
+3. Every served turn stores the exact policy and knowledge snapshots.
 4. Preferences are separate from shared policy.
 5. Non-backward-compatible journey edits do not mutate active journey instances.
 6. High-risk proposals require human approval.
 7. Raw media retention is controlled separately from derived signals.
 8. Replay must happen before rollout.
 9. Gateway capability constraints must be respected during planning and delivery.
+10. Retrievers inject response-scoped grounding data only; they do not mutate active policy, durable memory, or the agent wiki.
 
 ---
 

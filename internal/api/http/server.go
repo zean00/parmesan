@@ -2,13 +2,16 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha1"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,11 +22,15 @@ import (
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
 	"github.com/sahal/parmesan/internal/domain/execution"
+	"github.com/sahal/parmesan/internal/domain/knowledge"
+	"github.com/sahal/parmesan/internal/domain/media"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/replay"
 	"github.com/sahal/parmesan/internal/domain/rollout"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
+	knowledgecompiler "github.com/sahal/parmesan/internal/knowledge/compiler"
+	knowledgeenrichment "github.com/sahal/parmesan/internal/knowledge/enrichment"
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/policyyaml"
 	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
@@ -55,12 +62,14 @@ type streamItem struct {
 }
 
 type sessionSummary struct {
-	LastTraceID          string   `json:"last_trace_id,omitempty"`
-	LastExecutionID      string   `json:"last_execution_id,omitempty"`
-	AppliedGuidelineIDs  []string `json:"applied_guideline_ids,omitempty"`
-	ActiveJourneyID      string   `json:"active_journey_id,omitempty"`
-	ActiveJourneyStateID string   `json:"active_journey_state_id,omitempty"`
-	CompositionMode      string   `json:"composition_mode,omitempty"`
+	LastTraceID           string   `json:"last_trace_id,omitempty"`
+	LastExecutionID       string   `json:"last_execution_id,omitempty"`
+	AppliedGuidelineIDs   []string `json:"applied_guideline_ids,omitempty"`
+	ActiveJourneyID       string   `json:"active_journey_id,omitempty"`
+	ActiveJourneyStateID  string   `json:"active_journey_state_id,omitempty"`
+	CompositionMode       string   `json:"composition_mode,omitempty"`
+	KnowledgeSnapshotID   string   `json:"knowledge_snapshot_id,omitempty"`
+	RetrieverResultHashes []string `json:"retriever_result_hashes,omitempty"`
 }
 
 type sessionView struct {
@@ -91,6 +100,27 @@ type traceTimelineResponse struct {
 	SessionID   string               `json:"session_id,omitempty"`
 	ExecutionID string               `json:"execution_id,omitempty"`
 	Entries     []traceTimelineEntry `json:"entries"`
+}
+
+type mediaAssetView struct {
+	ID               string         `json:"id"`
+	SessionID        string         `json:"session_id"`
+	EventID          string         `json:"event_id"`
+	PartIndex        int            `json:"part_index"`
+	Type             string         `json:"type"`
+	URL              string         `json:"url,omitempty"`
+	MimeType         string         `json:"mime_type,omitempty"`
+	Checksum         string         `json:"checksum,omitempty"`
+	Status           string         `json:"status"`
+	Retention        string         `json:"retention,omitempty"`
+	Metadata         map[string]any `json:"metadata,omitempty"`
+	RetryCount       int            `json:"retry_count,omitempty"`
+	NextRetryAt      string         `json:"next_retry_at,omitempty"`
+	LastRetryAt      string         `json:"last_retry_at,omitempty"`
+	EnrichmentStatus string         `json:"enrichment_status,omitempty"`
+	Error            string         `json:"error,omitempty"`
+	CreatedAt        time.Time      `json:"created_at"`
+	EnrichedAt       time.Time      `json:"enriched_at,omitempty"`
 }
 
 func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *sse.Broker, router *model.Router, syncer *toolsync.Syncer) *Server {
@@ -146,6 +176,20 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/messages/on-behalf-of-agent", s.operatorCreateMessageOnBehalfOfAgent)
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/notes", s.operatorCreateNote)
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/process", s.operatorProcessEvent)
+	mux.HandleFunc("POST /v1/operator/knowledge/sources", s.operatorCreateKnowledgeSource)
+	mux.HandleFunc("POST /v1/operator/knowledge/sources/{id}/compile", s.operatorCompileKnowledgeSource)
+	mux.HandleFunc("GET /v1/operator/knowledge/snapshots/{id}", s.operatorGetKnowledgeSnapshot)
+	mux.HandleFunc("GET /v1/operator/knowledge/pages", s.operatorListKnowledgePages)
+	mux.HandleFunc("GET /v1/operator/knowledge/proposals", s.operatorListKnowledgeProposals)
+	mux.HandleFunc("GET /v1/operator/knowledge/proposals/{id}", s.operatorGetKnowledgeProposal)
+	mux.HandleFunc("GET /v1/operator/knowledge/proposals/{id}/preview", s.operatorPreviewKnowledgeProposal)
+	mux.HandleFunc("POST /v1/operator/knowledge/proposals/{id}/state", s.operatorTransitionKnowledgeProposal)
+	mux.HandleFunc("POST /v1/operator/knowledge/proposals/{id}/apply", s.operatorApplyKnowledgeProposal)
+	mux.HandleFunc("GET /v1/operator/media/assets", s.operatorListMediaAssets)
+	mux.HandleFunc("GET /v1/operator/media/assets/{id}", s.operatorGetMediaAsset)
+	mux.HandleFunc("POST /v1/operator/media/assets/{id}/reprocess", s.operatorReprocessMediaAsset)
+	mux.HandleFunc("POST /v1/operator/media/assets/reprocess", s.operatorBatchReprocessMediaAssets)
+	mux.HandleFunc("GET /v1/operator/media/signals", s.operatorListDerivedSignals)
 	mux.HandleFunc("POST /v1/tools/providers/register", s.registerProvider)
 	mux.HandleFunc("POST /v1/tools/providers/{id}/auth", s.saveProviderAuth)
 	mux.HandleFunc("GET /v1/tools/providers/{id}/auth", s.getProviderAuth)
@@ -810,12 +854,14 @@ func (s *Server) acpGetSession(w http.ResponseWriter, r *http.Request) {
 	summary := s.sessionSummaryFor(r.Context(), sess)
 	out := acp.SessionFromDomain(sess)
 	out.Summary = &acp.SessionSummary{
-		LastTraceID:          summary.LastTraceID,
-		LastExecutionID:      summary.LastExecutionID,
-		AppliedGuidelineIDs:  append([]string(nil), summary.AppliedGuidelineIDs...),
-		ActiveJourneyID:      summary.ActiveJourneyID,
-		ActiveJourneyStateID: summary.ActiveJourneyStateID,
-		CompositionMode:      summary.CompositionMode,
+		LastTraceID:           summary.LastTraceID,
+		LastExecutionID:       summary.LastExecutionID,
+		AppliedGuidelineIDs:   append([]string(nil), summary.AppliedGuidelineIDs...),
+		ActiveJourneyID:       summary.ActiveJourneyID,
+		ActiveJourneyStateID:  summary.ActiveJourneyStateID,
+		CompositionMode:       summary.CompositionMode,
+		KnowledgeSnapshotID:   summary.KnowledgeSnapshotID,
+		RetrieverResultHashes: append([]string(nil), summary.RetrieverResultHashes...),
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -1255,6 +1301,797 @@ func (s *Server) operatorCreateVisibleMessage(w http.ResponseWriter, r *http.Req
 	}
 	s.publishSessionEvent(sessionID, event, "", event.TraceID, event.CreatedAt)
 	writeJSON(w, http.StatusCreated, acp.NormalizeEvent(event))
+}
+
+func (s *Server) operatorCreateKnowledgeSource(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID        string         `json:"id"`
+		ScopeKind string         `json:"scope_kind"`
+		ScopeID   string         `json:"scope_id"`
+		Kind      string         `json:"kind"`
+		URI       string         `json:"uri"`
+		Metadata  map[string]any `json:"metadata"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.ScopeKind) == "" || strings.TrimSpace(req.ScopeID) == "" || strings.TrimSpace(req.URI) == "" {
+		http.Error(w, "scope_kind, scope_id, and uri are required", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Kind) == "" {
+		req.Kind = "folder"
+	}
+	if req.Kind == "folder" {
+		if _, err := validatedKnowledgePath(req.URI); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	now := time.Now().UTC()
+	if strings.TrimSpace(req.ID) == "" {
+		req.ID = fmt.Sprintf("ksrc_%d", now.UnixNano())
+	}
+	source := knowledge.Source{
+		ID:        req.ID,
+		ScopeKind: req.ScopeKind,
+		ScopeID:   req.ScopeID,
+		Kind:      req.Kind,
+		URI:       req.URI,
+		Status:    "registered",
+		Metadata:  cloneMap(req.Metadata),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.store.SaveKnowledgeSource(r.Context(), source); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusCreated, source)
+}
+
+func (s *Server) operatorCompileKnowledgeSource(w http.ResponseWriter, r *http.Request) {
+	source, err := s.store.GetKnowledgeSource(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if source.Kind != "folder" {
+		http.Error(w, "only folder knowledge sources are supported", http.StatusBadRequest)
+		return
+	}
+	root, err := validatedKnowledgePath(source.URI)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	snapshot, err := knowledgecompiler.NewWithEmbedder(s.store, s.router).CompileFolder(r.Context(), knowledgecompiler.Input{
+		ScopeKind: source.ScopeKind,
+		ScopeID:   source.ScopeID,
+		SourceID:  source.ID,
+		Root:      root,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	source.Status = "compiled"
+	source.UpdatedAt = time.Now().UTC()
+	_ = s.store.SaveKnowledgeSource(r.Context(), source)
+	writeJSON(w, http.StatusCreated, snapshot)
+}
+
+func (s *Server) operatorGetKnowledgeSnapshot(w http.ResponseWriter, r *http.Request) {
+	snapshot, err := s.store.GetKnowledgeSnapshot(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	pages, _ := s.store.ListKnowledgePages(r.Context(), knowledge.PageQuery{
+		ScopeKind:  snapshot.ScopeKind,
+		ScopeID:    snapshot.ScopeID,
+		SnapshotID: snapshot.ID,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"snapshot": snapshot, "pages": pages})
+}
+
+func (s *Server) operatorListKnowledgePages(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	limit, err := positiveQueryInt(query.Get("limit"), "limit")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	pages, err := s.store.ListKnowledgePages(r.Context(), knowledge.PageQuery{
+		ScopeKind:  strings.TrimSpace(query.Get("scope_kind")),
+		ScopeID:    strings.TrimSpace(query.Get("scope_id")),
+		SnapshotID: strings.TrimSpace(query.Get("snapshot_id")),
+		Limit:      limit,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, pages)
+}
+
+func (s *Server) operatorListKnowledgeProposals(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	items, err := s.store.ListKnowledgeUpdateProposals(r.Context(), strings.TrimSpace(query.Get("scope_kind")), strings.TrimSpace(query.Get("scope_id")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) operatorGetKnowledgeProposal(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetKnowledgeUpdateProposal(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) operatorPreviewKnowledgeProposal(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetKnowledgeUpdateProposal(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	payload := map[string]any{
+		"proposal": item,
+	}
+	if _, ok := item.Payload["page"].(map[string]any); ok {
+		currentPage, proposedPage := s.proposalPages(r.Context(), item)
+		var current map[string]any
+		if currentPage != nil {
+			current = map[string]any{
+				"id":       currentPage.ID,
+				"title":    currentPage.Title,
+				"body":     currentPage.Body,
+				"checksum": currentPage.Checksum,
+			}
+		}
+		payload["preview"] = map[string]any{
+			"current":  current,
+			"proposed": proposedPage,
+			"changes": map[string]any{
+				"title_changed": current == nil || fmt.Sprint(current["title"]) != fmt.Sprint(proposedPage["title"]),
+				"body_changed":  current == nil || fmt.Sprint(current["body"]) != fmt.Sprint(proposedPage["final_body"]),
+				"conflict":      proposalConflict(currentPage, proposedPage),
+			},
+		}
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) operatorTransitionKnowledgeProposal(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetKnowledgeUpdateProposal(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	var req struct {
+		State string `json:"state"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	state := strings.TrimSpace(req.State)
+	switch state {
+	case "draft", "approved", "rejected", "applied":
+	default:
+		http.Error(w, "state must be one of draft, approved, rejected, applied", http.StatusBadRequest)
+		return
+	}
+	if item.State == "applied" && state != "applied" {
+		http.Error(w, "applied proposal state is immutable", http.StatusBadRequest)
+		return
+	}
+	item.State = state
+	item.UpdatedAt = time.Now().UTC()
+	if err := s.store.SaveKnowledgeUpdateProposal(r.Context(), item); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) operatorApplyKnowledgeProposal(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetKnowledgeUpdateProposal(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if item.State == "applied" {
+		writeJSON(w, http.StatusOK, item)
+		return
+	}
+	if item.State == "rejected" {
+		http.Error(w, "rejected proposal cannot be applied", http.StatusBadRequest)
+		return
+	}
+	if item.State != "approved" && item.State != "draft" {
+		http.Error(w, "proposal must be draft or approved before apply", http.StatusBadRequest)
+		return
+	}
+	now := time.Now().UTC()
+	if _, ok := item.Payload["page"].(map[string]any); ok {
+		currentPage, proposedPage := s.proposalPages(r.Context(), item)
+		if proposalConflict(currentPage, proposedPage) {
+			http.Error(w, "proposal is stale relative to current page checksum", http.StatusConflict)
+			return
+		}
+		page := knowledge.Page{
+			ID:        strings.TrimSpace(fmt.Sprint(proposedPage["id"])),
+			ScopeKind: item.ScopeKind,
+			ScopeID:   item.ScopeID,
+			Title:     strings.TrimSpace(fmt.Sprint(proposedPage["title"])),
+			Body:      strings.TrimSpace(fmt.Sprint(proposedPage["final_body"])),
+			PageType:  "proposal_applied",
+			Citations: append([]knowledge.Citation(nil), item.Evidence...),
+			Metadata:  map[string]any{"proposal_id": item.ID},
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		if currentPage != nil {
+			page.ID = currentPage.ID
+			page.SourceID = currentPage.SourceID
+			page.PageType = currentPage.PageType
+			page.CreatedAt = currentPage.CreatedAt
+			page.Citations = mergeCitations(currentPage.Citations, page.Citations)
+			page.Metadata = mergeMaps(currentPage.Metadata, page.Metadata)
+		}
+		if strings.TrimSpace(page.ID) == "" {
+			page.ID = fmt.Sprintf("kpage_%d", now.UnixNano())
+		}
+		page.Checksum = knowledgeChecksum(page.Body)
+		chunk := knowledge.Chunk{
+			ID:        fmt.Sprintf("kchunk_%d", now.UnixNano()),
+			PageID:    page.ID,
+			ScopeKind: page.ScopeKind,
+			ScopeID:   page.ScopeID,
+			Text:      page.Body,
+			Citations: append([]knowledge.Citation(nil), page.Citations...),
+			Metadata:  map[string]any{"page_title": page.Title},
+			CreatedAt: now,
+		}
+		if err := s.store.SaveKnowledgePage(r.Context(), page, []knowledge.Chunk{chunk}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		pages, err := s.store.ListKnowledgePages(r.Context(), knowledge.PageQuery{ScopeKind: item.ScopeKind, ScopeID: item.ScopeID, Limit: 1000})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		chunks, err := s.store.ListKnowledgeChunks(r.Context(), knowledge.ChunkQuery{ScopeKind: item.ScopeKind, ScopeID: item.ScopeID, Limit: 1000})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		pageIDs := make([]string, 0, len(pages))
+		chunkIDs := make([]string, 0, len(chunks))
+		for _, page := range pages {
+			pageIDs = append(pageIDs, page.ID)
+		}
+		for _, chunk := range chunks {
+			chunkIDs = append(chunkIDs, chunk.ID)
+		}
+		if err := s.store.SaveKnowledgeSnapshot(r.Context(), knowledge.Snapshot{
+			ID:        fmt.Sprintf("ksnap_%d", now.UnixNano()),
+			ScopeKind: item.ScopeKind,
+			ScopeID:   item.ScopeID,
+			PageIDs:   pageIDs,
+			ChunkIDs:  chunkIDs,
+			Metadata:  map[string]any{"proposal_id": item.ID, "source": "proposal_apply"},
+			CreatedAt: now,
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	item.State = "applied"
+	item.UpdatedAt = now
+	if err := s.store.SaveKnowledgeUpdateProposal(r.Context(), item); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) proposalPages(ctx context.Context, item knowledge.UpdateProposal) (*knowledge.Page, map[string]any) {
+	payloadPage, ok := item.Payload["page"].(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	proposed := map[string]any{
+		"id":            strings.TrimSpace(fmt.Sprint(payloadPage["id"])),
+		"title":         strings.TrimSpace(fmt.Sprint(payloadPage["title"])),
+		"body":          strings.TrimSpace(fmt.Sprint(payloadPage["body"])),
+		"base_checksum": strings.TrimSpace(fmt.Sprint(payloadPage["base_checksum"])),
+		"operation":     normalizeProposalOperation(fmt.Sprint(payloadPage["operation"])),
+	}
+	pages, _ := s.store.ListKnowledgePages(ctx, knowledge.PageQuery{ScopeKind: item.ScopeKind, ScopeID: item.ScopeID, Limit: 1000})
+	for _, page := range pages {
+		if proposed["id"] != "" && page.ID == proposed["id"] {
+			proposed["final_body"] = mergeProposalBody(page.Body, fmt.Sprint(proposed["body"]), fmt.Sprint(proposed["operation"]))
+			return &page, proposed
+		}
+	}
+	if proposed["title"] != "" {
+		for _, page := range pages {
+			if strings.EqualFold(strings.TrimSpace(page.Title), fmt.Sprint(proposed["title"])) {
+				proposed["id"] = page.ID
+				proposed["final_body"] = mergeProposalBody(page.Body, fmt.Sprint(proposed["body"]), fmt.Sprint(proposed["operation"]))
+				return &page, proposed
+			}
+		}
+	}
+	proposed["final_body"] = strings.TrimSpace(fmt.Sprint(proposed["body"]))
+	return nil, proposed
+}
+
+func proposalConflict(current *knowledge.Page, proposed map[string]any) bool {
+	if current == nil || proposed == nil {
+		return false
+	}
+	baseChecksum := strings.TrimSpace(fmt.Sprint(proposed["base_checksum"]))
+	return baseChecksum != "" && current.Checksum != "" && current.Checksum != baseChecksum
+}
+
+func mergeMaps(base map[string]any, extra map[string]any) map[string]any {
+	if len(base) == 0 && len(extra) == 0 {
+		return nil
+	}
+	out := map[string]any{}
+	for key, value := range base {
+		out[key] = value
+	}
+	for key, value := range extra {
+		out[key] = value
+	}
+	return out
+}
+
+func mergeCitations(base []knowledge.Citation, extra []knowledge.Citation) []knowledge.Citation {
+	seen := map[string]struct{}{}
+	var out []knowledge.Citation
+	for _, item := range append(append([]knowledge.Citation(nil), base...), extra...) {
+		key := item.SourceID + "\x00" + item.URI + "\x00" + item.Title + "\x00" + item.Anchor
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, item)
+	}
+	return out
+}
+
+func sortedSet(items map[string]struct{}) []string {
+	out := make([]string, 0, len(items))
+	for item := range items {
+		out = append(out, item)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func knowledgeChecksum(text string) string {
+	sum := sha1.Sum([]byte(text))
+	return hex.EncodeToString(sum[:])
+}
+
+func normalizeProposalOperation(v string) string {
+	switch strings.TrimSpace(strings.ToLower(v)) {
+	case "append":
+		return "append"
+	case "prepend":
+		return "prepend"
+	default:
+		return "replace"
+	}
+}
+
+func mergeProposalBody(current string, proposed string, operation string) string {
+	current = strings.TrimSpace(current)
+	proposed = strings.TrimSpace(proposed)
+	switch normalizeProposalOperation(operation) {
+	case "append":
+		if current == "" {
+			return proposed
+		}
+		if proposed == "" {
+			return current
+		}
+		return current + "\n\n" + proposed
+	case "prepend":
+		if current == "" {
+			return proposed
+		}
+		if proposed == "" {
+			return current
+		}
+		return proposed + "\n\n" + current
+	default:
+		return proposed
+	}
+}
+
+func (s *Server) operatorListMediaAssets(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	items, err := s.store.ListMediaAssets(r.Context(), strings.TrimSpace(query.Get("session_id")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	status := strings.TrimSpace(query.Get("status"))
+	partType := strings.TrimSpace(query.Get("type"))
+	if status != "" || partType != "" {
+		filtered := items[:0]
+		for _, item := range items {
+			if status != "" && item.Status != status {
+				continue
+			}
+			if partType != "" && item.Type != partType {
+				continue
+			}
+			filtered = append(filtered, item)
+		}
+		items = filtered
+	}
+	views := make([]mediaAssetView, 0, len(items))
+	for _, item := range items {
+		views = append(views, mediaAssetToView(item))
+	}
+	writeJSON(w, http.StatusOK, views)
+}
+
+func (s *Server) operatorGetMediaAsset(w http.ResponseWriter, r *http.Request) {
+	assetID := strings.TrimSpace(r.PathValue("id"))
+	if assetID == "" {
+		http.Error(w, "asset id is required", http.StatusBadRequest)
+		return
+	}
+	asset, err := s.findMediaAsset(r.Context(), strings.TrimSpace(r.URL.Query().Get("session_id")), assetID)
+	if asset == nil {
+		http.Error(w, "media asset not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	signals, err := s.store.ListDerivedSignals(r.Context(), asset.SessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var filtered []media.DerivedSignal
+	for _, signal := range signals {
+		if signal.AssetID == asset.ID {
+			filtered = append(filtered, signal)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"asset":   mediaAssetToView(*asset),
+		"signals": filtered,
+	})
+}
+
+func (s *Server) operatorReprocessMediaAsset(w http.ResponseWriter, r *http.Request) {
+	assetID := strings.TrimSpace(r.PathValue("id"))
+	if assetID == "" {
+		http.Error(w, "asset id is required", http.StatusBadRequest)
+		return
+	}
+	asset, err := s.findMediaAsset(r.Context(), strings.TrimSpace(r.URL.Query().Get("session_id")), assetID)
+	if asset == nil {
+		http.Error(w, "media asset not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	event, err := s.sessions.ReadEvent(r.Context(), asset.SessionID, asset.EventID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if asset.PartIndex < 0 || asset.PartIndex >= len(event.Content) {
+		http.Error(w, "media part not found", http.StatusNotFound)
+		return
+	}
+	part := event.Content[asset.PartIndex]
+	asset.Status = "pending"
+	asset.Metadata = mergeMaps(asset.Metadata, map[string]any{
+		"reprocess_requested_at": time.Now().UTC().Format(time.RFC3339Nano),
+		"enrichment_status":      "pending",
+	})
+	if err := s.store.SaveMediaAsset(r.Context(), *asset); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	signals, statusCode, err := s.reprocessAsset(r.Context(), asset, event, part)
+	if err != nil {
+		http.Error(w, err.Error(), statusCode)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"asset": mediaAssetToView(*asset), "signals": signals})
+}
+
+func (s *Server) operatorBatchReprocessMediaAssets(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	sessionID := strings.TrimSpace(query.Get("session_id"))
+	statusFilter := strings.TrimSpace(query.Get("status"))
+	typeFilter := strings.TrimSpace(query.Get("type"))
+	limit, err := positiveQueryInt(query.Get("limit"), "limit")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	items, err := s.store.ListMediaAssets(r.Context(), sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	type result struct {
+		AssetID          string `json:"asset_id"`
+		Status           string `json:"status"`
+		RetryCount       int    `json:"retry_count,omitempty"`
+		NextRetryAt      string `json:"next_retry_at,omitempty"`
+		LastRetryAt      string `json:"last_retry_at,omitempty"`
+		EnrichmentStatus string `json:"enrichment_status,omitempty"`
+		Error            string `json:"error,omitempty"`
+	}
+	results := make([]result, 0, limit)
+	for _, item := range items {
+		if len(results) >= limit {
+			break
+		}
+		if statusFilter != "" && item.Status != statusFilter {
+			continue
+		}
+		if typeFilter != "" && item.Type != typeFilter {
+			continue
+		}
+		asset := item
+		event, err := s.sessions.ReadEvent(r.Context(), asset.SessionID, asset.EventID)
+		if err != nil {
+			view := mediaAssetToView(asset)
+			results = append(results, result{AssetID: asset.ID, Status: "not_found", RetryCount: view.RetryCount, NextRetryAt: view.NextRetryAt, LastRetryAt: view.LastRetryAt, EnrichmentStatus: view.EnrichmentStatus, Error: err.Error()})
+			continue
+		}
+		if asset.PartIndex < 0 || asset.PartIndex >= len(event.Content) {
+			view := mediaAssetToView(asset)
+			results = append(results, result{AssetID: asset.ID, Status: "not_found", RetryCount: view.RetryCount, NextRetryAt: view.NextRetryAt, LastRetryAt: view.LastRetryAt, EnrichmentStatus: view.EnrichmentStatus, Error: "media part not found"})
+			continue
+		}
+		_, _, err = s.reprocessAsset(r.Context(), &asset, event, event.Content[asset.PartIndex])
+		view := mediaAssetToView(asset)
+		if err != nil {
+			results = append(results, result{AssetID: asset.ID, Status: asset.Status, RetryCount: view.RetryCount, NextRetryAt: view.NextRetryAt, LastRetryAt: view.LastRetryAt, EnrichmentStatus: view.EnrichmentStatus, Error: err.Error()})
+			continue
+		}
+		results = append(results, result{AssetID: asset.ID, Status: asset.Status, RetryCount: view.RetryCount, NextRetryAt: view.NextRetryAt, LastRetryAt: view.LastRetryAt, EnrichmentStatus: view.EnrichmentStatus})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+func mediaAssetToView(asset media.Asset) mediaAssetView {
+	view := mediaAssetView{
+		ID:         asset.ID,
+		SessionID:  asset.SessionID,
+		EventID:    asset.EventID,
+		PartIndex:  asset.PartIndex,
+		Type:       asset.Type,
+		URL:        asset.URL,
+		MimeType:   asset.MimeType,
+		Checksum:   asset.Checksum,
+		Status:     asset.Status,
+		Retention:  asset.Retention,
+		Metadata:   asset.Metadata,
+		CreatedAt:  asset.CreatedAt,
+		EnrichedAt: asset.EnrichedAt,
+	}
+	if asset.Metadata == nil {
+		return view
+	}
+	view.RetryCount = mediaRetryCount(asset.Metadata)
+	view.NextRetryAt = strings.TrimSpace(fmt.Sprint(asset.Metadata["next_retry_at"]))
+	view.LastRetryAt = strings.TrimSpace(fmt.Sprint(asset.Metadata["last_retry_at"]))
+	view.EnrichmentStatus = strings.TrimSpace(fmt.Sprint(asset.Metadata["enrichment_status"]))
+	view.Error = strings.TrimSpace(fmt.Sprint(asset.Metadata["error"]))
+	return view
+}
+
+func mediaRetryCount(metadata map[string]any) int {
+	switch v := metadata["retry_count"].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case string:
+		if parsed, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
+func mediaAssetTraceID(event session.Event, asset *media.Asset) string {
+	if traceID := strings.TrimSpace(event.TraceID); traceID != "" {
+		return traceID
+	}
+	sum := sha1.Sum([]byte(asset.EventID + ":" + asset.SessionID))
+	return "trace_" + hex.EncodeToString(sum[:8])
+}
+
+func (s *Server) reprocessAsset(ctx context.Context, asset *media.Asset, event session.Event, part session.ContentPart) ([]media.DerivedSignal, int, error) {
+	traceID := mediaAssetTraceID(event, asset)
+	signals, err := knowledgeenrichment.ForPart(asset.Type).Enrich(ctx, event, *asset, part)
+	if err != nil {
+		asset.Status = "failed"
+		asset.EnrichedAt = time.Now().UTC()
+		asset.Metadata = mergeMaps(asset.Metadata, map[string]any{
+			"error":             err.Error(),
+			"enrichment_status": "failed",
+			"reprocessed_at":    time.Now().UTC().Format(time.RFC3339Nano),
+		})
+		if saveErr := s.store.SaveMediaAsset(ctx, *asset); saveErr != nil {
+			return nil, http.StatusInternalServerError, saveErr
+		}
+		s.appendTrace(ctx, audit.Record{
+			ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+			Kind:      "media.reprocess.failed",
+			SessionID: asset.SessionID,
+			TraceID:   traceID,
+			Message:   "media reprocess failed",
+			Fields: map[string]any{
+				"asset_id":          asset.ID,
+				"event_id":          asset.EventID,
+				"part_index":        asset.PartIndex,
+				"type":              asset.Type,
+				"error":             err.Error(),
+				"enrichment_status": asset.Metadata["enrichment_status"],
+			},
+			CreatedAt: time.Now().UTC(),
+		})
+		return nil, http.StatusBadGateway, err
+	}
+	extractors := map[string]struct{}{}
+	providers := map[string]struct{}{}
+	requestIDs := map[string]struct{}{}
+	var maxLatency int64
+	for _, signal := range signals {
+		if strings.TrimSpace(signal.Extractor) != "" {
+			extractors[signal.Extractor] = struct{}{}
+		}
+		if provider := strings.TrimSpace(fmt.Sprint(signal.Metadata["provider"])); provider != "" {
+			providers[provider] = struct{}{}
+		}
+		if requestID := strings.TrimSpace(fmt.Sprint(signal.Metadata["request_id"])); requestID != "" {
+			requestIDs[requestID] = struct{}{}
+		}
+		if latency, ok := signal.Metadata["latency_ms"]; ok {
+			switch typed := latency.(type) {
+			case int64:
+				if typed > maxLatency {
+					maxLatency = typed
+				}
+			case int:
+				if int64(typed) > maxLatency {
+					maxLatency = int64(typed)
+				}
+			case float64:
+				if int64(typed) > maxLatency {
+					maxLatency = int64(typed)
+				}
+			}
+		}
+		if err := s.store.SaveDerivedSignal(ctx, signal); err != nil {
+			return nil, http.StatusInternalServerError, err
+		}
+	}
+	asset.Status = "succeeded"
+	asset.EnrichedAt = time.Now().UTC()
+	meta := mergeMaps(asset.Metadata, map[string]any{
+		"enrichment_status": "succeeded",
+		"reprocessed_at":    time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	if len(extractors) > 0 {
+		meta["extractors"] = sortedSet(extractors)
+	}
+	if len(providers) > 0 {
+		meta["providers"] = sortedSet(providers)
+	}
+	if len(requestIDs) > 0 {
+		meta["request_ids"] = sortedSet(requestIDs)
+	}
+	if maxLatency > 0 {
+		meta["latency_ms"] = maxLatency
+	}
+	delete(meta, "error")
+	asset.Metadata = meta
+	if err := s.store.SaveMediaAsset(ctx, *asset); err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+	s.appendTrace(ctx, audit.Record{
+		ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+		Kind:      "media.reprocess.succeeded",
+		SessionID: asset.SessionID,
+		TraceID:   traceID,
+		Message:   "media reprocess succeeded",
+		Fields: map[string]any{
+			"asset_id":          asset.ID,
+			"event_id":          asset.EventID,
+			"part_index":        asset.PartIndex,
+			"type":              asset.Type,
+			"signal_count":      len(signals),
+			"enrichment_status": asset.Metadata["enrichment_status"],
+			"providers":         asset.Metadata["providers"],
+			"request_ids":       asset.Metadata["request_ids"],
+			"latency_ms":        asset.Metadata["latency_ms"],
+		},
+		CreatedAt: time.Now().UTC(),
+	})
+	return signals, http.StatusOK, nil
+}
+
+func (s *Server) findMediaAsset(ctx context.Context, sessionID string, assetID string) (*media.Asset, error) {
+	items, err := s.store.ListMediaAssets(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		if item.ID == assetID {
+			copy := item
+			return &copy, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *Server) operatorListDerivedSignals(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListDerivedSignals(r.Context(), strings.TrimSpace(r.URL.Query().Get("session_id")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func validatedKnowledgePath(uri string) (string, error) {
+	root := strings.TrimSpace(os.Getenv("KNOWLEDGE_SOURCE_ROOT"))
+	if root == "" {
+		return "", fmt.Errorf("KNOWLEDGE_SOURCE_ROOT is required for folder knowledge sources")
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	pathAbs, err := filepath.Abs(uri)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil {
+		return "", err
+	}
+	if rel == "." || (!strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != "..") {
+		return pathAbs, nil
+	}
+	return "", fmt.Errorf("knowledge source path must be under KNOWLEDGE_SOURCE_ROOT")
 }
 
 func (s *Server) streamAdminEvents(w http.ResponseWriter, r *http.Request) {
@@ -2153,6 +2990,8 @@ func (s *Server) sessionSummaryFor(ctx context.Context, sess session.Session) se
 		summary.ActiveJourneyID = stringMetadata(sess.Metadata, "active_journey_id")
 		summary.ActiveJourneyStateID = stringMetadata(sess.Metadata, "active_journey_state_id")
 		summary.CompositionMode = stringMetadata(sess.Metadata, "composition_mode")
+		summary.KnowledgeSnapshotID = stringMetadata(sess.Metadata, "knowledge_snapshot_id")
+		summary.RetrieverResultHashes = stringSliceMetadata(sess.Metadata, "retriever_result_hashes")
 	}
 	execs, err := s.store.ListExecutions(ctx)
 	if err == nil {
@@ -2340,14 +3179,20 @@ func (s *Server) buildTraceTimeline(ctx context.Context, traceID string) (traceT
 		if targetExec.ID == "" && record.ExecutionID != "" {
 			targetExec.ID = record.ExecutionID
 		}
+		kind := "audit." + record.Kind
+		payload := any(record)
+		if strings.HasPrefix(record.Kind, "media.") {
+			kind = record.Kind
+			payload = s.mediaAuditTimelinePayload(ctx, record)
+		}
 		entries = append(entries, traceTimelineEntry{
-			Kind:        "audit." + record.Kind,
+			Kind:        kind,
 			ID:          record.ID,
 			SessionID:   record.SessionID,
 			ExecutionID: record.ExecutionID,
 			TraceID:     record.TraceID,
 			When:        record.CreatedAt,
-			Payload:     record,
+			Payload:     payload,
 		})
 	}
 	for _, exec := range execs {
@@ -2473,6 +3318,35 @@ func (s *Server) buildTraceTimeline(ctx context.Context, traceID string) (traceT
 		ExecutionID: targetExec.ID,
 		Entries:     entries,
 	}, nil
+}
+
+func (s *Server) mediaAuditTimelinePayload(ctx context.Context, record audit.Record) map[string]any {
+	payload := map[string]any{
+		"audit": record,
+	}
+	assetID := strings.TrimSpace(fmt.Sprint(record.Fields["asset_id"]))
+	if assetID == "" {
+		return payload
+	}
+	asset, err := s.findMediaAsset(ctx, record.SessionID, assetID)
+	if err != nil || asset == nil {
+		return payload
+	}
+	payload["asset"] = mediaAssetToView(*asset)
+	signals, err := s.store.ListDerivedSignals(ctx, asset.SessionID)
+	if err != nil {
+		return payload
+	}
+	var filtered []media.DerivedSignal
+	for _, signal := range signals {
+		if signal.AssetID == asset.ID {
+			filtered = append(filtered, signal)
+		}
+	}
+	if len(filtered) > 0 {
+		payload["signals"] = filtered
+	}
+	return payload
 }
 
 type resolvedPolicyResponse struct {
