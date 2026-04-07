@@ -84,6 +84,10 @@ send either `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
 - `POST /v1/operator/sessions/{id}/messages/on-behalf-of-agent`
 - `POST /v1/operator/sessions/{id}/notes`
 - `POST /v1/operator/sessions/{id}/process`
+- `POST /v1/operator/agents`
+- `GET /v1/operator/agents`
+- `GET /v1/operator/agents/{id}`
+- `PUT /v1/operator/agents/{id}`
 - `POST /v1/operator/knowledge/sources`
 - `POST /v1/operator/knowledge/sources/{id}/compile`
 - `GET /v1/operator/knowledge/snapshots/{id}`
@@ -143,6 +147,15 @@ OpenRouter-backed enrichers now support:
 
 If OpenRouter is unavailable or a modality call fails, Parmesan falls back to
 local heuristic extraction for the supported media types.
+
+## Agent Profiles and SOUL
+
+Agent profiles bind an ACP `agent_id` to default policy and knowledge scopes.
+Policy bundles may include a `soul` block for brand/persona settings such as
+identity, role, tone, formality, verbosity, supported languages, formatting
+rules, escalation style, and avoid rules. SOUL is injected as strong response
+style guidance, but it does not override hard policy, strict templates,
+approval requirements, tool constraints, or explicit customer constraints.
 
 Operator media inspection now exposes:
 - per-asset signal drilldown

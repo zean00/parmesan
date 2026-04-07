@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sahal/parmesan/internal/api/sse"
+	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
 	"github.com/sahal/parmesan/internal/domain/execution"
@@ -278,6 +279,7 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 				"customer_decisions":    view.CustomerDependencyStage.Decisions,
 				"response_analysis":     view.ResponseAnalysisStage.Analysis,
 				"composition_mode":      view.CompositionMode,
+				"soul_hash":             bundleSoulHash(view.Bundle),
 				"arq_results":           view.ARQResults,
 			},
 			CreatedAt: time.Now().UTC(),
@@ -289,6 +291,7 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			"active_journey_state_id": journeyStateID(view.ActiveJourneyState),
 			"composition_mode":        view.CompositionMode,
 			"knowledge_snapshot_id":   view.RetrieverStage.KnowledgeSnapshotID,
+			"soul_hash":               bundleSoulHash(view.Bundle),
 			"retriever_result_hashes": retrieverResultHashes(view),
 		})
 		if _, err := r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "policy.resolved", "completed", exec.ID, exec.TraceID, map[string]any{
@@ -460,9 +463,14 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 	if err != nil {
 		return resolvedView{}, nil, err
 	}
-	selection := rolloutengine.SelectBundle(sess, proposals, rollouts, exec.PolicyBundleID)
-	selectedBundles := selectPolicyBundles(bundles, selection.BundleID, exec.PolicyBundleID)
-	knowledgeSnapshot, knowledgeChunks := r.resolveKnowledgeSnapshot(ctx, sess, selectedBundles)
+	profile := r.agentProfile(ctx, sess.AgentID)
+	defaultBundleID := exec.PolicyBundleID
+	if defaultBundleID == "" && profile.ID != "" {
+		defaultBundleID = profile.DefaultPolicyBundleID
+	}
+	selection := rolloutengine.SelectBundle(sess, proposals, rollouts, defaultBundleID)
+	selectedBundles := selectPolicyBundles(bundles, selection.BundleID, defaultBundleID)
+	knowledgeSnapshot, knowledgeChunks := r.resolveKnowledgeSnapshot(ctx, sess, profile, selectedBundles)
 	derivedSignals := r.derivedSignalText(ctx, exec.SessionID)
 	view, err := policyruntime.ResolveWithOptions(ctx, events, selectedBundles, journeys, catalog, policyruntime.ResolveOptions{
 		Router:            r.router,
@@ -474,8 +482,12 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 	if err != nil {
 		return resolvedView{}, nil, err
 	}
-	if selection.BundleID != "" && (exec.PolicyBundleID != selection.BundleID || exec.SelectionReason != selection.Reason || exec.ProposalID != selection.ProposalID || exec.RolloutID != selection.RolloutID) {
-		exec.PolicyBundleID = selection.BundleID
+	resolvedBundleID := selection.BundleID
+	if resolvedBundleID == "" && len(selectedBundles) > 0 {
+		resolvedBundleID = selectedBundles[0].ID
+	}
+	if resolvedBundleID != "" && (exec.PolicyBundleID != resolvedBundleID || exec.SelectionReason != selection.Reason || exec.ProposalID != selection.ProposalID || exec.RolloutID != selection.RolloutID) {
+		exec.PolicyBundleID = resolvedBundleID
 		exec.ProposalID = selection.ProposalID
 		exec.RolloutID = selection.RolloutID
 		exec.SelectionReason = selection.Reason
@@ -516,7 +528,24 @@ func selectPolicyBundles(bundles []policy.Bundle, preferred string, fallback str
 	return []policy.Bundle{bundles[0]}
 }
 
-func (r *Runner) resolveKnowledgeSnapshot(ctx context.Context, sess session.Session, bundles []policy.Bundle) (*knowledge.Snapshot, []knowledge.Chunk) {
+func (r *Runner) agentProfile(ctx context.Context, agentID string) agent.Profile {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return agent.Profile{}
+	}
+	profile, err := r.repo.GetAgentProfile(ctx, agentID)
+	if err != nil {
+		return agent.Profile{}
+	}
+	switch strings.TrimSpace(profile.Status) {
+	case "disabled", "retired":
+		return agent.Profile{}
+	default:
+		return profile
+	}
+}
+
+func (r *Runner) resolveKnowledgeSnapshot(ctx context.Context, sess session.Session, profile agent.Profile, bundles []policy.Bundle) (*knowledge.Snapshot, []knowledge.Chunk) {
 	var snapshots []knowledge.Snapshot
 	var chunks []knowledge.Chunk
 	customerScopeKind, customerScopeID := customerKnowledgeScope(sess)
@@ -535,6 +564,14 @@ func (r *Runner) resolveKnowledgeSnapshot(ctx context.Context, sess session.Sess
 			snapshots = append(snapshots, sharedSnapshots[0])
 			sharedChunks, _ := r.repo.ListKnowledgeChunks(ctx, knowledge.ChunkQuery{ScopeKind: scopeKind, ScopeID: scopeID, SnapshotID: sharedSnapshots[0].ID})
 			chunks = append(chunks, sharedChunks...)
+		}
+	}
+	if len(snapshots) == 0 && strings.TrimSpace(profile.DefaultKnowledgeScopeKind) != "" && strings.TrimSpace(profile.DefaultKnowledgeScopeID) != "" {
+		profileSnapshots, err := r.repo.ListKnowledgeSnapshots(ctx, knowledge.SnapshotQuery{ScopeKind: profile.DefaultKnowledgeScopeKind, ScopeID: profile.DefaultKnowledgeScopeID, Limit: 1})
+		if err == nil && len(profileSnapshots) > 0 {
+			snapshots = append(snapshots, profileSnapshots[0])
+			profileChunks, _ := r.repo.ListKnowledgeChunks(ctx, knowledge.ChunkQuery{ScopeKind: profile.DefaultKnowledgeScopeKind, ScopeID: profile.DefaultKnowledgeScopeID, SnapshotID: profileSnapshots[0].ID})
+			chunks = append(chunks, profileChunks...)
 		}
 	}
 	if len(snapshots) == 0 {
@@ -1324,6 +1361,9 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 	if len(view.Attention.CriticalInstructionIDs) > 0 {
 		parts = append(parts, "Critical policy IDs: "+strings.Join(view.Attention.CriticalInstructionIDs, ", "))
 	}
+	if soul := soulPrompt(bundleSoul(view.Bundle)); soul != "" {
+		parts = append(parts, "Agent SOUL style and brand rules:\n"+soul)
+	}
 	if view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
 		parts = append(parts, "Current journey instruction: "+view.ActiveJourneyState.Instruction)
 	}
@@ -1337,6 +1377,62 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 		parts = append(parts, "Tool output: "+mustJSON(toolOutput))
 	}
 	return strings.Join(parts, "\n")
+}
+
+func soulPrompt(soul policy.Soul) string {
+	var parts []string
+	add := func(label, value string) {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			parts = append(parts, label+": "+value)
+		}
+	}
+	add("Identity", soul.Identity)
+	add("Role", soul.Role)
+	add("Brand", soul.Brand)
+	add("Default language", soul.DefaultLanguage)
+	if len(soul.SupportedLanguages) > 0 {
+		parts = append(parts, "Supported languages: "+strings.Join(soul.SupportedLanguages, ", "))
+	}
+	add("Language matching", soul.LanguageMatching)
+	add("Tone", soul.Tone)
+	add("Formality", soul.Formality)
+	add("Verbosity", soul.Verbosity)
+	if len(soul.StyleRules) > 0 {
+		parts = append(parts, "Style rules: "+strings.Join(soul.StyleRules, "; "))
+	}
+	if len(soul.AvoidRules) > 0 {
+		parts = append(parts, "Avoid rules: "+strings.Join(soul.AvoidRules, "; "))
+	}
+	add("Escalation style", soul.EscalationStyle)
+	if len(soul.FormattingRules) > 0 {
+		parts = append(parts, "Formatting rules: "+strings.Join(soul.FormattingRules, "; "))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	parts = append(parts, "Apply these as strong style guidance unless hard policy, approval requirements, strict templates, or explicit customer constraints conflict.")
+	return strings.Join(parts, "\n")
+}
+
+func bundleSoul(bundle *policy.Bundle) policy.Soul {
+	if bundle == nil {
+		return policy.Soul{}
+	}
+	return bundle.Soul
+}
+
+func bundleSoulHash(bundle *policy.Bundle) string {
+	return soulHash(bundleSoul(bundle))
+}
+
+func soulHash(soul policy.Soul) string {
+	raw, err := json.Marshal(soul)
+	if err != nil || string(raw) == "{}" {
+		return ""
+	}
+	sum := sha1.Sum(raw)
+	return hex.EncodeToString(sum[:8])
 }
 
 func retrievedKnowledgeText(view resolvedView) string {

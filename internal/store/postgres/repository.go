@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
 	"github.com/sahal/parmesan/internal/domain/delivery"
@@ -61,6 +62,75 @@ func (c *Client) ListBundles(ctx context.Context) ([]policy.Bundle, error) {
 			return nil, err
 		}
 		out = append(out, bundle)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) SaveAgentProfile(ctx context.Context, profile agent.Profile) error {
+	db := c.sessionQuery()
+	metadata, err := json.Marshal(profile.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(ctx, `
+		INSERT INTO agent_profiles (id, name, description, status, default_policy_bundle_id, default_knowledge_scope_kind, default_knowledge_scope_id, metadata_json, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		ON CONFLICT (id) DO UPDATE
+		SET name = EXCLUDED.name,
+		    description = EXCLUDED.description,
+		    status = EXCLUDED.status,
+		    default_policy_bundle_id = EXCLUDED.default_policy_bundle_id,
+		    default_knowledge_scope_kind = EXCLUDED.default_knowledge_scope_kind,
+		    default_knowledge_scope_id = EXCLUDED.default_knowledge_scope_id,
+		    metadata_json = EXCLUDED.metadata_json,
+		    updated_at = EXCLUDED.updated_at
+	`, profile.ID, profile.Name, profile.Description, profile.Status, nullString(profile.DefaultPolicyBundleID), nullString(profile.DefaultKnowledgeScopeKind), nullString(profile.DefaultKnowledgeScopeID), metadata, profile.CreatedAt, profile.UpdatedAt)
+	return err
+}
+
+func (c *Client) GetAgentProfile(ctx context.Context, profileID string) (agent.Profile, error) {
+	db := c.sessionQuery()
+	row := db.QueryRow(ctx, `
+		SELECT id, name, COALESCE(description,''), status, COALESCE(default_policy_bundle_id,''), COALESCE(default_knowledge_scope_kind,''), COALESCE(default_knowledge_scope_id,''), metadata_json, created_at, updated_at
+		FROM agent_profiles
+		WHERE id = $1
+	`, profileID)
+	var profile agent.Profile
+	var metadata []byte
+	if err := row.Scan(&profile.ID, &profile.Name, &profile.Description, &profile.Status, &profile.DefaultPolicyBundleID, &profile.DefaultKnowledgeScopeKind, &profile.DefaultKnowledgeScopeID, &metadata, &profile.CreatedAt, &profile.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return agent.Profile{}, errors.New("agent profile not found")
+		}
+		return agent.Profile{}, err
+	}
+	if len(metadata) > 0 {
+		_ = json.Unmarshal(metadata, &profile.Metadata)
+	}
+	return profile, nil
+}
+
+func (c *Client) ListAgentProfiles(ctx context.Context) ([]agent.Profile, error) {
+	db := c.sessionQuery()
+	rows, err := db.Query(ctx, `
+		SELECT id, name, COALESCE(description,''), status, COALESCE(default_policy_bundle_id,''), COALESCE(default_knowledge_scope_kind,''), COALESCE(default_knowledge_scope_id,''), metadata_json, created_at, updated_at
+		FROM agent_profiles
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []agent.Profile
+	for rows.Next() {
+		var profile agent.Profile
+		var metadata []byte
+		if err := rows.Scan(&profile.ID, &profile.Name, &profile.Description, &profile.Status, &profile.DefaultPolicyBundleID, &profile.DefaultKnowledgeScopeKind, &profile.DefaultKnowledgeScopeID, &metadata, &profile.CreatedAt, &profile.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if len(metadata) > 0 {
+			_ = json.Unmarshal(metadata, &profile.Metadata)
+		}
+		out = append(out, profile)
 	}
 	return out, rows.Err()
 }

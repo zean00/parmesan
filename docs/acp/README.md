@@ -23,6 +23,10 @@ Conversation-edge rules:
 - If `OPERATOR_API_KEY` is configured, `/v1/operator/...` requires `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
 
 Knowledge workspace routes:
+- `POST /v1/operator/agents`
+- `GET /v1/operator/agents`
+- `GET /v1/operator/agents/{id}`
+- `PUT /v1/operator/agents/{id}`
 - `POST /v1/operator/knowledge/sources`
 - `POST /v1/operator/knowledge/sources/{id}/compile`
 - `GET /v1/operator/knowledge/snapshots/{id}`
@@ -40,6 +44,9 @@ Knowledge workspace routes:
 - `GET /v1/operator/media/signals`
 
 Knowledge rules:
+- Agent profiles bind an ACP `agent_id` to a default policy bundle and default knowledge scope.
+- Policy bundles can carry a `soul` block for identity, brand, language, tone, formatting, escalation, and avoid rules.
+- SOUL is injected as strong response style guidance, but hard policy, strict templates, approval/tool constraints, and explicit customer constraints take precedence.
 - Folder sources require `KNOWLEDGE_SOURCE_ROOT` and cannot point outside that root.
 - Compiled wiki pages and chunks are stored as typed records; Markdown files are source input, not runtime truth.
 - Runtime retrievers inject response-scoped grounding from immutable knowledge snapshots and must not mutate policy or wiki state during ACP turn processing.

@@ -9,6 +9,7 @@ import (
 
 	pgxmock "github.com/pashagolub/pgxmock/v4"
 
+	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/media"
 	"github.com/sahal/parmesan/internal/domain/session"
@@ -87,6 +88,69 @@ func TestUpdateSessionPersistsOperatorModeAndMetadata(t *testing.T) {
 
 	if err := client.UpdateSession(context.Background(), sess); err != nil {
 		t.Fatalf("UpdateSession() error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("ExpectationsWereMet() error = %v", err)
+	}
+}
+
+func TestSaveAndGetAgentProfile(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatalf("NewPool() error = %v", err)
+	}
+	defer mock.Close()
+
+	client := &Client{querier: mock}
+	profile := agent.Profile{
+		ID:                        "agent_1",
+		Name:                      "Support",
+		Description:               "Customer support",
+		Status:                    "active",
+		DefaultPolicyBundleID:     "bundle_1",
+		DefaultKnowledgeScopeKind: "agent",
+		DefaultKnowledgeScopeID:   "agent_1",
+		Metadata:                  map[string]any{"team": "support"},
+		CreatedAt:                 time.Unix(10, 0).UTC(),
+		UpdatedAt:                 time.Unix(11, 0).UTC(),
+	}
+	mock.ExpectExec(regexp.QuoteMeta(`
+		INSERT INTO agent_profiles (id, name, description, status, default_policy_bundle_id, default_knowledge_scope_kind, default_knowledge_scope_id, metadata_json, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		ON CONFLICT (id) DO UPDATE
+		SET name = EXCLUDED.name,
+		    description = EXCLUDED.description,
+		    status = EXCLUDED.status,
+		    default_policy_bundle_id = EXCLUDED.default_policy_bundle_id,
+		    default_knowledge_scope_kind = EXCLUDED.default_knowledge_scope_kind,
+		    default_knowledge_scope_id = EXCLUDED.default_knowledge_scope_id,
+		    metadata_json = EXCLUDED.metadata_json,
+		    updated_at = EXCLUDED.updated_at
+	`)).
+		WithArgs(profile.ID, profile.Name, profile.Description, profile.Status, profile.DefaultPolicyBundleID, profile.DefaultKnowledgeScopeKind, profile.DefaultKnowledgeScopeID, pgxmock.AnyArg(), profile.CreatedAt, profile.UpdatedAt).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+	if err := client.SaveAgentProfile(context.Background(), profile); err != nil {
+		t.Fatalf("SaveAgentProfile() error = %v", err)
+	}
+
+	metadata, _ := json.Marshal(profile.Metadata)
+	rows := pgxmock.NewRows([]string{"id", "name", "description", "status", "default_policy_bundle_id", "default_knowledge_scope_kind", "default_knowledge_scope_id", "metadata_json", "created_at", "updated_at"}).
+		AddRow(profile.ID, profile.Name, profile.Description, profile.Status, profile.DefaultPolicyBundleID, profile.DefaultKnowledgeScopeKind, profile.DefaultKnowledgeScopeID, metadata, profile.CreatedAt, profile.UpdatedAt)
+	mock.ExpectQuery(regexp.QuoteMeta(`
+		SELECT id, name, COALESCE(description,''), status, COALESCE(default_policy_bundle_id,''), COALESCE(default_knowledge_scope_kind,''), COALESCE(default_knowledge_scope_id,''), metadata_json, created_at, updated_at
+		FROM agent_profiles
+		WHERE id = $1
+	`)).
+		WithArgs("agent_1").
+		WillReturnRows(rows)
+
+	got, err := client.GetAgentProfile(context.Background(), "agent_1")
+	if err != nil {
+		t.Fatalf("GetAgentProfile() error = %v", err)
+	}
+	if got.DefaultPolicyBundleID != "bundle_1" || got.Metadata["team"] != "support" {
+		t.Fatalf("profile = %#v, want decoded profile", got)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("ExpectationsWereMet() error = %v", err)

@@ -40,6 +40,7 @@ type SessionSummary struct {
 	ActiveJourneyStateID  string   `json:"active_journey_state_id,omitempty"`
 	CompositionMode       string   `json:"composition_mode,omitempty"`
 	KnowledgeSnapshotID   string   `json:"knowledge_snapshot_id,omitempty"`
+	SoulHash              string   `json:"soul_hash,omitempty"`
 	RetrieverResultHashes []string `json:"retriever_result_hashes,omitempty"`
 }
 

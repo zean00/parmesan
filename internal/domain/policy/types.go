@@ -18,6 +18,8 @@ type Bundle struct {
 	Version                   string                     `json:"version" yaml:"version"`
 	CompositionMode           string                     `json:"composition_mode,omitempty" yaml:"composition_mode,omitempty"`
 	NoMatch                   string                     `json:"no_match,omitempty" yaml:"no_match,omitempty"`
+	Soul                      Soul                       `json:"soul,omitempty" yaml:"soul,omitempty"`
+	SoulMarkdown              string                     `json:"soul_markdown,omitempty" yaml:"soul_markdown,omitempty"`
 	ImportedAt                time.Time                  `json:"imported_at" yaml:"-"`
 	SourceYAML                string                     `json:"source_yaml" yaml:"-"`
 	Observations              []Observation              `json:"observations" yaml:"observations"`
@@ -28,6 +30,22 @@ type Bundle struct {
 	ToolPolicies              []ToolPolicy               `json:"tool_policies" yaml:"tool_policies"`
 	Retrievers                []RetrieverBinding         `json:"retrievers,omitempty" yaml:"retrievers,omitempty"`
 	GuidelineToolAssociations []GuidelineToolAssociation `json:"guideline_tool_associations,omitempty" yaml:"-"`
+}
+
+type Soul struct {
+	Identity           string   `json:"identity,omitempty" yaml:"identity,omitempty"`
+	Role               string   `json:"role,omitempty" yaml:"role,omitempty"`
+	Brand              string   `json:"brand,omitempty" yaml:"brand,omitempty"`
+	DefaultLanguage    string   `json:"default_language,omitempty" yaml:"default_language,omitempty"`
+	SupportedLanguages []string `json:"supported_languages,omitempty" yaml:"supported_languages,omitempty"`
+	LanguageMatching   string   `json:"language_matching,omitempty" yaml:"language_matching,omitempty"`
+	Tone               string   `json:"tone,omitempty" yaml:"tone,omitempty"`
+	Formality          string   `json:"formality,omitempty" yaml:"formality,omitempty"`
+	Verbosity          string   `json:"verbosity,omitempty" yaml:"verbosity,omitempty"`
+	StyleRules         []string `json:"style_rules,omitempty" yaml:"style_rules,omitempty"`
+	AvoidRules         []string `json:"avoid_rules,omitempty" yaml:"avoid_rules,omitempty"`
+	EscalationStyle    string   `json:"escalation_style,omitempty" yaml:"escalation_style,omitempty"`
+	FormattingRules    []string `json:"formatting_rules,omitempty" yaml:"formatting_rules,omitempty"`
 }
 
 type MCPRef struct {

@@ -4,11 +4,13 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sahal/parmesan/internal/api/sse"
 	"github.com/sahal/parmesan/internal/config"
+	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/execution"
 	"github.com/sahal/parmesan/internal/domain/policy"
@@ -540,6 +542,108 @@ func TestDecisionForPlannedCallPreservesFinalizedArguments(t *testing.T) {
 	decision := decisionForPlannedCall(view, call)
 	if decision.Arguments["session_id"] != "sess_1" || decision.Arguments["locale"] != "en" {
 		t.Fatalf("planned-call decision args = %#v, want finalized candidate args preserved", decision.Arguments)
+	}
+}
+
+func TestResolveViewUsesAgentProfileDefaultBundle(t *testing.T) {
+	repo := memory.New()
+	r := New(repo, nil, nil, nil, "test-runner")
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if err := repo.SaveBundle(ctx, policy.Bundle{
+		ID:      "bundle_default",
+		Version: "v1",
+		Soul: policy.Soul{
+			Brand:      "Parmesan",
+			Tone:       "calm",
+			StyleRules: []string{"use short paragraphs"},
+		},
+		Guidelines: []policy.Guideline{{ID: "g_default", When: "hello", Then: "reply helpfully"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveBundle(ctx, policy.Bundle{
+		ID:         "bundle_other",
+		Version:    "v1",
+		Guidelines: []policy.Guideline{{ID: "g_other", When: "hello", Then: "reply differently"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveAgentProfile(ctx, agent.Profile{
+		ID:                    "agent_1",
+		Name:                  "Support",
+		Status:                "active",
+		DefaultPolicyBundleID: "bundle_default",
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateSession(ctx, session.Session{
+		ID: "sess_1", Channel: "acp", AgentID: "agent_1", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendEvent(ctx, session.Event{
+		ID:        "evt_1",
+		SessionID: "sess_1",
+		Source:    "customer",
+		Kind:      "message",
+		CreatedAt: now,
+		Content:   []session.ContentPart{{Type: "text", Text: "hello"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	exec := execution.TurnExecution{
+		ID:             "exec_1",
+		SessionID:      "sess_1",
+		TriggerEventID: "evt_1",
+		TraceID:        "trace_1",
+		Status:         execution.StatusRunning,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := repo.CreateExecution(ctx, exec, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	view, _, err := r.resolveView(ctx, exec)
+	if err != nil {
+		t.Fatalf("resolveView() error = %v", err)
+	}
+	if view.Bundle.ID != "bundle_default" {
+		t.Fatalf("bundle id = %q, want profile default bundle", view.Bundle.ID)
+	}
+	updated, _, err := repo.GetExecution(ctx, "exec_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.PolicyBundleID != "bundle_default" {
+		t.Fatalf("execution policy bundle = %q, want persisted profile default bundle", updated.PolicyBundleID)
+	}
+}
+
+func TestComposePromptIncludesSoulGuidance(t *testing.T) {
+	prompt := composePrompt(resolvedView{
+		Bundle: &policy.Bundle{Soul: policy.Soul{
+			Brand:           "Parmesan",
+			DefaultLanguage: "en",
+			Tone:            "calm",
+			StyleRules:      []string{"ask one question at a time"},
+			AvoidRules:      []string{"unsupported promises"},
+		}},
+	}, []session.Event{{
+		Source:  "customer",
+		Kind:    "message",
+		Content: []session.ContentPart{{Type: "text", Text: "I need help"}},
+	}}, nil)
+
+	if !strings.Contains(prompt, "Agent SOUL style and brand rules:") ||
+		!strings.Contains(prompt, "Brand: Parmesan") ||
+		!strings.Contains(prompt, "ask one question at a time") ||
+		!strings.Contains(prompt, "Avoid rules: unsupported promises") {
+		t.Fatalf("prompt = %q, want SOUL style guidance", prompt)
 	}
 }
 

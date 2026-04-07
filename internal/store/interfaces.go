@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
 	"github.com/sahal/parmesan/internal/domain/delivery"
@@ -23,6 +24,9 @@ import (
 type Repository interface {
 	SaveBundle(ctx context.Context, bundle policy.Bundle) error
 	ListBundles(ctx context.Context) ([]policy.Bundle, error)
+	SaveAgentProfile(ctx context.Context, profile agent.Profile) error
+	GetAgentProfile(ctx context.Context, profileID string) (agent.Profile, error)
+	ListAgentProfiles(ctx context.Context) ([]agent.Profile, error)
 	CreateSession(ctx context.Context, sess session.Session) error
 	GetSession(ctx context.Context, sessionID string) (session.Session, error)
 	UpdateSession(ctx context.Context, sess session.Session) error

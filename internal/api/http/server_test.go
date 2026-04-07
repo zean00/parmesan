@@ -13,6 +13,7 @@ import (
 
 	"github.com/sahal/parmesan/internal/api/sse"
 	"github.com/sahal/parmesan/internal/config"
+	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
 	"github.com/sahal/parmesan/internal/domain/delivery"
@@ -167,6 +168,69 @@ func TestDisableRolloutMarksRecordDisabled(t *testing.T) {
 		item, err := repo.GetRollout(context.Background(), "rollout_1")
 		return err == nil && item.Status == rollout.RolloutDisabled
 	})
+}
+
+func TestOperatorAgentProfileCRUD(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/agents", strings.NewReader(`{
+		"id":"agent_1",
+		"name":"Support Agent",
+		"description":"Handles support sessions",
+		"default_policy_bundle_id":"bundle_support",
+		"default_knowledge_scope_kind":"agent",
+		"default_knowledge_scope_id":"agent_1",
+		"metadata":{"team":"support"}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/agents/agent_1", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got agent.Profile
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "active" || got.DefaultPolicyBundleID != "bundle_support" || got.DefaultKnowledgeScopeID != "agent_1" {
+		t.Fatalf("profile = %#v, want defaults persisted", got)
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/v1/operator/agents/agent_1", strings.NewReader(`{
+		"name":"Support Agent",
+		"status":"disabled",
+		"default_policy_bundle_id":"bundle_next",
+		"metadata":{"team":"escalations"}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/agents", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var list []agent.Profile
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].Status != "disabled" || list[0].DefaultPolicyBundleID != "bundle_next" {
+		t.Fatalf("profiles = %#v, want updated profile in list", list)
+	}
 }
 
 func TestRegisterProviderPersistsImmediatelyBeforeAsyncSync(t *testing.T) {

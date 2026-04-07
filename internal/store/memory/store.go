@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
 	"github.com/sahal/parmesan/internal/domain/delivery"
@@ -26,6 +27,7 @@ import (
 type Store struct {
 	mu                       sync.RWMutex
 	bundles                  []policy.Bundle
+	agentProfiles            []agent.Profile
 	sessions                 []session.Session
 	events                   map[string][]session.Event
 	bindings                 []gatewaydomain.ConversationBinding
@@ -73,6 +75,40 @@ func (s *Store) ListBundles(_ context.Context) ([]policy.Bundle, error) {
 	for i := len(s.bundles) - 1; i >= 0; i-- {
 		out = append(out, s.bundles[i])
 	}
+	return out, nil
+}
+
+func (s *Store) SaveAgentProfile(_ context.Context, profile agent.Profile) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.agentProfiles {
+		if item.ID == profile.ID {
+			s.agentProfiles[i] = profile
+			return nil
+		}
+	}
+	s.agentProfiles = append(s.agentProfiles, profile)
+	return nil
+}
+
+func (s *Store) GetAgentProfile(_ context.Context, profileID string) (agent.Profile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.agentProfiles {
+		if item.ID == profileID {
+			return item, nil
+		}
+	}
+	return agent.Profile{}, errors.New("agent profile not found")
+}
+
+func (s *Store) ListAgentProfiles(_ context.Context) ([]agent.Profile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := append([]agent.Profile(nil), s.agentProfiles...)
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
 	return out, nil
 }
 

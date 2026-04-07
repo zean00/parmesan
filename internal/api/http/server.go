@@ -19,6 +19,7 @@ import (
 
 	"github.com/sahal/parmesan/internal/acp"
 	"github.com/sahal/parmesan/internal/api/sse"
+	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
 	"github.com/sahal/parmesan/internal/domain/execution"
@@ -69,6 +70,7 @@ type sessionSummary struct {
 	ActiveJourneyStateID  string   `json:"active_journey_state_id,omitempty"`
 	CompositionMode       string   `json:"composition_mode,omitempty"`
 	KnowledgeSnapshotID   string   `json:"knowledge_snapshot_id,omitempty"`
+	SoulHash              string   `json:"soul_hash,omitempty"`
 	RetrieverResultHashes []string `json:"retriever_result_hashes,omitempty"`
 }
 
@@ -176,6 +178,10 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/messages/on-behalf-of-agent", s.operatorCreateMessageOnBehalfOfAgent)
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/notes", s.operatorCreateNote)
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/process", s.operatorProcessEvent)
+	mux.HandleFunc("POST /v1/operator/agents", s.operatorCreateAgentProfile)
+	mux.HandleFunc("GET /v1/operator/agents", s.operatorListAgentProfiles)
+	mux.HandleFunc("GET /v1/operator/agents/{id}", s.operatorGetAgentProfile)
+	mux.HandleFunc("PUT /v1/operator/agents/{id}", s.operatorUpdateAgentProfile)
 	mux.HandleFunc("POST /v1/operator/knowledge/sources", s.operatorCreateKnowledgeSource)
 	mux.HandleFunc("POST /v1/operator/knowledge/sources/{id}/compile", s.operatorCompileKnowledgeSource)
 	mux.HandleFunc("GET /v1/operator/knowledge/snapshots/{id}", s.operatorGetKnowledgeSnapshot)
@@ -861,6 +867,7 @@ func (s *Server) acpGetSession(w http.ResponseWriter, r *http.Request) {
 		ActiveJourneyStateID:  summary.ActiveJourneyStateID,
 		CompositionMode:       summary.CompositionMode,
 		KnowledgeSnapshotID:   summary.KnowledgeSnapshotID,
+		SoulHash:              summary.SoulHash,
 		RetrieverResultHashes: append([]string(nil), summary.RetrieverResultHashes...),
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -1301,6 +1308,86 @@ func (s *Server) operatorCreateVisibleMessage(w http.ResponseWriter, r *http.Req
 	}
 	s.publishSessionEvent(sessionID, event, "", event.TraceID, event.CreatedAt)
 	writeJSON(w, http.StatusCreated, acp.NormalizeEvent(event))
+}
+
+func (s *Server) operatorCreateAgentProfile(w http.ResponseWriter, r *http.Request) {
+	var profile agent.Profile
+	if err := json.NewDecoder(r.Body).Decode(&profile); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	now := time.Now().UTC()
+	if strings.TrimSpace(profile.ID) == "" {
+		profile.ID = fmt.Sprintf("agent_%d", now.UnixNano())
+	}
+	if strings.TrimSpace(profile.Name) == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(profile.Status) == "" {
+		profile.Status = "active"
+	}
+	if profile.Metadata == nil {
+		profile.Metadata = map[string]any{}
+	}
+	if profile.CreatedAt.IsZero() {
+		profile.CreatedAt = now
+	}
+	profile.UpdatedAt = now
+	if err := s.store.SaveAgentProfile(r.Context(), profile); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusCreated, profile)
+}
+
+func (s *Server) operatorListAgentProfiles(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListAgentProfiles(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) operatorGetAgentProfile(w http.ResponseWriter, r *http.Request) {
+	profile, err := s.store.GetAgentProfile(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, profile)
+}
+
+func (s *Server) operatorUpdateAgentProfile(w http.ResponseWriter, r *http.Request) {
+	existing, err := s.store.GetAgentProfile(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	var profile agent.Profile
+	if err := json.NewDecoder(r.Body).Decode(&profile); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	profile.ID = existing.ID
+	if strings.TrimSpace(profile.Name) == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(profile.Status) == "" {
+		profile.Status = existing.Status
+	}
+	if profile.Metadata == nil {
+		profile.Metadata = map[string]any{}
+	}
+	profile.CreatedAt = existing.CreatedAt
+	profile.UpdatedAt = time.Now().UTC()
+	if err := s.store.SaveAgentProfile(r.Context(), profile); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, profile)
 }
 
 func (s *Server) operatorCreateKnowledgeSource(w http.ResponseWriter, r *http.Request) {
@@ -2991,6 +3078,7 @@ func (s *Server) sessionSummaryFor(ctx context.Context, sess session.Session) se
 		summary.ActiveJourneyStateID = stringMetadata(sess.Metadata, "active_journey_state_id")
 		summary.CompositionMode = stringMetadata(sess.Metadata, "composition_mode")
 		summary.KnowledgeSnapshotID = stringMetadata(sess.Metadata, "knowledge_snapshot_id")
+		summary.SoulHash = stringMetadata(sess.Metadata, "soul_hash")
 		summary.RetrieverResultHashes = stringSliceMetadata(sess.Metadata, "retriever_result_hashes")
 	}
 	execs, err := s.store.ListExecutions(ctx)

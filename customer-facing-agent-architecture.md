@@ -2,9 +2,15 @@
 
 ## Overview
 
-Build this as a **modular monolith in Go** with three main deployables:
+Parmesan is a **supervised customer-facing autonomous agent platform**, not a
+generic open-ended agent framework. The agent’s job is to serve customers while
+following explicit scenarios, policies, journeys, tool constraints, approvals,
+and operator controls. Human operators monitor live and finished sessions, take
+over when needed, and provide feedback that can improve knowledge, customer
+preferences, and policy through controlled review paths.
 
-- `gateway`
+Build this as a **modular monolith in Go** with two main deployables:
+
 - `api`
 - `worker`
 
@@ -24,7 +30,7 @@ At the same time, it should borrow Hermes-style runtime ideas:
 - response-scoped retrievers for grounding data
 - maintained agent knowledge workspaces
 - progressive loading of reusable artifacts
-- first-class messaging gateway
+- ACP-first customer / agent interface
 
 Also keep Parlant’s online loop semantics:
 
@@ -38,18 +44,15 @@ Behavioral artifacts should be **authored in YAML**, but runtime should execute 
 
 ## 1. System Shape
 
-Build one product with **four planes**:
+Build one product with **three planes**:
 
-1. **Gateway plane**
-   - channel/platform connectivity and delivery
-
-2. **Runtime plane**
+1. **Runtime plane**
    - policy resolution, matching, journeys, tools, response planning
 
-3. **Policy plane**
+2. **Policy plane**
    - seeded policy, learned refinements, templates, tool policies, rollout state
 
-4. **Learning plane**
+3. **Learning plane**
    - admin teaching compiler, admin feedback compiler, preference compiler, replay/eval
 
 Do **not** start with microservices.
@@ -62,17 +65,10 @@ Start with:
 
 ### Initial Production Topology
 
-- **`gateway` service**
-  - long-running channel-facing runtime
-  - adapter lifecycle
-  - inbound webhook/polling normalization
-  - delivery and retries
-  - pairing/access control
-  - capability detection
-  - scheduled outbound delivery
-
 - **`api` service**
   - HTTP / gRPC / SSE
+  - ACP customer-facing interface
+  - operator supervision interface
   - admin console backend
   - SDK endpoints
   - auth
@@ -140,7 +136,8 @@ Your product will work if these rules remain true:
 - **Every turn stores the exact policy and knowledge snapshot hashes used.**
   - This is what makes replay, rollback, and debugging real.
 
-- **Gateway owns transport semantics.**
+- **ACP is the canonical customer / agent protocol.**
+  - Channel-specific transport adapters should live outside the core runtime boundary.
   - Runtime owns conversational semantics.
 
 - **Discovery is not exposure.**
@@ -164,31 +161,19 @@ Your product will work if these rules remain true:
 ## 3. High-Level Architecture
 
 ```text
-Channels / Platforms
-  ├── Web chat
-  ├── WhatsApp
-  ├── Telegram
-  ├── Slack
-  ├── Email
-  ├── Voice note / call ingress
+ACP Clients / Channel Adapters
+  ├── Web chat adapter
+  ├── WhatsApp adapter
+  ├── Telegram adapter
+  ├── Slack adapter
+  ├── Email adapter
+  ├── Voice / media adapter
   └── Admin console
 
-                ┌──────────────────────────────┐
-                │           Gateway            │
-                │ adapters, routing, delivery, │
-                │ pairing, retries, cron,      │
-                │ voice/media transport        │
-                └──────────────┬───────────────┘
-                               │
-                  ┌────────────▼────────────┐
-                  │ Event Normalization     │
-                  │ session/thread/user map │
-                  │ content parts/capability│
-                  └────────────┬────────────┘
-                               │
-          ┌────────────────────▼────────────────────┐
+          ┌─────────────────────────────────────────┐
           │                 API                     │
-          │ admin UI, control plane, SDK, auth     │
+          │ ACP, operator UI, control plane, SDK,  │
+          │ auth, SSE, trace and media inspection  │
           └───────────────┬─────────────────────────┘
                           │
         ┌─────────────────▼─────────────────┐
@@ -220,6 +205,8 @@ The most important decision is to make **policy first-class**.
 
 Use these canonical artifact types:
 
+- `AgentProfile`
+- `Soul`
 - `Observation`
 - `Guideline`
 - `Relationship`
@@ -238,10 +225,31 @@ Use these canonical artifact types:
 - `PolicyProposal`
 - `PolicySnapshot`
 
-### 4.1.1 Artifact Authoring Format
+### 4.2 Agent Profile and SOUL
+
+Each served agent should have an `AgentProfile` that binds identity to policy and knowledge defaults:
+
+- name, description, and status
+- default policy bundle
+- default knowledge scope
+- operator-visible metadata
+
+Persona is authored with the policy bundle as `SOUL.md` or a compiled `soul` block. It describes:
+
+- agent identity, role, and brand
+- default and supported languages
+- language matching behavior
+- tone, formality, verbosity, and formatting preferences
+- style rules and avoid rules
+- escalation / human-handoff style
+
+SOUL is strong brand and style guidance, not active policy. It may shape response composition, but hard policy, safety, approvals, strict templates, active journey instructions, and explicit customer constraints take precedence.
+
+### 4.3 Artifact Authoring Format
 
 Behavioral artifacts should be definable in YAML:
 
+- `soul`
 - `observations`
 - `guidelines`
 - `relationships`
@@ -272,7 +280,7 @@ Store both:
 
 When YAML uses MCP references, compile them into normalized internal tool exposure records while preserving the original MCP-scoped authoring form.
 
-### 4.2 Artifact Metadata
+### 4.4 Artifact Metadata
 
 Every artifact should carry:
 
@@ -307,7 +315,7 @@ Every artifact should carry:
 - `effective_from`
 - `effective_to`
 
-### 4.3 Policy Graph
+### 4.5 Policy Graph
 
 Store policy as a graph:
 
@@ -328,7 +336,7 @@ Store policy as a graph:
 - `refines`
 - `derived_from`
 
-### 4.4 Session Model
+### 4.6 Session Model
 
 Use one event model for all session types:
 
@@ -355,7 +363,7 @@ Each part may reference:
 - a `media_asset`
 - zero or more `derived_signals`
 
-### 4.5 Derived Signals
+### 4.7 Derived Signals
 
 This is the core of native multimodal support.
 
@@ -389,7 +397,7 @@ This is the core of native multimodal support.
 
 Runtime should mostly consume these signals, not raw media blobs.
 
-### 4.6 Customer Preference Model
+### 4.8 Customer Preference Model
 
 Preferences should live in their own store:
 
@@ -411,23 +419,33 @@ Each preference record should contain:
 - `expires_at`
 - `evidence_refs`
 
-### 4.7 Gateway Domain Model
+### 4.9 ACP and Channel Adapter Boundary
 
-Add explicit gateway entities:
+ACP is the canonical customer / agent interface inside Parmesan.
 
-- `ChannelAdapter`
-- `ChannelAccount`
-- `ConversationBinding`
-- `DeliveryAttempt`
-- `CapabilityProfile`
-- `InboundEnvelope`
-- `OutboundEnvelope`
+Core Parmesan should model:
+
+- `ACPSession`
+- `ACPEvent`
+- `ContentPart`
 - `ApprovalSession`
-- `NotificationRoute`
+- `MediaAsset`
+- `DerivedSignal`
+- `TraceTimeline`
+- `OperatorSessionControl`
 
-This matters because a customer-facing agent is not just “a session with messages.” Slack threads, Telegram chats, WhatsApp conversations, email threads, and voice-note channels all have different routing and reply semantics.
+Channel-specific systems outside the core boundary may still model:
 
-### 4.8 Retriever Model
+- channel account
+- channel conversation/thread binding
+- inbound/outbound envelopes
+- channel capability profile
+- platform delivery attempt
+- notification route
+
+Those adapter concerns should translate to and from ACP rather than becoming a first-class internal subsystem.
+
+### 4.10 Retriever Model
 
 Retrievers are runtime grounding adapters, not tools and not learning jobs.
 
@@ -470,7 +488,7 @@ Every served turn that uses retrievers should record:
 - citation refs
 - `knowledge_snapshot_id` when the retriever reads from the agent knowledge workspace
 
-### 4.9 Knowledge Workspace Model
+### 4.11 Knowledge Workspace Model
 
 Adopt the LLM-wiki pattern as a controlled knowledge workspace, not as the serving source of policy truth.
 
@@ -556,12 +574,12 @@ This is the core online serving path.
 
 For each turn:
 
-1. **Gateway ingress**
-   - receive message/webhook/poll result
+1. **ACP ingress**
+   - receive ACP message/event
    - authenticate source
-   - map to tenant, user, conversation, session, and thread
+   - map to tenant, customer, agent, and session
    - normalize content parts
-   - attach capability profile
+   - record channel capability metadata if provided by an external adapter
 
 2. **Ingest**
    - store raw event and content parts
@@ -644,10 +662,11 @@ For each turn:
     - decide whether to emit preamble / progress events
     - decide whether to stream partial output
 
-13. **Gateway delivery**
-    - map response plan to channel capabilities
-    - send text, media request, attachment, or audio reply
-    - handle retries and delivery audit
+13. **ACP output**
+    - emit assistant/status/tool/approval events
+    - stream response deltas and completion events
+    - expose media requests, attachments, or audio replies as ACP content parts
+    - let external channel adapters handle platform delivery and retries
 
 14. **Post-turn**
     - store trace
@@ -941,27 +960,32 @@ For high-risk flows, optionally pin the session to a snapshot family instead of 
 
 ---
 
-## 6. Messaging Gateway
+## 6. ACP Interface and Streaming
 
-This should be a **first-class subsystem**, not a thin adapter layer.
+ACP should be the **first-class customer / agent protocol**.
 
-### 6.1 Gateway Responsibilities
+Core Parmesan should own:
 
-The gateway should own:
+- ACP session creation and reads
+- ACP event ingestion
+- ACP event listing and streaming
+- typed message/status/tool/approval events
+- assistant response delta and completion events
+- operator supervision and takeover controls
+- trace timelines
+- media asset and derived signal inspection
+- durable execution triggers
 
-- platform adapter lifecycle
-- inbound webhook / polling normalization
-- user / session / thread routing
-- delivery and retry
-- attachment / media ingress
-- channel capability detection
-- approval interactions in messaging
-- scheduled outbound notifications
-- voice delivery
-- access control / allowlists / pairing
-- fan-out to runtime and workers
+Channel-specific adapters should sit outside this core boundary and translate their platform semantics to ACP:
 
-### 6.1.1 API Streaming
+- webhook / polling normalization
+- platform identity and thread mapping
+- platform delivery and retries
+- platform capability detection
+- voice/media transport quirks
+- proactive notification routing
+
+### 6.1 API Streaming
 
 The `api` service should support **Server-Sent Events (SSE)** as a first-class streaming transport.
 
@@ -982,13 +1006,14 @@ Suggested event types:
 - `runtime.response.delta`
 - `runtime.response.completed`
 - `approval.requested`
-- `delivery.status`
+- `media.enrichment.succeeded`
+- `media.enrichment.failed`
 
 Design runtime output as structured event envelopes first, then serialize them to SSE.
 
-### 6.2 Capability-Aware Routing
+### 6.2 Capability-Aware ACP Metadata
 
-The gateway should compute a `CapabilityProfile` per channel and conversation binding, for example:
+External channel adapters may attach a `CapabilityProfile` to ACP session metadata or content-part metadata, for example:
 
 - supports text
 - supports image upload
@@ -1002,21 +1027,22 @@ The gateway should compute a `CapabilityProfile` per channel and conversation bi
 
 This is essential for native multimodal support.
 
-### 6.3 Gateway vs Runtime Boundary
+### 6.3 Adapter vs Runtime Boundary
 
 A clean boundary is:
 
-- **Gateway owns transport semantics**
+- **External adapters own transport semantics**
+- **ACP owns Parmesan's customer / agent protocol**
 - **Runtime owns conversational semantics**
 
-#### Gateway responsibilities
+#### External adapter responsibilities
 
 - receive message/webhook
 - authenticate source
 - map to tenant/user/session/thread
-- normalize content parts
+- normalize platform content into ACP content parts
 - attach capability profile
-- deliver outbound response
+- deliver ACP outbound events to the platform
 - handle retry/backoff
 - maintain pairing/allowlists
 - run scheduled delivery triggers
@@ -1027,19 +1053,20 @@ A clean boundary is:
 - match observations/guidelines/journeys
 - plan tools
 - generate response plan
-- emit structured outbound response
+- emit structured ACP outbound events
 
 ### 6.4 Approval Flow
 
 For consequential customer-facing actions, approval should be a shared concern:
 
 - runtime decides approval is required
-- gateway manages the conversational approval UX on that platform
+- ACP exposes approval request/resolution events
+- external adapters may render the approval UX on a specific platform
 - approval result re-enters runtime as a structured event
 
 ### 6.5 Scheduled and Proactive Delivery
 
-Move scheduled outbound communication into the gateway plane:
+Move scheduled outbound communication into adapter or notification systems outside the core runtime boundary:
 
 - follow-up reminders
 - human-escalation notifications
@@ -1213,7 +1240,7 @@ Multimodal should be native in:
 - signal model
 - policy model
 - response model
-- gateway capability model
+- ACP capability metadata
 
 ### 8.1 Input Model
 
@@ -1495,14 +1522,14 @@ You need a real admin UI, not just an API.
 - rollback
 - policy snapshot history
 
-#### Gateway Operations
+#### Adapter Operations
 
-- channel account health
-- webhook status
-- delivery failure logs
-- retry queues
-- capability profile view
-- proactive notification routes
+- ACP channel adapter health
+- webhook / polling status from external adapters
+- platform delivery failure links
+- adapter retry queues
+- capability metadata view
+- proactive notification route status
 
 #### Tool Registry
 
@@ -1520,7 +1547,6 @@ You need a real admin UI, not just an API.
 
 ```text
 cmd/
-  gateway/
   api/
   worker/
   migrate/
@@ -1530,21 +1556,6 @@ internal/
     schema/
     compiler/
     loader/
-
-  gateway/
-    adapters/
-      web/
-      whatsapp/
-      telegram/
-      slack/
-      email/
-      voice/
-    routing/
-    delivery/
-    approvals/
-    capabilities/
-    normalization/
-    scheduler/
 
   runtime/
     ingest/
@@ -1584,7 +1595,6 @@ internal/
     tool/
     media/
     preference/
-    gateway/
     audit/
 
   adapters/
@@ -1652,12 +1662,6 @@ type ProposalCompiler interface {
 
 type Evaluator interface {
     Replay(ctx context.Context, in ReplayInput) (ReplayReport, error)
-}
-
-type ChannelAdapter interface {
-    Start(ctx context.Context) error
-    Send(ctx context.Context, out OutboundEnvelope) (DeliveryResult, error)
-    Capabilities(ctx context.Context, binding ConversationBinding) (CapabilityProfile, error)
 }
 ```
 
@@ -1739,8 +1743,8 @@ Do **not** start with weight fine-tuning.
 
 Every turn should emit a trace tree like:
 
-- gateway ingress
-- normalization
+- ACP ingress
+- content normalization
 - sync enrichment
 - policy resolve
 - candidate generation
@@ -1752,7 +1756,7 @@ Every turn should emit a trace tree like:
 - tool execution
 - journey transition
 - response planning
-- gateway delivery
+- ACP output event emission
 - post-turn learning jobs
 
 Store an audit record for:
@@ -1762,7 +1766,7 @@ Store an audit record for:
 - which knowledge snapshot and retrievers grounded the response
 - which proposal modified a lineage
 - which preferences were inferred and why
-- which channel delivered the response
+- which ACP/channel adapter observed or delivered the response, when available
 - which approval flow was triggered
 
 This is the backbone of safe learning.
@@ -1783,7 +1787,7 @@ Hard requirements:
 - immutable audit log
 - model output moderation
 - approval policies for consequential tools
-- gateway-level source verification and allowlists
+- ACP/channel-adapter source verification and allowlists
 
 ---
 
@@ -1804,7 +1808,7 @@ Hard requirements:
 
 **Exit criteria:**
 
-- `api`, `gateway`, and `worker` boot
+- `api` and `worker` boot
 - migrations run
 - trace spans visible
 - object store, DB, and cache integrated
@@ -1812,24 +1816,24 @@ Hard requirements:
 
 ---
 
-### Phase 0.5: Messaging Gateway Foundation
+### Phase 0.5: ACP Interface Foundation
 
 **Deliver:**
 
-- gateway service skeleton
-- adapter interface
-- inbound / outbound envelope model
-- session / thread binding model
-- delivery retries
-- capability profile
-- one real adapter first, ideally web chat or Telegram
+- ACP session and event API
+- typed content parts
+- ACP stream and trace surface
+- approval request / response event shape
+- operator session read and takeover surface
+- capability metadata pass-through for external channel adapters
+- one simple ACP client or web chat adapter outside the core runtime boundary
 
 **Exit criteria:**
 
-- one channel can send text + image into the runtime
-- runtime responses are delivered back correctly
-- session / thread mapping is stable
-- outbound retries and audit logs work
+- one ACP client can send text + image into the runtime
+- runtime responses are emitted as ACP events and streamed correctly
+- external channel/session mapping can be represented in metadata without core runtime coupling
+- audit logs and trace timelines include ACP ingress/output events
 
 ---
 
@@ -2068,7 +2072,7 @@ Do **not** start with live phone calls as the first slice.
 6. High-risk proposals require human approval.
 7. Raw media retention is controlled separately from derived signals.
 8. Replay must happen before rollout.
-9. Gateway capability constraints must be respected during planning and delivery.
+9. ACP/channel-adapter capability constraints must be respected during planning and output shaping.
 10. Retrievers inject response-scoped grounding data only; they do not mutate active policy, durable memory, or the agent wiki.
 
 ---
@@ -2080,6 +2084,6 @@ If implementing this next, the first four ADRs should be:
 1. **Policy snapshot semantics**
 2. **Session and media canonical schema**
 3. **Proposal rollout rules**
-4. **Gateway routing and capability model**
+4. **ACP session, operator, and channel-adapter boundary model**
 
 These four decisions will determine whether the system stays reliable as it begins to learn.

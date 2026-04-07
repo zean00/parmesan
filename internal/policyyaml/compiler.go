@@ -36,6 +36,9 @@ func ValidateBundle(bundle policy.Bundle) error {
 	if strings.TrimSpace(bundle.Version) == "" {
 		return errors.New("bundle.version is required")
 	}
+	if err := validateSoul(bundle.Soul); err != nil {
+		return err
+	}
 
 	seen := map[string]struct{}{}
 	for _, item := range bundle.Observations {
@@ -154,6 +157,64 @@ func ValidateBundle(bundle policy.Bundle) error {
 		}
 	}
 
+	return nil
+}
+
+func validateSoul(soul policy.Soul) error {
+	if strings.TrimSpace(soul.DefaultLanguage) != "" {
+		if err := validateLanguageCode("soul.default_language", soul.DefaultLanguage); err != nil {
+			return err
+		}
+	}
+	seenLanguages := map[string]struct{}{}
+	for _, language := range soul.SupportedLanguages {
+		language = strings.TrimSpace(language)
+		if err := validateLanguageCode("soul.supported_languages", language); err != nil {
+			return err
+		}
+		if _, ok := seenLanguages[language]; ok {
+			return fmt.Errorf("soul.supported_languages contains duplicate %q", language)
+		}
+		seenLanguages[language] = struct{}{}
+	}
+	if err := validateNonEmptyUnique("soul.style_rules", soul.StyleRules); err != nil {
+		return err
+	}
+	if err := validateNonEmptyUnique("soul.avoid_rules", soul.AvoidRules); err != nil {
+		return err
+	}
+	if err := validateNonEmptyUnique("soul.formatting_rules", soul.FormattingRules); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateLanguageCode(field, value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fmt.Errorf("%s cannot contain empty language", field)
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '-' {
+			continue
+		}
+		return fmt.Errorf("%s has invalid language code %q", field, value)
+	}
+	return nil
+}
+
+func validateNonEmptyUnique(field string, values []string) error {
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return fmt.Errorf("%s cannot contain empty rule", field)
+		}
+		if _, ok := seen[value]; ok {
+			return fmt.Errorf("%s contains duplicate rule %q", field, value)
+		}
+		seen[value] = struct{}{}
+	}
 	return nil
 }
 
