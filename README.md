@@ -99,7 +99,8 @@ send either `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
 - `GET /v1/replays`
 - `GET /v1/replays/{id}`
 - `GET /v1/replays/{id}/diff`
-- `GET /v1/traces`
+- `GET /v1/traces` with optional `trace_id`, `session_id`, `execution_id`, `kind`, and `limit` filters
+- `GET /v1/traces/{id}`
 
 ## Example Policy
 

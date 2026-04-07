@@ -19,6 +19,7 @@ Conversation-edge rules:
 - Operator supervision uses `/v1/operator/...`; operator notes are hidden from ACP list/stream responses.
 - Operator session listing supports `customer_id`, `agent_id`, `mode`, `label`, `operator_id`, `active=true`, and `limit` filters.
 - Operator event listing supports `min_offset`, `limit`, `source`, `trace_id`, and `kind` filters.
+- Trace listing supports `trace_id`, `session_id`, `execution_id`, `kind`, and `limit` filters; `GET /v1/traces/{id}` returns the detailed timeline.
 - If `OPERATOR_API_KEY` is configured, `/v1/operator/...` requires `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
 
 Core event families:

@@ -1537,7 +1537,36 @@ func (s *Server) listTraces(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, records)
+	query := r.URL.Query()
+	traceID := strings.TrimSpace(query.Get("trace_id"))
+	sessionID := strings.TrimSpace(query.Get("session_id"))
+	executionID := strings.TrimSpace(query.Get("execution_id"))
+	kind := strings.TrimSpace(query.Get("kind"))
+	limit, err := positiveQueryInt(query.Get("limit"), "limit")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	out := make([]audit.Record, 0, len(records))
+	for _, record := range records {
+		if traceID != "" && record.TraceID != traceID {
+			continue
+		}
+		if sessionID != "" && record.SessionID != sessionID {
+			continue
+		}
+		if executionID != "" && record.ExecutionID != executionID {
+			continue
+		}
+		if kind != "" && record.Kind != kind {
+			continue
+		}
+		out = append(out, record)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) getTraceTimeline(w http.ResponseWriter, r *http.Request) {

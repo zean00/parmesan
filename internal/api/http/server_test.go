@@ -435,6 +435,57 @@ func TestAdminEventsStreamReturnsAuditRecords(t *testing.T) {
 	}
 }
 
+func TestListTracesSupportsFiltersAndLimit(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	now := time.Now().UTC()
+	records := []audit.Record{
+		{ID: "audit_1", Kind: "policy.resolved", SessionID: "sess_1", ExecutionID: "exec_1", TraceID: "trace_1", Message: "resolved", CreatedAt: now},
+		{ID: "audit_2", Kind: "tool.completed", SessionID: "sess_1", ExecutionID: "exec_1", TraceID: "trace_1", Message: "tool", CreatedAt: now.Add(time.Second)},
+		{ID: "audit_3", Kind: "policy.resolved", SessionID: "sess_2", ExecutionID: "exec_2", TraceID: "trace_2", Message: "resolved", CreatedAt: now.Add(2 * time.Second)},
+	}
+	for _, record := range records {
+		if err := repo.AppendAuditRecord(context.Background(), record); err != nil {
+			t.Fatalf("AppendAuditRecord(%s) error = %v", record.ID, err)
+		}
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/traces?session_id=sess_1&execution_id=exec_1&trace_id=trace_1&limit=1", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got []audit.Record
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode traces: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "audit_1" {
+		t.Fatalf("records = %#v, want limited audit_1", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/traces?kind=tool.completed", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("kind filter status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode kind-filtered traces: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "audit_2" {
+		t.Fatalf("kind-filtered records = %#v, want audit_2", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/traces?limit=0", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid limit status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
 func waitFor(t *testing.T, timeout time.Duration, fn func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
