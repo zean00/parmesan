@@ -14,10 +14,10 @@ func buildToolStageResults(ctx context.Context, router *model.Router, matchCtx M
 	grounding := map[string]semantics.ToolGroundingEvidence{}
 	selection := map[string]semantics.ToolSelectionEvidence{}
 	if len(plan.Candidates) > 0 {
-		candidateIDs := candidateToolIDs(plan.Candidates)
+		selectionCache := newToolSelectionEvalCache(plan.Candidates)
 		for _, candidate := range plan.Candidates {
 			grounding[candidate.ToolID] = candidate.GroundingEvidence
-			selection[candidate.ToolID] = semantics.DefaultToolSelectionEvaluator{}.Evaluate(semantics.ToolSelectionContextFromIDs(candidate.ToolID, candidate.ReferenceTools, plan.SelectedTool, candidateIDs))
+			selection[candidate.ToolID] = selectionCache.evaluate(candidate, plan.SelectedTool)
 		}
 	}
 	return ToolPlanStageResult{

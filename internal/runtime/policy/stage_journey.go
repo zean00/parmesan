@@ -160,7 +160,7 @@ func runJourneyProgressARQ(ctx context.Context, router *model.Router, matchCtx M
 			return decision
 		}
 	}
-	stateRelevance := semantics.EvaluateJourneyState(matchCtx.LatestCustomerText, matchCtx.CustomerHistory, *activeState, "", true, customerSatisfiedGuideline)
+	stateRelevance := cachedEvaluateJourneyState(matchCtx, *activeState, "", true)
 	if len(activeState.When) > 0 && !stateRelevance.Satisfied {
 		rootID := ""
 		if root := journeyRootState(activeJourney); root != nil {
@@ -220,13 +220,7 @@ func buildJourneyProgressStageResult(ctx context.Context, router *model.Router, 
 	nextNodeEvaluations := map[string]JourneyNextNodeEvaluation{}
 	selectedNextNode := JourneyNextNodeEvaluation{}
 	if activeJourney != nil && activeState != nil {
-		satisfactions[activeState.ID] = semantics.DefaultJourneySatisfactionEvaluator{}.Evaluate(semantics.JourneyStateContext{
-			Text:                    strings.TrimSpace(matchCtx.LatestCustomerText),
-			State:                   *activeState,
-			EdgeCondition:           "",
-			LatestTurn:              true,
-			CustomerSatisfiedAnswer: customerSatisfiedGuideline,
-		})
+		satisfactions[activeState.ID] = cachedEvaluateJourneyState(matchCtx, *activeState, "", true)
 		nextIDs := journeyNextStateIDs(*activeJourney, activeState.ID)
 		nextNodeEvaluations = buildJourneyNextNodeEvaluations(matchCtx, activeJourney, activeState.ID, nextIDs)
 		selectedNextNode = selectNextJourneyNodeFromEvaluations(nextIDs, nextNodeEvaluations)
@@ -268,7 +262,7 @@ func resolveJourney(bundle policy.Bundle, instances []journey.Instance, ctx Matc
 	for _, j := range bundle.Journeys {
 		score := 0
 		for _, cond := range j.When {
-			if v := semantics.EvaluateCondition(cond, ctx.LatestCustomerText).Score; v > score {
+			if v := cachedEvaluateCondition(ctx, cond, ctx.LatestCustomerText).Score; v > score {
 				score = v
 			}
 		}

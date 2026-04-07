@@ -74,3 +74,27 @@ Default ports:
 ## Example Policy
 
 See [`examples/policy.yaml`](examples/policy.yaml).
+
+## Validation
+
+Fast local validation:
+
+```bash
+go test -count=1 ./...
+```
+
+Performance regression check:
+
+```bash
+./scripts/bench_regression.sh
+```
+
+This runs the full local suite plus the main policy and end-to-end benchmarks:
+
+- `BenchmarkResolveGoldenScenarios`
+- `BenchmarkRunParmesanGoldenScenarios`
+- `BenchmarkRunParmesanFullGoldenCorpus`
+
+Use this as the normal guardrail for refactors and latency work. External
+Parlant parity can stay as a periodic validation step, not the default inner
+loop.

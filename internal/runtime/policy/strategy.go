@@ -148,40 +148,32 @@ func snapshotFromState(state *matchingState) matchingSnapshot {
 	if state == nil {
 		return matchingSnapshot{}
 	}
-	backtrackStage := cloneJourneyBacktrackStageResult(state.journeyBacktrackStage)
-	progressStage := cloneJourneyProgressStageResult(state.journeyProgressStage)
-	previouslyAppliedStage := clonePreviouslyAppliedStageResult(state.previouslyAppliedStage)
-	customerStage := cloneCustomerDependencyStageResult(state.customerDependencyStage)
-	relationshipStage := cloneRelationshipResolutionStageResult(state.relationshipResolutionStage)
-	disambiguationStage := cloneDisambiguationStageResult(state.disambiguationStage)
-	responseStage := cloneResponseAnalysisStageResult(state.responseAnalysisStage)
-	toolExposureStage := cloneToolExposureStageResult(state.toolExposureStage)
-	toolPlanStage := cloneToolPlanStageResult(state.toolPlanStage)
-	toolDecisionStage := cloneToolDecisionStageResult(state.toolDecisionStage)
 	return matchingSnapshot{
 		router:               state.router,
 		bundle:               state.bundle,
 		context:              state.context,
-		catalog:              append([]tool.CatalogEntry(nil), state.catalog...),
-		journeyInstances:     append([]journey.Instance(nil), state.journeyInstances...),
-		projectedNodes:       append([]ProjectedJourneyNode(nil), state.projectedNodes...),
+		// Snapshots are read-only views for batch creation/execution, so keep
+		// them shallow to avoid re-cloning large stage artifacts on every step.
+		catalog:              state.catalog,
+		journeyInstances:     state.journeyInstances,
+		projectedNodes:       state.projectedNodes,
 		attention:            state.attention,
-		observationStage:     cloneObservationMatchStageResult(state.observationStage),
+		observationStage:     state.observationStage,
 		activeJourney:        state.activeJourney,
 		activeJourneyState:   state.activeJourneyState,
 		journeyInstance:      state.journeyInstance,
-		matchFinalizeStage:   cloneFinalizeStageResult(state.matchFinalizeStage),
-		previouslyAppliedStage: previouslyAppliedStage,
-		conditionArtifactsStage: ConditionArtifactsStageResult{Artifacts: cloneConditionArtifacts(state.conditionArtifactsStage.Artifacts)},
-		journeyBacktrackStage: backtrackStage,
-		journeyProgressStage:  progressStage,
-		customerDependencyStage: customerStage,
-		relationshipResolutionStage: relationshipStage,
-		disambiguationStage: disambiguationStage,
-		responseAnalysisStage: responseStage,
-		toolExposureStage:    toolExposureStage,
-		toolPlanStage:        toolPlanStage,
-		toolDecisionStage:    toolDecisionStage,
+		matchFinalizeStage:   state.matchFinalizeStage,
+		previouslyAppliedStage: state.previouslyAppliedStage,
+		conditionArtifactsStage: state.conditionArtifactsStage,
+		journeyBacktrackStage: state.journeyBacktrackStage,
+		journeyProgressStage:  state.journeyProgressStage,
+		customerDependencyStage: state.customerDependencyStage,
+		relationshipResolutionStage: state.relationshipResolutionStage,
+		disambiguationStage: state.disambiguationStage,
+		responseAnalysisStage: state.responseAnalysisStage,
+		toolExposureStage:    state.toolExposureStage,
+		toolPlanStage:        state.toolPlanStage,
+		toolDecisionStage:    state.toolDecisionStage,
 	}
 }
 

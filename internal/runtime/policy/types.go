@@ -19,6 +19,7 @@ type MatchingContext struct {
 	AppliedGuidelines   []string
 	AppliedInstructions []string
 	OccurredAt          time.Time
+	cache               *matchingEvalCache
 }
 
 type StagedToolCall struct {

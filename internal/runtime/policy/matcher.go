@@ -62,9 +62,10 @@ func (m *guidelineMatcher) Run(ctx context.Context, router *model.Router, bundle
 
 	for _, name := range names {
 		strategy := strategies[name]
-		for _, batch := range strategy.CreateMatchingBatches(snapshotFromState(state), strategyGroups[name]) {
+		snapshot := snapshotFromState(state)
+		for _, batch := range strategy.CreateMatchingBatches(snapshot, strategyGroups[name]) {
 			start := time.Now()
-			result, err := batch.Process(ctx, snapshotFromState(state))
+			result, err := batch.Process(ctx, snapshot)
 			if err != nil {
 				return nil, err
 			}
@@ -72,17 +73,20 @@ func (m *guidelineMatcher) Run(ctx context.Context, router *model.Router, bundle
 				result.Apply(state)
 			}
 			recordBatchResult(state, batch.Name(), batch.Strategy(), batch.PromptVersion(), 0, len(strategyGroups[name]), time.Since(start), result)
+			snapshot = snapshotFromState(state)
 		}
 		start := time.Now()
-		if result := strategy.TransformMatches(snapshotFromState(state)); result != nil {
+		snapshot = snapshotFromState(state)
+		if result := strategy.TransformMatches(snapshot); result != nil {
 			result.Apply(state)
 			recordBatchResult(state, "match_finalize", strategy.Name(), promptVersion("match_finalize"), 0, len(state.matchFinalizeStage.MatchedGuidelines), time.Since(start), result)
 		} else {
 			recordBatchResult(state, "match_finalize", strategy.Name(), promptVersion("match_finalize"), 0, len(state.matchFinalizeStage.MatchedGuidelines), time.Since(start), nil)
 		}
-		for _, batch := range strategy.CreateResponseAnalysisBatches(snapshotFromState(state)) {
+		snapshot = snapshotFromState(state)
+		for _, batch := range strategy.CreateResponseAnalysisBatches(snapshot) {
 			start := time.Now()
-			result, err := batch.Process(ctx, snapshotFromState(state))
+			result, err := batch.Process(ctx, snapshot)
 			if err != nil {
 				return nil, err
 			}
@@ -90,6 +94,7 @@ func (m *guidelineMatcher) Run(ctx context.Context, router *model.Router, bundle
 				result.Apply(state)
 			}
 			recordBatchResult(state, batch.Name(), batch.Strategy(), batch.PromptVersion(), 0, len(state.matchFinalizeStage.MatchedGuidelines), time.Since(start), result)
+			snapshot = snapshotFromState(state)
 		}
 	}
 

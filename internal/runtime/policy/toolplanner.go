@@ -32,11 +32,12 @@ func buildToolPlan(ctx context.Context, router *model.Router, matchCtx MatchingC
 	}
 
 	candidates, groups := buildToolCandidates(matchCtx, activeJourney, activeState, journeyDecision, guidelines, exposedTools, relationships, catalog, decision.Arguments)
+	selectionCache := newToolSelectionEvalCache(candidates)
 	plan := ToolCallPlan{
 		Candidates:        candidates,
 		OverlappingGroups: groups,
 	}
-	plan.Batches = evaluateToolCallBatches(ctx, router, matchCtx, activeJourney, activeState, guidelines, &plan)
+	plan.Batches = evaluateToolCallBatches(ctx, router, matchCtx, activeJourney, activeState, guidelines, &plan, selectionCache)
 	applyBatchRationales(candidates, plan.Batches)
 	batchSelected := selectedCandidatesFromBatches(plan.Batches, candidates)
 	plan.SelectedTools = selectedToolIDs(batchSelected)
@@ -46,7 +47,7 @@ func buildToolPlan(ctx context.Context, router *model.Router, matchCtx MatchingC
 		plan.Rationale = firstNonEmpty(batchSelected[0].SelectionRationale, batchSelected[0].PreparationRationale, batchSelected[0].Rationale)
 	case 0:
 	default:
-		plan.SelectedTool, plan.Rationale = selectToolCandidate(ctx, router, matchCtx, activeJourney, activeState, guidelines, batchSelected)
+		plan.SelectedTool, plan.Rationale = selectToolCandidate(ctx, router, matchCtx, activeJourney, activeState, guidelines, batchSelected, selectionCache)
 	}
 	if router != nil && len(exposedTools) > 0 {
 		var structured struct {
@@ -428,16 +429,30 @@ func buildToolCandidates(matchCtx MatchingContext, activeJourney *policy.Journey
 	return candidates, groups
 }
 
-func evaluateToolCallBatches(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, guidelines []policy.Guideline, plan *ToolCallPlan) []ToolCallBatchResult {
+func evaluateToolCallBatches(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, guidelines []policy.Guideline, plan *ToolCallPlan, selectionCache *toolSelectionEvalCache) []ToolCallBatchResult {
 	batches := createToolCallBatches(plan.Candidates, plan.OverlappingGroups)
-	results := make([]ToolCallBatchResult, 0, len(batches))
-	for _, batch := range batches {
+	if len(batches) < 3 {
+		results := make([]ToolCallBatchResult, 0, len(batches))
+		for _, batch := range batches {
+			switch batch.Kind {
+			case "overlapping_tools":
+				results = append(results, evaluateOverlappingToolBatch(ctx, router, matchCtx, activeJourney, activeState, guidelines, batch, plan.Candidates, selectionCache))
+			default:
+				results = append(results, evaluateSingleToolBatch(ctx, router, matchCtx, activeJourney, activeState, guidelines, batch, plan.Candidates, selectionCache))
+			}
+		}
+		return results
+	}
+	results, ok := processBatchesInParallel(ctx, batches, func(ctx context.Context, batch ToolCallBatchResult) (ToolCallBatchResult, bool) {
 		switch batch.Kind {
 		case "overlapping_tools":
-			results = append(results, evaluateOverlappingToolBatch(ctx, router, matchCtx, activeJourney, activeState, guidelines, batch, plan.Candidates))
+			return evaluateOverlappingToolBatch(ctx, router, matchCtx, activeJourney, activeState, guidelines, batch, plan.Candidates, selectionCache), true
 		default:
-			results = append(results, evaluateSingleToolBatch(ctx, router, matchCtx, activeJourney, activeState, guidelines, batch, plan.Candidates))
+			return evaluateSingleToolBatch(ctx, router, matchCtx, activeJourney, activeState, guidelines, batch, plan.Candidates, selectionCache), true
 		}
+	})
+	if !ok {
+		return nil
 	}
 	return results
 }
@@ -477,7 +492,7 @@ func createToolCallBatches(candidates []ToolCandidate, groups [][]string) []Tool
 	return batches
 }
 
-func evaluateSingleToolBatch(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, guidelines []policy.Guideline, batch ToolCallBatchResult, candidates []ToolCandidate) ToolCallBatchResult {
+func evaluateSingleToolBatch(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, guidelines []policy.Guideline, batch ToolCallBatchResult, candidates []ToolCandidate, selectionCache *toolSelectionEvalCache) ToolCallBatchResult {
 	if len(batch.CandidateTools) == 0 {
 		return batch
 	}
@@ -508,15 +523,15 @@ func evaluateSingleToolBatch(ctx context.Context, router *model.Router, matchCtx
 				pool = append(pool, item)
 			}
 		}
-		selected, rationale := selectToolCandidate(ctx, router, matchCtx, activeJourney, activeState, guidelines, pool)
+		selected, rationale := selectToolCandidate(ctx, router, matchCtx, activeJourney, activeState, guidelines, pool, selectionCache)
 		if strings.TrimSpace(selected) == candidate.ToolID {
 			batch.SelectedTool = candidate.ToolID
-			selection := semantics.DefaultToolSelectionEvaluator{}.Evaluate(semantics.ToolSelectionContextFromIDs(candidate.ToolID, candidate.ReferenceTools, selected, candidateToolIDs(candidates)))
+			selection := selectionCache.evaluate(candidate, selected)
 			batch.Rationale = firstNonEmpty(rationale, selection.Rationale, candidate.PreparationRationale)
 			return batch
 		}
 		if strings.TrimSpace(selected) != "" {
-			selection := semantics.DefaultToolSelectionEvaluator{}.Evaluate(semantics.ToolSelectionContextFromIDs(candidate.ToolID, candidate.ReferenceTools, selected, candidateToolIDs(candidates)))
+			selection := selectionCache.evaluate(candidate, selected)
 			if selection.RunInTandem {
 				batch.SelectedTool = candidate.ToolID
 				batch.RunInTandemWith = []string{strings.TrimSpace(selected)}
@@ -533,7 +548,7 @@ func evaluateSingleToolBatch(ctx context.Context, router *model.Router, matchCtx
 	}
 	if len(candidate.ReferenceTools) > 0 {
 		for _, ref := range candidate.ReferenceTools {
-			selection := semantics.DefaultToolSelectionEvaluator{}.Evaluate(semantics.ToolSelectionContextFromIDs(candidate.ToolID, candidate.ReferenceTools, ref, candidateToolIDs(candidates)))
+			selection := selectionCache.evaluate(candidate, ref)
 			if !selection.RunInTandem {
 				continue
 			}
@@ -551,11 +566,11 @@ func evaluateSingleToolBatch(ctx context.Context, router *model.Router, matchCtx
 	if candidate.ShouldRun && (candidate.Grounded || !hasGroundedRunnableCandidate(candidates)) {
 		batch.SelectedTool = candidate.ToolID
 	}
-	batch.Rationale = firstNonEmpty(semantics.DefaultToolSelectionEvaluator{}.Evaluate(semantics.ToolSelectionContextFromIDs(candidate.ToolID, candidate.ReferenceTools, "", candidateToolIDs(candidates))).Rationale, candidate.PreparationRationale, candidate.Rationale)
+	batch.Rationale = firstNonEmpty(selectionCache.evaluate(candidate, "").Rationale, candidate.PreparationRationale, candidate.Rationale)
 	return batch
 }
 
-func evaluateOverlappingToolBatch(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, guidelines []policy.Guideline, batch ToolCallBatchResult, candidates []ToolCandidate) ToolCallBatchResult {
+func evaluateOverlappingToolBatch(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, guidelines []policy.Guideline, batch ToolCallBatchResult, candidates []ToolCandidate, selectionCache *toolSelectionEvalCache) ToolCallBatchResult {
 	pool := make([]ToolCandidate, 0, len(batch.CandidateTools))
 	for _, toolID := range batch.CandidateTools {
 		if item, ok := findCandidate(candidates, toolID); ok {
@@ -568,18 +583,18 @@ func evaluateOverlappingToolBatch(ctx context.Context, router *model.Router, mat
 	if len(pool) == 0 {
 		return batch
 	}
-	selected, rationale := selectToolCandidate(ctx, router, matchCtx, activeJourney, activeState, guidelines, pool)
+	selected, rationale := selectToolCandidate(ctx, router, matchCtx, activeJourney, activeState, guidelines, pool, selectionCache)
 	if strings.TrimSpace(selected) != "" {
 		batch.SelectedTool = strings.TrimSpace(selected)
 		if candidate, ok := findCandidate(candidates, batch.SelectedTool); ok {
-			rationale = firstNonEmpty(semantics.DefaultToolSelectionEvaluator{}.Evaluate(semantics.ToolSelectionContextFromIDs(candidate.ToolID, candidate.ReferenceTools, "", candidateToolIDs(candidates))).Rationale, rationale)
+			rationale = firstNonEmpty(selectionCache.evaluate(candidate, "").Rationale, rationale)
 		}
 	}
 	batch.Rationale = firstNonEmpty(rationale, "choose the most specialized overlapping tool for the request")
 	return batch
 }
 
-func selectToolCandidate(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, guidelines []policy.Guideline, candidates []ToolCandidate) (string, string) {
+func selectToolCandidate(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, guidelines []policy.Guideline, candidates []ToolCandidate, selectionCache *toolSelectionEvalCache) (string, string) {
 	if len(candidates) == 0 {
 		return "", ""
 	}

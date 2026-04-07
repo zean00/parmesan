@@ -30,6 +30,7 @@ type SignalRegistry struct {
 	stopwords       map[string]struct{}
 	aliases         map[string]string
 	relativeDates   []string
+	phraseIndex     map[Signal][]string
 }
 
 type CategoryRegistry struct {
@@ -39,6 +40,11 @@ type CategoryRegistry struct {
 type SlotRegistry struct {
 	fieldKinds map[string]SlotKind
 	extractors map[SlotKind]SlotExtractorDef
+}
+
+type keywordSignalMapping struct {
+	Signal Signal
+	Parent Signal
 }
 
 var DefaultSignalRegistry = SignalRegistry{
@@ -75,6 +81,16 @@ var DefaultSignalRegistry = SignalRegistry{
 		"saying":    "say",
 	},
 	relativeDates: []string{"today", "tomorrow", "next week", "next month", "return in"},
+	phraseIndex:   buildPhraseFamilyIndex([]phraseFamilyDef{
+		{Kind: SignalReservation, Phrases: []string{"reserve a table", "book a table", "reservation"}},
+		{Kind: SignalReturnStatus, Phrases: []string{"return status", "tracking"}},
+		{Kind: SignalOrderStatus, Phrases: []string{"order status", "status is"}},
+		{Kind: SignalPickup, Phrases: []string{"store pickup", "pick up", "pickup"}},
+		{Kind: SignalInsideOutside, Phrases: []string{"inside", "outside"}},
+		{Kind: SignalDrinkPreference, Phrases: []string{"drink", "drinks", "without drinks", "no drinks"}},
+		{Kind: SignalApology, Phrases: []string{"sorry"}},
+		{Kind: SignalCardLocked, Phrases: []string{"card is now locked", "locked your card", "lock_card", "locked"}},
+	}),
 }
 
 var DefaultCategoryRegistry = CategoryRegistry{
@@ -100,9 +116,34 @@ var DefaultSlotRegistry = SlotRegistry{
 	},
 }
 
-func NormalizedTokens(input string) []string {
-	input = strings.NewReplacer("_", " ", "/", " ", "-", " ").Replace(input)
-	raw := strings.Fields(strings.ToLower(input))
+var (
+	normalizationReplacer = strings.NewReplacer("_", " ", "/", " ", "-", " ")
+	keywordSignalIndex    = buildKeywordSignalIndex(DefaultSignalRegistry.keywordFamilies)
+)
+
+func buildPhraseFamilyIndex(families []phraseFamilyDef) map[Signal][]string {
+	out := make(map[Signal][]string, len(families))
+	for _, family := range families {
+		out[family.Kind] = append(out[family.Kind], family.Phrases...)
+	}
+	return out
+}
+
+func buildKeywordSignalIndex(families []keywordFamilyDef) map[string][]keywordSignalMapping {
+	out := map[string][]keywordSignalMapping{}
+	for _, family := range families {
+		for _, token := range family.Tokens {
+			out[token] = append(out[token], keywordSignalMapping{
+				Signal: family.Signal,
+				Parent: family.Parent,
+			})
+		}
+	}
+	return out
+}
+
+func normalizedTokensLowered(input string) []string {
+	raw := strings.Fields(normalizationReplacer.Replace(input))
 	var out []string
 	for _, token := range raw {
 		token = strings.Trim(token, ".,!?;:\"'()[]{}")
@@ -120,25 +161,24 @@ func NormalizedTokens(input string) []string {
 	return out
 }
 
+func NormalizedTokens(input string) []string {
+	return normalizedTokensLowered(strings.ToLower(input))
+}
+
 func Signals(input string) []string {
 	input = strings.ToLower(strings.TrimSpace(input))
 	if input == "" {
 		return nil
 	}
 	var out []string
-	for _, token := range NormalizedTokens(input) {
+	for _, token := range normalizedTokensLowered(input) {
 		out = append(out, token)
-		for _, family := range DefaultSignalRegistry.keywordFamilies {
-			for _, candidate := range family.Tokens {
-				if token != candidate {
-					continue
-				}
-				if family.Signal != SignalUnknown {
-					out = append(out, string(family.Signal))
-				}
-				if family.Parent != SignalUnknown {
-					out = append(out, string(family.Parent))
-				}
+		for _, mapping := range keywordSignalIndex[token] {
+			if mapping.Signal != SignalUnknown {
+				out = append(out, string(mapping.Signal))
+			}
+			if mapping.Parent != SignalUnknown {
+				out = append(out, string(mapping.Parent))
 			}
 		}
 	}
@@ -220,6 +260,14 @@ func RelativeDateTerm(text string) string {
 }
 
 func (r SignalRegistry) HasPhraseFamily(text string, kind Signal) bool {
+	if families := r.phraseIndex[kind]; len(families) > 0 {
+		for _, phrase := range families {
+			if strings.Contains(text, phrase) {
+				return true
+			}
+		}
+		return false
+	}
 	for _, family := range r.phraseFamilies {
 		if family.Kind != kind {
 			continue
@@ -229,7 +277,6 @@ func (r SignalRegistry) HasPhraseFamily(text string, kind Signal) bool {
 				return true
 			}
 		}
-		return false
 	}
 	return false
 }

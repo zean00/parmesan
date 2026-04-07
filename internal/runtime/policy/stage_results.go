@@ -22,7 +22,7 @@ type ObservationMatchStageResult struct {
 func (r ObservationMatchStageResult) Apply(state *matchingState) {
 	state.observationStage = cloneObservationMatchStageResult(r)
 	for _, item := range r.Observations {
-		recordConditionArtifact(state, "observation:"+item.ID, semantics.EvaluateConditionAcrossTexts(item.When, matchingSource(state.context), state.context.ConversationText))
+		recordConditionArtifact(state, "observation:"+item.ID, cachedEvaluateConditionAcrossTexts(state.context, item.When, matchingSource(state.context), state.context.ConversationText))
 	}
 }
 
@@ -52,7 +52,7 @@ func (r GuidelineMatchStageResult) Apply(state *matchingState) {
 		state.matchFinalizeStage.MatchedGuidelines = append([]policy.Guideline(nil), r.Guidelines...)
 	}
 	for _, item := range r.Guidelines {
-		recordConditionArtifact(state, "guideline:"+item.ID, semantics.EvaluateConditionAcrossTexts(item.When, matchingSource(state.context), state.context.ConversationText))
+		recordConditionArtifact(state, "guideline:"+item.ID, cachedEvaluateConditionAcrossTexts(state.context, item.When, matchingSource(state.context), state.context.ConversationText))
 	}
 	syncFinalizeStageToState(state)
 }
