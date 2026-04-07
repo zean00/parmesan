@@ -24,6 +24,9 @@ func (s *Service) OpenSession(ctx context.Context, req Session) (Session, error)
 }
 
 func (s *Service) CreateEvent(ctx context.Context, req Event, async bool) (Event, error) {
+	if err := ValidateEvent(req); err != nil {
+		return Event{}, err
+	}
 	created, err := s.sessions.CreateEvent(ctx, sessionsvc.CreateEventParams{
 		ID:          req.ID,
 		SessionID:   req.SessionID,
@@ -40,7 +43,7 @@ func (s *Service) CreateEvent(ctx context.Context, req Event, async bool) (Event
 	if err != nil {
 		return Event{}, err
 	}
-	return EventFromDomain(created), nil
+	return NormalizeEvent(created), nil
 }
 
 func (s *Service) ListEvents(ctx context.Context, sessionID string, minOffset int64) ([]Event, error) {
@@ -54,7 +57,7 @@ func (s *Service) ListEvents(ctx context.Context, sessionID string, minOffset in
 	}
 	out := make([]Event, 0, len(items))
 	for _, item := range items {
-		out = append(out, EventFromDomain(item))
+		out = append(out, NormalizeEvent(item))
 	}
 	return out, nil
 }

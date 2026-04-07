@@ -49,6 +49,45 @@ type streamItem struct {
 	body any
 }
 
+type sessionSummary struct {
+	LastTraceID          string   `json:"last_trace_id,omitempty"`
+	LastExecutionID      string   `json:"last_execution_id,omitempty"`
+	AppliedGuidelineIDs  []string `json:"applied_guideline_ids,omitempty"`
+	ActiveJourneyID      string   `json:"active_journey_id,omitempty"`
+	ActiveJourneyStateID string   `json:"active_journey_state_id,omitempty"`
+	CompositionMode      string   `json:"composition_mode,omitempty"`
+}
+
+type sessionView struct {
+	ID         string         `json:"id"`
+	Channel    string         `json:"channel"`
+	CustomerID string         `json:"customer_id,omitempty"`
+	AgentID    string         `json:"agent_id,omitempty"`
+	Mode       string         `json:"mode,omitempty"`
+	Title      string         `json:"title,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+	Labels     []string       `json:"labels,omitempty"`
+	Summary    sessionSummary `json:"summary"`
+	CreatedAt  time.Time      `json:"created_at"`
+}
+
+type traceTimelineEntry struct {
+	Kind        string    `json:"kind"`
+	ID          string    `json:"id"`
+	SessionID   string    `json:"session_id,omitempty"`
+	ExecutionID string    `json:"execution_id,omitempty"`
+	TraceID     string    `json:"trace_id,omitempty"`
+	When        time.Time `json:"when"`
+	Payload     any       `json:"payload"`
+}
+
+type traceTimelineResponse struct {
+	TraceID     string               `json:"trace_id"`
+	SessionID   string               `json:"session_id,omitempty"`
+	ExecutionID string               `json:"execution_id,omitempty"`
+	Entries     []traceTimelineEntry `json:"entries"`
+}
+
 func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *sse.Broker, router *model.Router, syncer *toolsync.Syncer) *Server {
 	s := &Server{
 		store:    repo,
@@ -79,13 +118,15 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("POST /v1/rollouts/{id}/rollback", s.rollbackRollout)
 	mux.HandleFunc("GET /v1/admin/events/stream", s.streamAdminEvents)
 	mux.HandleFunc("POST /v1/sessions", s.createSession)
+	mux.HandleFunc("GET /v1/sessions/{id}", s.getSession)
 	mux.HandleFunc("GET /v1/sessions/{id}/events", s.listEvents)
 	mux.HandleFunc("POST /v1/sessions/{id}/events", s.appendEvent)
 	mux.HandleFunc("GET /v1/sessions/{id}/events/stream", s.streamEvents)
 	mux.HandleFunc("POST /v1/acp/sessions", s.acpCreateSession)
+	mux.HandleFunc("GET /v1/acp/sessions/{id}", s.acpGetSession)
 	mux.HandleFunc("GET /v1/acp/sessions/{id}/events", s.acpListEvents)
 	mux.HandleFunc("POST /v1/acp/sessions/{id}/events", s.acpAppendEvent)
-	mux.HandleFunc("GET /v1/acp/sessions/{id}/events/stream", s.streamEvents)
+	mux.HandleFunc("GET /v1/acp/sessions/{id}/events/stream", s.acpStreamEvents)
 	mux.HandleFunc("POST /v1/tools/providers/register", s.registerProvider)
 	mux.HandleFunc("POST /v1/tools/providers/{id}/auth", s.saveProviderAuth)
 	mux.HandleFunc("GET /v1/tools/providers/{id}/auth", s.getProviderAuth)
@@ -102,6 +143,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/replays/{id}", s.getReplayExecution)
 	mux.HandleFunc("GET /v1/replays/{id}/diff", s.getReplayDiff)
 	mux.HandleFunc("GET /v1/traces", s.listTraces)
+	mux.HandleFunc("GET /v1/traces/{id}", s.getTraceTimeline)
 
 	s.httpServer = &http.Server{
 		Addr:              addr,
@@ -563,6 +605,15 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, sess)
 }
 
+func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
+	sess, err := s.store.GetSession(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess)))
+}
+
 func (s *Server) appendEvent(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
 	var req struct {
@@ -671,6 +722,8 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	seen := map[string]struct{}{}
 	lastOffset := int64(0)
+	live, cancelLive := s.liveSessionFeed(sessionID)
+	defer cancelLive()
 
 	for {
 		var err error
@@ -678,17 +731,17 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return
 		}
-		waitCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-		_, _ = s.listener.WaitForMoreEvents(waitCtx, session.EventQuery{
-			SessionID:      sessionID,
-			MinOffset:      lastOffset + 1,
-			ExcludeDeleted: true,
-		})
-		cancel()
-		select {
-		case <-ctx.Done():
+		if s.forwardLiveSessionEvents(w, flusher, live) {
 			return
-		default:
+		}
+		env, gotLive, done := s.waitForSessionActivity(ctx, sessionID, lastOffset, live)
+		if done {
+			return
+		}
+		if gotLive {
+			if s.writeLiveEnvelope(w, flusher, env) {
+				return
+			}
 		}
 	}
 }
@@ -717,6 +770,25 @@ func (s *Server) acpCreateSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, created)
 }
 
+func (s *Server) acpGetSession(w http.ResponseWriter, r *http.Request) {
+	sess, err := s.store.GetSession(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	summary := s.sessionSummaryFor(r.Context(), sess)
+	out := acp.SessionFromDomain(sess)
+	out.Summary = &acp.SessionSummary{
+		LastTraceID:          summary.LastTraceID,
+		LastExecutionID:      summary.LastExecutionID,
+		AppliedGuidelineIDs:  append([]string(nil), summary.AppliedGuidelineIDs...),
+		ActiveJourneyID:      summary.ActiveJourneyID,
+		ActiveJourneyStateID: summary.ActiveJourneyStateID,
+		CompositionMode:      summary.CompositionMode,
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (s *Server) acpAppendEvent(w http.ResponseWriter, r *http.Request) {
 	service := acp.NewService(s.sessions)
 	var req acp.Event
@@ -730,6 +802,10 @@ func (s *Server) acpAppendEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.CreatedAt.IsZero() {
 		req.CreatedAt = time.Now().UTC()
+	}
+	if err := acp.ValidateEvent(req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	created, err := service.CreateEvent(r.Context(), req, true)
 	if err != nil {
@@ -754,6 +830,62 @@ func (s *Server) acpListEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, events)
+}
+
+func (s *Server) acpStreamEvents(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	ctx := r.Context()
+	lastOffset := int64(0)
+	if raw := strings.TrimSpace(r.URL.Query().Get("min_offset")); raw != "" {
+		if _, err := fmt.Sscan(raw, &lastOffset); err != nil {
+			http.Error(w, "invalid min_offset", http.StatusBadRequest)
+			return
+		}
+	}
+	service := acp.NewService(s.sessions)
+	live, cancelLive := s.liveSessionFeed(sessionID)
+	defer cancelLive()
+	for {
+		events, err := service.ListEvents(ctx, sessionID, lastOffset+1)
+		if err != nil {
+			return
+		}
+		for _, event := range events {
+			raw, err := json.Marshal(event)
+			if err != nil {
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", event.ID, event.Kind, raw); err != nil {
+				return
+			}
+			if event.Offset > lastOffset {
+				lastOffset = event.Offset
+			}
+		}
+		flusher.Flush()
+		if s.forwardLiveSessionEvents(w, flusher, live) {
+			return
+		}
+		env, gotLive, done := s.waitForSessionActivity(ctx, sessionID, lastOffset, live)
+		if done {
+			return
+		}
+		if gotLive {
+			if s.writeLiveEnvelope(w, flusher, env) {
+				return
+			}
+		}
+	}
 }
 
 func (s *Server) streamAdminEvents(w http.ResponseWriter, r *http.Request) {
@@ -1037,6 +1169,15 @@ func (s *Server) listTraces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, records)
+}
+
+func (s *Server) getTraceTimeline(w http.ResponseWriter, r *http.Request) {
+	resp, err := s.buildTraceTimeline(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) listToolRuns(w http.ResponseWriter, r *http.Request) {
@@ -1359,6 +1500,332 @@ func (s *Server) appendAuditItems(ctx context.Context, items []streamItem, seen 
 		})
 	}
 	return items, nil
+}
+
+func (s *Server) sessionSummaryFor(ctx context.Context, sess session.Session) sessionSummary {
+	summary := sessionSummary{}
+	if sess.Metadata != nil {
+		summary.LastTraceID = stringMetadata(sess.Metadata, "last_trace_id")
+		summary.AppliedGuidelineIDs = stringSliceMetadata(sess.Metadata, "applied_guideline_ids")
+		summary.ActiveJourneyID = stringMetadata(sess.Metadata, "active_journey_id")
+		summary.ActiveJourneyStateID = stringMetadata(sess.Metadata, "active_journey_state_id")
+		summary.CompositionMode = stringMetadata(sess.Metadata, "composition_mode")
+	}
+	execs, err := s.store.ListExecutions(ctx)
+	if err == nil {
+		var latest execution.TurnExecution
+		var matched execution.TurnExecution
+		for _, exec := range execs {
+			if exec.SessionID != sess.ID {
+				continue
+			}
+			if latest.ID == "" || exec.UpdatedAt.After(latest.UpdatedAt) {
+				latest = exec
+			}
+			if summary.LastTraceID != "" && exec.TraceID == summary.LastTraceID {
+				if matched.ID == "" || exec.UpdatedAt.After(matched.UpdatedAt) {
+					matched = exec
+				}
+			}
+		}
+		if matched.ID != "" {
+			summary.LastExecutionID = matched.ID
+		} else {
+			summary.LastExecutionID = latest.ID
+		}
+	}
+	return summary
+}
+
+func sessionViewFromDomain(sess session.Session, summary sessionSummary) sessionView {
+	return sessionView{
+		ID:         sess.ID,
+		Channel:    sess.Channel,
+		CustomerID: sess.CustomerID,
+		AgentID:    sess.AgentID,
+		Mode:       sess.Mode,
+		Title:      sess.Title,
+		Metadata:   sess.Metadata,
+		Labels:     append([]string(nil), sess.Labels...),
+		Summary:    summary,
+		CreatedAt:  sess.CreatedAt,
+	}
+}
+
+func stringMetadata(metadata map[string]any, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	value, ok := metadata[key]
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func stringSliceMetadata(metadata map[string]any, key string) []string {
+	if metadata == nil {
+		return nil
+	}
+	raw, ok := metadata[key]
+	if !ok {
+		return nil
+	}
+	switch values := raw.(type) {
+	case []string:
+		return append([]string(nil), values...)
+	case []any:
+		out := make([]string, 0, len(values))
+		for _, value := range values {
+			text := strings.TrimSpace(fmt.Sprint(value))
+			if text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func (s *Server) liveSessionFeed(sessionID string) (chan sse.Envelope, func()) {
+	if s.broker == nil {
+		return nil, func() {}
+	}
+	ch := make(chan sse.Envelope, 16)
+	cancel := s.broker.Subscribe(sessionID, ch)
+	return ch, cancel
+}
+
+func (s *Server) forwardLiveSessionEvents(w http.ResponseWriter, flusher http.Flusher, ch chan sse.Envelope) bool {
+	if ch == nil {
+		return false
+	}
+	wrote := false
+	for {
+		select {
+		case env, ok := <-ch:
+			if !ok {
+				return true
+			}
+			if env.Type != "runtime.response.delta" && env.Type != "runtime.response.completed" {
+				continue
+			}
+			raw, err := json.Marshal(env)
+			if err != nil {
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", env.EventID, strings.ReplaceAll(env.Type, "runtime.", ""), raw); err != nil {
+				return true
+			}
+			wrote = true
+		default:
+			if wrote {
+				flusher.Flush()
+			}
+			return false
+		}
+	}
+}
+
+func (s *Server) waitForSessionActivity(ctx context.Context, sessionID string, lastOffset int64, live chan sse.Envelope) (sse.Envelope, bool, bool) {
+	ready := make(chan struct{}, 1)
+	go func() {
+		waitCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		defer cancel()
+		ok, _ := s.listener.WaitForMoreEvents(waitCtx, session.EventQuery{
+			SessionID:      sessionID,
+			MinOffset:      lastOffset + 1,
+			ExcludeDeleted: true,
+		})
+		if ok {
+			select {
+			case ready <- struct{}{}:
+			default:
+			}
+		}
+	}()
+	select {
+	case <-ctx.Done():
+		return sse.Envelope{}, false, true
+	case env, ok := <-live:
+		if !ok {
+			return sse.Envelope{}, false, false
+		}
+		return env, true, false
+	case <-ready:
+		return sse.Envelope{}, false, false
+	case <-time.After(500 * time.Millisecond):
+		return sse.Envelope{}, false, false
+	}
+}
+
+func (s *Server) writeLiveEnvelope(w http.ResponseWriter, flusher http.Flusher, env sse.Envelope) bool {
+	if env.Type != "runtime.response.delta" && env.Type != "runtime.response.completed" {
+		return false
+	}
+	raw, err := json.Marshal(env)
+	if err != nil {
+		return false
+	}
+	if _, err := fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", env.EventID, strings.ReplaceAll(env.Type, "runtime.", ""), raw); err != nil {
+		return true
+	}
+	flusher.Flush()
+	return false
+}
+
+func (s *Server) buildTraceTimeline(ctx context.Context, traceID string) (traceTimelineResponse, error) {
+	records, err := s.store.ListAuditRecords(ctx)
+	if err != nil {
+		return traceTimelineResponse{}, err
+	}
+	execs, err := s.store.ListExecutions(ctx)
+	if err != nil {
+		return traceTimelineResponse{}, err
+	}
+	var targetExec execution.TurnExecution
+	var sessionID string
+	var entries []traceTimelineEntry
+	for _, record := range records {
+		if record.TraceID != traceID {
+			continue
+		}
+		if sessionID == "" {
+			sessionID = record.SessionID
+		}
+		if targetExec.ID == "" && record.ExecutionID != "" {
+			targetExec.ID = record.ExecutionID
+		}
+		entries = append(entries, traceTimelineEntry{
+			Kind:        "audit." + record.Kind,
+			ID:          record.ID,
+			SessionID:   record.SessionID,
+			ExecutionID: record.ExecutionID,
+			TraceID:     record.TraceID,
+			When:        record.CreatedAt,
+			Payload:     record,
+		})
+	}
+	for _, exec := range execs {
+		if exec.TraceID != traceID {
+			continue
+		}
+		if targetExec.ID == "" {
+			targetExec = exec
+		}
+		if sessionID == "" {
+			sessionID = exec.SessionID
+		}
+		entries = append(entries, traceTimelineEntry{
+			Kind:        "execution",
+			ID:          exec.ID,
+			SessionID:   exec.SessionID,
+			ExecutionID: exec.ID,
+			TraceID:     exec.TraceID,
+			When:        exec.CreatedAt,
+			Payload:     exec,
+		})
+		_, steps, err := s.store.GetExecution(ctx, exec.ID)
+		if err == nil {
+			for _, step := range steps {
+				when := step.UpdatedAt
+				if when.IsZero() {
+					when = step.CreatedAt
+				}
+				entries = append(entries, traceTimelineEntry{
+					Kind:        "execution.step",
+					ID:          step.ID,
+					SessionID:   exec.SessionID,
+					ExecutionID: exec.ID,
+					TraceID:     exec.TraceID,
+					When:        when,
+					Payload:     step,
+				})
+			}
+		}
+	}
+	if sessionID != "" {
+		events, err := s.store.ListEventsFiltered(ctx, session.EventQuery{SessionID: sessionID, TraceID: traceID})
+		if err == nil {
+			for _, event := range events {
+				entries = append(entries, traceTimelineEntry{
+					Kind:        "session.event",
+					ID:          event.ID,
+					SessionID:   event.SessionID,
+					ExecutionID: event.ExecutionID,
+					TraceID:     event.TraceID,
+					When:        event.CreatedAt,
+					Payload:     acp.NormalizeEvent(event),
+				})
+			}
+		}
+		approvals, err := s.store.ListApprovalSessions(ctx, sessionID)
+		if err == nil {
+			for _, item := range approvals {
+				if targetExec.ID != "" && item.ExecutionID != targetExec.ID {
+					continue
+				}
+				entries = append(entries, traceTimelineEntry{
+					Kind:        "approval",
+					ID:          item.ID,
+					SessionID:   item.SessionID,
+					ExecutionID: item.ExecutionID,
+					TraceID:     traceID,
+					When:        item.CreatedAt,
+					Payload:     item,
+				})
+			}
+		}
+	}
+	if targetExec.ID != "" {
+		runs, err := s.store.ListToolRuns(ctx, targetExec.ID)
+		if err == nil {
+			for _, run := range runs {
+				entries = append(entries, traceTimelineEntry{
+					Kind:        "tool.run",
+					ID:          run.ID,
+					SessionID:   sessionID,
+					ExecutionID: run.ExecutionID,
+					TraceID:     traceID,
+					When:        run.CreatedAt,
+					Payload:     run,
+				})
+			}
+		}
+		deliveries, err := s.store.ListDeliveryAttempts(ctx, targetExec.ID)
+		if err == nil {
+			for _, attempt := range deliveries {
+				entries = append(entries, traceTimelineEntry{
+					Kind:        "delivery.attempt",
+					ID:          attempt.ID,
+					SessionID:   attempt.SessionID,
+					ExecutionID: attempt.ExecutionID,
+					TraceID:     traceID,
+					When:        attempt.CreatedAt,
+					Payload:     attempt,
+				})
+			}
+		}
+	}
+	if len(entries) == 0 {
+		return traceTimelineResponse{}, fmt.Errorf("trace not found")
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].When.Equal(entries[j].When) {
+			if entries[i].Kind == entries[j].Kind {
+				return entries[i].ID < entries[j].ID
+			}
+			return entries[i].Kind < entries[j].Kind
+		}
+		return entries[i].When.Before(entries[j].When)
+	})
+	return traceTimelineResponse{
+		TraceID:     traceID,
+		SessionID:   sessionID,
+		ExecutionID: targetExec.ID,
+		Entries:     entries,
+	}, nil
 }
 
 type resolvedPolicyResponse struct {

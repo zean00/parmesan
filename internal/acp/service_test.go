@@ -2,6 +2,9 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -56,5 +59,80 @@ func TestServiceOpenSessionAndListEvents(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].ID != "evt_1" {
 		t.Fatalf("events = %#v, want evt_1", events)
+	}
+}
+
+func TestValidateEventRejectsMissingTypedFields(t *testing.T) {
+	err := ValidateEvent(Event{
+		ID:        "evt_1",
+		SessionID: "sess_1",
+		Source:    "runtime",
+		Kind:      EventKindToolFailed,
+		CreatedAt: time.Now().UTC(),
+		Data:      map[string]any{"tool_id": "tool_1"},
+	})
+	if err == nil {
+		t.Fatal("ValidateEvent() error = nil, want missing error field rejection")
+	}
+}
+
+func TestValidateEventRejectsNonStringTypedFields(t *testing.T) {
+	err := ValidateEvent(Event{
+		ID:        "evt_1",
+		SessionID: "sess_1",
+		Source:    "runtime",
+		Kind:      EventKindToolFailed,
+		CreatedAt: time.Now().UTC(),
+		Data: map[string]any{
+			"tool_id": 123,
+			"error":   true,
+		},
+	})
+	if err == nil {
+		t.Fatal("ValidateEvent() error = nil, want non-string typed field rejection")
+	}
+}
+
+func TestNormalizeEventMapsLegacyApprovalResult(t *testing.T) {
+	event := NormalizeEvent(session.Event{
+		ID:        "evt_1",
+		SessionID: "sess_1",
+		Source:    "gateway",
+		Kind:      "approval_result",
+		CreatedAt: time.Now().UTC(),
+		Content:   []session.ContentPart{{Type: "text", Text: "approve"}},
+		Metadata:  map[string]any{"approval_id": "appr_1", "tool_id": "tool_1"},
+	})
+	if event.Kind != EventKindApprovalResolved {
+		t.Fatalf("kind = %q, want %q", event.Kind, EventKindApprovalResolved)
+	}
+	if event.Data["decision"] != "approve" || event.Data["approval_id"] != "appr_1" {
+		t.Fatalf("normalized data = %#v, want approval resolved fields", event.Data)
+	}
+}
+
+func TestACPDocsSchemasAreValidJSON(t *testing.T) {
+	root := filepath.Join("..", "..", "docs", "acp", "schemas")
+	files := []string{
+		"session.json",
+		"event-base.json",
+		"event-message.json",
+		"event-status.json",
+		"event-approval-requested.json",
+		"event-approval-resolved.json",
+		"event-tool-started.json",
+		"event-tool-completed.json",
+		"event-tool-failed.json",
+		"event-tool-blocked.json",
+	}
+	for _, name := range files {
+		raw, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", name, err)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatalf("schema %s invalid JSON: %v", name, err)
+		}
 	}
 }

@@ -113,6 +113,82 @@ func (s *Service) CreateStatusEvent(ctx context.Context, sessionID, source, stat
 	})
 }
 
+func (s *Service) CreateACPStatusEvent(ctx context.Context, sessionID, source, code, state, executionID, traceID string, details, metadata map[string]any, async bool) (session.Event, error) {
+	data := map[string]any{
+		"code":  code,
+		"state": state,
+	}
+	for k, v := range details {
+		data[k] = v
+	}
+	return s.CreateEvent(ctx, CreateEventParams{
+		SessionID:   sessionID,
+		Source:      source,
+		Kind:        "status",
+		Data:        data,
+		ExecutionID: executionID,
+		TraceID:     traceID,
+		Metadata:    metadata,
+		Async:       async,
+	})
+}
+
+func (s *Service) CreateApprovalRequestedEvent(ctx context.Context, sessionID, source, executionID, traceID, approvalID, toolID, message string, expiresAt time.Time, metadata map[string]any, async bool) (session.Event, error) {
+	data := map[string]any{
+		"approval_id": approvalID,
+		"tool_id":     toolID,
+		"message":     message,
+		"expires_at":  expiresAt.Format(time.RFC3339Nano),
+	}
+	for k, v := range metadata {
+		data[k] = v
+	}
+	return s.CreateEvent(ctx, CreateEventParams{
+		SessionID:   sessionID,
+		Source:      source,
+		Kind:        "approval.requested",
+		Data:        data,
+		ExecutionID: executionID,
+		TraceID:     traceID,
+		Metadata:    metadata,
+		Async:       async,
+	})
+}
+
+func (s *Service) CreateApprovalResolvedEvent(ctx context.Context, sessionID, source, executionID, traceID, approvalID, toolID, decision string, metadata map[string]any, async bool) (session.Event, error) {
+	data := map[string]any{
+		"approval_id": approvalID,
+		"tool_id":     toolID,
+		"decision":    decision,
+	}
+	for k, v := range metadata {
+		data[k] = v
+	}
+	return s.CreateEvent(ctx, CreateEventParams{
+		SessionID:   sessionID,
+		Source:      source,
+		Kind:        "approval.resolved",
+		Data:        data,
+		ExecutionID: executionID,
+		TraceID:     traceID,
+		Metadata:    metadata,
+		Async:       async,
+	})
+}
+
+func (s *Service) CreateToolEvent(ctx context.Context, sessionID, source, kind, executionID, traceID string, data, metadata map[string]any, async bool) (session.Event, error) {
+	return s.CreateEvent(ctx, CreateEventParams{
+		SessionID:   sessionID,
+		Source:      source,
+		Kind:        kind,
+		Data:        data,
+		ExecutionID: executionID,
+		TraceID:     traceID,
+		Metadata:    metadata,
+		Async:       async,
+	})
+}
+
 func (s *Service) CreateEvent(ctx context.Context, params CreateEventParams) (session.Event, error) {
 	if _, err := s.repo.GetSession(ctx, params.SessionID); err != nil {
 		return session.Event{}, err

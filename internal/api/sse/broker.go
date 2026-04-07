@@ -52,8 +52,8 @@ func (b *Broker) Stream(w http.ResponseWriter, r *http.Request, sessionID string
 	w.Header().Set("Connection", "keep-alive")
 
 	ch := make(chan Envelope, 16)
-	b.subscribe(sessionID, ch)
-	defer b.unsubscribe(sessionID, ch)
+	cancel := b.Subscribe(sessionID, ch)
+	defer cancel()
 
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
@@ -74,6 +74,13 @@ func (b *Broker) Stream(w http.ResponseWriter, r *http.Request, sessionID string
 			fmt.Fprintf(w, "data: %s\n\n", raw)
 			flusher.Flush()
 		}
+	}
+}
+
+func (b *Broker) Subscribe(sessionID string, ch chan Envelope) func() {
+	b.subscribe(sessionID, ch)
+	return func() {
+		b.unsubscribe(sessionID, ch)
 	}
 }
 

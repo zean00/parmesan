@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [{ "$ref": "./event-base.json" }],
+  "properties": {
+    "kind": { "const": "tool.started" },
+    "data": {
+      "type": "object",
+      "required": ["tool_id", "provider_id"],
+      "properties": {
+        "tool_id": { "type": "string" },
+        "provider_id": { "type": "string" }
+      }
+    }
+  },
+  "required": ["data"]
+}

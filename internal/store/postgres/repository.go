@@ -63,6 +63,7 @@ func (c *Client) ListBundles(ctx context.Context) ([]policy.Bundle, error) {
 }
 
 func (c *Client) CreateSession(ctx context.Context, sess session.Session) error {
+	db := c.sessionQuery()
 	metadata, err := json.Marshal(sess.Metadata)
 	if err != nil {
 		return err
@@ -71,7 +72,7 @@ func (c *Client) CreateSession(ctx context.Context, sess session.Session) error 
 	if err != nil {
 		return err
 	}
-	_, err = c.Pool.Exec(ctx, `
+	_, err = db.Exec(ctx, `
 		INSERT INTO sessions (id, channel, customer_id, agent_id, mode, title, metadata_json, labels_json, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (id) DO NOTHING
@@ -80,7 +81,7 @@ func (c *Client) CreateSession(ctx context.Context, sess session.Session) error 
 }
 
 func (c *Client) GetSession(ctx context.Context, sessionID string) (session.Session, error) {
-	row := c.Pool.QueryRow(ctx, `SELECT id, channel, COALESCE(customer_id,''), COALESCE(agent_id,''), COALESCE(mode,''), COALESCE(title,''), metadata_json, labels_json, created_at FROM sessions WHERE id = $1`, sessionID)
+	row := c.sessionQuery().QueryRow(ctx, `SELECT id, channel, COALESCE(customer_id,''), COALESCE(agent_id,''), COALESCE(mode,''), COALESCE(title,''), metadata_json, labels_json, created_at FROM sessions WHERE id = $1`, sessionID)
 	var sess session.Session
 	var metadata []byte
 	var labels []byte
@@ -100,6 +101,7 @@ func (c *Client) GetSession(ctx context.Context, sessionID string) (session.Sess
 }
 
 func (c *Client) UpdateSession(ctx context.Context, sess session.Session) error {
+	db := c.sessionQuery()
 	metadata, err := json.Marshal(sess.Metadata)
 	if err != nil {
 		return err
@@ -108,7 +110,7 @@ func (c *Client) UpdateSession(ctx context.Context, sess session.Session) error 
 	if err != nil {
 		return err
 	}
-	_, err = c.Pool.Exec(ctx, `
+	_, err = db.Exec(ctx, `
 		UPDATE sessions
 		SET channel = $2,
 		    customer_id = $3,
@@ -123,7 +125,7 @@ func (c *Client) UpdateSession(ctx context.Context, sess session.Session) error 
 }
 
 func (c *Client) ListSessions(ctx context.Context) ([]session.Session, error) {
-	rows, err := c.Pool.Query(ctx, `SELECT id, channel, COALESCE(customer_id,''), COALESCE(agent_id,''), COALESCE(mode,''), COALESCE(title,''), metadata_json, labels_json, created_at FROM sessions ORDER BY created_at DESC`)
+	rows, err := c.sessionQuery().Query(ctx, `SELECT id, channel, COALESCE(customer_id,''), COALESCE(agent_id,''), COALESCE(mode,''), COALESCE(title,''), metadata_json, labels_json, created_at FROM sessions ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -148,6 +150,7 @@ func (c *Client) ListSessions(ctx context.Context) ([]session.Session, error) {
 }
 
 func (c *Client) AppendEvent(ctx context.Context, event session.Event) error {
+	db := c.sessionQuery()
 	raw, err := json.Marshal(event)
 	if err != nil {
 		return err
@@ -156,7 +159,7 @@ func (c *Client) AppendEvent(ctx context.Context, event session.Event) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.Pool.Exec(ctx, `
+	_, err = db.Exec(ctx, `
 		INSERT INTO session_events (id, session_id, source, kind, execution_id, payload, created_at, offset, trace_id, metadata_json, deleted)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (id) DO NOTHING
@@ -169,7 +172,7 @@ func (c *Client) ListEvents(ctx context.Context, sessionID string) ([]session.Ev
 }
 
 func (c *Client) ReadEvent(ctx context.Context, sessionID string, eventID string) (session.Event, error) {
-	row := c.Pool.QueryRow(ctx, `
+	row := c.sessionQuery().QueryRow(ctx, `
 		SELECT payload, COALESCE(offset,0), COALESCE(trace_id,''), metadata_json, deleted
 		FROM session_events
 		WHERE session_id = $1 AND id = $2
@@ -193,6 +196,7 @@ func (c *Client) ReadEvent(ctx context.Context, sessionID string, eventID string
 }
 
 func (c *Client) UpdateEvent(ctx context.Context, event session.Event) error {
+	db := c.sessionQuery()
 	raw, err := json.Marshal(event)
 	if err != nil {
 		return err
@@ -201,7 +205,7 @@ func (c *Client) UpdateEvent(ctx context.Context, event session.Event) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.Pool.Exec(ctx, `
+	_, err = db.Exec(ctx, `
 		UPDATE session_events
 		SET source = $3,
 		    kind = $4,
@@ -249,7 +253,7 @@ func (c *Client) ListEventsFiltered(ctx context.Context, query session.EventQuer
 		arg++
 	}
 	sql += ` ORDER BY COALESCE(offset,0) ASC, created_at ASC`
-	rows, err := c.Pool.Query(ctx, sql, args...)
+	rows, err := c.sessionQuery().Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}

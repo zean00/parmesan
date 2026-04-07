@@ -235,27 +235,13 @@ func (s *Server) respondApproval(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	event, err := s.sessions.CreateEvent(r.Context(), sessionsvc.CreateEventParams{
-		SessionID:   binding.SessionID,
-		Source:      "gateway",
-		Kind:        "approval_result",
-		ExecutionID: item.ExecutionID,
-		Content: []session.ContentPart{{
-			Type: "text",
-			Text: decision,
-			Meta: map[string]any{"approval_id": item.ID, "tool_id": item.ToolID},
-		}},
-		Metadata: map[string]any{"approval_id": item.ID, "tool_id": item.ToolID},
-		Async:    true,
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	_ = event
 	execs, err := s.repo.ListExecutions(r.Context())
+	traceID := ""
 	if err == nil {
 		for _, exec := range execs {
+			if exec.ID == item.ExecutionID {
+				traceID = exec.TraceID
+			}
 			if exec.ID == item.ExecutionID && exec.Status == execution.StatusBlocked {
 				exec.Status = execution.StatusPending
 				exec.UpdatedAt = time.Now().UTC()
@@ -263,6 +249,12 @@ func (s *Server) respondApproval(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	event, err := s.sessions.CreateApprovalResolvedEvent(r.Context(), binding.SessionID, "gateway", item.ExecutionID, traceID, item.ID, item.ToolID, decision, nil, true)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = event
 	_ = s.writes.AppendAuditRecord(r.Context(), audit.Record{
 		ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
 		Kind:        "approval.resolved",

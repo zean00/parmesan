@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [{ "$ref": "./event-base.json" }],
+  "properties": {
+    "kind": { "const": "approval.resolved" },
+    "data": {
+      "type": "object",
+      "required": ["approval_id", "tool_id", "decision"],
+      "properties": {
+        "approval_id": { "type": "string" },
+        "tool_id": { "type": "string" },
+        "decision": { "type": "string" }
+      }
+    }
+  },
+  "required": ["data"]
+}

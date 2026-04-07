@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://parmesan.local/acp/v1/event-base.json",
+  "type": "object",
+  "required": ["id", "session_id", "source", "kind", "created_at"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "session_id": { "type": "string", "minLength": 1 },
+    "source": { "type": "string", "minLength": 1 },
+    "kind": { "type": "string", "minLength": 1 },
+    "offset": { "type": "integer" },
+    "trace_id": { "type": "string" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "content": { "type": "array" },
+    "data": { "type": "object" },
+    "metadata": { "type": "object" },
+    "deleted": { "type": "boolean" },
+    "execution_id": { "type": "string" }
+  },
+  "additionalProperties": true
+}

@@ -11,11 +11,15 @@ import (
 
 	"github.com/sahal/parmesan/internal/api/sse"
 	"github.com/sahal/parmesan/internal/config"
+	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
+	"github.com/sahal/parmesan/internal/domain/delivery"
+	"github.com/sahal/parmesan/internal/domain/execution"
 	"github.com/sahal/parmesan/internal/domain/replay"
 	"github.com/sahal/parmesan/internal/domain/rollout"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
+	"github.com/sahal/parmesan/internal/domain/toolrun"
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/store/memory"
@@ -667,6 +671,93 @@ func TestACPSessionEndpointsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestACPListEventsExcludesDeletedByDefault(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID:        "sess_1",
+		Channel:   "acp",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID:        "evt_live",
+		SessionID: "sess_1",
+		Source:    "assistant",
+		Kind:      "message",
+		Offset:    10,
+		TraceID:   "trace_1",
+		Content:   []session.ContentPart{{Type: "text", Text: "visible"}},
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("AppendEvent(live) error = %v", err)
+	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID:        "evt_deleted",
+		SessionID: "sess_1",
+		Source:    "assistant",
+		Kind:      "message",
+		Offset:    11,
+		TraceID:   "trace_1",
+		Deleted:   true,
+		Content:   []session.ContentPart{{Type: "text", Text: "hidden"}},
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("AppendEvent(deleted) error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/acp/sessions/sess_1/events", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list acp events status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var events []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode acp events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("acp events = %#v, want exactly one visible event", events)
+	}
+	if got := events[0]["id"]; got != "evt_live" {
+		t.Fatalf("visible event id = %#v, want evt_live", got)
+	}
+}
+
+func TestACPAppendEventRejectsInvalidTypedPayload(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID:        "sess_1",
+		Channel:   "acp",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/sessions/sess_1/events", strings.NewReader(`{"id":"evt_1","source":"runtime","kind":"tool.failed","data":{"tool_id":"tool_1"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
 func TestSessionEventStreamIncludesPersistedEvent(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
@@ -705,5 +796,279 @@ func TestSessionEventStreamIncludesPersistedEvent(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, "event: session.event.created") || !strings.Contains(body, `"id":"evt_1"`) {
 		t.Fatalf("stream body = %q, want persisted session event", body)
+	}
+}
+
+func TestACPStreamNormalizesLegacyApprovalResultKind(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID:        "sess_1",
+		Channel:   "acp",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID:        "evt_1",
+		SessionID: "sess_1",
+		Source:    "gateway",
+		Kind:      "approval_result",
+		Offset:    1,
+		TraceID:   "trace_1",
+		Content:   []session.ContentPart{{Type: "text", Text: "approve"}},
+		Metadata:  map[string]any{"approval_id": "appr_1", "tool_id": "tool_1"},
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	reqCtx, reqCancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer reqCancel()
+	req := httptest.NewRequest(http.MethodGet, "/v1/acp/sessions/sess_1/events/stream", nil).WithContext(reqCtx)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: approval.resolved") || !strings.Contains(body, `"decision":"approve"`) {
+		t.Fatalf("stream body = %q, want normalized ACP approval event", body)
+	}
+}
+
+func TestGetSessionReturnsTypedSummary(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID:        "sess_1",
+		Channel:   "web",
+		Metadata:  map[string]any{"last_trace_id": "trace_1", "applied_guideline_ids": []any{"g1", "g2"}, "active_journey_id": "journey_1", "active_journey_state_id": "state_1", "composition_mode": "strict"},
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	if err := repo.CreateExecution(context.Background(), execution.TurnExecution{
+		ID:             "exec_1",
+		SessionID:      "sess_1",
+		TriggerEventID: "evt_1",
+		TraceID:        "trace_1",
+		Status:         execution.StatusSucceeded,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}, nil); err != nil {
+		t.Fatalf("CreateExecution() error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/sess_1", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get session status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+	summary, ok := payload["summary"].(map[string]any)
+	if !ok {
+		t.Fatalf("summary = %#v, want object", payload["summary"])
+	}
+	if summary["last_trace_id"] != "trace_1" || summary["last_execution_id"] != "exec_1" {
+		t.Fatalf("summary = %#v, want trace/execution summary", summary)
+	}
+}
+
+func TestACPGetSessionReturnsTypedSummary(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID:        "sess_1",
+		Channel:   "acp",
+		Metadata:  map[string]any{"last_trace_id": "trace_1", "composition_mode": "strict"},
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/acp/sessions/sess_1", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get acp session status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode acp session: %v", err)
+	}
+	summary, ok := payload["summary"].(map[string]any)
+	if !ok || summary["last_trace_id"] != "trace_1" {
+		t.Fatalf("summary = %#v, want typed ACP summary", payload["summary"])
+	}
+}
+
+func TestGetSessionFallsBackToLatestExecutionWhenLastTraceIsStale(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID:        "sess_1",
+		Channel:   "web",
+		Metadata:  map[string]any{"last_trace_id": "trace_stale"},
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	if err := repo.CreateExecution(context.Background(), execution.TurnExecution{
+		ID:             "exec_1",
+		SessionID:      "sess_1",
+		TriggerEventID: "evt_1",
+		TraceID:        "trace_real",
+		Status:         execution.StatusSucceeded,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}, nil); err != nil {
+		t.Fatalf("CreateExecution() error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/sess_1", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get session status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+	summary, ok := payload["summary"].(map[string]any)
+	if !ok {
+		t.Fatalf("summary = %#v, want object", payload["summary"])
+	}
+	if summary["last_execution_id"] != "exec_1" {
+		t.Fatalf("summary = %#v, want fallback latest execution id", summary)
+	}
+}
+
+func TestACPAndSessionStreamsIncludeResponseDelta(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	broker := sse.NewBroker()
+	srv := New(":0", repo, writes, broker, model.NewRouter(config.ProviderConfig{}), nil)
+
+	for _, path := range []string{"/v1/sessions/sess_1/events/stream", "/v1/acp/sessions/sess_1/events/stream"} {
+		reqCtx, reqCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(reqCtx)
+		rec := httptest.NewRecorder()
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			broker.Publish("sess_1", sse.Envelope{
+				EventID:     "stream_1",
+				SessionID:   "sess_1",
+				ExecutionID: "exec_1",
+				TraceID:     "trace_1",
+				Type:        "runtime.response.delta",
+				Payload:     map[string]any{"text": "hello"},
+				CreatedAt:   time.Now().UTC(),
+			})
+			time.Sleep(10 * time.Millisecond)
+			reqCancel()
+		}()
+		srv.httpServer.Handler.ServeHTTP(rec, req)
+		body := rec.Body.String()
+		if !strings.Contains(body, "event: response.delta") || !strings.Contains(body, `"text":"hello"`) {
+			t.Fatalf("%s body = %q, want streamed response delta", path, body)
+		}
+	}
+}
+
+func TestTraceTimelineIncludesCrossArtifactEntries(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{ID: "sess_1", Channel: "web", CreatedAt: now}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID: "evt_1", SessionID: "sess_1", Source: "customer", Kind: "message", Offset: 1, TraceID: "trace_1", CreatedAt: now,
+		Content: []session.ContentPart{{Type: "text", Text: "hello"}},
+	}); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+	if err := repo.CreateExecution(context.Background(), execution.TurnExecution{
+		ID: "exec_1", SessionID: "sess_1", TriggerEventID: "evt_1", TraceID: "trace_1", Status: execution.StatusRunning, CreatedAt: now, UpdatedAt: now,
+	}, []execution.ExecutionStep{{
+		ID: "step_1", ExecutionID: "exec_1", Name: "resolve_policy", Status: execution.StatusSucceeded, CreatedAt: now, UpdatedAt: now,
+	}}); err != nil {
+		t.Fatalf("CreateExecution() error = %v", err)
+	}
+	if err := repo.SaveApprovalSession(context.Background(), approval.Session{
+		ID: "approval_1", SessionID: "sess_1", ExecutionID: "exec_1", ToolID: "tool_1", Status: approval.StatusPending, RequestText: "approve", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveApprovalSession() error = %v", err)
+	}
+	if err := repo.SaveToolRun(context.Background(), toolrun.Run{
+		ID: "run_1", ExecutionID: "exec_1", ToolID: "tool_1", Status: "succeeded", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveToolRun() error = %v", err)
+	}
+	if err := repo.SaveDeliveryAttempt(context.Background(), delivery.Attempt{
+		ID: "delivery_1", SessionID: "sess_1", ExecutionID: "exec_1", EventID: "evt_ai", Channel: "web", Status: "queued", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveDeliveryAttempt() error = %v", err)
+	}
+	if err := repo.AppendAuditRecord(context.Background(), audit.Record{
+		ID: "audit_1", Kind: "policy.resolved", SessionID: "sess_1", ExecutionID: "exec_1", TraceID: "trace_1", Message: "resolved", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("AppendAuditRecord() error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/traces/trace_1", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("trace timeline status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode trace timeline: %v", err)
+	}
+	entries, ok := payload["entries"].([]any)
+	if !ok || len(entries) < 5 {
+		t.Fatalf("entries = %#v, want timeline entries", payload["entries"])
 	}
 }

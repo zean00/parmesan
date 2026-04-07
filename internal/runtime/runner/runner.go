@@ -205,6 +205,11 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution, step *execution.ExecutionStep) error {
 	switch step.Name {
 	case "ingest":
+		if _, err := r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "execution.ingest", "completed", exec.ID, exec.TraceID, map[string]any{
+			"step": "ingest",
+		}, nil, false); err != nil {
+			return err
+		}
 		r.appendTrace(ctx, audit.Record{
 			ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
 			Kind:        "execution.ingest",
@@ -267,6 +272,13 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			"active_journey_state_id": journeyStateID(view.ActiveJourneyState),
 			"composition_mode":        view.CompositionMode,
 		})
+		if _, err := r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "policy.resolved", "completed", exec.ID, exec.TraceID, map[string]any{
+			"bundle_id":          exec.PolicyBundleID,
+			"composition_mode":   view.CompositionMode,
+			"matched_guidelines": idsFromGuidelines(view.MatchFinalizeStage.MatchedGuidelines),
+		}, nil, false); err != nil {
+			return err
+		}
 		return nil
 	case "match_and_plan":
 		view, _, err := r.resolveView(ctx, *exec)
@@ -299,6 +311,12 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			},
 			CreatedAt: time.Now().UTC(),
 		})
+		if _, err := r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "runtime.plan", "completed", exec.ID, exec.TraceID, map[string]any{
+			"candidate_templates": templateIDs(view.ResponseAnalysisStage.CandidateTemplates),
+			"selected_tool":       toolDecision.SelectedTool,
+		}, nil, false); err != nil {
+			return err
+		}
 		return nil
 	case "compose_response":
 		view, events, err := r.resolveView(ctx, *exec)
@@ -355,6 +373,11 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			},
 			CreatedAt: time.Now().UTC(),
 		})
+		if _, err := r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "response.composed", "completed", exec.ID, exec.TraceID, map[string]any{
+			"event_id": assistantEvent.ID,
+		}, nil, false); err != nil {
+			return err
+		}
 		r.publish(exec.SessionID, exec.ID, "runtime.response.delta", map[string]any{"text": respText})
 		return nil
 	case "deliver_response":
@@ -364,6 +387,11 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 		}
 		last := latestAssistant(events)
 		if last.ID != "" {
+			if _, err := r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "response.delivered", "queued", exec.ID, exec.TraceID, map[string]any{
+				"event_id": last.ID,
+			}, nil, false); err != nil {
+				return err
+			}
 			r.publish(exec.SessionID, exec.ID, "runtime.response.completed", map[string]any{"event_id": last.ID, "status": "queued_for_gateway"})
 		}
 		return nil
@@ -560,6 +588,14 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 			Fields:      payload,
 			CreatedAt:   time.Now().UTC(),
 		})
+		_, _ = r.sessions.CreateToolEvent(ctx, exec.SessionID, "runtime", "tool.blocked", exec.ID, exec.TraceID, map[string]any{
+			"tool_id":           entry.ID,
+			"reason":            "cannot_run",
+			"missing_arguments": append([]string(nil), decision.MissingArguments...),
+			"invalid_arguments": append([]string(nil), decision.InvalidArguments...),
+			"missing_issues":    append([]policyruntime.ToolArgumentIssue(nil), decision.MissingIssues...),
+			"invalid_issues":    append([]policyruntime.ToolArgumentIssue(nil), decision.InvalidIssues...),
+		}, map[string]any{"provider_id": entry.ProviderID}, false)
 		r.publish(exec.SessionID, exec.ID, "runtime.tool.blocked", payload)
 		return payload, nil
 	}
@@ -593,6 +629,12 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 			Fields:      map[string]any{"tool": entry.Name, "provider_id": entry.ProviderID},
 			CreatedAt:   time.Now().UTC(),
 		})
+		_, _ = r.sessions.CreateToolEvent(ctx, exec.SessionID, "runtime", "tool.completed", exec.ID, exec.TraceID, map[string]any{
+			"tool_id":     entry.ID,
+			"provider_id": entry.ProviderID,
+			"output":      output,
+			"reused":      true,
+		}, nil, false)
 		r.publish(exec.SessionID, exec.ID, "runtime.tool.completed", map[string]any{"tool": entry.Name, "output": output, "reused": true})
 		return output, nil
 	}
@@ -608,6 +650,11 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 	if err := r.repo.SaveToolRun(ctx, run); err != nil {
 		return nil, err
 	}
+	_, _ = r.sessions.CreateToolEvent(ctx, exec.SessionID, "runtime", "tool.started", exec.ID, exec.TraceID, map[string]any{
+		"tool_id":     entry.ID,
+		"provider_id": entry.ProviderID,
+		"arguments":   cloneAnyMap(decision.Arguments),
+	}, nil, false)
 	r.publish(exec.SessionID, exec.ID, "runtime.tool.started", map[string]any{"tool": entry.Name})
 	output, err := r.invoker.Invoke(ctx, binding, auth, entry, decision.Arguments)
 	if err != nil {
@@ -624,6 +671,14 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 			Fields:      toolErrorPayload(err),
 			CreatedAt:   time.Now().UTC(),
 		})
+		_, _ = r.sessions.CreateToolEvent(ctx, exec.SessionID, "runtime", "tool.failed", exec.ID, exec.TraceID, map[string]any{
+			"tool_id":     entry.ID,
+			"provider_id": entry.ProviderID,
+			"error":       err.Error(),
+			"error_class": toolErrorPayload(err)["error_class"],
+			"retryable":   toolErrorPayload(err)["retryable"],
+			"status":      toolErrorPayload(err)["status"],
+		}, nil, false)
 		return nil, err
 	}
 	run.Status = "succeeded"
@@ -641,6 +696,11 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 		Fields:      map[string]any{"tool": entry.Name, "provider_id": entry.ProviderID},
 		CreatedAt:   time.Now().UTC(),
 	})
+	_, _ = r.sessions.CreateToolEvent(ctx, exec.SessionID, "runtime", "tool.completed", exec.ID, exec.TraceID, map[string]any{
+		"tool_id":     entry.ID,
+		"provider_id": entry.ProviderID,
+		"output":      output,
+	}, nil, false)
 	r.publish(exec.SessionID, exec.ID, "runtime.tool.completed", map[string]any{"tool": entry.Name, "output": output})
 	return output, nil
 }
@@ -840,6 +900,9 @@ func (r *Runner) approvalStatus(ctx context.Context, exec execution.TurnExecutio
 		Fields:      map[string]any{"approval_id": item.ID, "tool": entry.Name},
 		CreatedAt:   time.Now().UTC(),
 	})
+	_, _ = r.sessions.CreateApprovalRequestedEvent(ctx, exec.SessionID, "runtime", exec.ID, exec.TraceID, item.ID, entry.ID, item.RequestText, item.ExpiresAt, map[string]any{
+		"tool_name": entry.Name,
+	}, false)
 	r.publish(exec.SessionID, exec.ID, "approval.requested", map[string]any{"approval_id": item.ID, "tool": entry.Name, "message": item.RequestText})
 	return string(approval.StatusPending), nil
 }

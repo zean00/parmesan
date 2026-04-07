@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [{ "$ref": "./event-base.json" }],
+  "properties": {
+    "kind": { "const": "message" },
+    "content": { "type": "array", "minItems": 1 }
+  },
+  "required": ["content"]
+}

@@ -92,6 +92,22 @@ func TestRunnerCompletesExecution(t *testing.T) {
 	if len(events) < 2 {
 		t.Fatalf("events len = %d, want at least 2", len(events))
 	}
+	var hasPolicyResolvedStatus bool
+	var hasResponseDeliveredStatus bool
+	for _, event := range events {
+		if event.Kind != "status" || event.Data == nil {
+			continue
+		}
+		if event.Data["code"] == "policy.resolved" {
+			hasPolicyResolvedStatus = true
+		}
+		if event.Data["code"] == "response.delivered" {
+			hasResponseDeliveredStatus = true
+		}
+	}
+	if !hasPolicyResolvedStatus || !hasResponseDeliveredStatus {
+		t.Fatalf("events = %#v, want persisted ACP status lifecycle events", events)
+	}
 }
 
 func TestRunnerBlocksForApprovalRequiredTool(t *testing.T) {
@@ -179,6 +195,20 @@ func TestRunnerBlocksForApprovalRequiredTool(t *testing.T) {
 	}
 	if len(approvals) != 1 || approvals[0].Status != approval.StatusPending {
 		t.Fatalf("approvals = %#v, want one pending approval", approvals)
+	}
+	events, err := repo.ListEvents(ctx, "sess")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hasApprovalRequested bool
+	for _, event := range events {
+		if event.Kind == "approval.requested" {
+			hasApprovalRequested = true
+			break
+		}
+	}
+	if !hasApprovalRequested {
+		t.Fatalf("events = %#v, want approval.requested session event", events)
 	}
 }
 
@@ -468,6 +498,22 @@ func TestRunnerExecutesMultipleSelectedTools(t *testing.T) {
 	}
 	if len(runs) != 2 {
 		t.Fatalf("tool runs = %#v, want two tool invocations", runs)
+	}
+	events, err := repo.ListEvents(ctx, "sess")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var started, completed int
+	for _, event := range events {
+		switch event.Kind {
+		case "tool.started":
+			started++
+		case "tool.completed":
+			completed++
+		}
+	}
+	if started != 2 || completed != 2 {
+		t.Fatalf("events tool lifecycle = %#v, want two tool.started and two tool.completed", events)
 	}
 }
 
