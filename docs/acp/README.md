@@ -17,20 +17,29 @@ Conversation-edge rules:
 - If the session mode is `manual`, ACP message ingress persists and streams the customer message but does not create an automated execution.
 - approval reads and responses should use the ACP session-scoped approval endpoints instead of the legacy `/v1/web/...` gateway surface.
 - Operator supervision uses `/v1/operator/...`; operator notes are hidden from ACP list/stream responses.
-- Operator session listing supports `customer_id`, `agent_id`, `mode`, `label`, `operator_id`, `active=true`, and `limit` filters.
+- Operator session listing supports customer, agent, mode, label, assignment, pending approval, failed media, unresolved lint, activity-window, cursor, and limit filters.
 - Operator event listing supports `min_offset`, `limit`, `source`, `trace_id`, and `kind` filters.
 - Operator feedback uses `POST /v1/operator/sessions/{id}/feedback` and can compile into customer preferences, knowledge proposals, or draft policy/SOUL proposals.
 - Operator customer preferences are available under `/v1/operator/customers/{customer_id}/preferences?agent_id=...`; lifecycle actions use `/confirm`, `/reject`, and `/expire` on a preference key.
 - Trace listing supports `trace_id`, `session_id`, `execution_id`, `kind`, and `limit` filters; `GET /v1/traces/{id}` returns the detailed timeline.
-- If `OPERATOR_API_KEY` is configured, `/v1/operator/...` requires `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
+- `/v1/operator/...` supports single-tenant RBAC with stored operator API tokens, trusted identity headers, and `OPERATOR_API_KEY` as bootstrap admin fallback.
 
 Knowledge workspace routes:
+- `POST /v1/operator/operators`
+- `GET /v1/operator/operators`
+- `GET /v1/operator/operators/{id}`
+- `PUT /v1/operator/operators/{id}`
+- `POST /v1/operator/operators/{id}/tokens`
+- `POST /v1/operator/operators/{id}/tokens/{token_id}/revoke`
 - `POST /v1/operator/agents`
 - `GET /v1/operator/agents`
 - `GET /v1/operator/agents/{id}`
 - `PUT /v1/operator/agents/{id}`
 - `POST /v1/operator/knowledge/sources`
+- `GET /v1/operator/knowledge/sources`
+- `GET /v1/operator/knowledge/sources/{id}`
 - `POST /v1/operator/knowledge/sources/{id}/compile`
+- `POST /v1/operator/knowledge/sources/{id}/resync`
 - `GET /v1/operator/knowledge/snapshots/{id}`
 - `GET /v1/operator/knowledge/pages`
 - `GET /v1/operator/knowledge/proposals`
@@ -63,6 +72,7 @@ Knowledge rules:
 - Policy and SOUL changes inferred from operator feedback always become draft rollout proposals and never auto-apply.
 - Proposal review supports explicit `draft`, `approved`, `rejected`, and `applied` states, plus a preview surface before apply.
 - Knowledge lint findings are surfaced during preview/apply; unresolved high-risk citation, staleness, or contradiction findings block apply.
+- Knowledge proposals can apply whole-page or section-level changes; payload citations are preserved into applied pages and chunks.
 - OpenRouter multimodal enrichers are used when configured:
   - images use `image_url`
   - audio uses `input_audio`

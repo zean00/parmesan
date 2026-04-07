@@ -18,6 +18,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/journey"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/media"
+	"github.com/sahal/parmesan/internal/domain/operator"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/replay"
 	"github.com/sahal/parmesan/internal/domain/rollout"
@@ -30,6 +31,8 @@ type Store struct {
 	mu                       sync.RWMutex
 	bundles                  []policy.Bundle
 	agentProfiles            []agent.Profile
+	operators                []operator.Operator
+	operatorTokens           []operator.APIToken
 	customerPreferences      []customer.Preference
 	customerPreferenceEvents []customer.PreferenceEvent
 	feedbackRecords          []feedback.Record
@@ -115,6 +118,77 @@ func (s *Store) ListAgentProfiles(_ context.Context) ([]agent.Profile, error) {
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].CreatedAt.After(out[j].CreatedAt)
 	})
+	return out, nil
+}
+
+func (s *Store) SaveOperator(_ context.Context, item operator.Operator) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, existing := range s.operators {
+		if existing.ID == item.ID {
+			s.operators[i] = item
+			return nil
+		}
+	}
+	s.operators = append(s.operators, item)
+	return nil
+}
+
+func (s *Store) GetOperator(_ context.Context, operatorID string) (operator.Operator, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.operators {
+		if item.ID == operatorID {
+			return item, nil
+		}
+	}
+	return operator.Operator{}, errors.New("operator not found")
+}
+
+func (s *Store) ListOperators(_ context.Context) ([]operator.Operator, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := append([]operator.Operator(nil), s.operators...)
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (s *Store) SaveOperatorAPIToken(_ context.Context, token operator.APIToken) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, existing := range s.operatorTokens {
+		if existing.ID == token.ID {
+			s.operatorTokens[i] = token
+			return nil
+		}
+	}
+	s.operatorTokens = append(s.operatorTokens, token)
+	return nil
+}
+
+func (s *Store) GetOperatorAPITokenByHash(_ context.Context, tokenHash string) (operator.APIToken, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.operatorTokens {
+		if item.TokenHash == tokenHash {
+			return item, nil
+		}
+	}
+	return operator.APIToken{}, errors.New("operator api token not found")
+}
+
+func (s *Store) ListOperatorAPITokens(_ context.Context, operatorID string) ([]operator.APIToken, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []operator.APIToken
+	for _, item := range s.operatorTokens {
+		if operatorID != "" && item.OperatorID != operatorID {
+			continue
+		}
+		item.Plaintext = ""
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out, nil
 }
 

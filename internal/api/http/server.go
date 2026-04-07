@@ -2,8 +2,11 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -28,6 +31,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/feedback"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/media"
+	operatordomain "github.com/sahal/parmesan/internal/domain/operator"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/replay"
 	"github.com/sahal/parmesan/internal/domain/rollout"
@@ -46,18 +50,27 @@ import (
 )
 
 type Server struct {
-	httpServer     *http.Server
-	store          store.Repository
-	writes         *asyncwrite.Queue
-	broker         *sse.Broker
-	router         *model.Router
-	syncer         *toolsync.Syncer
-	sessions       *sessionsvc.Service
-	listener       *sessionsvc.Listener
-	operatorAPIKey string
+	httpServer                 *http.Server
+	store                      store.Repository
+	writes                     *asyncwrite.Queue
+	broker                     *sse.Broker
+	router                     *model.Router
+	syncer                     *toolsync.Syncer
+	sessions                   *sessionsvc.Service
+	listener                   *sessionsvc.Listener
+	operatorAPIKey             string
+	trustedOperatorIDHeader    string
+	trustedOperatorRolesHeader string
 }
 
 const adminStreamID = "__admin__"
+
+type operatorContextKey struct{}
+
+type operatorPrincipal struct {
+	ID    string
+	Roles []string
+}
 
 type streamItem struct {
 	id   string
@@ -80,16 +93,21 @@ type sessionSummary struct {
 }
 
 type sessionView struct {
-	ID         string         `json:"id"`
-	Channel    string         `json:"channel"`
-	CustomerID string         `json:"customer_id,omitempty"`
-	AgentID    string         `json:"agent_id,omitempty"`
-	Mode       string         `json:"mode,omitempty"`
-	Title      string         `json:"title,omitempty"`
-	Metadata   map[string]any `json:"metadata,omitempty"`
-	Labels     []string       `json:"labels,omitempty"`
-	Summary    sessionSummary `json:"summary"`
-	CreatedAt  time.Time      `json:"created_at"`
+	ID                   string         `json:"id"`
+	Channel              string         `json:"channel"`
+	CustomerID           string         `json:"customer_id,omitempty"`
+	AgentID              string         `json:"agent_id,omitempty"`
+	Mode                 string         `json:"mode,omitempty"`
+	Title                string         `json:"title,omitempty"`
+	Metadata             map[string]any `json:"metadata,omitempty"`
+	Labels               []string       `json:"labels,omitempty"`
+	Summary              sessionSummary `json:"summary"`
+	CreatedAt            time.Time      `json:"created_at"`
+	AssignedOperatorID   string         `json:"assigned_operator_id,omitempty"`
+	LastActivityAt       time.Time      `json:"last_activity_at,omitempty"`
+	PendingApprovalCount int            `json:"pending_approval_count,omitempty"`
+	FailedMediaCount     int            `json:"failed_media_count,omitempty"`
+	UnresolvedLintCount  int            `json:"unresolved_lint_count,omitempty"`
 }
 
 type traceTimelineEntry struct {
@@ -132,14 +150,16 @@ type mediaAssetView struct {
 
 func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *sse.Broker, router *model.Router, syncer *toolsync.Syncer) *Server {
 	s := &Server{
-		store:          repo,
-		writes:         writes,
-		broker:         broker,
-		router:         router,
-		syncer:         syncer,
-		sessions:       sessionsvc.New(repo, writes),
-		listener:       sessionsvc.NewListener(repo),
-		operatorAPIKey: strings.TrimSpace(os.Getenv("OPERATOR_API_KEY")),
+		store:                      repo,
+		writes:                     writes,
+		broker:                     broker,
+		router:                     router,
+		syncer:                     syncer,
+		sessions:                   sessionsvc.New(repo, writes),
+		listener:                   sessionsvc.NewListener(repo),
+		operatorAPIKey:             strings.TrimSpace(os.Getenv("OPERATOR_API_KEY")),
+		trustedOperatorIDHeader:    strings.TrimSpace(os.Getenv("OPERATOR_TRUSTED_ID_HEADER")),
+		trustedOperatorRolesHeader: strings.TrimSpace(os.Getenv("OPERATOR_TRUSTED_ROLES_HEADER")),
 	}
 
 	mux := http.NewServeMux()
@@ -186,6 +206,12 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/feedback", s.operatorCreateFeedback)
 	mux.HandleFunc("GET /v1/operator/feedback", s.operatorListFeedback)
 	mux.HandleFunc("GET /v1/operator/feedback/{id}", s.operatorGetFeedback)
+	mux.HandleFunc("POST /v1/operator/operators", s.operatorCreateOperator)
+	mux.HandleFunc("GET /v1/operator/operators", s.operatorListOperators)
+	mux.HandleFunc("GET /v1/operator/operators/{id}", s.operatorGetOperator)
+	mux.HandleFunc("PUT /v1/operator/operators/{id}", s.operatorUpdateOperator)
+	mux.HandleFunc("POST /v1/operator/operators/{id}/tokens", s.operatorCreateOperatorToken)
+	mux.HandleFunc("POST /v1/operator/operators/{id}/tokens/{token_id}/revoke", s.operatorRevokeOperatorToken)
 	mux.HandleFunc("GET /v1/operator/customers/{customer_id}/preferences", s.operatorListCustomerPreferences)
 	mux.HandleFunc("PUT /v1/operator/customers/{customer_id}/preferences/{key}", s.operatorUpsertCustomerPreference)
 	mux.HandleFunc("POST /v1/operator/customers/{customer_id}/preferences/{key}/confirm", s.operatorConfirmCustomerPreference)
@@ -197,7 +223,10 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/operator/agents/{id}", s.operatorGetAgentProfile)
 	mux.HandleFunc("PUT /v1/operator/agents/{id}", s.operatorUpdateAgentProfile)
 	mux.HandleFunc("POST /v1/operator/knowledge/sources", s.operatorCreateKnowledgeSource)
+	mux.HandleFunc("GET /v1/operator/knowledge/sources", s.operatorListKnowledgeSources)
+	mux.HandleFunc("GET /v1/operator/knowledge/sources/{id}", s.operatorGetKnowledgeSource)
 	mux.HandleFunc("POST /v1/operator/knowledge/sources/{id}/compile", s.operatorCompileKnowledgeSource)
+	mux.HandleFunc("POST /v1/operator/knowledge/sources/{id}/resync", s.operatorResyncKnowledgeSource)
 	mux.HandleFunc("GET /v1/operator/knowledge/snapshots/{id}", s.operatorGetKnowledgeSnapshot)
 	mux.HandleFunc("GET /v1/operator/knowledge/pages", s.operatorListKnowledgePages)
 	mux.HandleFunc("GET /v1/operator/knowledge/proposals", s.operatorListKnowledgeProposals)
@@ -1048,12 +1077,32 @@ func (s *Server) operatorListSessions(w http.ResponseWriter, r *http.Request) {
 	mode := strings.TrimSpace(query.Get("mode"))
 	label := strings.TrimSpace(query.Get("label"))
 	operatorID := strings.TrimSpace(query.Get("operator_id"))
+	assignedOperatorID := strings.TrimSpace(query.Get("assigned_operator_id"))
+	if assignedOperatorID == "" {
+		assignedOperatorID = operatorID
+	}
 	activeOnly := strings.EqualFold(strings.TrimSpace(query.Get("active")), "true")
+	unassignedOnly := strings.EqualFold(strings.TrimSpace(query.Get("unassigned")), "true")
+	pendingApprovalOnly := strings.EqualFold(strings.TrimSpace(query.Get("pending_approval")), "true")
+	failedMediaOnly := strings.EqualFold(strings.TrimSpace(query.Get("failed_media")), "true")
+	unresolvedLintOnly := strings.EqualFold(strings.TrimSpace(query.Get("unresolved_lint")), "true")
+	after, err := parseOptionalTime(query.Get("last_activity_after"))
+	if err != nil {
+		http.Error(w, "invalid last_activity_after", http.StatusBadRequest)
+		return
+	}
+	before, err := parseOptionalTime(query.Get("last_activity_before"))
+	if err != nil {
+		http.Error(w, "invalid last_activity_before", http.StatusBadRequest)
+		return
+	}
+	cursor := strings.TrimSpace(query.Get("cursor"))
 	limit, err := positiveQueryInt(query.Get("limit"), "limit")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	cursorSeen := cursor == ""
 	out := make([]sessionView, 0, len(items))
 	for _, sess := range items {
 		if customerID != "" && sess.CustomerID != customerID {
@@ -1068,13 +1117,44 @@ func (s *Server) operatorListSessions(w http.ResponseWriter, r *http.Request) {
 		if label != "" && !hasLabel(sess.Labels, label) {
 			continue
 		}
-		if operatorID != "" && stringMetadata(sess.Metadata, "assigned_operator_id") != operatorID {
+		assigned := stringMetadata(sess.Metadata, "assigned_operator_id")
+		if assignedOperatorID != "" && assigned != assignedOperatorID {
 			continue
 		}
-		if activeOnly && !(sessionMode(sess) == "manual" || stringMetadata(sess.Metadata, "assigned_operator_id") != "") {
+		if unassignedOnly && assigned != "" {
 			continue
 		}
-		out = append(out, sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess)))
+		if activeOnly && !(sessionMode(sess) == "manual" || assigned != "") {
+			continue
+		}
+		view := sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess))
+		view.AssignedOperatorID = assigned
+		view.LastActivityAt = s.sessionLastActivityAt(r.Context(), sess)
+		view.PendingApprovalCount = s.pendingApprovalCount(r.Context(), sess.ID)
+		view.FailedMediaCount = s.failedMediaCount(r.Context(), sess.ID)
+		view.UnresolvedLintCount = s.unresolvedLintCount(r.Context(), sess.AgentID)
+		if pendingApprovalOnly && view.PendingApprovalCount == 0 {
+			continue
+		}
+		if failedMediaOnly && view.FailedMediaCount == 0 {
+			continue
+		}
+		if unresolvedLintOnly && view.UnresolvedLintCount == 0 {
+			continue
+		}
+		if !after.IsZero() && !view.LastActivityAt.After(after) {
+			continue
+		}
+		if !before.IsZero() && !view.LastActivityAt.Before(before) {
+			continue
+		}
+		if !cursorSeen {
+			if view.ID == cursor {
+				cursorSeen = true
+			}
+			continue
+		}
+		out = append(out, view)
 		if limit > 0 && len(out) >= limit {
 			break
 		}
@@ -1139,8 +1219,9 @@ func (s *Server) operatorTakeover(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	operatorID := requestOperatorID(r, req.OperatorID)
 	sess, err := s.updateOperatorMode(r.Context(), sessionID, "manual", map[string]any{
-		"assigned_operator_id": req.OperatorID,
+		"assigned_operator_id": operatorID,
 		"handoff_reason":       req.Reason,
 		"takeover_started_at":  time.Now().UTC().Format(time.RFC3339Nano),
 	})
@@ -1149,14 +1230,14 @@ func (s *Server) operatorTakeover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	traceID := fmt.Sprintf("trace_%d", time.Now().UnixNano())
-	_, _ = s.createOperatorControlEvent(r.Context(), sess.ID, "operator.takeover.started", req.OperatorID, req.Reason, traceID, nil)
+	_, _ = s.createOperatorControlEvent(r.Context(), sess.ID, "operator.takeover.started", operatorID, req.Reason, traceID, nil)
 	s.appendTrace(r.Context(), audit.Record{
 		ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
 		Kind:      "operator.takeover.started",
 		SessionID: sess.ID,
 		TraceID:   traceID,
 		Message:   "operator takeover started",
-		Fields:    map[string]any{"operator_id": req.OperatorID, "reason": req.Reason},
+		Fields:    map[string]any{"operator_id": operatorID, "reason": req.Reason},
 		CreatedAt: time.Now().UTC(),
 	})
 	writeJSON(w, http.StatusOK, sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess)))
@@ -1172,6 +1253,7 @@ func (s *Server) operatorResume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	operatorID := requestOperatorID(r, req.OperatorID)
 	sess, err := s.store.GetSession(r.Context(), sessionID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -1190,14 +1272,14 @@ func (s *Server) operatorResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	traceID := fmt.Sprintf("trace_%d", time.Now().UnixNano())
-	_, _ = s.createOperatorControlEvent(r.Context(), sess.ID, "operator.takeover.ended", req.OperatorID, req.Reason, traceID, nil)
+	_, _ = s.createOperatorControlEvent(r.Context(), sess.ID, "operator.takeover.ended", operatorID, req.Reason, traceID, nil)
 	s.appendTrace(r.Context(), audit.Record{
 		ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
 		Kind:      "operator.takeover.ended",
 		SessionID: sess.ID,
 		TraceID:   traceID,
 		Message:   "operator takeover ended",
-		Fields:    map[string]any{"operator_id": req.OperatorID, "reason": req.Reason},
+		Fields:    map[string]any{"operator_id": operatorID, "reason": req.Reason},
 		CreatedAt: time.Now().UTC(),
 	})
 	writeJSON(w, http.StatusOK, sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess)))
@@ -1228,7 +1310,7 @@ func (s *Server) operatorCreateNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	metadata := cloneMap(req.Metadata)
-	metadata["operator_id"] = req.OperatorID
+	metadata["operator_id"] = requestOperatorID(r, req.OperatorID)
 	metadata["internal_only"] = true
 	event, err := s.sessions.CreateEvent(r.Context(), sessionsvc.CreateEventParams{
 		ID:        req.ID,
@@ -1306,6 +1388,7 @@ func (s *Server) operatorCreateFeedback(w http.ResponseWriter, r *http.Request) 
 		record.ID = fmt.Sprintf("feedback_%d", now.UnixNano())
 	}
 	record.SessionID = sessionID
+	record.OperatorID = requestOperatorID(r, record.OperatorID)
 	if record.Metadata == nil {
 		record.Metadata = map[string]any{}
 	}
@@ -1382,6 +1465,160 @@ func (s *Server) operatorGetFeedback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) operatorCreateOperator(w http.ResponseWriter, r *http.Request) {
+	var item operatordomain.Operator
+	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	now := time.Now().UTC()
+	if strings.TrimSpace(item.ID) == "" {
+		item.ID = fmt.Sprintf("op_%d", now.UnixNano())
+	}
+	if strings.TrimSpace(item.DisplayName) == "" {
+		http.Error(w, "display_name is required", http.StatusBadRequest)
+		return
+	}
+	item.Roles = normalizeOperatorRoles(item.Roles)
+	if len(item.Roles) == 0 {
+		item.Roles = []string{operatordomain.RoleViewer}
+	}
+	if strings.TrimSpace(item.Status) == "" {
+		item.Status = operatordomain.StatusActive
+	}
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = now
+	}
+	item.UpdatedAt = now
+	if err := s.store.SaveOperator(r.Context(), item); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusCreated, item)
+}
+
+func (s *Server) operatorListOperators(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListOperators(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) operatorGetOperator(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetOperator(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	tokens, _ := s.store.ListOperatorAPITokens(r.Context(), item.ID)
+	writeJSON(w, http.StatusOK, map[string]any{"operator": item, "tokens": tokens})
+}
+
+func (s *Server) operatorUpdateOperator(w http.ResponseWriter, r *http.Request) {
+	existing, err := s.store.GetOperator(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	var item operatordomain.Operator
+	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	item.ID = existing.ID
+	item.CreatedAt = existing.CreatedAt
+	item.UpdatedAt = time.Now().UTC()
+	if strings.TrimSpace(item.Email) == "" {
+		item.Email = existing.Email
+	}
+	if strings.TrimSpace(item.DisplayName) == "" {
+		item.DisplayName = existing.DisplayName
+	}
+	item.Roles = normalizeOperatorRoles(item.Roles)
+	if len(item.Roles) == 0 {
+		item.Roles = existing.Roles
+	}
+	if strings.TrimSpace(item.Status) == "" {
+		item.Status = existing.Status
+	}
+	if item.Metadata == nil {
+		item.Metadata = existing.Metadata
+	}
+	if err := s.store.SaveOperator(r.Context(), item); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) operatorCreateOperatorToken(w http.ResponseWriter, r *http.Request) {
+	op, err := s.store.GetOperator(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	var req struct {
+		Name      string         `json:"name"`
+		ExpiresAt *time.Time     `json:"expires_at"`
+		Metadata  map[string]any `json:"metadata"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	now := time.Now().UTC()
+	plain, err := newOperatorToken()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	token := operatordomain.APIToken{
+		ID:         fmt.Sprintf("optok_%d", now.UnixNano()),
+		OperatorID: op.ID,
+		Name:       strings.TrimSpace(req.Name),
+		TokenHash:  hashOperatorToken(plain),
+		Status:     operatordomain.StatusActive,
+		ExpiresAt:  req.ExpiresAt,
+		Metadata:   cloneMap(req.Metadata),
+		CreatedAt:  now,
+		Plaintext:  plain,
+	}
+	if err := s.store.SaveOperatorAPIToken(r.Context(), token); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusCreated, token)
+}
+
+func (s *Server) operatorRevokeOperatorToken(w http.ResponseWriter, r *http.Request) {
+	tokens, err := s.store.ListOperatorAPITokens(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tokenID := r.PathValue("token_id")
+	for _, token := range tokens {
+		if token.ID != tokenID {
+			continue
+		}
+		now := time.Now().UTC()
+		token.Status = operatordomain.StatusRevoked
+		token.RevokedAt = &now
+		if err := s.store.SaveOperatorAPIToken(r.Context(), token); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, token)
+		return
+	}
+	http.Error(w, "operator api token not found", http.StatusNotFound)
 }
 
 func (s *Server) operatorListCustomerPreferences(w http.ResponseWriter, r *http.Request) {
@@ -1464,7 +1701,7 @@ func (s *Server) operatorUpsertCustomerPreference(w http.ResponseWriter, r *http
 		Source:       "operator",
 		Confidence:   req.Confidence,
 		EvidenceRefs: req.EvidenceRefs,
-		Metadata:     map[string]any{"operator_id": req.OperatorID},
+		Metadata:     map[string]any{"operator_id": requestOperatorID(r, req.OperatorID)},
 		CreatedAt:    now,
 	}
 	if err := s.store.SaveCustomerPreference(r.Context(), pref, event); err != nil {
@@ -1536,7 +1773,7 @@ func (s *Server) operatorTransitionCustomerPreference(w http.ResponseWriter, r *
 		Source:       "operator",
 		Confidence:   pref.Confidence,
 		EvidenceRefs: append([]string(nil), pref.EvidenceRefs...),
-		Metadata:     map[string]any{"operator_id": req.OperatorID},
+		Metadata:     map[string]any{"operator_id": requestOperatorID(r, req.OperatorID)},
 		CreatedAt:    now,
 	}
 	if err := s.store.SaveCustomerPreference(r.Context(), pref, event); err != nil {
@@ -1605,7 +1842,7 @@ func (s *Server) operatorCreateVisibleMessage(w http.ResponseWriter, r *http.Req
 		return
 	}
 	metadata := cloneMap(req.Metadata)
-	metadata["operator_id"] = req.OperatorID
+	metadata["operator_id"] = requestOperatorID(r, req.OperatorID)
 	if strings.TrimSpace(req.DisplayName) != "" {
 		metadata["display_name"] = req.DisplayName
 	}
@@ -1807,6 +2044,25 @@ func (s *Server) operatorCreateKnowledgeSource(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusCreated, source)
 }
 
+func (s *Server) operatorListKnowledgeSources(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	items, err := s.store.ListKnowledgeSources(r.Context(), strings.TrimSpace(query.Get("scope_kind")), strings.TrimSpace(query.Get("scope_id")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) operatorGetKnowledgeSource(w http.ResponseWriter, r *http.Request) {
+	source, err := s.store.GetKnowledgeSource(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, source)
+}
+
 func (s *Server) operatorCompileKnowledgeSource(w http.ResponseWriter, r *http.Request) {
 	source, err := s.store.GetKnowledgeSource(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -1817,25 +2073,81 @@ func (s *Server) operatorCompileKnowledgeSource(w http.ResponseWriter, r *http.R
 		http.Error(w, "only folder knowledge sources are supported", http.StatusBadRequest)
 		return
 	}
-	root, err := validatedKnowledgePath(source.URI)
+	snapshot, err := s.compileKnowledgeSource(r.Context(), source, true)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusCreated, snapshot)
+}
+
+func (s *Server) operatorResyncKnowledgeSource(w http.ResponseWriter, r *http.Request) {
+	source, err := s.store.GetKnowledgeSource(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if source.Kind != "folder" {
+		http.Error(w, "only folder knowledge sources are supported", http.StatusBadRequest)
+		return
+	}
+	force := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("force")), "true")
+	checksum, err := knowledgeSourceChecksum(source)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	snapshot, err := knowledgecompiler.NewWithEmbedder(s.store, s.router).CompileFolder(r.Context(), knowledgecompiler.Input{
+	if !force && source.Checksum != "" && checksum == source.Checksum {
+		writeJSON(w, http.StatusOK, map[string]any{"source": source, "changed": false})
+		return
+	}
+	snapshot, err := s.compileKnowledgeSource(r.Context(), source, true)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.appendTrace(r.Context(), audit.Record{
+		ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+		Kind:      "knowledge.source.resynced",
+		Message:   "knowledge source resynced",
+		Fields:    map[string]any{"source_id": source.ID, "snapshot_id": snapshot.ID, "force": force},
+		CreatedAt: time.Now().UTC(),
+	})
+	writeJSON(w, http.StatusCreated, map[string]any{"source_id": source.ID, "snapshot": snapshot, "changed": true})
+}
+
+func (s *Server) compileKnowledgeSource(ctx context.Context, source knowledge.Source, updateSource bool) (knowledge.Snapshot, error) {
+	if source.Kind != "folder" {
+		return knowledge.Snapshot{}, fmt.Errorf("only folder knowledge sources are supported")
+	}
+	root, err := validatedKnowledgePath(source.URI)
+	if err != nil {
+		return knowledge.Snapshot{}, err
+	}
+	snapshot, err := knowledgecompiler.NewWithEmbedder(s.store, s.router).CompileFolder(ctx, knowledgecompiler.Input{
 		ScopeKind: source.ScopeKind,
 		ScopeID:   source.ScopeID,
 		SourceID:  source.ID,
 		Root:      root,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return knowledge.Snapshot{}, err
 	}
-	source.Status = "compiled"
-	source.UpdatedAt = time.Now().UTC()
-	_ = s.store.SaveKnowledgeSource(r.Context(), source)
-	writeJSON(w, http.StatusCreated, snapshot)
+	if updateSource {
+		source.Status = "compiled"
+		source.UpdatedAt = time.Now().UTC()
+		if checksum, err := knowledgeSourceChecksum(source); err == nil {
+			source.Checksum = checksum
+		}
+		if source.Metadata == nil {
+			source.Metadata = map[string]any{}
+		}
+		source.Metadata["last_snapshot_id"] = snapshot.ID
+		if err := s.store.SaveKnowledgeSource(ctx, source); err != nil {
+			return knowledge.Snapshot{}, err
+		}
+	}
+	return snapshot, nil
 }
 
 func (s *Server) operatorGetKnowledgeSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -1930,6 +2242,9 @@ func (s *Server) operatorPreviewKnowledgeProposal(w http.ResponseWriter, r *http
 				"conflict":      proposalConflict(currentPage, proposedPage),
 			},
 		}
+	}
+	if sections := s.proposalSectionPreviews(r.Context(), item); len(sections) > 0 {
+		payload["sections"] = sections
 	}
 	writeJSON(w, http.StatusOK, payload)
 }
@@ -2049,7 +2364,7 @@ func (s *Server) operatorResolveKnowledgeLint(w http.ResponseWriter, r *http.Req
 			item.Metadata = map[string]any{}
 		}
 		item.Metadata["resolution"] = strings.TrimSpace(req.Resolution)
-		item.Metadata["operator_id"] = strings.TrimSpace(req.OperatorID)
+		item.Metadata["operator_id"] = requestOperatorID(r, req.OperatorID)
 		if err := s.store.SaveKnowledgeLintFinding(r.Context(), item); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -2078,7 +2393,14 @@ func (s *Server) operatorApplyKnowledgeProposal(w http.ResponseWriter, r *http.R
 		http.Error(w, "proposal must be draft or approved before apply", http.StatusBadRequest)
 		return
 	}
-	if _, ok := item.Payload["page"].(map[string]any); ok {
+	if len(s.proposalSectionPreviews(r.Context(), item)) > 0 {
+		for _, section := range s.proposalSectionPreviews(r.Context(), item) {
+			if conflict, _ := section["conflict"].(bool); conflict {
+				http.Error(w, "proposal is stale relative to current page checksum", http.StatusConflict)
+				return
+			}
+		}
+	} else if _, ok := item.Payload["page"].(map[string]any); ok {
 		currentPage, proposedPage := s.proposalPages(r.Context(), item)
 		if proposalConflict(currentPage, proposedPage) {
 			http.Error(w, "proposal is stale relative to current page checksum", http.StatusConflict)
@@ -2098,7 +2420,51 @@ func (s *Server) operatorApplyKnowledgeProposal(w http.ResponseWriter, r *http.R
 		return
 	}
 	now := time.Now().UTC()
-	if pagePayload, ok := item.Payload["page"].(map[string]any); ok {
+	if sections := s.proposalSectionPreviews(r.Context(), item); len(sections) > 0 {
+		for _, section := range sections {
+			currentRaw, _ := section["current"].(map[string]any)
+			proposedRaw, _ := section["proposed"].(map[string]any)
+			page := knowledge.Page{
+				ID:        strings.TrimSpace(fmt.Sprint(proposedRaw["id"])),
+				ScopeKind: item.ScopeKind,
+				ScopeID:   item.ScopeID,
+				Title:     strings.TrimSpace(fmt.Sprint(proposedRaw["title"])),
+				Body:      strings.TrimSpace(fmt.Sprint(proposedRaw["final_body"])),
+				PageType:  "proposal_applied",
+				Citations: mergeCitations(item.Evidence, citationsFromPayload(proposedRaw)),
+				Metadata:  map[string]any{"proposal_id": item.ID},
+				CreatedAt: now,
+				UpdatedAt: now,
+			}
+			if currentRaw != nil {
+				page.ID = strings.TrimSpace(fmt.Sprint(currentRaw["id"]))
+				page.Citations = mergeCitations(citationsFromAny(currentRaw["citations"]), page.Citations)
+				page.Metadata = mergeMaps(map[string]any{}, page.Metadata)
+			}
+			if page.ID == "" {
+				page.ID = fmt.Sprintf("kpage_%d", now.UnixNano())
+			}
+			page.Checksum = knowledgeChecksum(page.Body)
+			chunk := knowledge.Chunk{
+				ID:        fmt.Sprintf("kchunk_%d", now.UnixNano()),
+				PageID:    page.ID,
+				ScopeKind: page.ScopeKind,
+				ScopeID:   page.ScopeID,
+				Text:      page.Body,
+				Citations: append([]knowledge.Citation(nil), page.Citations...),
+				Metadata:  map[string]any{"page_title": page.Title},
+				CreatedAt: now,
+			}
+			if err := s.store.SaveKnowledgePage(r.Context(), page, []knowledge.Chunk{chunk}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		if err := s.saveKnowledgeSnapshotForScope(r.Context(), item.ScopeKind, item.ScopeID, item.ID, now); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else if pagePayload, ok := item.Payload["page"].(map[string]any); ok {
 		currentPage, proposedPage := s.proposalPages(r.Context(), item)
 		if proposalConflict(currentPage, proposedPage) {
 			http.Error(w, "proposal is stale relative to current page checksum", http.StatusConflict)
@@ -2143,33 +2509,7 @@ func (s *Server) operatorApplyKnowledgeProposal(w http.ResponseWriter, r *http.R
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		pages, err := s.store.ListKnowledgePages(r.Context(), knowledge.PageQuery{ScopeKind: item.ScopeKind, ScopeID: item.ScopeID, Limit: 1000})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		chunks, err := s.store.ListKnowledgeChunks(r.Context(), knowledge.ChunkQuery{ScopeKind: item.ScopeKind, ScopeID: item.ScopeID, Limit: 1000})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		pageIDs := make([]string, 0, len(pages))
-		chunkIDs := make([]string, 0, len(chunks))
-		for _, page := range pages {
-			pageIDs = append(pageIDs, page.ID)
-		}
-		for _, chunk := range chunks {
-			chunkIDs = append(chunkIDs, chunk.ID)
-		}
-		if err := s.store.SaveKnowledgeSnapshot(r.Context(), knowledge.Snapshot{
-			ID:        fmt.Sprintf("ksnap_%d", now.UnixNano()),
-			ScopeKind: item.ScopeKind,
-			ScopeID:   item.ScopeID,
-			PageIDs:   pageIDs,
-			ChunkIDs:  chunkIDs,
-			Metadata:  map[string]any{"proposal_id": item.ID, "source": "proposal_apply"},
-			CreatedAt: now,
-		}); err != nil {
+		if err := s.saveKnowledgeSnapshotForScope(r.Context(), item.ScopeKind, item.ScopeID, item.ID, now); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -2186,6 +2526,39 @@ func (s *Server) operatorApplyKnowledgeProposal(w http.ResponseWriter, r *http.R
 func (s *Server) lintKnowledgeProposal(ctx context.Context, item knowledge.UpdateProposal, persist bool) ([]knowledge.LintFinding, error) {
 	now := time.Now().UTC()
 	var findings []knowledge.LintFinding
+	for _, section := range s.proposalSectionPreviews(ctx, item) {
+		proposed, _ := section["proposed"].(map[string]any)
+		if conflict, _ := section["conflict"].(bool); conflict {
+			findings = append(findings, knowledge.LintFinding{
+				ID:         stableServerID("klint", item.ID, "section_stale", fmt.Sprint(proposed["id"]), fmt.Sprint(proposed["anchor"])),
+				ScopeKind:  item.ScopeKind,
+				ScopeID:    item.ScopeID,
+				ProposalID: item.ID,
+				PageID:     strings.TrimSpace(fmt.Sprint(proposed["id"])),
+				Kind:       "stale_base_checksum",
+				Severity:   "high",
+				Status:     "open",
+				Message:    "Section proposal base checksum does not match the current page.",
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			})
+		}
+		if len(item.Evidence) == 0 && len(citationsFromPayload(proposed)) == 0 {
+			findings = append(findings, knowledge.LintFinding{
+				ID:         stableServerID("klint", item.ID, "section_missing_citation", fmt.Sprint(proposed["id"]), fmt.Sprint(proposed["anchor"])),
+				ScopeKind:  item.ScopeKind,
+				ScopeID:    item.ScopeID,
+				ProposalID: item.ID,
+				PageID:     strings.TrimSpace(fmt.Sprint(proposed["id"])),
+				Kind:       "missing_citation",
+				Severity:   "high",
+				Status:     "open",
+				Message:    "Section knowledge proposal has no evidence citations.",
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			})
+		}
+	}
 	if pagePayload, ok := item.Payload["page"].(map[string]any); ok {
 		currentPage, proposedPage := s.proposalPages(ctx, item)
 		if proposalConflict(currentPage, proposedPage) {
@@ -2400,6 +2773,139 @@ func citationsFromPayload(payload map[string]any) []knowledge.Citation {
 		})
 	}
 	return out
+}
+
+func citationsFromAny(value any) []knowledge.Citation {
+	items, ok := value.([]knowledge.Citation)
+	if ok {
+		return items
+	}
+	return nil
+}
+
+func (s *Server) proposalSectionPreviews(ctx context.Context, item knowledge.UpdateProposal) []map[string]any {
+	raw, ok := item.Payload["sections"].([]any)
+	if !ok || len(raw) == 0 {
+		return nil
+	}
+	pages, _ := s.store.ListKnowledgePages(ctx, knowledge.PageQuery{ScopeKind: item.ScopeKind, ScopeID: item.ScopeID, Limit: 1000})
+	var out []map[string]any
+	for _, entry := range raw {
+		section, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		pageID := strings.TrimSpace(fmt.Sprint(section["page_id"]))
+		title := strings.TrimSpace(fmt.Sprint(section["title"]))
+		var current *knowledge.Page
+		for i := range pages {
+			if pageID != "" && pages[i].ID == pageID {
+				current = &pages[i]
+				break
+			}
+			if title != "" && strings.EqualFold(strings.TrimSpace(pages[i].Title), title) {
+				current = &pages[i]
+				break
+			}
+		}
+		currentBody := ""
+		currentChecksum := ""
+		currentID := pageID
+		currentTitle := title
+		var currentPayload map[string]any
+		if current != nil {
+			currentBody = current.Body
+			currentChecksum = current.Checksum
+			currentID = current.ID
+			currentTitle = current.Title
+			currentPayload = map[string]any{
+				"id":        current.ID,
+				"title":     current.Title,
+				"body":      current.Body,
+				"checksum":  current.Checksum,
+				"citations": current.Citations,
+			}
+		}
+		operation := normalizeProposalOperation(fmt.Sprint(section["operation"]))
+		body := strings.TrimSpace(fmt.Sprint(section["body"]))
+		anchor := strings.TrimSpace(fmt.Sprint(section["anchor"]))
+		finalBody := mergeSectionBody(currentBody, anchor, body, operation)
+		proposed := map[string]any{
+			"id":            currentID,
+			"title":         currentTitle,
+			"anchor":        anchor,
+			"body":          body,
+			"operation":     operation,
+			"base_checksum": strings.TrimSpace(fmt.Sprint(section["base_checksum"])),
+			"final_body":    finalBody,
+			"citations":     section["citations"],
+		}
+		conflict := proposed["base_checksum"] != "" && currentChecksum != "" && proposed["base_checksum"] != currentChecksum
+		out = append(out, map[string]any{"current": currentPayload, "proposed": proposed, "conflict": conflict})
+	}
+	return out
+}
+
+func mergeSectionBody(current, anchor, proposed, operation string) string {
+	current = strings.TrimSpace(current)
+	anchor = strings.TrimSpace(anchor)
+	proposed = strings.TrimSpace(proposed)
+	if anchor == "" || current == "" {
+		return mergeProposalBody(current, proposed, operation)
+	}
+	idx := strings.Index(strings.ToLower(current), strings.ToLower(anchor))
+	if idx < 0 {
+		return mergeProposalBody(current, proposed, "append")
+	}
+	end := strings.Index(current[idx:], "\n#")
+	if end < 0 {
+		end = len(current)
+	} else {
+		end = idx + end
+	}
+	before := strings.TrimSpace(current[:idx])
+	existing := strings.TrimSpace(current[idx:end])
+	after := strings.TrimSpace(current[end:])
+	replacement := mergeProposalBody(existing, proposed, operation)
+	parts := []string{}
+	if before != "" {
+		parts = append(parts, before)
+	}
+	if replacement != "" {
+		parts = append(parts, replacement)
+	}
+	if after != "" {
+		parts = append(parts, after)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func (s *Server) saveKnowledgeSnapshotForScope(ctx context.Context, scopeKind, scopeID, proposalID string, now time.Time) error {
+	pages, err := s.store.ListKnowledgePages(ctx, knowledge.PageQuery{ScopeKind: scopeKind, ScopeID: scopeID, Limit: 1000})
+	if err != nil {
+		return err
+	}
+	chunks, err := s.store.ListKnowledgeChunks(ctx, knowledge.ChunkQuery{ScopeKind: scopeKind, ScopeID: scopeID, Limit: 1000})
+	if err != nil {
+		return err
+	}
+	pageIDs := make([]string, 0, len(pages))
+	chunkIDs := make([]string, 0, len(chunks))
+	for _, page := range pages {
+		pageIDs = append(pageIDs, page.ID)
+	}
+	for _, chunk := range chunks {
+		chunkIDs = append(chunkIDs, chunk.ID)
+	}
+	return s.store.SaveKnowledgeSnapshot(ctx, knowledge.Snapshot{
+		ID:        fmt.Sprintf("ksnap_%d", now.UnixNano()),
+		ScopeKind: scopeKind,
+		ScopeID:   scopeID,
+		PageIDs:   pageIDs,
+		ChunkIDs:  chunkIDs,
+		Metadata:  map[string]any{"proposal_id": proposalID, "source": "proposal_apply"},
+		CreatedAt: now,
+	})
 }
 
 func (s *Server) proposalPages(ctx context.Context, item knowledge.UpdateProposal) (*knowledge.Page, map[string]any) {
@@ -2890,6 +3396,40 @@ func validatedKnowledgePath(uri string) (string, error) {
 		return pathAbs, nil
 	}
 	return "", fmt.Errorf("knowledge source path must be under KNOWLEDGE_SOURCE_ROOT")
+}
+
+func knowledgeSourceChecksum(source knowledge.Source) (string, error) {
+	if source.Kind != "folder" {
+		return source.Checksum, nil
+	}
+	root, err := validatedKnowledgePath(source.URI)
+	if err != nil {
+		return "", err
+	}
+	var parts []string
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext != ".md" && ext != ".txt" {
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		parts = append(parts, rel+"\x00"+knowledgeChecksum(string(raw)))
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	sort.Strings(parts)
+	return knowledgeChecksum(strings.Join(parts, "\x00")), nil
 }
 
 func (s *Server) streamAdminEvents(w http.ResponseWriter, r *http.Request) {
@@ -3415,30 +3955,191 @@ func (s *Server) operatorAuthMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if s.operatorAPIKey == "" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if !operatorTokenMatches(r, s.operatorAPIKey) {
+		principal, ok := s.authenticateOperator(r)
+		if !ok {
 			http.Error(w, "operator authorization required", http.StatusUnauthorized)
 			return
 		}
-		next.ServeHTTP(w, r)
+		permission := operatorPermission(r.Method, r.URL.Path)
+		if permission != "" && !operatorHasPermission(principal.Roles, permission) {
+			http.Error(w, "operator permission denied", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), operatorContextKey{}, principal)))
 	})
 }
 
-func operatorTokenMatches(r *http.Request, want string) bool {
-	got := strings.TrimSpace(r.Header.Get("X-Operator-Token"))
-	if got == "" {
-		auth := strings.TrimSpace(r.Header.Get("Authorization"))
-		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-			got = strings.TrimSpace(auth[len("Bearer "):])
+func (s *Server) authenticateOperator(r *http.Request) (operatorPrincipal, bool) {
+	if s.trustedOperatorIDHeader != "" {
+		if id := strings.TrimSpace(r.Header.Get(s.trustedOperatorIDHeader)); id != "" {
+			roles := splitHeaderRoles(r.Header.Get(s.trustedOperatorRolesHeader))
+			if len(roles) == 0 {
+				roles = []string{operatordomain.RoleViewer}
+			}
+			return operatorPrincipal{ID: id, Roles: roles}, true
 		}
 	}
+	if s.operatorAPIKey != "" && operatorTokenMatches(r, s.operatorAPIKey) {
+		return operatorPrincipal{ID: "bootstrap_admin", Roles: []string{operatordomain.RoleAdmin}}, true
+	}
+	if token := operatorBearerToken(r); token != "" {
+		tokenHash := hashOperatorToken(token)
+		item, err := s.store.GetOperatorAPITokenByHash(r.Context(), tokenHash)
+		if err == nil && item.Status == operatordomain.StatusActive && (item.ExpiresAt == nil || item.ExpiresAt.After(time.Now().UTC())) {
+			op, err := s.store.GetOperator(r.Context(), item.OperatorID)
+			if err == nil && op.Status == operatordomain.StatusActive {
+				now := time.Now().UTC()
+				item.LastUsedAt = &now
+				_ = s.store.SaveOperatorAPIToken(r.Context(), item)
+				return operatorPrincipal{ID: op.ID, Roles: op.Roles}, true
+			}
+		}
+	}
+	if s.operatorAPIKey == "" && s.trustedOperatorIDHeader == "" {
+		return operatorPrincipal{ID: "dev_operator", Roles: []string{operatordomain.RoleAdmin}}, true
+	}
+	return operatorPrincipal{}, false
+}
+
+func operatorBearerToken(r *http.Request) string {
+	if got := strings.TrimSpace(r.Header.Get("X-Operator-Token")); got != "" {
+		return got
+	}
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		return strings.TrimSpace(auth[len("Bearer "):])
+	}
+	return ""
+}
+
+func operatorTokenMatches(r *http.Request, want string) bool {
+	got := operatorBearerToken(r)
 	if got == "" || len(got) != len(want) {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+func splitHeaderRoles(raw string) []string {
+	var out []string
+	for _, item := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ' ' || r == ';' }) {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func operatorFromContext(ctx context.Context) (operatorPrincipal, bool) {
+	item, ok := ctx.Value(operatorContextKey{}).(operatorPrincipal)
+	return item, ok
+}
+
+func requestOperatorID(r *http.Request, fallback string) string {
+	if principal, ok := operatorFromContext(r.Context()); ok && principal.ID != "" {
+		if principal.ID == "dev_operator" && strings.TrimSpace(fallback) != "" {
+			return strings.TrimSpace(fallback)
+		}
+		return principal.ID
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func operatorPermission(method, path string) string {
+	if strings.HasPrefix(path, "/v1/operator/operators") {
+		return "operator.manage"
+	}
+	if strings.Contains(path, "/takeover") || strings.Contains(path, "/resume") || strings.Contains(path, "/messages") || strings.Contains(path, "/notes") || strings.Contains(path, "/process") || strings.Contains(path, "/approvals") || strings.Contains(path, "/feedback") {
+		if method == http.MethodGet {
+			return "operator.view"
+		}
+		return "session.operate"
+	}
+	if strings.Contains(path, "/knowledge/") {
+		if method == http.MethodGet {
+			return "operator.view"
+		}
+		return "knowledge.manage"
+	}
+	if strings.Contains(path, "/media/") {
+		if method == http.MethodGet {
+			return "operator.view"
+		}
+		return "knowledge.manage"
+	}
+	if strings.Contains(path, "/customers/") && strings.Contains(path, "/preferences") {
+		if method == http.MethodGet {
+			return "operator.view"
+		}
+		return "session.operate"
+	}
+	if strings.Contains(path, "/agents") {
+		if method == http.MethodGet {
+			return "operator.view"
+		}
+		return "operator.manage"
+	}
+	return "operator.view"
+}
+
+func operatorHasPermission(roles []string, permission string) bool {
+	for _, role := range roles {
+		switch role {
+		case operatordomain.RoleAdmin:
+			return true
+		case operatordomain.RoleViewer:
+			if permission == "operator.view" {
+				return true
+			}
+		case operatordomain.RoleOperator:
+			if permission == "operator.view" || permission == "session.operate" {
+				return true
+			}
+		case operatordomain.RoleKnowledgeManager:
+			if permission == "operator.view" || permission == "knowledge.manage" {
+				return true
+			}
+		case operatordomain.RolePolicyManager:
+			if permission == "operator.view" || permission == "policy.manage" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func normalizeOperatorRoles(roles []string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, role := range roles {
+		role = strings.TrimSpace(role)
+		switch role {
+		case operatordomain.RoleViewer, operatordomain.RoleOperator, operatordomain.RoleKnowledgeManager, operatordomain.RolePolicyManager, operatordomain.RoleAdmin:
+		default:
+			continue
+		}
+		if _, ok := seen[role]; ok {
+			continue
+		}
+		seen[role] = struct{}{}
+		out = append(out, role)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func newOperatorToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return "opt_" + base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func hashOperatorToken(token string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	return hex.EncodeToString(sum[:])
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -3614,6 +4315,78 @@ func positiveQueryInt(raw, name string) (int, error) {
 		return 0, fmt.Errorf("invalid %s", name)
 	}
 	return value, nil
+}
+
+func parseOptionalTime(raw string) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err == nil {
+		return t, nil
+	}
+	return time.Parse(time.RFC3339, raw)
+}
+
+func (s *Server) sessionLastActivityAt(ctx context.Context, sess session.Session) time.Time {
+	last := sess.CreatedAt
+	events, err := s.store.ListEvents(ctx, sess.ID)
+	if err == nil {
+		for _, event := range events {
+			if event.CreatedAt.After(last) {
+				last = event.CreatedAt
+			}
+		}
+	}
+	execs, err := s.store.ListExecutions(ctx)
+	if err == nil {
+		for _, exec := range execs {
+			if exec.SessionID == sess.ID && exec.UpdatedAt.After(last) {
+				last = exec.UpdatedAt
+			}
+		}
+	}
+	return last
+}
+
+func (s *Server) pendingApprovalCount(ctx context.Context, sessionID string) int {
+	items, err := s.store.ListApprovalSessions(ctx, sessionID)
+	if err != nil {
+		return 0
+	}
+	var count int
+	for _, item := range items {
+		if item.Status == approval.StatusPending {
+			count++
+		}
+	}
+	return count
+}
+
+func (s *Server) failedMediaCount(ctx context.Context, sessionID string) int {
+	items, err := s.store.ListMediaAssets(ctx, sessionID)
+	if err != nil {
+		return 0
+	}
+	var count int
+	for _, item := range items {
+		if item.Status == "failed" || stringMetadata(item.Metadata, "enrichment_status") == "failed" {
+			count++
+		}
+	}
+	return count
+}
+
+func (s *Server) unresolvedLintCount(ctx context.Context, agentID string) int {
+	if strings.TrimSpace(agentID) == "" {
+		return 0
+	}
+	items, err := s.store.ListKnowledgeLintFindings(ctx, knowledge.LintQuery{ScopeKind: "agent", ScopeID: agentID, Status: "open", Severity: "high", Limit: 1000})
+	if err != nil {
+		return 0
+	}
+	return len(items)
 }
 
 func cloneMap(src map[string]any) map[string]any {

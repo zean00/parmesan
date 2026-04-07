@@ -15,6 +15,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/journey"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/media"
+	"github.com/sahal/parmesan/internal/domain/operator"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/replay"
 	"github.com/sahal/parmesan/internal/domain/rollout"
@@ -29,6 +30,12 @@ type Repository interface {
 	SaveAgentProfile(ctx context.Context, profile agent.Profile) error
 	GetAgentProfile(ctx context.Context, profileID string) (agent.Profile, error)
 	ListAgentProfiles(ctx context.Context) ([]agent.Profile, error)
+	SaveOperator(ctx context.Context, item operator.Operator) error
+	GetOperator(ctx context.Context, operatorID string) (operator.Operator, error)
+	ListOperators(ctx context.Context) ([]operator.Operator, error)
+	SaveOperatorAPIToken(ctx context.Context, token operator.APIToken) error
+	GetOperatorAPITokenByHash(ctx context.Context, tokenHash string) (operator.APIToken, error)
+	ListOperatorAPITokens(ctx context.Context, operatorID string) ([]operator.APIToken, error)
 	SaveCustomerPreference(ctx context.Context, pref customer.Preference, event customer.PreferenceEvent) error
 	GetCustomerPreference(ctx context.Context, agentID string, customerID string, key string) (customer.Preference, error)
 	ListCustomerPreferences(ctx context.Context, query customer.PreferenceQuery) ([]customer.Preference, error)

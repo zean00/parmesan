@@ -21,6 +21,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/journey"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/media"
+	"github.com/sahal/parmesan/internal/domain/operator"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/replay"
 	"github.com/sahal/parmesan/internal/domain/rollout"
@@ -133,6 +134,135 @@ func (c *Client) ListAgentProfiles(ctx context.Context) ([]agent.Profile, error)
 			_ = json.Unmarshal(metadata, &profile.Metadata)
 		}
 		out = append(out, profile)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) SaveOperator(ctx context.Context, item operator.Operator) error {
+	roles, err := json.Marshal(item.Roles)
+	if err != nil {
+		return err
+	}
+	metadata, err := json.Marshal(item.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = c.sessionQuery().Exec(ctx, `
+		INSERT INTO operators (id, display_name, email, roles_json, status, metadata_json, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		ON CONFLICT (id) DO UPDATE
+		SET display_name = EXCLUDED.display_name,
+		    email = EXCLUDED.email,
+		    roles_json = EXCLUDED.roles_json,
+		    status = EXCLUDED.status,
+		    metadata_json = EXCLUDED.metadata_json,
+		    updated_at = EXCLUDED.updated_at
+	`, item.ID, item.DisplayName, item.Email, roles, item.Status, metadata, item.CreatedAt, item.UpdatedAt)
+	return err
+}
+
+func (c *Client) GetOperator(ctx context.Context, operatorID string) (operator.Operator, error) {
+	row := c.sessionQuery().QueryRow(ctx, `
+		SELECT id, display_name, COALESCE(email,''), roles_json, status, metadata_json, created_at, updated_at
+		FROM operators
+		WHERE id = $1
+	`, operatorID)
+	var item operator.Operator
+	var roles, metadata []byte
+	if err := row.Scan(&item.ID, &item.DisplayName, &item.Email, &roles, &item.Status, &metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return operator.Operator{}, errors.New("operator not found")
+		}
+		return operator.Operator{}, err
+	}
+	_ = json.Unmarshal(roles, &item.Roles)
+	_ = json.Unmarshal(metadata, &item.Metadata)
+	return item, nil
+}
+
+func (c *Client) ListOperators(ctx context.Context) ([]operator.Operator, error) {
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT id, display_name, COALESCE(email,''), roles_json, status, metadata_json, created_at, updated_at
+		FROM operators
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []operator.Operator
+	for rows.Next() {
+		var item operator.Operator
+		var roles, metadata []byte
+		if err := rows.Scan(&item.ID, &item.DisplayName, &item.Email, &roles, &item.Status, &metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(roles, &item.Roles)
+		_ = json.Unmarshal(metadata, &item.Metadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) SaveOperatorAPIToken(ctx context.Context, token operator.APIToken) error {
+	metadata, err := json.Marshal(token.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = c.sessionQuery().Exec(ctx, `
+		INSERT INTO operator_api_tokens (id, operator_id, name, token_hash, status, last_used_at, expires_at, metadata_json, created_at, revoked_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		ON CONFLICT (id) DO UPDATE
+		SET name = EXCLUDED.name,
+		    token_hash = EXCLUDED.token_hash,
+		    status = EXCLUDED.status,
+		    last_used_at = EXCLUDED.last_used_at,
+		    expires_at = EXCLUDED.expires_at,
+		    metadata_json = EXCLUDED.metadata_json,
+		    revoked_at = EXCLUDED.revoked_at
+	`, token.ID, token.OperatorID, token.Name, token.TokenHash, token.Status, token.LastUsedAt, token.ExpiresAt, metadata, token.CreatedAt, token.RevokedAt)
+	return err
+}
+
+func (c *Client) GetOperatorAPITokenByHash(ctx context.Context, tokenHash string) (operator.APIToken, error) {
+	row := c.sessionQuery().QueryRow(ctx, `
+		SELECT id, operator_id, name, token_hash, status, last_used_at, expires_at, metadata_json, created_at, revoked_at
+		FROM operator_api_tokens
+		WHERE token_hash = $1
+	`, tokenHash)
+	var item operator.APIToken
+	var metadata []byte
+	if err := row.Scan(&item.ID, &item.OperatorID, &item.Name, &item.TokenHash, &item.Status, &item.LastUsedAt, &item.ExpiresAt, &metadata, &item.CreatedAt, &item.RevokedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return operator.APIToken{}, errors.New("operator api token not found")
+		}
+		return operator.APIToken{}, err
+	}
+	_ = json.Unmarshal(metadata, &item.Metadata)
+	return item, nil
+}
+
+func (c *Client) ListOperatorAPITokens(ctx context.Context, operatorID string) ([]operator.APIToken, error) {
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT id, operator_id, name, token_hash, status, last_used_at, expires_at, metadata_json, created_at, revoked_at
+		FROM operator_api_tokens
+		WHERE ($1 = '' OR operator_id = $1)
+		ORDER BY created_at DESC
+	`, operatorID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []operator.APIToken
+	for rows.Next() {
+		var item operator.APIToken
+		var metadata []byte
+		if err := rows.Scan(&item.ID, &item.OperatorID, &item.Name, &item.TokenHash, &item.Status, &item.LastUsedAt, &item.ExpiresAt, &metadata, &item.CreatedAt, &item.RevokedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(metadata, &item.Metadata)
+		item.Plaintext = ""
+		out = append(out, item)
 	}
 	return out, rows.Err()
 }

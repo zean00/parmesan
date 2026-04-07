@@ -22,6 +22,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/feedback"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/media"
+	operatordomain "github.com/sahal/parmesan/internal/domain/operator"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/replay"
 	"github.com/sahal/parmesan/internal/domain/rollout"
@@ -1539,6 +1540,99 @@ func TestOperatorEndpointsRequireTokenWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestOperatorRBACStoredTokenAndTrustedHeaders(t *testing.T) {
+	t.Setenv("OPERATOR_API_KEY", "bootstrap-secret")
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	now := time.Now().UTC()
+	if err := repo.SaveOperator(context.Background(), operatordomain.Operator{
+		ID: "viewer_1", DisplayName: "Viewer", Roles: []string{operatordomain.RoleViewer}, Status: operatordomain.StatusActive, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveOperatorAPIToken(context.Background(), operatordomain.APIToken{
+		ID: "token_1", OperatorID: "viewer_1", Name: "viewer token", TokenHash: hashOperatorToken("viewer-secret"), Status: operatordomain.StatusActive, CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateSession(context.Background(), session.Session{ID: "sess_1", Channel: "acp", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/sessions", nil)
+	req.Header.Set("Authorization", "Bearer viewer-secret")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("viewer read status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_1/takeover", strings.NewReader(`{"operator_id":"spoofed"}`))
+	req.Header.Set("Authorization", "Bearer viewer-secret")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("viewer takeover status = %d, want %d body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+
+	t.Setenv("OPERATOR_TRUSTED_ID_HEADER", "X-Operator-ID")
+	t.Setenv("OPERATOR_TRUSTED_ROLES_HEADER", "X-Operator-Roles")
+	srv = New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_1/takeover", strings.NewReader(`{"operator_id":"spoofed"}`))
+	req.Header.Set("X-Operator-ID", "trusted_op")
+	req.Header.Set("X-Operator-Roles", "operator")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("trusted operator takeover status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	sess, err := repo.GetSession(context.Background(), "sess_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sess.Metadata["assigned_operator_id"]; got != "trusted_op" {
+		t.Fatalf("assigned operator = %#v, want trusted_op", got)
+	}
+}
+
+func TestOperatorUpdatePreservesEmailOnPartialUpdate(t *testing.T) {
+	t.Setenv("OPERATOR_API_KEY", "bootstrap-secret")
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	now := time.Now().UTC()
+	if err := repo.SaveOperator(context.Background(), operatordomain.Operator{
+		ID:          "op_1",
+		Email:       "agent.ops@example.com",
+		DisplayName: "Ops",
+		Roles:       []string{operatordomain.RoleViewer},
+		Status:      operatordomain.StatusActive,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodPut, "/v1/operator/operators/op_1", strings.NewReader(`{"roles":["admin"]}`))
+	req.Header.Set("Authorization", "Bearer bootstrap-secret")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	got, err := repo.GetOperator(context.Background(), "op_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Email != "agent.ops@example.com" {
+		t.Fatalf("email = %q, want preserved email", got.Email)
+	}
+	if len(got.Roles) != 1 || got.Roles[0] != operatordomain.RoleAdmin {
+		t.Fatalf("roles = %#v, want admin", got.Roles)
+	}
+}
+
 func TestOperatorSessionListFiltersByOperatorAndActiveState(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
@@ -1549,7 +1643,7 @@ func TestOperatorSessionListFiltersByOperatorAndActiveState(t *testing.T) {
 			Metadata: map[string]any{"assigned_operator_id": "op_1"},
 		},
 		{
-			ID: "sess_2", Channel: "acp", CustomerID: "cust_2", AgentID: "agent_1", Mode: "auto", CreatedAt: now.Add(time.Second),
+			ID: "sess_2", Channel: "acp", CustomerID: "cust_2", AgentID: "agent_2", Mode: "auto", CreatedAt: now.Add(time.Second),
 			Metadata: map[string]any{},
 		},
 	}
@@ -1557,6 +1651,15 @@ func TestOperatorSessionListFiltersByOperatorAndActiveState(t *testing.T) {
 		if err := repo.CreateSession(context.Background(), sess); err != nil {
 			t.Fatalf("CreateSession(%s) error = %v", sess.ID, err)
 		}
+	}
+	if err := repo.SaveApprovalSession(context.Background(), approval.Session{ID: "approval_1", SessionID: "sess_1", Status: approval.StatusPending, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveMediaAsset(context.Background(), media.Asset{ID: "asset_failed", SessionID: "sess_1", EventID: "evt_1", Type: "image", Status: "failed", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveKnowledgeLintFinding(context.Background(), knowledge.LintFinding{ID: "lint_1", ScopeKind: "agent", ScopeID: "agent_1", Kind: "missing_citation", Severity: "high", Status: "open", Message: "missing citation", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
 	}
 	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
 
@@ -1568,6 +1671,10 @@ func TestOperatorSessionListFiltersByOperatorAndActiveState(t *testing.T) {
 		{name: "operator", path: "/v1/operator/sessions?operator_id=op_1", want: "sess_1"},
 		{name: "active", path: "/v1/operator/sessions?active=true", want: "sess_1"},
 		{name: "limit", path: "/v1/operator/sessions?limit=1", want: "sess_1"},
+		{name: "pending approval", path: "/v1/operator/sessions?pending_approval=true", want: "sess_1"},
+		{name: "failed media", path: "/v1/operator/sessions?failed_media=true", want: "sess_1"},
+		{name: "unresolved lint", path: "/v1/operator/sessions?unresolved_lint=true", want: "sess_1"},
+		{name: "unassigned", path: "/v1/operator/sessions?unassigned=true", want: "sess_2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
@@ -1584,6 +1691,50 @@ func TestOperatorSessionListFiltersByOperatorAndActiveState(t *testing.T) {
 				t.Fatalf("sessions = %#v, want only %s", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestOperatorSessionListCursorFollowsListingOrder(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	now := time.Now().UTC()
+	for _, sess := range []session.Session{
+		{ID: "z_session", Channel: "acp", CreatedAt: now},
+		{ID: "a_session", Channel: "acp", CreatedAt: now.Add(time.Second)},
+		{ID: "m_session", Channel: "acp", CreatedAt: now.Add(2 * time.Second)},
+	} {
+		if err := repo.CreateSession(context.Background(), sess); err != nil {
+			t.Fatalf("CreateSession(%s) error = %v", sess.ID, err)
+		}
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/sessions?limit=2", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var page1 []sessionView
+	if err := json.Unmarshal(rec.Body.Bytes(), &page1); err != nil {
+		t.Fatalf("decode page1: %v", err)
+	}
+	if len(page1) != 2 || page1[0].ID != "z_session" || page1[1].ID != "a_session" {
+		t.Fatalf("page1 = %#v, want z_session then a_session", page1)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/sessions?cursor=a_session", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cursor status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var page2 []sessionView
+	if err := json.Unmarshal(rec.Body.Bytes(), &page2); err != nil {
+		t.Fatalf("decode page2: %v", err)
+	}
+	if len(page2) != 1 || page2[0].ID != "m_session" {
+		t.Fatalf("page2 = %#v, want only m_session", page2)
 	}
 }
 
@@ -2051,6 +2202,48 @@ func TestOperatorKnowledgeSourceCompileCreatesSnapshot(t *testing.T) {
 	}
 	if len(pages) != 1 || pages[0]["title"] != "Returns" {
 		t.Fatalf("pages = %#v, want Returns page", pages)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/knowledge/sources?scope_kind=agent&scope_id=agent_1", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list sources status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/sources/src_1/resync", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unchanged resync status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if err := os.WriteFile(filepath.Join(docDir, "shipping.md"), []byte("# Shipping\n\nShips in two days."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/sources/src_1/resync", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("changed resync status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/sources", strings.NewReader(`{
+		"id":"src_file",
+		"scope_kind":"agent",
+		"scope_id":"agent_1",
+		"kind":"file",
+		"uri":"`+filepath.Join(docDir, "returns.md")+`"
+	}`))
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create file source status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/sources/src_file/resync", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("file resync status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 }
 
@@ -2573,6 +2766,72 @@ func TestKnowledgeProposalApplyPersistsPayloadCitations(t *testing.T) {
 	}
 	if len(chunks) != 1 || len(chunks[0].Citations) != 1 || chunks[0].Citations[0].URI != "doc://warranty" {
 		t.Fatalf("chunks = %#v, want payload citation persisted", chunks)
+	}
+}
+
+func TestKnowledgeSectionProposalPreviewAndApply(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	body := "# Returns\n\nOld returns copy.\n\n# Shipping\n\nOld shipping copy."
+	checksum := knowledgeChecksum(body)
+	if err := repo.SaveKnowledgePage(context.Background(), knowledge.Page{
+		ID: "page_1", ScopeKind: "agent", ScopeID: "agent_1", Title: "Support", Body: body, Checksum: checksum, CreatedAt: now, UpdatedAt: now,
+	}, []knowledge.Chunk{{ID: "chunk_1", PageID: "page_1", ScopeKind: "agent", ScopeID: "agent_1", Text: body, CreatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveKnowledgeUpdateProposal(context.Background(), knowledge.UpdateProposal{
+		ID:        "prop_section",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		Kind:      "operator_feedback",
+		State:     "approved",
+		Payload: map[string]any{
+			"sections": []any{
+				map[string]any{
+					"page_id":       "page_1",
+					"title":         "Support",
+					"anchor":        "# Shipping",
+					"operation":     "replace",
+					"body":          "# Shipping\n\nNew shipping copy.",
+					"base_checksum": checksum,
+					"citations":     []any{map[string]any{"uri": "doc://shipping", "title": "Shipping policy"}},
+				},
+			},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/knowledge/proposals/prop_section/preview", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var preview map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if sections, ok := preview["sections"].([]any); !ok || len(sections) != 1 {
+		t.Fatalf("preview = %#v, want one section preview", preview)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/proposals/prop_section/apply", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	pages, err := repo.ListKnowledgePages(context.Background(), knowledge.PageQuery{ScopeKind: "agent", ScopeID: "agent_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pages) != 1 || !strings.Contains(pages[0].Body, "New shipping copy.") || !strings.Contains(pages[0].Body, "Old returns copy.") || len(pages[0].Citations) != 1 {
+		t.Fatalf("pages = %#v, want section-only update with citation", pages)
 	}
 }
 

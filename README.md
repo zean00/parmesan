@@ -40,8 +40,10 @@ ACP is the primary public conversation interface. The separate `gateway`
 service remains available for legacy `/v1/web/...` clients while ACP-to-channel
 adapters migrate externally.
 
-Operator endpoints are guarded when `OPERATOR_API_KEY` is set. Clients should
-send either `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
+Operator endpoints support single-tenant RBAC. `OPERATOR_API_KEY` remains a
+bootstrap admin credential; production operators can use stored operator API
+tokens or trusted identity headers via `OPERATOR_TRUSTED_ID_HEADER` and
+`OPERATOR_TRUSTED_ROLES_HEADER`.
 
 ## API Endpoints
 
@@ -74,7 +76,7 @@ send either `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
 - `GET /v1/acp/sessions/{id}/events/stream`
 - `GET /v1/acp/sessions/{id}/approvals`
 - `POST /v1/acp/sessions/{id}/approvals/{approval_id}`
-- `GET /v1/operator/sessions` with optional `customer_id`, `agent_id`, `mode`, `label`, `operator_id`, `active=true`, and `limit` filters
+- `GET /v1/operator/sessions` with optional `customer_id`, `agent_id`, `mode`, `label`, `operator_id`, `assigned_operator_id`, `unassigned=true`, `active=true`, `pending_approval=true`, `failed_media=true`, `unresolved_lint=true`, `last_activity_after`, `last_activity_before`, `cursor`, and `limit` filters
 - `GET /v1/operator/sessions/{id}`
 - `GET /v1/operator/sessions/{id}/events` with optional `min_offset`, `limit`, `source`, `trace_id`, and `kind` filters
 - `GET /v1/operator/sessions/{id}/stream`
@@ -87,6 +89,12 @@ send either `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
 - `POST /v1/operator/sessions/{id}/feedback`
 - `GET /v1/operator/feedback` with optional `session_id`, `operator_id`, `category`, and `limit` filters
 - `GET /v1/operator/feedback/{id}`
+- `POST /v1/operator/operators`
+- `GET /v1/operator/operators`
+- `GET /v1/operator/operators/{id}`
+- `PUT /v1/operator/operators/{id}`
+- `POST /v1/operator/operators/{id}/tokens`
+- `POST /v1/operator/operators/{id}/tokens/{token_id}/revoke`
 - `GET /v1/operator/customers/{customer_id}/preferences` with required `agent_id` and optional `status`, `key`, `source`, `include_expired`, and `limit` filters
 - `PUT /v1/operator/customers/{customer_id}/preferences/{key}`
 - `POST /v1/operator/customers/{customer_id}/preferences/{key}/confirm`
@@ -98,7 +106,10 @@ send either `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
 - `GET /v1/operator/agents/{id}`
 - `PUT /v1/operator/agents/{id}`
 - `POST /v1/operator/knowledge/sources`
+- `GET /v1/operator/knowledge/sources`
+- `GET /v1/operator/knowledge/sources/{id}`
 - `POST /v1/operator/knowledge/sources/{id}/compile`
+- `POST /v1/operator/knowledge/sources/{id}/resync`
 - `GET /v1/operator/knowledge/snapshots/{id}`
 - `GET /v1/operator/knowledge/pages` with optional `scope_kind`, `scope_id`, `snapshot_id`, and `limit` filters
 - `GET /v1/operator/knowledge/proposals` with optional `scope_kind` and `scope_id`
@@ -149,7 +160,9 @@ Preference learning now keeps explicit preferences active while routing inferred
 or conflicting preferences through pending events for operator confirmation.
 Proposal workflow now supports preview plus explicit `draft`, `approved`,
 `rejected`, and `applied` states; shared knowledge apply is gated by lint
-findings for high-risk citation, staleness, and contradiction issues.
+findings for high-risk citation, staleness, and contradiction issues. Proposal
+payloads can target whole pages or section-level updates, and payload citations
+are preserved into applied pages and chunks.
 
 Multimodal provider config:
 - `OPENROUTER_API_KEY`
