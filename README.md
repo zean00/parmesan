@@ -71,6 +71,16 @@ adapters migrate externally.
 - `GET /v1/acp/sessions/{id}/events/stream`
 - `GET /v1/acp/sessions/{id}/approvals`
 - `POST /v1/acp/sessions/{id}/approvals/{approval_id}`
+- `GET /v1/operator/sessions`
+- `GET /v1/operator/sessions/{id}`
+- `GET /v1/operator/sessions/{id}/events`
+- `GET /v1/operator/sessions/{id}/stream`
+- `POST /v1/operator/sessions/{id}/takeover`
+- `POST /v1/operator/sessions/{id}/resume`
+- `POST /v1/operator/sessions/{id}/messages`
+- `POST /v1/operator/sessions/{id}/messages/on-behalf-of-agent`
+- `POST /v1/operator/sessions/{id}/notes`
+- `POST /v1/operator/sessions/{id}/process`
 - `POST /v1/tools/providers/register`
 - `POST /v1/tools/providers/{id}/auth`
 - `GET /v1/tools/providers/{id}/auth`

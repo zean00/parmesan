@@ -14,7 +14,9 @@ Supported routes:
 
 Conversation-edge rules:
 - `POST /v1/acp/sessions/{id}/messages` is the primary turn-ingress endpoint and creates a durable execution plus the trigger event.
+- If the session mode is `manual`, ACP message ingress persists and streams the customer message but does not create an automated execution.
 - approval reads and responses should use the ACP session-scoped approval endpoints instead of the legacy `/v1/web/...` gateway surface.
+- Operator supervision uses `/v1/operator/...`; operator notes are hidden from ACP list/stream responses.
 
 Core event families:
 - `message`

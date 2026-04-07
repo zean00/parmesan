@@ -62,6 +62,62 @@ func TestServiceOpenSessionAndListEvents(t *testing.T) {
 	}
 }
 
+func TestListEventsPageAdvancesCursorPastInternalEvents(t *testing.T) {
+	repo := memory.New()
+	svc := NewService(sessionsvc.New(repo, nil))
+	ctx := context.Background()
+	_, err := svc.OpenSession(ctx, Session{ID: "sess_1", Channel: "web", CreatedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatalf("OpenSession() error = %v", err)
+	}
+	if err := repo.AppendEvent(ctx, session.Event{
+		ID: "evt_note", SessionID: "sess_1", Source: "operator", Kind: "operator.note", Offset: 10, CreatedAt: time.Now().UTC(), Metadata: map[string]any{"internal_only": true},
+	}); err != nil {
+		t.Fatalf("AppendEvent(note) error = %v", err)
+	}
+	if err := repo.AppendEvent(ctx, session.Event{
+		ID: "evt_message", SessionID: "sess_1", Source: "customer", Kind: "message", Offset: 11, CreatedAt: time.Now().UTC(),
+		Content: []session.ContentPart{{Type: "text", Text: "hello"}},
+	}); err != nil {
+		t.Fatalf("AppendEvent(message) error = %v", err)
+	}
+
+	events, offset, err := svc.ListEventsPage(ctx, "sess_1", 10)
+	if err != nil {
+		t.Fatalf("ListEventsPage() error = %v", err)
+	}
+	if offset != 11 {
+		t.Fatalf("offset = %d, want 11", offset)
+	}
+	if len(events) != 1 || events[0].ID != "evt_message" {
+		t.Fatalf("events = %#v, want only public message", events)
+	}
+
+	_, err = svc.OpenSession(ctx, Session{ID: "sess_2", Channel: "web", CreatedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatalf("OpenSession(sess_2) error = %v", err)
+	}
+	if err := repo.AppendEvent(ctx, session.Event{
+		ID: "evt_only_note", SessionID: "sess_2", Source: "operator", Kind: "operator.note", Offset: 20, CreatedAt: time.Now().UTC(), Metadata: map[string]any{"internal_only": true},
+	}); err != nil {
+		t.Fatalf("AppendEvent(only note) error = %v", err)
+	}
+	events, offset, err = svc.ListEventsPage(ctx, "sess_2", 20)
+	if err != nil {
+		t.Fatalf("ListEventsPage(internal only) error = %v", err)
+	}
+	if len(events) != 0 || offset != 20 {
+		t.Fatalf("events=%#v offset=%d, want hidden event omitted and cursor advanced", events, offset)
+	}
+	events, offset, err = svc.ListEventsPage(ctx, "sess_1", 12)
+	if err != nil {
+		t.Fatalf("ListEventsPage(empty) error = %v", err)
+	}
+	if len(events) != 0 || offset != 11 {
+		t.Fatalf("events=%#v offset=%d, want empty and previous cursor", events, offset)
+	}
+}
+
 func TestValidateEventRejectsMissingTypedFields(t *testing.T) {
 	err := ValidateEvent(Event{
 		ID:        "evt_1",

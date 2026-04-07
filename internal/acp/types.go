@@ -84,6 +84,27 @@ func NormalizeEvent(src session.Event) Event {
 	return out
 }
 
+func IsInternalEvent(src session.Event) bool {
+	if src.Kind == "operator.note" {
+		return true
+	}
+	if src.Metadata == nil {
+		return false
+	}
+	value, ok := src.Metadata["internal_only"]
+	if !ok {
+		return false
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true")
+	default:
+		return false
+	}
+}
+
 func ValidateEvent(event Event) error {
 	kind := strings.TrimSpace(event.Kind)
 	if kind == "" {

@@ -47,17 +47,29 @@ func (s *Service) CreateEvent(ctx context.Context, req Event, async bool) (Event
 }
 
 func (s *Service) ListEvents(ctx context.Context, sessionID string, minOffset int64) ([]Event, error) {
+	events, _, err := s.ListEventsPage(ctx, sessionID, minOffset)
+	return events, err
+}
+
+func (s *Service) ListEventsPage(ctx context.Context, sessionID string, minOffset int64) ([]Event, int64, error) {
 	items, err := s.sessions.ListEvents(ctx, session.EventQuery{
 		SessionID:      sessionID,
 		MinOffset:      minOffset,
 		ExcludeDeleted: true,
 	})
 	if err != nil {
-		return nil, err
+		return nil, minOffset - 1, err
 	}
 	out := make([]Event, 0, len(items))
+	lastOffset := minOffset - 1
 	for _, item := range items {
+		if item.Offset > lastOffset {
+			lastOffset = item.Offset
+		}
+		if IsInternalEvent(item) {
+			continue
+		}
 		out = append(out, NormalizeEvent(item))
 	}
-	return out, nil
+	return out, lastOffset, nil
 }

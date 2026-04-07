@@ -1063,6 +1063,188 @@ func TestACPMessageIngressMissingSessionReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestACPMessageIngressManualModeStoresEventWithoutExecution(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_1", Channel: "acp", Mode: "manual", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/sessions/sess_1/messages", strings.NewReader(`{"id":"evt_1","text":"hold for operator"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	waitFor(t, time.Second, func() bool {
+		events, err := repo.ListEvents(context.Background(), "sess_1")
+		return err == nil && len(events) == 1 && events[0].ID == "evt_1" && events[0].Metadata["automation_skipped"] == true
+	})
+	execs, err := repo.ListExecutions(context.Background())
+	if err != nil {
+		t.Fatalf("ListExecutions() error = %v", err)
+	}
+	if len(execs) != 0 {
+		t.Fatalf("executions = %#v, want none while session is manual", execs)
+	}
+}
+
+func TestOperatorTakeoverResumeAndExplicitProcess(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_1", Channel: "acp", CreatedAt: now, Metadata: map[string]any{},
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID: "evt_1", SessionID: "sess_1", Source: "customer", Kind: "message", TraceID: "trace_1", Offset: 1, CreatedAt: now,
+		Content: []session.ContentPart{{Type: "text", Text: "hello"}},
+	}); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_1/takeover", strings.NewReader(`{"operator_id":"op_1","reason":"customer requested human"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("takeover status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	sess, err := repo.GetSession(context.Background(), "sess_1")
+	if err != nil {
+		t.Fatalf("GetSession() error = %v", err)
+	}
+	if sess.Mode != "manual" || sess.Metadata["assigned_operator_id"] != "op_1" {
+		t.Fatalf("session after takeover = %#v, want manual with assignment", sess)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_1/process", strings.NewReader(`{"event_id":"evt_1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("process status = %d, want %d body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	waitFor(t, time.Second, func() bool {
+		execs, err := repo.ListExecutions(context.Background())
+		return err == nil && len(execs) == 1 && execs[0].TriggerEventID == "evt_1"
+	})
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_1/resume", strings.NewReader(`{"operator_id":"op_1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resume status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	sess, err = repo.GetSession(context.Background(), "sess_1")
+	if err != nil {
+		t.Fatalf("GetSession() error = %v", err)
+	}
+	if sess.Mode != "auto" || sess.Metadata["assigned_operator_id"] != nil {
+		t.Fatalf("session after resume = %#v, want auto without assignment", sess)
+	}
+}
+
+func TestOperatorNotesAreHiddenFromACPButVisibleToOperator(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_1", Channel: "acp", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_1/notes", strings.NewReader(`{"operator_id":"op_1","text":"internal note"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("note status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	waitFor(t, time.Second, func() bool {
+		events, err := repo.ListEvents(context.Background(), "sess_1")
+		return err == nil && len(events) == 1
+	})
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/acp/sessions/sess_1/events", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ACP list status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var acpEvents []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &acpEvents); err != nil {
+		t.Fatalf("decode ACP events: %v", err)
+	}
+	if len(acpEvents) != 0 {
+		t.Fatalf("ACP events = %#v, want operator note hidden", acpEvents)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_1/messages", strings.NewReader(`{"operator_id":"op_1","display_name":"Operator","text":"I can help from here"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("operator message status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	waitFor(t, time.Second, func() bool {
+		events, err := repo.ListEvents(context.Background(), "sess_1")
+		return err == nil && len(events) == 2
+	})
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/acp/sessions/sess_1/events", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ACP list status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &acpEvents); err != nil {
+		t.Fatalf("decode ACP events after operator message: %v", err)
+	}
+	if len(acpEvents) != 1 || acpEvents[0]["source"] != "human_agent" {
+		t.Fatalf("ACP events = %#v, want visible human_agent message only", acpEvents)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/sessions/sess_1/events", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("operator list status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var operatorEvents []session.Event
+	if err := json.Unmarshal(rec.Body.Bytes(), &operatorEvents); err != nil {
+		t.Fatalf("decode operator events: %v", err)
+	}
+	if len(operatorEvents) != 2 || operatorEvents[0].Kind != "operator.note" || operatorEvents[1].Source != "human_agent" {
+		t.Fatalf("operator events = %#v, want operator note and human-agent message visible", operatorEvents)
+	}
+}
+
 func TestACPApprovalEndpointsListPendingAndResolve(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)

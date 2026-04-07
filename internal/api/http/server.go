@@ -131,6 +131,16 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/acp/sessions/{id}/events/stream", s.acpStreamEvents)
 	mux.HandleFunc("GET /v1/acp/sessions/{id}/approvals", s.acpListApprovals)
 	mux.HandleFunc("POST /v1/acp/sessions/{id}/approvals/{approval_id}", s.acpRespondApproval)
+	mux.HandleFunc("GET /v1/operator/sessions", s.operatorListSessions)
+	mux.HandleFunc("GET /v1/operator/sessions/{id}", s.operatorGetSession)
+	mux.HandleFunc("GET /v1/operator/sessions/{id}/events", s.operatorListEvents)
+	mux.HandleFunc("GET /v1/operator/sessions/{id}/stream", s.operatorStreamEvents)
+	mux.HandleFunc("POST /v1/operator/sessions/{id}/takeover", s.operatorTakeover)
+	mux.HandleFunc("POST /v1/operator/sessions/{id}/resume", s.operatorResume)
+	mux.HandleFunc("POST /v1/operator/sessions/{id}/messages", s.operatorCreateMessage)
+	mux.HandleFunc("POST /v1/operator/sessions/{id}/messages/on-behalf-of-agent", s.operatorCreateMessageOnBehalfOfAgent)
+	mux.HandleFunc("POST /v1/operator/sessions/{id}/notes", s.operatorCreateNote)
+	mux.HandleFunc("POST /v1/operator/sessions/{id}/process", s.operatorProcessEvent)
 	mux.HandleFunc("POST /v1/tools/providers/register", s.registerProvider)
 	mux.HandleFunc("POST /v1/tools/providers/{id}/auth", s.saveProviderAuth)
 	mux.HandleFunc("GET /v1/tools/providers/{id}/auth", s.getProviderAuth)
@@ -657,15 +667,6 @@ func (s *Server) appendEvent(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:   time.Now().UTC(),
 	})
 
-	s.broker.Publish(sessionID, sse.Envelope{
-		EventID:     event.ID,
-		SessionID:   sessionID,
-		ExecutionID: execID,
-		Type:        "session.event.created",
-		Payload:     event,
-		CreatedAt:   time.Now().UTC(),
-	})
-
 	writeJSON(w, http.StatusCreated, event)
 }
 
@@ -689,12 +690,34 @@ func (s *Server) acpCreateMessage(w http.ResponseWriter, r *http.Request) {
 		req.Source = "customer"
 	}
 	content := []session.ContentPart{{Type: "text", Text: req.Text}}
-	event, _, _, err := s.enqueueSessionTurn(r.Context(), sessionID, req.ID, req.Source, acp.EventKindMessage, content, nil, req.Metadata)
+	sess, err := s.store.GetSession(r.Context(), sessionID)
 	if err != nil {
-		if strings.Contains(err.Error(), "session not found") {
-			http.Error(w, err.Error(), http.StatusNotFound)
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if sessionMode(sess) == "manual" {
+		metadata := cloneMap(req.Metadata)
+		metadata["automation_skipped"] = true
+		metadata["automation_skip_reason"] = "manual_mode"
+		event, err := s.sessions.CreateEvent(r.Context(), sessionsvc.CreateEventParams{
+			ID:        req.ID,
+			SessionID: sessionID,
+			Source:    req.Source,
+			Kind:      acp.EventKindMessage,
+			Content:   content,
+			Metadata:  metadata,
+			Async:     true,
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		s.publishSessionEvent(sessionID, event, "", event.TraceID, event.CreatedAt)
+		writeJSON(w, http.StatusCreated, acp.NormalizeEvent(event))
+		return
+	}
+	event, _, _, err := s.enqueueSessionTurn(r.Context(), sessionID, req.ID, req.Source, acp.EventKindMessage, content, nil, req.Metadata)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -859,9 +882,12 @@ func (s *Server) acpStreamEvents(w http.ResponseWriter, r *http.Request) {
 	live, cancelLive := s.liveSessionFeed(sessionID)
 	defer cancelLive()
 	for {
-		events, err := service.ListEvents(ctx, sessionID, lastOffset+1)
+		events, scannedOffset, err := service.ListEventsPage(ctx, sessionID, lastOffset+1)
 		if err != nil {
 			return
+		}
+		if scannedOffset > lastOffset {
+			lastOffset = scannedOffset
 		}
 		for _, event := range events {
 			raw, err := json.Marshal(event)
@@ -932,6 +958,258 @@ func (s *Server) acpRespondApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) operatorListSessions(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListSessions(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	query := r.URL.Query()
+	customerID := strings.TrimSpace(query.Get("customer_id"))
+	agentID := strings.TrimSpace(query.Get("agent_id"))
+	mode := strings.TrimSpace(query.Get("mode"))
+	label := strings.TrimSpace(query.Get("label"))
+	out := make([]sessionView, 0, len(items))
+	for _, sess := range items {
+		if customerID != "" && sess.CustomerID != customerID {
+			continue
+		}
+		if agentID != "" && sess.AgentID != agentID {
+			continue
+		}
+		if mode != "" && sessionMode(sess) != mode {
+			continue
+		}
+		if label != "" && !hasLabel(sess.Labels, label) {
+			continue
+		}
+		out = append(out, sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess)))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) operatorGetSession(w http.ResponseWriter, r *http.Request) {
+	sess, err := s.store.GetSession(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess)))
+}
+
+func (s *Server) operatorListEvents(w http.ResponseWriter, r *http.Request) {
+	events, err := s.sessions.ListEvents(r.Context(), session.EventQuery{
+		SessionID:      r.PathValue("id"),
+		ExcludeDeleted: true,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, events)
+}
+
+func (s *Server) operatorStreamEvents(w http.ResponseWriter, r *http.Request) {
+	s.streamEvents(w, r)
+}
+
+func (s *Server) operatorTakeover(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	var req struct {
+		OperatorID string `json:"operator_id"`
+		Reason     string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	sess, err := s.updateOperatorMode(r.Context(), sessionID, "manual", map[string]any{
+		"assigned_operator_id": req.OperatorID,
+		"handoff_reason":       req.Reason,
+		"takeover_started_at":  time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	_, _ = s.createOperatorControlEvent(r.Context(), sess.ID, "operator.takeover.started", req.OperatorID, req.Reason, nil)
+	s.appendTrace(r.Context(), audit.Record{
+		ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+		Kind:      "operator.takeover.started",
+		SessionID: sess.ID,
+		TraceID:   fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+		Message:   "operator takeover started",
+		Fields:    map[string]any{"operator_id": req.OperatorID, "reason": req.Reason},
+		CreatedAt: time.Now().UTC(),
+	})
+	writeJSON(w, http.StatusOK, sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess)))
+}
+
+func (s *Server) operatorResume(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	var req struct {
+		OperatorID string `json:"operator_id"`
+		Reason     string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	sess, err := s.store.GetSession(r.Context(), sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	sess.Mode = "auto"
+	if sess.Metadata == nil {
+		sess.Metadata = map[string]any{}
+	}
+	delete(sess.Metadata, "assigned_operator_id")
+	delete(sess.Metadata, "handoff_reason")
+	delete(sess.Metadata, "takeover_started_at")
+	sess.Metadata["takeover_ended_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	if err := s.store.UpdateSession(r.Context(), sess); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_, _ = s.createOperatorControlEvent(r.Context(), sess.ID, "operator.takeover.ended", req.OperatorID, req.Reason, nil)
+	s.appendTrace(r.Context(), audit.Record{
+		ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+		Kind:      "operator.takeover.ended",
+		SessionID: sess.ID,
+		TraceID:   fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+		Message:   "operator takeover ended",
+		Fields:    map[string]any{"operator_id": req.OperatorID, "reason": req.Reason},
+		CreatedAt: time.Now().UTC(),
+	})
+	writeJSON(w, http.StatusOK, sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess)))
+}
+
+func (s *Server) operatorCreateMessage(w http.ResponseWriter, r *http.Request) {
+	s.operatorCreateVisibleMessage(w, r, "human_agent")
+}
+
+func (s *Server) operatorCreateMessageOnBehalfOfAgent(w http.ResponseWriter, r *http.Request) {
+	s.operatorCreateVisibleMessage(w, r, "human_agent_on_behalf_of_ai_agent")
+}
+
+func (s *Server) operatorCreateNote(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	var req struct {
+		ID         string         `json:"id"`
+		OperatorID string         `json:"operator_id"`
+		Text       string         `json:"text"`
+		Metadata   map[string]any `json:"metadata"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Text) == "" {
+		http.Error(w, "text is required", http.StatusBadRequest)
+		return
+	}
+	metadata := cloneMap(req.Metadata)
+	metadata["operator_id"] = req.OperatorID
+	metadata["internal_only"] = true
+	event, err := s.sessions.CreateEvent(r.Context(), sessionsvc.CreateEventParams{
+		ID:        req.ID,
+		SessionID: sessionID,
+		Source:    "operator",
+		Kind:      "operator.note",
+		Content:   []session.ContentPart{{Type: "text", Text: req.Text}},
+		Metadata:  metadata,
+		Async:     true,
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "session not found") {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.publishSessionEvent(sessionID, event, "", event.TraceID, event.CreatedAt)
+	writeJSON(w, http.StatusCreated, event)
+}
+
+func (s *Server) operatorProcessEvent(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	var req struct {
+		EventID string `json:"event_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.EventID) == "" {
+		http.Error(w, "event_id is required", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.store.GetSession(r.Context(), sessionID); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	event, err := s.sessions.ReadEvent(r.Context(), sessionID, req.EventID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if event.Source != "customer" || event.Kind != acp.EventKindMessage {
+		http.Error(w, "event_id must reference a customer message event", http.StatusBadRequest)
+		return
+	}
+	exec, err := s.createExecutionForEvent(r.Context(), sessionID, event.ID, event.TraceID, time.Now().UTC())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, exec)
+}
+
+func (s *Server) operatorCreateVisibleMessage(w http.ResponseWriter, r *http.Request, source string) {
+	sessionID := r.PathValue("id")
+	var req struct {
+		ID          string         `json:"id"`
+		OperatorID  string         `json:"operator_id"`
+		DisplayName string         `json:"display_name"`
+		Text        string         `json:"text"`
+		Metadata    map[string]any `json:"metadata"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Text) == "" {
+		http.Error(w, "text is required", http.StatusBadRequest)
+		return
+	}
+	metadata := cloneMap(req.Metadata)
+	metadata["operator_id"] = req.OperatorID
+	if strings.TrimSpace(req.DisplayName) != "" {
+		metadata["display_name"] = req.DisplayName
+	}
+	event, err := s.sessions.CreateEvent(r.Context(), sessionsvc.CreateEventParams{
+		ID:        req.ID,
+		SessionID: sessionID,
+		Source:    source,
+		Kind:      acp.EventKindMessage,
+		Content:   []session.ContentPart{{Type: "text", Text: req.Text}},
+		Metadata:  metadata,
+		Async:     true,
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "session not found") {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.publishSessionEvent(sessionID, event, "", event.TraceID, event.CreatedAt)
+	writeJSON(w, http.StatusCreated, acp.NormalizeEvent(event))
 }
 
 func (s *Server) streamAdminEvents(w http.ResponseWriter, r *http.Request) {
@@ -1448,8 +1726,39 @@ func (s *Server) enqueueSessionTurn(ctx context.Context, sessionID, eventID, sou
 	if strings.TrimSpace(eventID) == "" {
 		eventID = fmt.Sprintf("evt_%d", now.UnixNano())
 	}
-	execID := fmt.Sprintf("exec_%d", now.UnixNano())
 	traceID := fmt.Sprintf("trace_%d", now.UnixNano())
+	exec, err := s.createExecutionForEvent(ctx, sessionID, eventID, traceID, now)
+	if err != nil {
+		return session.Event{}, "", "", err
+	}
+	event, err := s.sessions.CreateEvent(ctx, sessionsvc.CreateEventParams{
+		ID:          eventID,
+		SessionID:   sessionID,
+		Source:      source,
+		Kind:        kind,
+		Content:     content,
+		Data:        data,
+		Metadata:    metadata,
+		ExecutionID: exec.ID,
+		TraceID:     traceID,
+		CreatedAt:   now,
+		Async:       true,
+	})
+	if err != nil {
+		return session.Event{}, "", "", err
+	}
+	s.publishSessionEvent(sessionID, event, exec.ID, traceID, now)
+	return event, exec.ID, traceID, nil
+}
+
+func (s *Server) createExecutionForEvent(ctx context.Context, sessionID, eventID, traceID string, now time.Time) (execution.TurnExecution, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if strings.TrimSpace(traceID) == "" {
+		traceID = fmt.Sprintf("trace_%d", now.UnixNano())
+	}
+	execID := fmt.Sprintf("exec_%d", now.UnixNano())
 	exec := execution.TurnExecution{
 		ID:             execID,
 		SessionID:      sessionID,
@@ -1467,36 +1776,95 @@ func (s *Server) enqueueSessionTurn(ctx context.Context, sessionID, eventID, sou
 		newStep(execID, "deliver_response", false),
 	}
 	if err := s.writes.CreateExecution(ctx, exec, steps); err != nil {
-		return session.Event{}, "", "", err
+		return execution.TurnExecution{}, err
 	}
-	event, err := s.sessions.CreateEvent(ctx, sessionsvc.CreateEventParams{
-		ID:          eventID,
+	return exec, nil
+}
+
+func (s *Server) publishSessionEvent(sessionID string, event session.Event, executionID, traceID string, createdAt time.Time) {
+	if s.broker == nil {
+		return
+	}
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	s.broker.Publish(sessionID, sse.Envelope{
+		EventID:     event.ID,
 		SessionID:   sessionID,
-		Source:      source,
-		Kind:        kind,
-		Content:     content,
-		Data:        data,
-		Metadata:    metadata,
-		ExecutionID: execID,
+		ExecutionID: executionID,
 		TraceID:     traceID,
-		CreatedAt:   now,
-		Async:       true,
+		Type:        "session.event.created",
+		Payload:     event,
+		CreatedAt:   createdAt,
+	})
+}
+
+func (s *Server) updateOperatorMode(ctx context.Context, sessionID, mode string, metadata map[string]any) (session.Session, error) {
+	sess, err := s.store.GetSession(ctx, sessionID)
+	if err != nil {
+		return session.Session{}, err
+	}
+	sess.Mode = mode
+	if sess.Metadata == nil {
+		sess.Metadata = map[string]any{}
+	}
+	for key, value := range metadata {
+		if strings.TrimSpace(key) != "" {
+			sess.Metadata[key] = value
+		}
+	}
+	if err := s.store.UpdateSession(ctx, sess); err != nil {
+		return session.Session{}, err
+	}
+	return sess, nil
+}
+
+func (s *Server) createOperatorControlEvent(ctx context.Context, sessionID, kind, operatorID, reason string, metadata map[string]any) (session.Event, error) {
+	payload := cloneMap(metadata)
+	payload["operator_id"] = operatorID
+	payload["reason"] = reason
+	payload["internal_only"] = true
+	event, err := s.sessions.CreateEvent(ctx, sessionsvc.CreateEventParams{
+		SessionID: sessionID,
+		Source:    "operator",
+		Kind:      kind,
+		Data: map[string]any{
+			"operator_id": operatorID,
+			"reason":      reason,
+		},
+		Metadata: payload,
+		Async:    true,
 	})
 	if err != nil {
-		return session.Event{}, "", "", err
+		return session.Event{}, err
 	}
-	if s.broker != nil {
-		s.broker.Publish(sessionID, sse.Envelope{
-			EventID:     event.ID,
-			SessionID:   sessionID,
-			ExecutionID: execID,
-			TraceID:     traceID,
-			Type:        "session.event.created",
-			Payload:     event,
-			CreatedAt:   now,
-		})
+	s.publishSessionEvent(sessionID, event, "", event.TraceID, event.CreatedAt)
+	return event, nil
+}
+
+func sessionMode(sess session.Session) string {
+	mode := strings.ToLower(strings.TrimSpace(sess.Mode))
+	if mode == "" {
+		return "auto"
 	}
-	return event, execID, traceID, nil
+	return mode
+}
+
+func hasLabel(labels []string, target string) bool {
+	for _, label := range labels {
+		if label == target {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneMap(src map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range src {
+		out[key] = value
+	}
+	return out
 }
 
 func (s *Server) resolveSessionApproval(ctx context.Context, sessionID, approvalID, decision, source string) (approval.Session, error) {
