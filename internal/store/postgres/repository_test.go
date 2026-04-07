@@ -48,6 +48,49 @@ func TestCreateSessionPersistsRichFields(t *testing.T) {
 	}
 }
 
+func TestUpdateSessionPersistsOperatorModeAndMetadata(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatalf("NewPool() error = %v", err)
+	}
+	defer mock.Close()
+
+	client := &Client{querier: mock}
+	sess := session.Session{
+		ID:         "sess_1",
+		Channel:    "acp",
+		CustomerID: "cust_1",
+		AgentID:    "agent_1",
+		Mode:       "manual",
+		Title:      "Support",
+		Metadata: map[string]any{
+			"assigned_operator_id": "op_1",
+			"handoff_reason":       "requested human",
+		},
+		Labels: []string{"vip"},
+	}
+	mock.ExpectExec(regexp.QuoteMeta(`
+		UPDATE sessions
+		SET channel = $2,
+		    customer_id = $3,
+		    agent_id = $4,
+		    mode = $5,
+		    title = $6,
+		    metadata_json = $7,
+		    labels_json = $8
+		WHERE id = $1
+	`)).
+		WithArgs(sess.ID, sess.Channel, sess.CustomerID, sess.AgentID, sess.Mode, sess.Title, pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	if err := client.UpdateSession(context.Background(), sess); err != nil {
+		t.Fatalf("UpdateSession() error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("ExpectationsWereMet() error = %v", err)
+	}
+}
+
 func TestReadEventDecodesOffsetTraceAndMetadata(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	if err != nil {

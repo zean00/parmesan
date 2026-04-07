@@ -1099,6 +1099,40 @@ func TestACPMessageIngressManualModeStoresEventWithoutExecution(t *testing.T) {
 	}
 }
 
+func TestOperatorEndpointsRequireTokenWhenConfigured(t *testing.T) {
+	t.Setenv("OPERATOR_API_KEY", "secret-operator-token")
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_1", Channel: "acp", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/sessions", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth operator status = %d, want %d body=%s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/sessions", nil)
+	req.Header.Set("Authorization", "Bearer secret-operator-token")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("auth operator status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/acp/sessions/sess_1", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ACP status = %d, want %d without operator token body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
 func TestOperatorTakeoverResumeAndExplicitProcess(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)

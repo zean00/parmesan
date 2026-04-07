@@ -2,11 +2,13 @@ package httpapi
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -39,6 +41,7 @@ type Server struct {
 	syncer     *toolsync.Syncer
 	sessions   *sessionsvc.Service
 	listener   *sessionsvc.Listener
+	operatorAPIKey string
 }
 
 const adminStreamID = "__admin__"
@@ -98,6 +101,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 		syncer:   syncer,
 		sessions: sessionsvc.New(repo, writes),
 		listener: sessionsvc.NewListener(repo),
+		operatorAPIKey: strings.TrimSpace(os.Getenv("OPERATOR_API_KEY")),
 	}
 
 	mux := http.NewServeMux()
@@ -161,7 +165,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 
 	s.httpServer = &http.Server{
 		Addr:              addr,
-		Handler:           loggingMiddleware(mux),
+		Handler:           loggingMiddleware(s.operatorAuthMiddleware(mux)),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -1698,6 +1702,38 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(start))
 	})
+}
+
+func (s *Server) operatorAuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/v1/operator/") && r.URL.Path != "/v1/operator" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if s.operatorAPIKey == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !operatorTokenMatches(r, s.operatorAPIKey) {
+			http.Error(w, "operator authorization required", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func operatorTokenMatches(r *http.Request, want string) bool {
+	got := strings.TrimSpace(r.Header.Get("X-Operator-Token"))
+	if got == "" {
+		auth := strings.TrimSpace(r.Header.Get("Authorization"))
+		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			got = strings.TrimSpace(auth[len("Bearer "):])
+		}
+	}
+	if got == "" || len(got) != len(want) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -40,6 +40,9 @@ ACP is the primary public conversation interface. The separate `gateway`
 service remains available for legacy `/v1/web/...` clients while ACP-to-channel
 adapters migrate externally.
 
+Operator endpoints are guarded when `OPERATOR_API_KEY` is set. Clients should
+send either `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
+
 ## API Endpoints
 
 - `GET /healthz`
