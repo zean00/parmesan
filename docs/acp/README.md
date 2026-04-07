@@ -17,6 +17,7 @@ Conversation-edge rules:
 - If the session mode is `manual`, ACP message ingress persists and streams the customer message but does not create an automated execution.
 - approval reads and responses should use the ACP session-scoped approval endpoints instead of the legacy `/v1/web/...` gateway surface.
 - Operator supervision uses `/v1/operator/...`; operator notes are hidden from ACP list/stream responses.
+- Operator session listing supports `customer_id`, `agent_id`, `mode`, `label`, `operator_id`, and `active=true` filters.
 - If `OPERATOR_API_KEY` is configured, `/v1/operator/...` requires `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
 
 Core event families:

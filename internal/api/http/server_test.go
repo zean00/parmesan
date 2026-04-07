@@ -1133,6 +1133,53 @@ func TestOperatorEndpointsRequireTokenWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestOperatorSessionListFiltersByOperatorAndActiveState(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	now := time.Now().UTC()
+	sessions := []session.Session{
+		{
+			ID: "sess_1", Channel: "acp", CustomerID: "cust_1", AgentID: "agent_1", Mode: "manual", Labels: []string{"vip"}, CreatedAt: now,
+			Metadata: map[string]any{"assigned_operator_id": "op_1"},
+		},
+		{
+			ID: "sess_2", Channel: "acp", CustomerID: "cust_2", AgentID: "agent_1", Mode: "auto", CreatedAt: now.Add(time.Second),
+			Metadata: map[string]any{},
+		},
+	}
+	for _, sess := range sessions {
+		if err := repo.CreateSession(context.Background(), sess); err != nil {
+			t.Fatalf("CreateSession(%s) error = %v", sess.ID, err)
+		}
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	for _, tc := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "operator", path: "/v1/operator/sessions?operator_id=op_1", want: "sess_1"},
+		{name: "active", path: "/v1/operator/sessions?active=true", want: "sess_1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			rec := httptest.NewRecorder()
+			srv.httpServer.Handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			var got []sessionView
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode sessions: %v", err)
+			}
+			if len(got) != 1 || got[0].ID != tc.want {
+				t.Fatalf("sessions = %#v, want only %s", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestOperatorTakeoverResumeAndExplicitProcess(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
@@ -1195,6 +1242,72 @@ func TestOperatorTakeoverResumeAndExplicitProcess(t *testing.T) {
 	}
 	if sess.Mode != "auto" || sess.Metadata["assigned_operator_id"] != nil {
 		t.Fatalf("session after resume = %#v, want auto without assignment", sess)
+	}
+}
+
+func TestOperatorTakeoverAppearsAsOperatorTraceEntry(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_1", Channel: "acp", CreatedAt: time.Now().UTC(), Metadata: map[string]any{},
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_1/takeover", strings.NewReader(`{"operator_id":"op_1","reason":"customer requested human"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("takeover status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var traceID string
+	waitFor(t, time.Second, func() bool {
+		records, err := repo.ListAuditRecords(context.Background())
+		if err != nil {
+			return false
+		}
+		for _, record := range records {
+			if record.Kind == "operator.takeover.started" {
+				traceID = record.TraceID
+				return traceID != ""
+			}
+		}
+		return false
+	})
+	waitFor(t, time.Second, func() bool {
+		events, err := repo.ListEvents(context.Background(), "sess_1")
+		return err == nil && len(events) == 1 && events[0].Kind == "operator.takeover.started" && events[0].TraceID == traceID
+	})
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/traces/"+traceID, nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("trace timeline status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var payload traceTimelineResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode trace timeline: %v", err)
+	}
+	foundAudit := false
+	foundOperatorEvent := false
+	for _, entry := range payload.Entries {
+		if entry.Kind == "audit.operator.takeover.started" {
+			foundAudit = true
+		}
+		if entry.Kind == "operator.takeover.started" {
+			foundOperatorEvent = true
+		}
+	}
+	if !foundAudit || !foundOperatorEvent {
+		t.Fatalf("timeline entries = %#v, want audit and operator takeover entries", payload.Entries)
 	}
 }
 

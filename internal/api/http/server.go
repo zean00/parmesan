@@ -33,14 +33,14 @@ import (
 )
 
 type Server struct {
-	httpServer *http.Server
-	store      store.Repository
-	writes     *asyncwrite.Queue
-	broker     *sse.Broker
-	router     *model.Router
-	syncer     *toolsync.Syncer
-	sessions   *sessionsvc.Service
-	listener   *sessionsvc.Listener
+	httpServer     *http.Server
+	store          store.Repository
+	writes         *asyncwrite.Queue
+	broker         *sse.Broker
+	router         *model.Router
+	syncer         *toolsync.Syncer
+	sessions       *sessionsvc.Service
+	listener       *sessionsvc.Listener
 	operatorAPIKey string
 }
 
@@ -94,13 +94,13 @@ type traceTimelineResponse struct {
 
 func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *sse.Broker, router *model.Router, syncer *toolsync.Syncer) *Server {
 	s := &Server{
-		store:    repo,
-		writes:   writes,
-		broker:   broker,
-		router:   router,
-		syncer:   syncer,
-		sessions: sessionsvc.New(repo, writes),
-		listener: sessionsvc.NewListener(repo),
+		store:          repo,
+		writes:         writes,
+		broker:         broker,
+		router:         router,
+		syncer:         syncer,
+		sessions:       sessionsvc.New(repo, writes),
+		listener:       sessionsvc.NewListener(repo),
 		operatorAPIKey: strings.TrimSpace(os.Getenv("OPERATOR_API_KEY")),
 	}
 
@@ -975,6 +975,8 @@ func (s *Server) operatorListSessions(w http.ResponseWriter, r *http.Request) {
 	agentID := strings.TrimSpace(query.Get("agent_id"))
 	mode := strings.TrimSpace(query.Get("mode"))
 	label := strings.TrimSpace(query.Get("label"))
+	operatorID := strings.TrimSpace(query.Get("operator_id"))
+	activeOnly := strings.EqualFold(strings.TrimSpace(query.Get("active")), "true")
 	out := make([]sessionView, 0, len(items))
 	for _, sess := range items {
 		if customerID != "" && sess.CustomerID != customerID {
@@ -987,6 +989,12 @@ func (s *Server) operatorListSessions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if label != "" && !hasLabel(sess.Labels, label) {
+			continue
+		}
+		if operatorID != "" && stringMetadata(sess.Metadata, "assigned_operator_id") != operatorID {
+			continue
+		}
+		if activeOnly && !(sessionMode(sess) == "manual" || stringMetadata(sess.Metadata, "assigned_operator_id") != "") {
 			continue
 		}
 		out = append(out, sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess)))
@@ -1038,12 +1046,13 @@ func (s *Server) operatorTakeover(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	_, _ = s.createOperatorControlEvent(r.Context(), sess.ID, "operator.takeover.started", req.OperatorID, req.Reason, nil)
+	traceID := fmt.Sprintf("trace_%d", time.Now().UnixNano())
+	_, _ = s.createOperatorControlEvent(r.Context(), sess.ID, "operator.takeover.started", req.OperatorID, req.Reason, traceID, nil)
 	s.appendTrace(r.Context(), audit.Record{
 		ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
 		Kind:      "operator.takeover.started",
 		SessionID: sess.ID,
-		TraceID:   fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+		TraceID:   traceID,
 		Message:   "operator takeover started",
 		Fields:    map[string]any{"operator_id": req.OperatorID, "reason": req.Reason},
 		CreatedAt: time.Now().UTC(),
@@ -1078,12 +1087,13 @@ func (s *Server) operatorResume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	_, _ = s.createOperatorControlEvent(r.Context(), sess.ID, "operator.takeover.ended", req.OperatorID, req.Reason, nil)
+	traceID := fmt.Sprintf("trace_%d", time.Now().UnixNano())
+	_, _ = s.createOperatorControlEvent(r.Context(), sess.ID, "operator.takeover.ended", req.OperatorID, req.Reason, traceID, nil)
 	s.appendTrace(r.Context(), audit.Record{
 		ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
 		Kind:      "operator.takeover.ended",
 		SessionID: sess.ID,
-		TraceID:   fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+		TraceID:   traceID,
 		Message:   "operator takeover ended",
 		Fields:    map[string]any{"operator_id": req.OperatorID, "reason": req.Reason},
 		CreatedAt: time.Now().UTC(),
@@ -1855,7 +1865,10 @@ func (s *Server) updateOperatorMode(ctx context.Context, sessionID, mode string,
 	return sess, nil
 }
 
-func (s *Server) createOperatorControlEvent(ctx context.Context, sessionID, kind, operatorID, reason string, metadata map[string]any) (session.Event, error) {
+func (s *Server) createOperatorControlEvent(ctx context.Context, sessionID, kind, operatorID, reason, traceID string, metadata map[string]any) (session.Event, error) {
+	if strings.TrimSpace(traceID) == "" {
+		traceID = fmt.Sprintf("trace_%d", time.Now().UnixNano())
+	}
 	payload := cloneMap(metadata)
 	payload["operator_id"] = operatorID
 	payload["reason"] = reason
@@ -1864,6 +1877,7 @@ func (s *Server) createOperatorControlEvent(ctx context.Context, sessionID, kind
 		SessionID: sessionID,
 		Source:    "operator",
 		Kind:      kind,
+		TraceID:   traceID,
 		Data: map[string]any{
 			"operator_id": operatorID,
 			"reason":      reason,
@@ -2306,8 +2320,12 @@ func (s *Server) buildTraceTimeline(ctx context.Context, traceID string) (traceT
 		events, err := s.store.ListEventsFiltered(ctx, session.EventQuery{SessionID: sessionID, TraceID: traceID})
 		if err == nil {
 			for _, event := range events {
+				entryKind := "session.event"
+				if event.Source == "operator" || strings.HasPrefix(event.Kind, "operator.") {
+					entryKind = event.Kind
+				}
 				entries = append(entries, traceTimelineEntry{
-					Kind:        "session.event",
+					Kind:        entryKind,
 					ID:          event.ID,
 					SessionID:   event.SessionID,
 					ExecutionID: event.ExecutionID,
