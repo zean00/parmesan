@@ -172,6 +172,9 @@ func (s *Store) ListEventsFiltered(_ context.Context, query session.EventQuery) 
 			}
 		}
 		out = append(out, event)
+		if query.Limit > 0 && len(out) >= query.Limit {
+			break
+		}
 	}
 	return append([]session.Event(nil), out...), nil
 }

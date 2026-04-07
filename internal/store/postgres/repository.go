@@ -253,6 +253,11 @@ func (c *Client) ListEventsFiltered(ctx context.Context, query session.EventQuer
 		arg++
 	}
 	sql += ` ORDER BY COALESCE(offset,0) ASC, created_at ASC`
+	if query.Limit > 0 {
+		sql += ` LIMIT $` + strconv.Itoa(arg)
+		args = append(args, query.Limit)
+		arg++
+	}
 	rows, err := c.sessionQuery().Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err

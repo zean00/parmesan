@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -977,6 +978,11 @@ func (s *Server) operatorListSessions(w http.ResponseWriter, r *http.Request) {
 	label := strings.TrimSpace(query.Get("label"))
 	operatorID := strings.TrimSpace(query.Get("operator_id"))
 	activeOnly := strings.EqualFold(strings.TrimSpace(query.Get("active")), "true")
+	limit, err := positiveQueryInt(query.Get("limit"), "limit")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	out := make([]sessionView, 0, len(items))
 	for _, sess := range items {
 		if customerID != "" && sess.CustomerID != customerID {
@@ -998,6 +1004,9 @@ func (s *Server) operatorListSessions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		out = append(out, sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess)))
+		if limit > 0 && len(out) >= limit {
+			break
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -1012,8 +1021,30 @@ func (s *Server) operatorGetSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) operatorListEvents(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	minOffset := int64(0)
+	if raw := strings.TrimSpace(query.Get("min_offset")); raw != "" {
+		if _, err := fmt.Sscan(raw, &minOffset); err != nil {
+			http.Error(w, "invalid min_offset", http.StatusBadRequest)
+			return
+		}
+	}
+	limit, err := positiveQueryInt(query.Get("limit"), "limit")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var kinds []string
+	if kind := strings.TrimSpace(query.Get("kind")); kind != "" {
+		kinds = []string{kind}
+	}
 	events, err := s.sessions.ListEvents(r.Context(), session.EventQuery{
 		SessionID:      r.PathValue("id"),
+		Source:         strings.TrimSpace(query.Get("source")),
+		TraceID:        strings.TrimSpace(query.Get("trace_id")),
+		Kinds:          kinds,
+		MinOffset:      minOffset,
+		Limit:          limit,
 		ExcludeDeleted: true,
 	})
 	if err != nil {
@@ -1907,6 +1938,18 @@ func hasLabel(labels []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func positiveQueryInt(raw, name string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("invalid %s", name)
+	}
+	return value, nil
 }
 
 func cloneMap(src map[string]any) map[string]any {

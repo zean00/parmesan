@@ -1161,6 +1161,7 @@ func TestOperatorSessionListFiltersByOperatorAndActiveState(t *testing.T) {
 	}{
 		{name: "operator", path: "/v1/operator/sessions?operator_id=op_1", want: "sess_1"},
 		{name: "active", path: "/v1/operator/sessions?active=true", want: "sess_1"},
+		{name: "limit", path: "/v1/operator/sessions?limit=1", want: "sess_1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
@@ -1177,6 +1178,48 @@ func TestOperatorSessionListFiltersByOperatorAndActiveState(t *testing.T) {
 				t.Fatalf("sessions = %#v, want only %s", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestOperatorListEventsSupportsCursorFiltersAndLimit(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_1", Channel: "acp", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	for _, event := range []session.Event{
+		{ID: "evt_1", SessionID: "sess_1", Source: "customer", Kind: "message", TraceID: "trace_1", Offset: 1, CreatedAt: now},
+		{ID: "evt_2", SessionID: "sess_1", Source: "operator", Kind: "operator.note", TraceID: "trace_2", Offset: 2, CreatedAt: now.Add(time.Second)},
+		{ID: "evt_3", SessionID: "sess_1", Source: "operator", Kind: "operator.note", TraceID: "trace_2", Offset: 3, CreatedAt: now.Add(2 * time.Second)},
+	} {
+		if err := repo.AppendEvent(context.Background(), event); err != nil {
+			t.Fatalf("AppendEvent(%s) error = %v", event.ID, err)
+		}
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/sessions/sess_1/events?min_offset=2&source=operator&kind=operator.note&trace_id=trace_2&limit=1", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var events []session.Event
+	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	if len(events) != 1 || events[0].ID != "evt_2" {
+		t.Fatalf("events = %#v, want limited filtered evt_2", events)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/sessions/sess_1/events?limit=0", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid limit status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 }
 

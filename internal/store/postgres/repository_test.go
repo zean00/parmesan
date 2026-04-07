@@ -156,8 +156,8 @@ func TestListEventsFilteredBuildsExpectedFilters(t *testing.T) {
 		SELECT payload, COALESCE(offset,0), COALESCE(trace_id,''), metadata_json, deleted
 		FROM session_events
 		WHERE session_id = $1
-	 AND source = $2 AND trace_id = $3 AND COALESCE(offset,0) >= $4 AND deleted = FALSE AND kind = ANY($5) ORDER BY COALESCE(offset,0) ASC, created_at ASC`)).
-		WithArgs("sess_1", "assistant", "trace_2", int64(150), []string{"status"}).
+	 AND source = $2 AND trace_id = $3 AND COALESCE(offset,0) >= $4 AND deleted = FALSE AND kind = ANY($5) ORDER BY COALESCE(offset,0) ASC, created_at ASC LIMIT $6`)).
+		WithArgs("sess_1", "assistant", "trace_2", int64(150), []string{"status"}, 10).
 		WillReturnRows(rows)
 
 	events, err := client.ListEventsFiltered(context.Background(), session.EventQuery{
@@ -165,6 +165,7 @@ func TestListEventsFilteredBuildsExpectedFilters(t *testing.T) {
 		Source:         "assistant",
 		TraceID:        "trace_2",
 		MinOffset:      150,
+		Limit:          10,
 		ExcludeDeleted: true,
 		Kinds:          []string{"status"},
 	})

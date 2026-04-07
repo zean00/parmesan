@@ -74,9 +74,9 @@ send either `Authorization: Bearer <token>` or `X-Operator-Token: <token>`.
 - `GET /v1/acp/sessions/{id}/events/stream`
 - `GET /v1/acp/sessions/{id}/approvals`
 - `POST /v1/acp/sessions/{id}/approvals/{approval_id}`
-- `GET /v1/operator/sessions` with optional `customer_id`, `agent_id`, `mode`, `label`, `operator_id`, and `active=true` filters
+- `GET /v1/operator/sessions` with optional `customer_id`, `agent_id`, `mode`, `label`, `operator_id`, `active=true`, and `limit` filters
 - `GET /v1/operator/sessions/{id}`
-- `GET /v1/operator/sessions/{id}/events`
+- `GET /v1/operator/sessions/{id}/events` with optional `min_offset`, `limit`, `source`, `trace_id`, and `kind` filters
 - `GET /v1/operator/sessions/{id}/stream`
 - `POST /v1/operator/sessions/{id}/takeover`
 - `POST /v1/operator/sessions/{id}/resume`
