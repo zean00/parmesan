@@ -1009,6 +1009,151 @@ func TestACPAndSessionStreamsIncludeResponseDelta(t *testing.T) {
 	}
 }
 
+func TestACPMessageIngressCreatesExecutionAndTriggerEvent(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_1", Channel: "acp", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/sessions/sess_1/messages", strings.NewReader(`{"id":"evt_1","text":"hello from acp"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	waitFor(t, time.Second, func() bool {
+		events, err := repo.ListEvents(context.Background(), "sess_1")
+		return err == nil && len(events) == 1 && events[0].ID == "evt_1"
+	})
+
+	execs, err := repo.ListExecutions(context.Background())
+	if err != nil {
+		t.Fatalf("ListExecutions() error = %v", err)
+	}
+	if len(execs) != 1 {
+		t.Fatalf("executions = %#v, want exactly one execution", execs)
+	}
+	if execs[0].TriggerEventID != "evt_1" {
+		t.Fatalf("TriggerEventID = %q, want %q", execs[0].TriggerEventID, "evt_1")
+	}
+}
+
+func TestACPMessageIngressMissingSessionReturnsNotFound(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/sessions/missing/messages", strings.NewReader(`{"text":"hello from acp"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}
+
+func TestACPApprovalEndpointsListPendingAndResolve(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_1", Channel: "acp", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	if err := repo.CreateExecution(context.Background(), execution.TurnExecution{
+		ID: "exec_1", SessionID: "sess_1", TriggerEventID: "evt_1", TraceID: "trace_1", Status: execution.StatusBlocked, CreatedAt: now, UpdatedAt: now,
+	}, []execution.ExecutionStep{}); err != nil {
+		t.Fatalf("CreateExecution() error = %v", err)
+	}
+	for _, item := range []approval.Session{
+		{ID: "approval_1", SessionID: "sess_1", ExecutionID: "exec_1", ToolID: "tool_1", Status: approval.StatusPending, RequestText: "approve", CreatedAt: now, UpdatedAt: now},
+		{ID: "approval_2", SessionID: "sess_1", ExecutionID: "exec_1", ToolID: "tool_2", Status: approval.StatusApproved, RequestText: "approve", Decision: "approve", CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := repo.SaveApprovalSession(context.Background(), item); err != nil {
+			t.Fatalf("SaveApprovalSession() error = %v", err)
+		}
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/acp/sessions/sess_1/approvals", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list approvals status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var listed []approval.Session
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode approvals: %v", err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("listed approvals = %#v, want both session approvals", listed)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/acp/sessions/sess_1/approvals?status=pending", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("filtered approvals status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var pending []approval.Session
+	if err := json.Unmarshal(rec.Body.Bytes(), &pending); err != nil {
+		t.Fatalf("decode filtered approvals: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != "approval_1" {
+		t.Fatalf("pending approvals = %#v, want only pending item", pending)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/acp/sessions/sess_1/approvals/approval_1", strings.NewReader(`{"decision":"approve"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resolve approval status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	waitFor(t, time.Second, func() bool {
+		item, err := repo.GetApprovalSession(context.Background(), "approval_1")
+		return err == nil && item.Status == approval.StatusApproved
+	})
+	exec, _, err := repo.GetExecution(context.Background(), "exec_1")
+	if err != nil {
+		t.Fatalf("GetExecution() error = %v", err)
+	}
+	if exec.Status != execution.StatusPending {
+		t.Fatalf("execution status = %q, want %q", exec.Status, execution.StatusPending)
+	}
+	waitFor(t, time.Second, func() bool {
+		events, err := repo.ListEvents(context.Background(), "sess_1")
+		if err != nil {
+			return false
+		}
+		for _, event := range events {
+			if event.Kind == "approval.resolved" {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 func TestTraceTimelineIncludesCrossArtifactEntries(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)

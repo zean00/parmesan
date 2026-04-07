@@ -13,6 +13,7 @@ import (
 
 	"github.com/sahal/parmesan/internal/acp"
 	"github.com/sahal/parmesan/internal/api/sse"
+	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
 	"github.com/sahal/parmesan/internal/domain/execution"
 	"github.com/sahal/parmesan/internal/domain/policy"
@@ -124,9 +125,12 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/sessions/{id}/events/stream", s.streamEvents)
 	mux.HandleFunc("POST /v1/acp/sessions", s.acpCreateSession)
 	mux.HandleFunc("GET /v1/acp/sessions/{id}", s.acpGetSession)
+	mux.HandleFunc("POST /v1/acp/sessions/{id}/messages", s.acpCreateMessage)
 	mux.HandleFunc("GET /v1/acp/sessions/{id}/events", s.acpListEvents)
 	mux.HandleFunc("POST /v1/acp/sessions/{id}/events", s.acpAppendEvent)
 	mux.HandleFunc("GET /v1/acp/sessions/{id}/events/stream", s.acpStreamEvents)
+	mux.HandleFunc("GET /v1/acp/sessions/{id}/approvals", s.acpListApprovals)
+	mux.HandleFunc("POST /v1/acp/sessions/{id}/approvals/{approval_id}", s.acpRespondApproval)
 	mux.HandleFunc("POST /v1/tools/providers/register", s.registerProvider)
 	mux.HandleFunc("POST /v1/tools/providers/{id}/auth", s.saveProviderAuth)
 	mux.HandleFunc("GET /v1/tools/providers/{id}/auth", s.getProviderAuth)
@@ -637,40 +641,7 @@ func (s *Server) appendEvent(w http.ResponseWriter, r *http.Request) {
 		req.Kind = "message"
 	}
 
-	execID := fmt.Sprintf("exec_%d", time.Now().UnixNano())
-	traceID := fmt.Sprintf("trace_%d", time.Now().UnixNano())
-	exec := execution.TurnExecution{
-		ID:             execID,
-		SessionID:      sessionID,
-		TriggerEventID: req.ID,
-		TraceID:        traceID,
-		Status:         execution.StatusRunning,
-		CreatedAt:      time.Now().UTC(),
-		UpdatedAt:      time.Now().UTC(),
-	}
-	steps := []execution.ExecutionStep{
-		newStep(execID, "ingest", false),
-		newStep(execID, "resolve_policy", true),
-		newStep(execID, "match_and_plan", true),
-		newStep(execID, "compose_response", true),
-		newStep(execID, "deliver_response", false),
-	}
-	if err := s.writes.CreateExecution(r.Context(), exec, steps); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	event, err := s.sessions.CreateEvent(r.Context(), sessionsvc.CreateEventParams{
-		ID:          req.ID,
-		SessionID:   sessionID,
-		Source:      req.Source,
-		Kind:        req.Kind,
-		Content:     req.Content,
-		ExecutionID: execID,
-		TraceID:     traceID,
-		CreatedAt:   time.Now().UTC(),
-		Async:       true,
-	})
+	event, execID, traceID, err := s.enqueueSessionTurn(r.Context(), sessionID, req.ID, req.Source, req.Kind, req.Content, nil, nil)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -696,6 +667,38 @@ func (s *Server) appendEvent(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSON(w, http.StatusCreated, event)
+}
+
+func (s *Server) acpCreateMessage(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	var req struct {
+		ID       string         `json:"id"`
+		Source   string         `json:"source"`
+		Text     string         `json:"text"`
+		Metadata map[string]any `json:"metadata"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Text) == "" {
+		http.Error(w, "text is required", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Source) == "" {
+		req.Source = "customer"
+	}
+	content := []session.ContentPart{{Type: "text", Text: req.Text}}
+	event, _, _, err := s.enqueueSessionTurn(r.Context(), sessionID, req.ID, req.Source, acp.EventKindMessage, content, nil, req.Metadata)
+	if err != nil {
+		if strings.Contains(err.Error(), "session not found") {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusCreated, acp.NormalizeEvent(event))
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
@@ -886,6 +889,49 @@ func (s *Server) acpStreamEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+func (s *Server) acpListApprovals(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListApprovalSessions(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	statusFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
+	if statusFilter != "" && statusFilter != "all" {
+		filtered := items[:0]
+		for _, item := range items {
+			if string(item.Status) == statusFilter {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) acpRespondApproval(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("id")
+	var req struct {
+		Decision string `json:"decision"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	item, err := s.resolveSessionApproval(r.Context(), sessionID, r.PathValue("approval_id"), req.Decision, "acp")
+	if err != nil {
+		switch {
+		case strings.Contains(err.Error(), "not found"):
+			http.Error(w, err.Error(), http.StatusNotFound)
+		case strings.Contains(err.Error(), "decision must be"):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
 }
 
 func (s *Server) streamAdminEvents(w http.ResponseWriter, r *http.Request) {
@@ -1395,6 +1441,113 @@ func newStep(execID, name string, recomputable bool) execution.ExecutionStep {
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
+}
+
+func (s *Server) enqueueSessionTurn(ctx context.Context, sessionID, eventID, source, kind string, content []session.ContentPart, data, metadata map[string]any) (session.Event, string, string, error) {
+	now := time.Now().UTC()
+	if strings.TrimSpace(eventID) == "" {
+		eventID = fmt.Sprintf("evt_%d", now.UnixNano())
+	}
+	execID := fmt.Sprintf("exec_%d", now.UnixNano())
+	traceID := fmt.Sprintf("trace_%d", now.UnixNano())
+	exec := execution.TurnExecution{
+		ID:             execID,
+		SessionID:      sessionID,
+		TriggerEventID: eventID,
+		TraceID:        traceID,
+		Status:         execution.StatusRunning,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	steps := []execution.ExecutionStep{
+		newStep(execID, "ingest", false),
+		newStep(execID, "resolve_policy", true),
+		newStep(execID, "match_and_plan", true),
+		newStep(execID, "compose_response", true),
+		newStep(execID, "deliver_response", false),
+	}
+	if err := s.writes.CreateExecution(ctx, exec, steps); err != nil {
+		return session.Event{}, "", "", err
+	}
+	event, err := s.sessions.CreateEvent(ctx, sessionsvc.CreateEventParams{
+		ID:          eventID,
+		SessionID:   sessionID,
+		Source:      source,
+		Kind:        kind,
+		Content:     content,
+		Data:        data,
+		Metadata:    metadata,
+		ExecutionID: execID,
+		TraceID:     traceID,
+		CreatedAt:   now,
+		Async:       true,
+	})
+	if err != nil {
+		return session.Event{}, "", "", err
+	}
+	if s.broker != nil {
+		s.broker.Publish(sessionID, sse.Envelope{
+			EventID:     event.ID,
+			SessionID:   sessionID,
+			ExecutionID: execID,
+			TraceID:     traceID,
+			Type:        "session.event.created",
+			Payload:     event,
+			CreatedAt:   now,
+		})
+	}
+	return event, execID, traceID, nil
+}
+
+func (s *Server) resolveSessionApproval(ctx context.Context, sessionID, approvalID, decision, source string) (approval.Session, error) {
+	item, err := s.store.GetApprovalSession(ctx, approvalID)
+	if err != nil || item.SessionID != sessionID {
+		return approval.Session{}, fmt.Errorf("approval session not found")
+	}
+	decision = strings.ToLower(strings.TrimSpace(decision))
+	if decision != "approve" && decision != "reject" {
+		return approval.Session{}, fmt.Errorf("decision must be approve or reject")
+	}
+	item.Decision = decision
+	item.UpdatedAt = time.Now().UTC()
+	if decision == "approve" {
+		item.Status = approval.StatusApproved
+	} else {
+		item.Status = approval.StatusRejected
+	}
+	if err := s.store.SaveApprovalSession(ctx, item); err != nil {
+		return approval.Session{}, err
+	}
+	execs, err := s.store.ListExecutions(ctx)
+	traceID := ""
+	if err == nil {
+		for _, exec := range execs {
+			if exec.ID != item.ExecutionID {
+				continue
+			}
+			traceID = exec.TraceID
+			if exec.Status == execution.StatusBlocked {
+				exec.Status = execution.StatusPending
+				exec.UpdatedAt = time.Now().UTC()
+				_ = s.store.UpdateExecution(ctx, exec)
+			}
+			break
+		}
+	}
+	if _, err := s.sessions.CreateApprovalResolvedEvent(ctx, sessionID, source, item.ExecutionID, traceID, item.ID, item.ToolID, decision, nil, true); err != nil {
+		return approval.Session{}, err
+	}
+	s.appendTrace(ctx, audit.Record{
+		ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+		Kind:        "approval.resolved",
+		SessionID:   sessionID,
+		ExecutionID: item.ExecutionID,
+		TraceID:     traceID,
+		Message:     "approval resolved via API",
+		Fields:      map[string]any{"approval_id": item.ID, "decision": decision, "source": source},
+		CreatedAt:   time.Now().UTC(),
+	})
+	return item, nil
 }
 
 func (s *Server) appendTrace(ctx context.Context, record audit.Record) {

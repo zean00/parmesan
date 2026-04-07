@@ -21,15 +21,24 @@ This repository currently contains the bootstrap implementation:
 
 ```bash
 go run ./cmd/api
-go run ./cmd/gateway
 go run ./cmd/worker
+```
+
+Legacy compatibility surface:
+
+```bash
+go run ./cmd/gateway
 ```
 
 Default ports:
 
 - `api`: `:8080`
-- `gateway`: `:8081`
+- `gateway`: `:8081` legacy compatibility only
 - `worker`: `:8082`
+
+ACP is the primary public conversation interface. The separate `gateway`
+service remains available for legacy `/v1/web/...` clients while ACP-to-channel
+adapters migrate externally.
 
 ## API Endpoints
 
@@ -55,9 +64,13 @@ Default ports:
 - `GET /v1/sessions/{id}/events`
 - `GET /v1/sessions/{id}/events/stream`
 - `POST /v1/acp/sessions`
+- `GET /v1/acp/sessions/{id}`
+- `POST /v1/acp/sessions/{id}/messages`
 - `POST /v1/acp/sessions/{id}/events`
 - `GET /v1/acp/sessions/{id}/events`
 - `GET /v1/acp/sessions/{id}/events/stream`
+- `GET /v1/acp/sessions/{id}/approvals`
+- `POST /v1/acp/sessions/{id}/approvals/{approval_id}`
 - `POST /v1/tools/providers/register`
 - `POST /v1/tools/providers/{id}/auth`
 - `GET /v1/tools/providers/{id}/auth`

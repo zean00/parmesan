@@ -4,9 +4,17 @@ ACP is exposed as a path-versioned public contract under `/v1/acp/...`.
 
 Supported routes:
 - `POST /v1/acp/sessions`
+- `GET /v1/acp/sessions/{id}`
+- `POST /v1/acp/sessions/{id}/messages`
 - `POST /v1/acp/sessions/{id}/events`
 - `GET /v1/acp/sessions/{id}/events`
 - `GET /v1/acp/sessions/{id}/events/stream`
+- `GET /v1/acp/sessions/{id}/approvals`
+- `POST /v1/acp/sessions/{id}/approvals/{approval_id}`
+
+Conversation-edge rules:
+- `POST /v1/acp/sessions/{id}/messages` is the primary turn-ingress endpoint and creates a durable execution plus the trigger event.
+- approval reads and responses should use the ACP session-scoped approval endpoints instead of the legacy `/v1/web/...` gateway surface.
 
 Core event families:
 - `message`
