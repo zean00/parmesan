@@ -320,6 +320,43 @@ func TestMatchClaimsDetectsContradictedEvidence(t *testing.T) {
 	}
 }
 
+func TestMatchClaimsUsesSemanticEvidenceConcepts(t *testing.T) {
+	view := policyruntime.EngineResult{
+		RetrieverStage: policyruntime.RetrieverStageResult{Results: []knowledgeretriever.Result{{
+			RetrieverID: "wiki",
+			Data:        "The support policy says reimbursement and exchange eligibility are available only after order validation.",
+			ResultHash:  "hash_semantic_support",
+			Citations:   []knowledge.Citation{{URI: "kb://semantic-support"}},
+		}}},
+	}
+
+	claims := ExtractClaims("Refund and replacement eligibility can be reviewed after verification.")
+	matches := MatchClaims(view, claims)
+	if len(matches) == 0 || !matches[0].Supported {
+		t.Fatalf("matches = %#v, want semantic support", matches)
+	}
+	if matches[0].MatchedSourceType != "retrieved_knowledge" {
+		t.Fatalf("matches = %#v, want retrieved knowledge source", matches)
+	}
+}
+
+func TestMatchClaimsDetectsSemanticContradiction(t *testing.T) {
+	view := policyruntime.EngineResult{
+		RetrieverStage: policyruntime.RetrieverStageResult{Results: []knowledgeretriever.Result{{
+			RetrieverID: "wiki",
+			Data:        "The policy says exchange decisions require validation and must not promise immediate replacement.",
+			ResultHash:  "hash_semantic_contradiction",
+			Citations:   []knowledge.Citation{{URI: "kb://semantic-contradiction"}},
+		}}},
+	}
+
+	claims := ExtractClaims("You qualify for an instant replacement right away.")
+	matches := MatchClaims(view, claims)
+	if len(matches) == 0 || matches[0].FailureReason != "contradicted_by_evidence" {
+		t.Fatalf("matches = %#v, want semantic contradiction", matches)
+	}
+}
+
 func TestProductionReadinessScenariosHaveDeterministicQualityCoverage(t *testing.T) {
 	for _, scenario := range ProductionReadinessScenarios() {
 		t.Run(scenario.ID, func(t *testing.T) {

@@ -726,8 +726,21 @@ func evidenceSupportsClaim(evidence string, claim ResponseClaim) bool {
 			matched++
 		}
 	}
-	if len(claim.Indicators) > 0 {
-		return matched == len(claim.Indicators)
+	if len(claim.Indicators) > 0 && matched == len(claim.Indicators) {
+		return true
+	}
+	evidenceConcepts := conceptSet(evidence)
+	claimConcepts := conceptSet(claimText)
+	if len(claimConcepts) > 0 {
+		hits := 0
+		for concept := range claimConcepts {
+			if _, ok := evidenceConcepts[concept]; ok {
+				hits++
+			}
+		}
+		if hits >= 3 && hits*2 >= len(claimConcepts) {
+			return true
+		}
 	}
 	tokens := tokenSet(claimText)
 	if len(tokens) == 0 {
@@ -743,8 +756,9 @@ func evidenceSupportsClaim(evidence string, claim ResponseClaim) bool {
 }
 
 func evidenceContradictsClaim(evidence string, claim ResponseClaim) bool {
+	claimText := strings.ToLower(claim.Text)
 	indicatorHit := false
-	if strings.Contains(evidence, strings.ToLower(claim.Text)) {
+	if strings.Contains(evidence, claimText) {
 		indicatorHit = true
 	}
 	for _, indicator := range claim.Indicators {
@@ -753,10 +767,13 @@ func evidenceContradictsClaim(evidence string, claim ResponseClaim) bool {
 			break
 		}
 	}
+	if !indicatorHit && conceptOverlap(evidence, claim.Text, 2) {
+		indicatorHit = true
+	}
 	if !indicatorHit {
 		return false
 	}
-	negations := []string{
+	hardNegations := []string{
 		"never",
 		"do not",
 		"don't",
@@ -765,6 +782,16 @@ func evidenceContradictsClaim(evidence string, claim ResponseClaim) bool {
 		"must not",
 		"not available",
 		"not eligible",
+	}
+	for _, marker := range hardNegations {
+		if strings.Contains(evidence, marker) {
+			return true
+		}
+	}
+	if claimHasVerificationQualifier(claimText) {
+		return false
+	}
+	conditionalNegations := []string{
 		"requires review",
 		"after verification",
 		"after review",
@@ -772,7 +799,7 @@ func evidenceContradictsClaim(evidence string, claim ResponseClaim) bool {
 		"before review",
 		"before verification",
 	}
-	for _, marker := range negations {
+	for _, marker := range conditionalNegations {
 		if strings.Contains(evidence, marker) {
 			return true
 		}
@@ -781,6 +808,78 @@ func evidenceContradictsClaim(evidence string, claim ResponseClaim) bool {
 		return true
 	}
 	return false
+}
+
+func claimHasVerificationQualifier(claimText string) bool {
+	for _, marker := range []string{
+		"after verification",
+		"once verified",
+		"after review",
+		"policy review",
+		"pending review",
+		"requires review",
+		"before refund review",
+		"before replacement review",
+	} {
+		if strings.Contains(claimText, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func conceptOverlap(a, b string, minHits int) bool {
+	left := conceptSet(a)
+	right := conceptSet(b)
+	if len(left) == 0 || len(right) == 0 {
+		return false
+	}
+	hits := 0
+	for concept := range right {
+		if _, ok := left[concept]; ok {
+			hits++
+		}
+	}
+	return hits >= minHits
+}
+
+func conceptSet(text string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for token := range tokenSet(text) {
+		if concept := canonicalConcept(token); concept != "" {
+			out[concept] = struct{}{}
+		}
+	}
+	return out
+}
+
+func canonicalConcept(token string) string {
+	token = strings.ToLower(strings.TrimSpace(token))
+	switch token {
+	case "refund", "refunds", "refunded", "reimbursement", "reimburse", "reimbursed", "credit", "credited":
+		return "refund"
+	case "replacement", "replacements", "replace", "replaced", "exchange", "exchanges", "swap", "swapped":
+		return "replacement"
+	case "eligible", "eligibility", "qualify", "qualifies", "qualified", "qualifying":
+		return "eligibility"
+	case "approval", "approve", "approved", "authorization", "authorize", "authorized":
+		return "approval"
+	case "review", "reviewed", "verification", "verify", "verified", "confirm", "confirmed", "validation", "validate", "validated":
+		return "verification"
+	case "instant", "immediate", "immediately", "right", "away":
+		return "immediate"
+	case "guarantee", "guaranteed", "promise", "promised", "commit", "committed":
+		return "promise"
+	case "timeline", "deadline", "window", "days", "day", "hours", "hour":
+		return "timeline"
+	case "escalate", "escalation", "handoff", "operator", "human":
+		return "escalation"
+	default:
+		if len(token) > 3 {
+			return token
+		}
+		return ""
+	}
 }
 
 func tokenSet(text string) map[string]struct{} {
