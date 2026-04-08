@@ -3,9 +3,11 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/sahal/parmesan/internal/quality"
 )
@@ -23,13 +25,19 @@ func main() {
 	var category string
 	var domain string
 	var summaryOnly bool
+	var idsOnly bool
 	flag.BoolVar(&liveOnly, "live-only", false, "print only scenarios marked for live-provider release gates")
 	flag.StringVar(&category, "category", "", "filter by category")
 	flag.StringVar(&domain, "domain", "", "filter by domain")
 	flag.BoolVar(&summaryOnly, "summary", false, "print aggregate catalog summary instead of scenario list")
+	flag.BoolVar(&idsOnly, "ids", false, "print comma-separated scenario ids instead of JSON")
 	flag.Parse()
 
 	scenarios := filterScenarios(quality.ProductionReadinessScenarios(), liveOnly, category, domain)
+	if idsOnly {
+		fmt.Println(strings.Join(scenarioIDs(scenarios), ","))
+		return
+	}
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
 	if summaryOnly {
@@ -41,6 +49,14 @@ func main() {
 	if err := encoder.Encode(scenarios); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func scenarioIDs(scenarios []quality.ScenarioExpectation) []string {
+	out := make([]string, 0, len(scenarios))
+	for _, scenario := range scenarios {
+		out = append(out, scenario.ID)
+	}
+	return out
 }
 
 func filterScenarios(scenarios []quality.ScenarioExpectation, liveOnly bool, category, domain string) []quality.ScenarioExpectation {

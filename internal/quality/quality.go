@@ -7,6 +7,10 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sahal/parmesan/internal/domain/customer"
+	"github.com/sahal/parmesan/internal/domain/knowledge"
+	"github.com/sahal/parmesan/internal/domain/policy"
+	knowledgeretriever "github.com/sahal/parmesan/internal/knowledge/retriever"
 	"github.com/sahal/parmesan/internal/model"
 	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
 )
@@ -762,6 +766,92 @@ func FindScenarioByID(id string) (ScenarioExpectation, bool) {
 		}
 	}
 	return ScenarioExpectation{}, false
+}
+
+func LiveGateScenarioIDs() []string {
+	var out []string
+	for _, scenario := range ProductionReadinessScenarios() {
+		if scenario.LiveGate {
+			out = append(out, scenario.ID)
+		}
+	}
+	return out
+}
+
+func ScenarioFixture(scenario ScenarioExpectation) (policyruntime.EngineResult, string, bool) {
+	switch scenario.Category {
+	case "knowledge_grounding", "retrieval_quality":
+		evidence := "Order support requires verification before refund or replacement review. Damaged items may qualify after policy review. Notifications can be sent by email."
+		if scenario.Category == "retrieval_quality" && strings.Contains(strings.ToLower(scenario.Input), "citation") {
+			evidence = "Policy support requires citation-backed retrieval before a replacement answer."
+		}
+		return policyruntime.EngineResult{
+			RetrieverStage: policyruntime.RetrieverStageResult{Results: []knowledgeretriever.Result{{
+				RetrieverID: "wiki",
+				Data:        evidence,
+				ResultHash:  "scenario_evidence",
+				Citations:   []knowledge.Citation{{URI: "kb://scenario"}},
+			}}},
+			MatchFinalizeStage: policyruntime.FinalizeStageResult{MatchedGuidelines: []policy.Guideline{{
+				ID:   "verify_first",
+				Then: "Verify the order before promising a refund or replacement.",
+			}}},
+		}, strings.TrimSuffix(evidence, "."), true
+	case "topic_scope":
+		reply := "I can help with pet-store questions, but not cooking or human food."
+		if strings.Contains(scenario.Input, "pet food") || strings.Contains(scenario.Input, "pet-safe") {
+			return policyruntime.EngineResult{
+				Bundle:             &policy.Bundle{DomainBoundary: policy.DomainBoundary{AllowedTopics: []string{"pet food", "pet-safe ingredients"}}},
+				ScopeBoundaryStage: policyruntime.ScopeBoundaryStageResult{Classification: "in_scope", Action: "allow"},
+			}, "I can help compare pet food options in the store catalog.", true
+		}
+		return policyruntime.EngineResult{
+			Bundle:             &policy.Bundle{DomainBoundary: policy.DomainBoundary{BlockedTopics: []string{"cooking", "human food", "finance"}}},
+			ScopeBoundaryStage: policyruntime.ScopeBoundaryStageResult{Classification: "out_of_scope", Action: "refuse", Reply: reply, Reasons: []string{"scenario_scope"}},
+		}, reply, true
+	case "preference":
+		if strings.Contains(strings.ToLower(scenario.Input), "email") {
+			return policyruntime.EngineResult{CustomerPreferences: []customer.Preference{{ID: "pref_email", Key: "contact_channel", Value: "email"}}}, "I will keep email as your preferred update channel.", true
+		}
+		return policyruntime.EngineResult{CustomerPreferences: []customer.Preference{{ID: "pref_name", Key: "preferred_name", Value: "Rina"}}}, "Rina, I can help with that.", true
+	case "multilingual":
+		if strings.EqualFold(strings.TrimSpace(scenario.ExpectedLanguage), "id") || strings.Contains(strings.ToLower(scenario.Input), "indonesian") || strings.Contains(strings.ToLower(scenario.Input), "mixed") {
+			return policyruntime.EngineResult{CustomerPreferences: []customer.Preference{{ID: "pref_language", Key: "preferred_language", Value: "indonesian"}}}, "Saya bisa membantu Anda dengan pilihan itu.", true
+		}
+		return policyruntime.EngineResult{Bundle: &policy.Bundle{Soul: policy.Soul{DefaultLanguage: "en"}}}, "I can help with that in English.", true
+	case "journey_adherence":
+		return policyruntime.EngineResult{
+			ActiveJourneyState: &policy.JourneyNode{ID: "state_verify", Instruction: "Please share the order number before I review options."},
+		}, "Please share the order number before I review options.", true
+	case "tool_and_approval":
+		return policyruntime.EngineResult{
+			MatchFinalizeStage: policyruntime.FinalizeStageResult{MatchedGuidelines: []policy.Guideline{{ID: "approval", Then: "Request approval before changing an order."}}},
+		}, "I need approval before changing the order.", true
+	case "soul_persona":
+		return policyruntime.EngineResult{Bundle: &policy.Bundle{Soul: policy.Soul{Tone: "warm", Verbosity: "concise"}}}, "I can help with that. I will keep this concise.", true
+	case "refusal_escalation", "failure_modes":
+		if strings.Contains(strings.ToLower(scenario.Input), "unsafe") || strings.Contains(strings.ToLower(scenario.Input), "blocked") {
+			return policyruntime.EngineResult{
+				Bundle: &policy.Bundle{DomainBoundary: policy.DomainBoundary{BlockedTopics: []string{"unsafe request"}}},
+				ScopeBoundaryStage: policyruntime.ScopeBoundaryStageResult{
+					Classification: "out_of_scope",
+					Action:         "refuse",
+					Reply:          "I cannot help with that request, but I can help with safe support options.",
+					Reasons:        []string{"scenario_boundary"},
+				},
+			}, "I cannot help with that request, but I can help with safe support options.", true
+		}
+		if strings.Contains(strings.ToLower(scenario.Input), "operator handoff") || strings.Contains(strings.ToLower(scenario.Input), "human review") {
+			return policyruntime.EngineResult{
+				MatchFinalizeStage: policyruntime.FinalizeStageResult{MatchedGuidelines: []policy.Guideline{{ID: "handoff", Then: "Escalate to a human operator when the customer asks for operator support."}}},
+			}, "I need to bring in a human operator for this. They will review the conversation and continue from here.", true
+		}
+		return policyruntime.EngineResult{
+			MatchFinalizeStage: policyruntime.FinalizeStageResult{MatchedGuidelines: []policy.Guideline{{ID: "safe_next_step", Then: "Avoid overcommitting and ask for the missing detail."}}},
+		}, "I need one more detail before I can continue safely.", true
+	default:
+		return policyruntime.EngineResult{}, "", false
+	}
 }
 
 func mergeScenarioSeeds(base, seeds []ScenarioExpectation) []ScenarioExpectation {

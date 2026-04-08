@@ -261,6 +261,7 @@ Inspect the catalog directly with:
 ```bash
 go run ./cmd/quality-catalog -summary
 go run ./cmd/quality-catalog -live-only
+go run ./cmd/quality-catalog -live-only -ids
 OPERATOR_API_KEY=... go run ./cmd/regression-export -base-url http://127.0.0.1:8080 -out artifacts/regression-fixtures.json
 go run ./cmd/regression-seed -in artifacts/regression-fixtures.json -out artifacts/regression-scenario-seeds.json
 go run ./cmd/quality-seed-check -in artifacts/regression-scenario-seeds.json
@@ -275,7 +276,8 @@ report checker merge those scenarios automatically, with matching IDs overriding
 built-in expectations.
 `./scripts/live_platform_validation.sh` now auto-detects
 `artifacts/regression-scenario-seeds.json`, validates it with
-`quality-seed-check`, and exports `QUALITY_SCENARIO_SEEDS` automatically.
+`quality-seed-check`, exports `QUALITY_SCENARIO_SEEDS`, and derives its live
+scenario expectation list directly from `go run ./cmd/quality-catalog -live-only -ids`.
 
 The script defaults reasoning, structured, and embedding providers to
 OpenRouter; override `DEFAULT_REASONING_PROVIDER`,

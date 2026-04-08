@@ -244,7 +244,10 @@ func TestProductionReadinessScenariosDefinesHundredCases(t *testing.T) {
 func TestProductionReadinessScenariosHaveDeterministicQualityCoverage(t *testing.T) {
 	for _, scenario := range ProductionReadinessScenarios() {
 		t.Run(scenario.ID, func(t *testing.T) {
-			view, response := deterministicScenarioQualityCase(scenario)
+			view, response, ok := ScenarioFixture(scenario)
+			if !ok {
+				t.Fatalf("scenario %s has no deterministic fixture", scenario.ID)
+			}
 			card := Grade(view, response, nil)
 			if card.Dimensions == nil {
 				t.Fatalf("scenario %s scorecard = %#v, want dimensions", scenario.ID, card)
@@ -287,58 +290,5 @@ func TestProductionReadinessScenariosMergesSeedFileFromEnv(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("merged scenarios = %#v, want seed scenario", scenarios)
-	}
-}
-
-func deterministicScenarioQualityCase(scenario ScenarioExpectation) (policyruntime.EngineResult, string) {
-	switch scenario.Category {
-	case "knowledge_grounding", "retrieval_quality":
-		evidence := "Order support requires verification before refund or replacement review. Damaged items may qualify after policy review. Notifications can be sent by email."
-		if scenario.Category == "retrieval_quality" && strings.Contains(strings.ToLower(scenario.Input), "citation") {
-			evidence = "Policy support requires citation-backed retrieval before a replacement answer."
-		}
-		return policyruntime.EngineResult{
-			RetrieverStage: policyruntime.RetrieverStageResult{Results: []knowledgeretriever.Result{{
-				RetrieverID: "wiki",
-				Data:        evidence,
-				ResultHash:  "scenario_evidence",
-				Citations:   []knowledge.Citation{{URI: "kb://scenario"}},
-			}}},
-		}, strings.TrimSuffix(evidence, ".")
-	case "topic_scope":
-		reply := "I can help with pet-store questions, but not cooking or human food."
-		if strings.Contains(scenario.Input, "pet food") || strings.Contains(scenario.Input, "pet-safe") {
-			return policyruntime.EngineResult{
-				Bundle:             &policy.Bundle{DomainBoundary: policy.DomainBoundary{AllowedTopics: []string{"pet food", "pet-safe ingredients"}}},
-				ScopeBoundaryStage: policyruntime.ScopeBoundaryStageResult{Classification: "in_scope", Action: "allow"},
-			}, "I can help compare pet food options in the store catalog."
-		}
-		return policyruntime.EngineResult{
-			Bundle:             &policy.Bundle{DomainBoundary: policy.DomainBoundary{BlockedTopics: []string{"cooking", "human food", "finance"}}},
-			ScopeBoundaryStage: policyruntime.ScopeBoundaryStageResult{Classification: "out_of_scope", Action: "refuse", Reply: reply, Reasons: []string{"scenario_scope"}},
-		}, reply
-	case "preference":
-		return policyruntime.EngineResult{CustomerPreferences: []customer.Preference{{ID: "pref_name", Key: "preferred_name", Value: "Rina"}}}, "Rina, I can help with that."
-	case "multilingual":
-		if strings.Contains(strings.ToLower(scenario.Input), "indonesian") || strings.Contains(strings.ToLower(scenario.Input), "mixed") {
-			return policyruntime.EngineResult{CustomerPreferences: []customer.Preference{{ID: "pref_language", Key: "preferred_language", Value: "indonesian"}}}, "Saya bisa membantu Anda dengan pilihan itu."
-		}
-		return policyruntime.EngineResult{Bundle: &policy.Bundle{Soul: policy.Soul{DefaultLanguage: "en"}}}, "I can help with that in English."
-	case "journey_adherence":
-		return policyruntime.EngineResult{
-			ActiveJourneyState: &policy.JourneyNode{ID: "state_verify", Instruction: "Please share the order number before I review options."},
-		}, "Please share the order number before I review options."
-	case "tool_and_approval":
-		return policyruntime.EngineResult{
-			MatchFinalizeStage: policyruntime.FinalizeStageResult{MatchedGuidelines: []policy.Guideline{{ID: "approval", Then: "Request approval before changing an order."}}},
-		}, "I need approval before changing the order."
-	case "soul_persona":
-		return policyruntime.EngineResult{Bundle: &policy.Bundle{Soul: policy.Soul{Tone: "warm", Verbosity: "concise"}}}, "I can help with that. I will keep this concise."
-	case "refusal_escalation", "failure_modes":
-		return policyruntime.EngineResult{
-			MatchFinalizeStage: policyruntime.FinalizeStageResult{MatchedGuidelines: []policy.Guideline{{ID: "safe_next_step", Then: "Avoid overcommitting and ask for the missing detail."}}},
-		}, "I need one more detail before I can continue safely."
-	default:
-		return policyruntime.EngineResult{}, "I can help with that."
 	}
 }

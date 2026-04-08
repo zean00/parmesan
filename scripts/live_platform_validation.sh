@@ -6,7 +6,6 @@ cd "$ROOT"
 
 REPORT_DIR="${PLATFORM_VALIDATION_REPORT_DIR:-/tmp/parmesan-platform-validation-live}"
 PROVIDER="${DEFAULT_REASONING_PROVIDER:-openrouter}"
-EXPECTED_SCENARIOS="ecommerce_knowledge_grounding_damaged_toaster_replacem,ecommerce_knowledge_grounding_refund_timing_question,pet_store_topic_scope_human_cooking_question,pet_store_topic_scope_pet_food_question,support_multilingual_english_fallback,support_multilingual_respond_in_indonesian,support_preference_call_me_rina,support_preference_prefer_email,support_refusal_escalation_operator_handoff,support_refusal_escalation_unsafe_request"
 SEED_FILE="${QUALITY_SCENARIO_SEEDS:-artifacts/regression-scenario-seeds.json}"
 
 if [[ "$PROVIDER" == "openrouter" && -z "${OPENROUTER_API_KEY:-}" ]]; then
@@ -29,6 +28,8 @@ if [[ -f "$SEED_FILE" ]]; then
   go run ./cmd/quality-seed-check -in "$SEED_FILE"
   export QUALITY_SCENARIO_SEEDS="$SEED_FILE"
 fi
+
+EXPECTED_SCENARIOS="$(go run ./cmd/quality-catalog -live-only -ids)"
 
 mkdir -p "$REPORT_DIR"
 rm -f "$REPORT_DIR"/TestPlatformValidation*.json

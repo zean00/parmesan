@@ -93,7 +93,7 @@ Knowledge rules:
 - `go run ./cmd/regression-seed -in artifacts/regression-fixtures.json -out artifacts/regression-scenario-seeds.json` converts that reviewable export into catalog-seed scenario entries.
 - `go run ./cmd/quality-seed-check -in artifacts/regression-scenario-seeds.json` validates reviewed seed entries before they are merged into the catalog.
 - Setting `QUALITY_SCENARIO_SEEDS=artifacts/regression-scenario-seeds.json` causes the quality catalog and report checker to merge reviewed seed scenarios automatically.
-- `./scripts/live_platform_validation.sh` auto-detects `artifacts/regression-scenario-seeds.json`, validates it, and exports `QUALITY_SCENARIO_SEEDS` automatically when the file is present.
+- `./scripts/live_platform_validation.sh` auto-detects `artifacts/regression-scenario-seeds.json`, validates it, exports `QUALITY_SCENARIO_SEEDS`, and derives the expected live-gate scenario IDs from `go run ./cmd/quality-catalog -live-only -ids`.
 
 Core event families:
 - `message`
