@@ -295,8 +295,8 @@ func TestProductionReadinessScenariosDefinesTwoHundredCases(t *testing.T) {
 			liveGate++
 		}
 	}
-	if liveGate != 50 {
-		t.Fatalf("live gate scenario count = %d, want 50", liveGate)
+	if liveGate != 55 {
+		t.Fatalf("live gate scenario count = %d, want 55", liveGate)
 	}
 	if len(categories) < 10 {
 		t.Fatalf("categories = %#v, want broad platform coverage", categories)
