@@ -3,6 +3,7 @@ package quality
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 
 	"github.com/sahal/parmesan/internal/model"
@@ -691,6 +692,10 @@ func shortStableID(value string) string {
 }
 
 func ProductionReadinessScenarios() []ScenarioExpectation {
+	return mergeScenarioSeeds(builtInProductionReadinessScenarios(), loadScenarioSeedsFromEnv())
+}
+
+func builtInProductionReadinessScenarios() []ScenarioExpectation {
 	categories := []struct {
 		domain   string
 		category string
@@ -743,6 +748,72 @@ func FindScenarioByID(id string) (ScenarioExpectation, bool) {
 		}
 	}
 	return ScenarioExpectation{}, false
+}
+
+func mergeScenarioSeeds(base, seeds []ScenarioExpectation) []ScenarioExpectation {
+	if len(seeds) == 0 {
+		return base
+	}
+	index := map[string]int{}
+	out := append([]ScenarioExpectation(nil), base...)
+	for i, item := range out {
+		index[item.ID] = i
+	}
+	for _, seed := range seeds {
+		if strings.TrimSpace(seed.ID) == "" {
+			continue
+		}
+		seed = normalizeScenarioSeed(seed)
+		if i, ok := index[seed.ID]; ok {
+			out[i] = seed
+			continue
+		}
+		out = append(out, seed)
+		index[seed.ID] = len(out) - 1
+	}
+	return out
+}
+
+func loadScenarioSeedsFromEnv() []ScenarioExpectation {
+	path := strings.TrimSpace(os.Getenv("QUALITY_SCENARIO_SEEDS"))
+	if path == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var seeds []ScenarioExpectation
+	if err := json.Unmarshal(raw, &seeds); err != nil {
+		return nil
+	}
+	var out []ScenarioExpectation
+	for _, seed := range seeds {
+		if strings.TrimSpace(seed.ID) == "" || strings.TrimSpace(seed.Input) == "" {
+			continue
+		}
+		out = append(out, normalizeScenarioSeed(seed))
+	}
+	return out
+}
+
+func normalizeScenarioSeed(seed ScenarioExpectation) ScenarioExpectation {
+	if strings.TrimSpace(seed.Domain) == "" {
+		seed.Domain = "support"
+	}
+	if strings.TrimSpace(seed.Category) == "" {
+		seed.Category = "failure_modes"
+	}
+	if strings.TrimSpace(seed.Risk) == "" {
+		seed.Risk = "high"
+	}
+	if seed.MinimumOverall <= 0 || seed.MinimumOverall > 1 {
+		seed.MinimumOverall = minimumOverallForRisk(seed.Risk)
+	}
+	if len(seed.ExpectedQuality) == 0 {
+		seed.ExpectedQuality = []string{"policy_adherence"}
+	}
+	return seed
 }
 
 func minimumOverallForRisk(risk string) float64 {

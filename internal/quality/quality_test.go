@@ -1,6 +1,7 @@
 package quality
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -260,6 +261,32 @@ func TestProductionReadinessScenariosHaveDeterministicQualityCoverage(t *testing
 				t.Fatalf("scenario %s scorecard = %#v, want deterministic passing baseline", scenario.ID, card)
 			}
 		})
+	}
+}
+
+func TestProductionReadinessScenariosMergesSeedFileFromEnv(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "scenario-seeds-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString(`[{"id":"seed_custom_quality_case","domain":"support","category":"failure_modes","input":"seeded case","expected_quality":["policy_adherence"],"risk":"medium","minimum_overall":0.75}]`); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("QUALITY_SCENARIO_SEEDS", file.Name())
+
+	scenarios := ProductionReadinessScenarios()
+	found := false
+	for _, scenario := range scenarios {
+		if scenario.ID == "seed_custom_quality_case" {
+			found = true
+			if scenario.MinimumOverall != 0.75 {
+				t.Fatalf("scenario = %#v, want merged minimum overall", scenario)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("merged scenarios = %#v, want seed scenario", scenarios)
 	}
 }
 
