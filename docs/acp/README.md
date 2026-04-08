@@ -99,7 +99,9 @@ Knowledge rules:
 - `go run ./cmd/quality-release-snapshot -dir /tmp/parmesan-platform-validation-live -out artifacts/quality-release-snapshot.json` freezes the latest live-gate evidence into one artifact with the merged live-gate set, live diff, report summary, and aggregated provider stats.
 - `./scripts/live_platform_validation.sh` writes that snapshot automatically to `QUALITY_RELEASE_SNAPSHOT_OUT`, defaulting to `artifacts/quality-release-snapshot.json`, after a passing report check.
 - `go run ./cmd/quality-release-history -dir artifacts/quality-release-history -require-consecutive 3` checks archived release snapshots and enforces a configurable consecutive-clean-run requirement.
+- `go run ./cmd/quality-release-trend -dir artifacts/quality-release-history` compares the latest archived snapshot to the previous one and reports score, pass/fail, and provider-health deltas.
 - `./scripts/live_platform_validation.sh` now archives each passing snapshot into `QUALITY_RELEASE_HISTORY_DIR`, defaulting to `artifacts/quality-release-history`, and runs the history check with `QUALITY_RELEASE_REQUIRE_CONSECUTIVE_CLEAN`.
+- `./scripts/live_platform_validation.sh` also runs the release-trend report after archiving the latest snapshot.
 - The quality catalog now carries 200 deterministic scenarios and 30 catalog-driven live-gate scenarios for the release path.
 
 Core event families:

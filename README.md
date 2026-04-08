@@ -271,6 +271,7 @@ QUALITY_SCENARIO_SEEDS=artifacts/regression-scenario-seeds.json go run ./cmd/qua
 go run ./cmd/quality-report-check -dir /tmp/parmesan-platform-validation-live -expect-scenarios ecommerce_knowledge_grounding_damaged_toaster_replacem,ecommerce_knowledge_grounding_refund_timing_question,pet_store_topic_scope_human_cooking_question,pet_store_topic_scope_pet_food_question,support_multilingual_english_fallback,support_multilingual_respond_in_indonesian,support_preference_call_me_rina,support_preference_prefer_email,support_refusal_escalation_operator_handoff,support_refusal_escalation_unsafe_request -min-overall 0.7
 go run ./cmd/quality-release-snapshot -dir /tmp/parmesan-platform-validation-live -out artifacts/quality-release-snapshot.json
 go run ./cmd/quality-release-history -dir artifacts/quality-release-history -require-consecutive 3
+go run ./cmd/quality-release-trend -dir artifacts/quality-release-history
 ```
 
 `quality-report-check` now applies stricter per-scenario minimums from the
@@ -292,6 +293,9 @@ The script also archives that snapshot into `QUALITY_RELEASE_HISTORY_DIR`,
 defaulting to `artifacts/quality-release-history`, and can enforce
 `QUALITY_RELEASE_REQUIRE_CONSECUTIVE_CLEAN` consecutive clean runs through
 `go run ./cmd/quality-release-history`.
+`go run ./cmd/quality-release-trend` compares the latest archived snapshot to
+the previous one and reports pass/fail change, minimum-score delta, and provider
+health changes.
 The catalog-driven live gate now expects 30 live scenarios, not just the
 original 10-scenario smoke pack.
 

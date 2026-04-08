@@ -65,6 +65,10 @@ echo "Release history check"
 go run ./cmd/quality-release-history -dir "$HISTORY_DIR" -require-consecutive "$REQUIRE_CONSECUTIVE"
 
 echo
+echo "Release trend"
+go run ./cmd/quality-release-trend -dir "$HISTORY_DIR"
+
+echo
 echo "Scorecard summary from $REPORT_DIR"
 if command -v jq >/dev/null 2>&1; then
   for report in "$REPORT_DIR"/TestPlatformValidation*.json; do
