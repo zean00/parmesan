@@ -4,5 +4,6 @@ bin/
 dist/
 .cache/
 coverage.out
+artifacts/
 __pycache__/
 *.py[cod]
