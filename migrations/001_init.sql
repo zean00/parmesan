@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS turn_executions (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL REFERENCES sessions(id),
     trigger_event_id TEXT NOT NULL,
+    trigger_event_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
     policy_bundle_id TEXT,
     proposal_id TEXT,
     rollout_id TEXT,
@@ -126,7 +127,8 @@ ALTER TABLE turn_executions
     ADD COLUMN IF NOT EXISTS lease_owner TEXT,
     ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS blocked_reason TEXT,
-    ADD COLUMN IF NOT EXISTS resume_signal TEXT;
+    ADD COLUMN IF NOT EXISTS resume_signal TEXT,
+    ADD COLUMN IF NOT EXISTS trigger_event_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
 
 CREATE TABLE IF NOT EXISTS tool_provider_bindings (
     id TEXT PRIMARY KEY,

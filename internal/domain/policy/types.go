@@ -138,10 +138,11 @@ type JourneyEdge struct {
 }
 
 type Template struct {
-	ID   string `json:"id" yaml:"id"`
-	Mode string `json:"mode" yaml:"mode"`
-	Text string `json:"text" yaml:"text"`
-	When string `json:"when,omitempty" yaml:"when,omitempty"`
+	ID       string   `json:"id" yaml:"id"`
+	Mode     string   `json:"mode" yaml:"mode"`
+	Text     string   `json:"text,omitempty" yaml:"text,omitempty"`
+	Messages []string `json:"messages,omitempty" yaml:"messages,omitempty"`
+	When     string   `json:"when,omitempty" yaml:"when,omitempty"`
 }
 
 type ToolPolicy struct {

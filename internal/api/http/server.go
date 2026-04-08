@@ -1486,7 +1486,7 @@ func (s *Server) operatorProcessEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "event_id must reference a customer message event", http.StatusBadRequest)
 		return
 	}
-	exec, err := s.createExecutionForEvent(r.Context(), sessionID, event.ID, event.TraceID, time.Now().UTC())
+	exec, err := s.createExecutionForEvent(r.Context(), sessionID, event.ID, event.TraceID, time.Now().UTC(), false, time.Time{})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -5042,10 +5042,13 @@ func (s *Server) enqueueSessionTurn(ctx context.Context, sessionID, eventID, sou
 		eventID = fmt.Sprintf("evt_%d", now.UnixNano())
 	}
 	traceID := fmt.Sprintf("trace_%d", now.UnixNano())
-	exec, err := s.createExecutionForEvent(ctx, sessionID, eventID, traceID, now)
+	window := responseCoalesceWindow()
+	coalesce := source == "customer" && kind == acp.EventKindMessage && window > 0
+	exec, err := s.createExecutionForEvent(ctx, sessionID, eventID, traceID, now, coalesce, now.Add(window))
 	if err != nil {
 		return session.Event{}, "", "", err
 	}
+	traceID = exec.TraceID
 	event, err := s.sessions.CreateEvent(ctx, sessionsvc.CreateEventParams{
 		ID:          eventID,
 		SessionID:   sessionID,
@@ -5066,7 +5069,7 @@ func (s *Server) enqueueSessionTurn(ctx context.Context, sessionID, eventID, sou
 	return event, exec.ID, traceID, nil
 }
 
-func (s *Server) createExecutionForEvent(ctx context.Context, sessionID, eventID, traceID string, now time.Time) (execution.TurnExecution, error) {
+func (s *Server) createExecutionForEvent(ctx context.Context, sessionID, eventID, traceID string, now time.Time, coalesce bool, coalesceUntil time.Time) (execution.TurnExecution, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
@@ -5078,10 +5081,13 @@ func (s *Server) createExecutionForEvent(ctx context.Context, sessionID, eventID
 		ID:             execID,
 		SessionID:      sessionID,
 		TriggerEventID: eventID,
-		TraceID:        traceID,
-		Status:         execution.StatusRunning,
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		TriggerEventIDs: []string{
+			eventID,
+		},
+		TraceID:   traceID,
+		Status:    execution.StatusRunning,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	steps := []execution.ExecutionStep{
 		newStep(execID, "ingest", false),
@@ -5090,10 +5096,37 @@ func (s *Server) createExecutionForEvent(ctx context.Context, sessionID, eventID
 		newStep(execID, "compose_response", true),
 		newStep(execID, "deliver_response", false),
 	}
-	if err := s.writes.CreateExecution(ctx, exec, steps); err != nil {
+	if coalesce {
+		exec.Status = execution.StatusWaiting
+		exec.LeaseExpiresAt = coalesceUntil
+		if len(steps) > 0 {
+			steps[0].Status = execution.StatusWaiting
+			steps[0].NextAttemptAt = coalesceUntil
+			steps[0].LeaseExpiresAt = coalesceUntil
+			steps[0].UpdatedAt = now
+		}
+		created, _, _, err := s.store.CreateOrCoalesceExecution(ctx, exec, steps, eventID, coalesceUntil)
+		if err != nil {
+			return execution.TurnExecution{}, err
+		}
+		return created, nil
+	}
+	if err := s.store.CreateExecution(ctx, exec, steps); err != nil {
 		return execution.TurnExecution{}, err
 	}
 	return exec, nil
+}
+
+func responseCoalesceWindow() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("ACP_RESPONSE_COALESCE_MS"))
+	if raw == "" {
+		return 1500 * time.Millisecond
+	}
+	ms, err := strconv.Atoi(raw)
+	if err != nil || ms < 0 {
+		return 1500 * time.Millisecond
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 func (s *Server) publishSessionEvent(sessionID string, event session.Event, executionID, traceID string, createdAt time.Time) {

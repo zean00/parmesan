@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sahal/parmesan/internal/acp"
 	"github.com/sahal/parmesan/internal/api/sse"
 	"github.com/sahal/parmesan/internal/config"
 	"github.com/sahal/parmesan/internal/domain/agent"
@@ -35,6 +36,96 @@ import (
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/store/memory"
 )
+
+func TestEnqueueSessionTurnCoalescesQuickCustomerMessages(t *testing.T) {
+	t.Setenv("ACP_RESPONSE_COALESCE_MS", "5000")
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(ctx, session.Session{ID: "sess_coalesce", Channel: "acp", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	first, execID, traceID, err := srv.enqueueSessionTurn(ctx, "sess_coalesce", "evt_first", "customer", acp.EventKindMessage, []session.ContentPart{{Type: "text", Text: "I need help"}}, nil, nil)
+	if err != nil {
+		t.Fatalf("first enqueue error = %v", err)
+	}
+	second, secondExecID, secondTraceID, err := srv.enqueueSessionTurn(ctx, "sess_coalesce", "evt_second", "customer", acp.EventKindMessage, []session.ContentPart{{Type: "text", Text: "also my order is damaged"}}, nil, nil)
+	if err != nil {
+		t.Fatalf("second enqueue error = %v", err)
+	}
+	writes.Stop()
+
+	if execID != secondExecID || traceID != secondTraceID {
+		t.Fatalf("second message execution=(%s,%s), want same (%s,%s)", secondExecID, secondTraceID, execID, traceID)
+	}
+	if first.ExecutionID != execID || second.ExecutionID != execID {
+		t.Fatalf("events execution IDs = %q/%q, want %q", first.ExecutionID, second.ExecutionID, execID)
+	}
+	exec, steps, err := repo.GetExecution(ctx, execID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exec.Status != execution.StatusWaiting {
+		t.Fatalf("execution status = %s, want waiting", exec.Status)
+	}
+	if got := strings.Join(exec.TriggerEventIDs, ","); got != "evt_first,evt_second" {
+		t.Fatalf("trigger event ids = %q, want both message IDs", got)
+	}
+	if len(steps) == 0 || steps[0].Status != execution.StatusWaiting || steps[0].NextAttemptAt.IsZero() {
+		t.Fatalf("first step = %#v, want waiting with wake cursor", steps)
+	}
+}
+
+func TestEnqueueSessionTurnDoesNotCoalesceRunningExecution(t *testing.T) {
+	t.Setenv("ACP_RESPONSE_COALESCE_MS", "5000")
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(ctx, session.Session{ID: "sess_running_coalesce", Channel: "acp", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, execID, _, err := srv.enqueueSessionTurn(ctx, "sess_running_coalesce", "evt_first", "customer", acp.EventKindMessage, []session.ContentPart{{Type: "text", Text: "I need help"}}, nil, nil)
+	if err != nil {
+		t.Fatalf("first enqueue error = %v", err)
+	}
+	exec, _, err := repo.GetExecution(ctx, execID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec.Status = execution.StatusRunning
+	exec.LeaseOwner = "runner_1"
+	exec.LeaseExpiresAt = time.Now().UTC().Add(time.Minute)
+	exec.UpdatedAt = time.Now().UTC()
+	if err := repo.UpdateExecution(ctx, exec); err != nil {
+		t.Fatal(err)
+	}
+
+	_, secondExecID, _, err := srv.enqueueSessionTurn(ctx, "sess_running_coalesce", "evt_second", "customer", acp.EventKindMessage, []session.ContentPart{{Type: "text", Text: "also my order is damaged"}}, nil, nil)
+	if err != nil {
+		t.Fatalf("second enqueue error = %v", err)
+	}
+	writes.Stop()
+	if secondExecID == execID {
+		t.Fatalf("second message coalesced into running execution %s; want follow-up execution", execID)
+	}
+	firstExec, _, err := repo.GetExecution(ctx, execID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(firstExec.TriggerEventIDs, ","); got != "evt_first" {
+		t.Fatalf("running execution trigger ids = %q, want only original trigger", got)
+	}
+}
 
 func TestCreateRolloutPromotesProposalAndEnforcesSingleActivePerChannel(t *testing.T) {
 	repo := memory.New()

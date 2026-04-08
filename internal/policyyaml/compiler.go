@@ -117,8 +117,8 @@ func ValidateBundle(bundle policy.Bundle) error {
 		if err := validateID("template", item.ID, seen); err != nil {
 			return err
 		}
-		if strings.TrimSpace(item.Text) == "" {
-			return fmt.Errorf("template %q requires text", item.ID)
+		if strings.TrimSpace(item.Text) == "" && !hasTemplateMessages(item.Messages) {
+			return fmt.Errorf("template %q requires text or messages", item.ID)
 		}
 	}
 	for _, item := range bundle.ToolPolicies {
@@ -399,4 +399,13 @@ func itemStateWhen(item policy.Journey, stateID string) []string {
 		}
 	}
 	return nil
+}
+
+func hasTemplateMessages(messages []string) bool {
+	for _, message := range messages {
+		if strings.TrimSpace(message) != "" {
+			return true
+		}
+	}
+	return false
 }

@@ -16,18 +16,169 @@ import (
 
 	"github.com/sahal/parmesan/internal/api/sse"
 	"github.com/sahal/parmesan/internal/config"
+	"github.com/sahal/parmesan/internal/domain/agent"
+	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/customer"
 	"github.com/sahal/parmesan/internal/domain/execution"
 	"github.com/sahal/parmesan/internal/domain/feedback"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
+	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/rollout"
 	"github.com/sahal/parmesan/internal/domain/session"
+	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/quality"
 	"github.com/sahal/parmesan/internal/runtime/runner"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/store/memory"
 )
+
+func TestPlatformValidationDurableApprovalResumeFlow(t *testing.T) {
+	var toolCallCount int
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		toolCallCount++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"result":{"order_id":"ord_123","status":"approved_for_review"}}`))
+	}))
+	defer toolServer.Close()
+
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 128)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	broker := sse.NewBroker()
+	router := model.NewRouter(config.ProviderConfig{
+		DefaultReasoning:  "openrouter",
+		DefaultStructured: "openrouter",
+		OpenRouterBase:    "https://openrouter.ai/api/v1",
+	})
+	r := runner.New(repo, writes, broker, router, "durable-approval-test-worker")
+	r.Start(ctx)
+	srv := New(":0", repo, writes, broker, router, nil)
+
+	now := time.Now().UTC()
+	if err := repo.SaveBundle(ctx, policy.Bundle{
+		ID:      "approval_bundle",
+		Version: "v1",
+		Guidelines: []policy.Guideline{{
+			ID:   "order_lookup",
+			When: "customer asks to check an order",
+			Then: "Check the order before responding.",
+			MCP:  &policy.MCPRef{Server: "commerce", Tool: "get_order"},
+		}},
+		ToolPolicies: []policy.ToolPolicy{{
+			ID:       "commerce_approval",
+			ToolIDs:  []string{"commerce.get_order", "commerce_get_order", "get_order"},
+			Approval: "required",
+		}},
+		ImportedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveAgentProfile(ctx, agent.Profile{
+		ID:                    "agent_approval",
+		Name:                  "Approval Agent",
+		Status:                "active",
+		DefaultPolicyBundleID: "approval_bundle",
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RegisterProvider(ctx, tool.ProviderBinding{ID: "commerce", Kind: tool.ProviderMCP, Name: "commerce", URI: toolServer.URL, Healthy: true, RegisteredAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveCatalogEntries(ctx, []tool.CatalogEntry{{
+		ID:              "commerce_get_order",
+		ProviderID:      "commerce",
+		Name:            "get_order",
+		Description:     "Get order details.",
+		RuntimeProtocol: "mcp",
+		ImportedAt:      now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doJSONRequest(t, srv, http.MethodPost, "/v1/acp/sessions", `{
+		"id":"sess_durable_approval",
+		"channel":"acp",
+		"agent_id":"agent_approval",
+		"customer_id":"cust_approval"
+	}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create session status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	rec = doJSONRequest(t, srv, http.MethodPost, "/v1/acp/sessions/sess_durable_approval/messages", `{
+		"id":"evt_durable_approval",
+		"text":"Please check my order ord_123"
+	}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("send message status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	exec := waitForExecutionStatusAllowBlocked(t, repo, "sess_durable_approval", execution.StatusBlocked, validationTimeout(4*time.Second))
+	if exec.BlockedReason != execution.BlockedReasonApprovalRequired || exec.ResumeSignal != execution.ResumeSignalApproval {
+		t.Fatalf("blocked execution = %#v, want approval resume metadata", exec)
+	}
+	if toolCallCount != 0 {
+		t.Fatalf("toolCallCount = %d, want no tool invocation before approval", toolCallCount)
+	}
+	approvals := waitForPendingApprovals(t, repo, "sess_durable_approval", validationTimeout(2*time.Second))
+	if len(approvals) != 1 {
+		t.Fatalf("approvals = %#v, want one pending approval", approvals)
+	}
+
+	rec = doJSONRequest(t, srv, http.MethodGet, "/v1/acp/sessions/sess_durable_approval/approvals", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list approvals status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var listed []approval.Session
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode approvals: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != approvals[0].ID || listed[0].Status != approval.StatusPending {
+		t.Fatalf("listed approvals = %#v, want pending approval %s", listed, approvals[0].ID)
+	}
+
+	rec = doJSONRequest(t, srv, http.MethodPost, "/v1/acp/sessions/sess_durable_approval/approvals/"+approvals[0].ID, `{"decision":"approve"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	exec = waitForExecutionStatus(t, repo, "sess_durable_approval", execution.StatusSucceeded, validationTimeout(6*time.Second))
+	if exec.ID == "" {
+		t.Fatal("missing resumed execution")
+	}
+	if toolCallCount != 1 {
+		t.Fatalf("toolCallCount = %d, want one tool invocation after approval", toolCallCount)
+	}
+	runs, err := repo.ListToolRuns(context.Background(), exec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].Status != "succeeded" {
+		t.Fatalf("tool runs = %#v, want one succeeded tool run", runs)
+	}
+	_ = waitForAssistantText(t, repo, "sess_durable_approval", validationTimeout(2*time.Second))
+	events, err := repo.ListEvents(context.Background(), "sess_durable_approval")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hasApprovalResolved, hasToolCompleted bool
+	for _, event := range events {
+		switch event.Kind {
+		case "approval.resolved":
+			hasApprovalResolved = true
+		case "tool.completed":
+			hasToolCompleted = true
+		}
+	}
+	if !hasApprovalResolved || !hasToolCompleted {
+		t.Fatalf("events = %#v, want approval.resolved and tool.completed", events)
+	}
+}
 
 func TestPlatformValidationEcommerceLifecycle(t *testing.T) {
 	repo := memory.New()
@@ -811,6 +962,65 @@ func waitForExecutionStatus(t *testing.T, repo *memory.Store, sessionID string, 
 		t.Fatalf("latest execution for session %s = %#v; steps=%#v", sessionID, latest, latestSteps)
 	}
 	return matched
+}
+
+func waitForExecutionStatusAllowBlocked(t *testing.T, repo *memory.Store, sessionID string, want execution.Status, timeout time.Duration) execution.TurnExecution {
+	t.Helper()
+	var matched execution.TurnExecution
+	var latest execution.TurnExecution
+	var latestSteps []execution.ExecutionStep
+	waitFor(t, timeout, func() bool {
+		items, err := repo.ListExecutions(context.Background())
+		if err != nil {
+			return false
+		}
+		var found execution.TurnExecution
+		for _, item := range items {
+			if item.SessionID != sessionID {
+				continue
+			}
+			if found.ID == "" || item.CreatedAt.After(found.CreatedAt) {
+				found = item
+			}
+		}
+		if found.ID == "" {
+			return false
+		}
+		matched = found
+		latest = found
+		_, steps, err := repo.GetExecution(context.Background(), found.ID)
+		if err == nil {
+			latestSteps = steps
+		}
+		switch found.Status {
+		case execution.StatusFailed, execution.StatusAbandoned:
+			t.Fatalf("execution %s for session %s reached terminal status %s; steps=%#v", found.ID, sessionID, found.Status, latestSteps)
+		}
+		return found.Status == want
+	})
+	if matched.Status != want {
+		t.Fatalf("latest execution for session %s = %#v; steps=%#v", sessionID, latest, latestSteps)
+	}
+	return matched
+}
+
+func waitForPendingApprovals(t *testing.T, repo *memory.Store, sessionID string, timeout time.Duration) []approval.Session {
+	t.Helper()
+	var out []approval.Session
+	waitFor(t, timeout, func() bool {
+		items, err := repo.ListApprovalSessions(context.Background(), sessionID)
+		if err != nil {
+			return false
+		}
+		out = nil
+		for _, item := range items {
+			if item.Status == approval.StatusPending {
+				out = append(out, item)
+			}
+		}
+		return len(out) > 0
+	})
+	return out
 }
 
 func waitForAssistantText(t *testing.T, repo *memory.Store, sessionID string, timeout time.Duration) string {

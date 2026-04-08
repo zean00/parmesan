@@ -60,6 +60,27 @@ templates:
 	}
 }
 
+func TestParseBundleAllowsTemplateMessageSequence(t *testing.T) {
+	raw := []byte(`
+id: bundle-1
+version: v1
+templates:
+  - id: two_step_reply
+    mode: strict
+    messages:
+      - I can help with that.
+      - First, please share your order number.
+`)
+
+	bundle, err := ParseBundle(raw)
+	if err != nil {
+		t.Fatalf("ParseBundle() error = %v", err)
+	}
+	if len(bundle.Templates) != 1 || len(bundle.Templates[0].Messages) != 2 {
+		t.Fatalf("templates = %#v, want parsed message sequence", bundle.Templates)
+	}
+}
+
 func TestParseBundleNormalizesJourneyRootAndEdges(t *testing.T) {
 	raw := []byte(`
 id: bundle-1

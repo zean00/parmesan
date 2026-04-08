@@ -759,6 +759,40 @@ func TestComposePromptIncludesSoulGuidance(t *testing.T) {
 	}
 }
 
+func TestCreateAssistantMessageSequenceAddsBatchMetadata(t *testing.T) {
+	repo := memory.New()
+	r := New(repo, nil, nil, nil, "test-runner")
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := repo.CreateSession(ctx, session.Session{ID: "sess_batch", Channel: "acp", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := r.createAssistantMessageSequence(ctx, execution.TurnExecution{
+		ID:        "exec_batch",
+		SessionID: "sess_batch",
+		TraceID:   "trace_batch",
+	}, []string{"First message.", "Second message."})
+	if err != nil {
+		t.Fatalf("createAssistantMessageSequence() error = %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events len = %d, want 2", len(events))
+	}
+	batchID, _ := events[0].Metadata["response_batch_id"].(string)
+	if strings.TrimSpace(batchID) == "" {
+		t.Fatalf("first event metadata = %#v, want response_batch_id", events[0].Metadata)
+	}
+	for i, event := range events {
+		if event.Source != "ai_agent" || event.ExecutionID != "exec_batch" || event.TraceID != "trace_batch" {
+			t.Fatalf("event[%d] = %#v, want assistant event tied to execution", i, event)
+		}
+		if event.Metadata["response_batch_id"] != batchID || event.Metadata["message_index"] != i || event.Metadata["message_count"] != 2 {
+			t.Fatalf("event[%d] metadata = %#v", i, event.Metadata)
+		}
+	}
+}
+
 func step(execID, name string, recomputable bool) execution.ExecutionStep {
 	now := time.Now().UTC()
 	return execution.ExecutionStep{

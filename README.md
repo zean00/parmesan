@@ -222,6 +222,8 @@ Durable execution notes:
 - approval-required tools block executions with an approval resume signal; approval resolution moves the blocked step and execution back to `pending`
 - retryable step/tool failures are scheduled with durable backoff and resume after the retry cursor; exhausted retry budgets block for operator recovery
 - independent planned tools run in parallel while preserving approval blocking and idempotent tool-run reuse
+- ACP customer messages are coalesced for a short durable waiting window before response; configure it with `ACP_RESPONSE_COALESCE_MS` (default `1500`, set `0` to disable)
+- strict policy templates can emit natural response sequences with `messages: [...]`; generated replies may also return a bounded JSON `messages` array, capped at three assistant events per execution
 
 ## Example Policy
 

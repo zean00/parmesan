@@ -13,7 +13,9 @@ Supported routes:
 - `POST /v1/acp/sessions/{id}/approvals/{approval_id}`
 
 Conversation-edge rules:
-- `POST /v1/acp/sessions/{id}/messages` is the primary turn-ingress endpoint and creates a durable execution plus the trigger event.
+- `POST /v1/acp/sessions/{id}/messages` is the primary turn-ingress endpoint and creates or coalesces a durable execution plus the trigger event.
+- Quick successive customer messages are coalesced for `ACP_RESPONSE_COALESCE_MS` milliseconds (default `1500`, set `0` to disable) while the execution is still safe to merge before response composition.
+- One execution can emit multiple ordered `ai_agent` message events when a strict template defines `messages: [...]` or generation returns a bounded JSON `messages` array; each event carries response-batch metadata while compatibility status events keep the first `event_id`.
 - If the session mode is `manual`, ACP message ingress persists and streams the customer message but does not create an automated execution.
 - approval reads and responses should use the ACP session-scoped approval endpoints instead of the legacy `/v1/web/...` gateway surface.
 - Operator supervision uses `/v1/operator/...`; operator notes are hidden from ACP list/stream responses.

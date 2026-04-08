@@ -2656,14 +2656,41 @@ func inferCompositionMode(templates []policy.Template) string {
 }
 
 func templateScore(tmpl policy.Template, text string) int {
-	return semantics.EvaluateCondition(firstNonEmpty(tmpl.When, tmpl.Text), text).Score
+	return semantics.EvaluateCondition(templateConditionText(tmpl), text).Score
+}
+
+func templateConditionText(tmpl policy.Template) string {
+	if strings.TrimSpace(tmpl.When) != "" {
+		return tmpl.When
+	}
+	if strings.TrimSpace(tmpl.Text) != "" {
+		return tmpl.Text
+	}
+	return strings.Join(tmpl.Messages, " ")
 }
 
 func renderTemplate(templates []policy.Template, toolOutput map[string]any) string {
 	if len(templates) == 0 {
 		return ""
 	}
-	out := templates[0].Text
+	tmpl := templates[0]
+	if len(tmpl.Messages) > 0 {
+		var parts []string
+		for _, message := range tmpl.Messages {
+			rendered := renderTemplateText(message, toolOutput)
+			if rendered != "" {
+				parts = append(parts, rendered)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n\n")
+		}
+	}
+	return renderTemplateText(tmpl.Text, toolOutput)
+}
+
+func renderTemplateText(text string, toolOutput map[string]any) string {
+	out := text
 	for key, value := range toolOutput {
 		out = strings.ReplaceAll(out, "{{"+key+"}}", fmt.Sprint(value))
 	}

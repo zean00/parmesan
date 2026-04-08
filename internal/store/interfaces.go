@@ -57,6 +57,7 @@ type Repository interface {
 	GetConversationBinding(ctx context.Context, channel string, externalConversationID string) (gatewaydomain.ConversationBinding, error)
 	ListConversationBindings(ctx context.Context) ([]gatewaydomain.ConversationBinding, error)
 	CreateExecution(ctx context.Context, exec execution.TurnExecution, steps []execution.ExecutionStep) error
+	CreateOrCoalesceExecution(ctx context.Context, exec execution.TurnExecution, steps []execution.ExecutionStep, triggerEventID string, coalesceUntil time.Time) (execution.TurnExecution, []execution.ExecutionStep, bool, error)
 	ListExecutions(ctx context.Context) ([]execution.TurnExecution, error)
 	GetExecution(ctx context.Context, executionID string) (execution.TurnExecution, []execution.ExecutionStep, error)
 	UpdateExecution(ctx context.Context, exec execution.TurnExecution) error

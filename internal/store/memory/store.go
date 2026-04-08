@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -498,6 +499,41 @@ func (s *Store) CreateExecution(_ context.Context, exec execution.TurnExecution,
 	return nil
 }
 
+func (s *Store) CreateOrCoalesceExecution(_ context.Context, exec execution.TurnExecution, steps []execution.ExecutionStep, triggerEventID string, coalesceUntil time.Time) (execution.TurnExecution, []execution.ExecutionStep, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.execs) - 1; i >= 0; i-- {
+		existing := s.execs[i]
+		if existing.SessionID != exec.SessionID || existing.BlockedReason != "" {
+			continue
+		}
+		if existing.Status != execution.StatusPending && existing.Status != execution.StatusWaiting {
+			continue
+		}
+		if !safeToCoalesceSteps(s.steps[existing.ID]) {
+			continue
+		}
+		if hasAssistantEventForExecution(s.events[existing.SessionID], existing.ID) {
+			continue
+		}
+		existing.TriggerEventIDs = appendUniqueExecutionID(existing.TriggerEventIDs, existing.TriggerEventID)
+		existing.TriggerEventIDs = appendUniqueExecutionID(existing.TriggerEventIDs, triggerEventID)
+		existing.LeaseExpiresAt = coalesceUntil
+		existing.Status = execution.StatusWaiting
+		existing.LeaseOwner = ""
+		existing.UpdatedAt = exec.UpdatedAt
+		updateFirstPendingStepForCoalesce(s.steps[existing.ID], coalesceUntil, exec.UpdatedAt)
+		s.execs[i] = existing
+		return existing, append([]execution.ExecutionStep(nil), s.steps[existing.ID]...), true, nil
+	}
+	if len(exec.TriggerEventIDs) == 0 {
+		exec.TriggerEventIDs = []string{triggerEventID}
+	}
+	s.execs = append(s.execs, exec)
+	s.steps[exec.ID] = append([]execution.ExecutionStep(nil), steps...)
+	return exec, append([]execution.ExecutionStep(nil), steps...), false, nil
+}
+
 func (s *Store) UpdateExecution(_ context.Context, updated execution.TurnExecution) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -560,6 +596,55 @@ func (s *Store) ListRunnableExecutions(_ context.Context, now time.Time) ([]exec
 		}
 	}
 	return out, nil
+}
+
+func safeToCoalesceSteps(steps []execution.ExecutionStep) bool {
+	for _, step := range steps {
+		if step.Name != "compose_response" {
+			continue
+		}
+		switch step.Status {
+		case execution.StatusRunning, execution.StatusSucceeded, execution.StatusBlocked, execution.StatusFailed, execution.StatusAbandoned:
+			return false
+		}
+	}
+	return true
+}
+
+func updateFirstPendingStepForCoalesce(steps []execution.ExecutionStep, coalesceUntil time.Time, updatedAt time.Time) {
+	for i := range steps {
+		if steps[i].Status != execution.StatusPending && steps[i].Status != execution.StatusWaiting {
+			continue
+		}
+		steps[i].Status = execution.StatusWaiting
+		steps[i].NextAttemptAt = coalesceUntil
+		steps[i].LeaseOwner = ""
+		steps[i].LeaseExpiresAt = coalesceUntil
+		steps[i].UpdatedAt = updatedAt
+		return
+	}
+}
+
+func hasAssistantEventForExecution(events []session.Event, executionID string) bool {
+	for _, event := range events {
+		if event.ExecutionID == executionID && event.Source == "ai_agent" {
+			return true
+		}
+	}
+	return false
+}
+
+func appendUniqueExecutionID(items []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return items
+	}
+	for _, item := range items {
+		if item == value {
+			return items
+		}
+	}
+	return append(items, value)
 }
 
 func (s *Store) UpsertJourneyInstance(_ context.Context, instance journey.Instance) error {

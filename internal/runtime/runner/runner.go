@@ -521,28 +521,30 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 		if err != nil {
 			return err
 		}
-		respText := renderResponse(view, toolOutput)
-		if respText == "" {
+		respMessages := renderResponseMessages(view, toolOutput)
+		if len(respMessages) == 0 {
 			prompt := composePrompt(view, events, toolOutput)
 			resp, err := r.router.Generate(ctx, model.CapabilityReasoning, model.Request{Prompt: prompt})
 			if err != nil {
 				return err
 			}
-			respText = resp.Text
+			respMessages = parseResponseEnvelope(resp.Text)
 		}
+		respMessages = normalizeResponseMessages(respMessages)
+		respText := strings.Join(respMessages, "\n\n")
 		verification := policyruntime.VerifyDraft(view, respText, toolOutput)
 		switch verification.Status {
 		case "revise", "block":
 			if strings.TrimSpace(verification.Replacement) != "" {
+				respMessages = []string{verification.Replacement}
 				respText = verification.Replacement
 			}
 		}
-		assistantEvent, err := r.sessions.CreateMessageEvent(ctx, exec.SessionID, "ai_agent", respText, exec.ID, exec.TraceID, map[string]any{
-			"step": "compose_response",
-		}, false)
+		assistantEvents, err := r.createAssistantMessageSequence(ctx, *exec, respMessages)
 		if err != nil {
 			return err
 		}
+		eventIDs := eventIDs(assistantEvents)
 		journeyDecision := view.JourneyProgressStage.Decision
 		if view.JourneyInstance != nil && view.ActiveJourney != nil && view.ActiveJourneyState != nil {
 			next := policyruntime.AdvanceJourney(view.JourneyInstance, view.ActiveJourneyState, view.ActiveJourney, journeyDecision)
@@ -560,7 +562,8 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			TraceID:     exec.TraceID,
 			Message:     "assistant response composed",
 			Fields: map[string]any{
-				"event_id":      assistantEvent.ID,
+				"event_id":      firstString(eventIDs),
+				"event_ids":     eventIDs,
 				"journey_state": journeyStateID(view.ActiveJourneyState),
 				"tool_output":   toolOutput,
 				"verification":  verification,
@@ -568,7 +571,8 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			CreatedAt: time.Now().UTC(),
 		})
 		if _, err := r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "response.composed", "completed", exec.ID, exec.TraceID, map[string]any{
-			"event_id": assistantEvent.ID,
+			"event_id":  firstString(eventIDs),
+			"event_ids": eventIDs,
 		}, nil, false); err != nil {
 			return err
 		}
@@ -579,14 +583,21 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 		if err != nil {
 			return err
 		}
-		last := latestAssistant(events)
-		if last.ID != "" {
+		assistantEvents := assistantEventsForExecution(events, exec.ID)
+		if len(assistantEvents) == 0 {
+			if last := latestAssistant(events); last.ID != "" {
+				assistantEvents = []session.Event{last}
+			}
+		}
+		eventIDs := eventIDs(assistantEvents)
+		if len(eventIDs) > 0 {
 			if _, err := r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "response.delivered", "queued", exec.ID, exec.TraceID, map[string]any{
-				"event_id": last.ID,
+				"event_id":  firstString(eventIDs),
+				"event_ids": eventIDs,
 			}, nil, false); err != nil {
 				return err
 			}
-			r.publish(exec.SessionID, exec.ID, "runtime.response.completed", map[string]any{"event_id": last.ID, "status": "queued_for_gateway"})
+			r.publish(exec.SessionID, exec.ID, "runtime.response.completed", map[string]any{"event_id": firstString(eventIDs), "event_ids": eventIDs, "status": "queued_for_gateway"})
 		}
 		return nil
 	default:
@@ -1714,6 +1725,7 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 	if len(toolOutput) > 0 {
 		parts = append(parts, "Tool output: "+mustJSON(toolOutput))
 	}
+	parts = append(parts, `Return either plain text or JSON with this schema: {"messages":["first assistant message","optional follow-up message"]}. Use 1 to 3 messages. Split into multiple messages only when that makes the conversation more natural or when a template/policy calls for a sequence.`)
 	return strings.Join(parts, "\n")
 }
 
@@ -1907,6 +1919,77 @@ func (r *Runner) appendTrace(ctx context.Context, record audit.Record) {
 	_ = r.repo.AppendAuditRecord(ctx, record)
 }
 
+func (r *Runner) createAssistantMessageSequence(ctx context.Context, exec execution.TurnExecution, messages []string) ([]session.Event, error) {
+	messages = normalizeResponseMessages(messages)
+	batchID := fmt.Sprintf("resp_%d", time.Now().UnixNano())
+	out := make([]session.Event, 0, len(messages))
+	for i, message := range messages {
+		event, err := r.sessions.CreateMessageEvent(ctx, exec.SessionID, "ai_agent", message, exec.ID, exec.TraceID, map[string]any{
+			"step":              "compose_response",
+			"response_batch_id": batchID,
+			"message_index":     i,
+			"message_count":     len(messages),
+		}, false)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, event)
+	}
+	return out, nil
+}
+
+type responseEnvelope struct {
+	Messages []string `json:"messages"`
+	Text     string   `json:"text"`
+}
+
+func parseResponseEnvelope(raw string) []string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+	var env responseEnvelope
+	if err := json.Unmarshal([]byte(trimmed), &env); err == nil {
+		if len(env.Messages) > 0 {
+			return env.Messages
+		}
+		if strings.TrimSpace(env.Text) != "" {
+			return []string{env.Text}
+		}
+	}
+	start := strings.Index(trimmed, "{")
+	end := strings.LastIndex(trimmed, "}")
+	if start >= 0 && end > start {
+		if err := json.Unmarshal([]byte(trimmed[start:end+1]), &env); err == nil {
+			if len(env.Messages) > 0 {
+				return env.Messages
+			}
+			if strings.TrimSpace(env.Text) != "" {
+				return []string{env.Text}
+			}
+		}
+	}
+	return []string{trimmed}
+}
+
+func normalizeResponseMessages(messages []string) []string {
+	out := make([]string, 0, len(messages))
+	for _, message := range messages {
+		message = strings.TrimSpace(message)
+		if message == "" {
+			continue
+		}
+		out = append(out, message)
+		if len(out) == 3 {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return []string{"Not sure I understand. Could you please say that another way?"}
+	}
+	return out
+}
+
 func latestText(events []session.Event) string {
 	for i := len(events) - 1; i >= 0; i-- {
 		if events[i].Source != "customer" {
@@ -1928,6 +2011,33 @@ func latestAssistant(events []session.Event) session.Event {
 		}
 	}
 	return session.Event{}
+}
+
+func assistantEventsForExecution(events []session.Event, executionID string) []session.Event {
+	var out []session.Event
+	for _, event := range events {
+		if event.ExecutionID == executionID && event.Source == "ai_agent" {
+			out = append(out, event)
+		}
+	}
+	return out
+}
+
+func eventIDs(events []session.Event) []string {
+	out := make([]string, 0, len(events))
+	for _, event := range events {
+		if strings.TrimSpace(event.ID) != "" {
+			out = append(out, event.ID)
+		}
+	}
+	return out
+}
+
+func firstString(items []string) string {
+	if len(items) == 0 {
+		return ""
+	}
+	return items[0]
 }
 
 func hasEvent(events []session.Event, eventID string) bool {

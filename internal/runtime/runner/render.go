@@ -9,26 +9,34 @@ import (
 )
 
 func renderResponse(view resolvedView, toolOutput map[string]any) string {
+	messages := renderResponseMessages(view, toolOutput)
+	if len(messages) == 0 {
+		return ""
+	}
+	return strings.Join(messages, "\n\n")
+}
+
+func renderResponseMessages(view resolvedView, toolOutput map[string]any) []string {
 	if reply := strings.TrimSpace(view.ScopeBoundaryStage.Reply); reply != "" && (view.ScopeBoundaryStage.Action == "refuse" || view.ScopeBoundaryStage.Action == "redirect") {
-		return reply
+		return []string{reply}
 	}
 	analysis := view.ResponseAnalysisStage.Analysis
 	if view.DisambiguationPrompt != "" {
-		return view.DisambiguationPrompt
+		return []string{view.DisambiguationPrompt}
 	}
 	if rendered := renderTemplateText(analysis.RecommendedTemplate, toolOutput); rendered != "" {
-		return rendered
+		return []string{rendered}
 	}
 	if strings.EqualFold(view.CompositionMode, "strict") {
-		if rendered := renderTemplate(view.ResponseAnalysisStage.CandidateTemplates, toolOutput); rendered != "" {
+		if rendered := renderTemplateMessages(view.ResponseAnalysisStage.CandidateTemplates, toolOutput); len(rendered) > 0 {
 			return rendered
 		}
 		if view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
-			return view.ActiveJourneyState.Instruction
+			return []string{view.ActiveJourneyState.Instruction}
 		}
-		return strictNoMatchText(view.NoMatch)
+		return []string{strictNoMatchText(view.NoMatch)}
 	}
-	if rendered := renderTemplate(view.ResponseAnalysisStage.CandidateTemplates, toolOutput); rendered != "" {
+	if rendered := renderTemplateMessages(view.ResponseAnalysisStage.CandidateTemplates, toolOutput); len(rendered) > 0 {
 		return rendered
 	}
 	guidelines := view.MatchFinalizeStage.MatchedGuidelines
@@ -40,25 +48,43 @@ func renderResponse(view resolvedView, toolOutput map[string]any) string {
 			}
 		}
 		if len(parts) > 0 {
-			return strings.Join(parts, " ")
+			return []string{strings.Join(parts, " ")}
 		}
 	}
 	if view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
-		return view.ActiveJourneyState.Instruction
+		return []string{view.ActiveJourneyState.Instruction}
 	}
 	if len(toolOutput) > 0 {
 		raw, _ := json.Marshal(toolOutput)
-		return fmt.Sprintf("I checked the tool result: %s", string(raw))
+		return []string{fmt.Sprintf("I checked the tool result: %s", string(raw))}
 	}
-	return ""
+	return nil
 }
 
 func renderTemplate(templates []policy.Template, toolOutput map[string]any) string {
+	return strings.Join(renderTemplateMessages(templates, toolOutput), "\n\n")
+}
+
+func renderTemplateMessages(templates []policy.Template, toolOutput map[string]any) []string {
 	if len(templates) == 0 {
-		return ""
+		return nil
 	}
-	out := templates[0].Text
-	return renderTemplateText(out, toolOutput)
+	template := templates[0]
+	if len(template.Messages) > 0 {
+		out := make([]string, 0, len(template.Messages))
+		for _, message := range template.Messages {
+			if rendered := renderTemplateText(message, toolOutput); rendered != "" {
+				out = append(out, rendered)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	if rendered := renderTemplateText(template.Text, toolOutput); rendered != "" {
+		return []string{rendered}
+	}
+	return nil
 }
 
 func renderTemplateText(text string, toolOutput map[string]any) string {

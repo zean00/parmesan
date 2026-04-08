@@ -1416,10 +1416,10 @@ func (c *Client) CreateExecution(ctx context.Context, exec execution.TurnExecuti
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO turn_executions (
-			id, session_id, trigger_event_id, policy_bundle_id, proposal_id, rollout_id, selection_reason, trace_id, status, lease_owner, lease_expires_at, blocked_reason, resume_signal, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+			id, session_id, trigger_event_id, trigger_event_ids, policy_bundle_id, proposal_id, rollout_id, selection_reason, trace_id, status, lease_owner, lease_expires_at, blocked_reason, resume_signal, created_at, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 		ON CONFLICT (id) DO NOTHING
-	`, exec.ID, exec.SessionID, exec.TriggerEventID, nullString(exec.PolicyBundleID), nullString(exec.ProposalID), nullString(exec.RolloutID), nullString(exec.SelectionReason), nullString(exec.TraceID), exec.Status, nullString(exec.LeaseOwner), nullTime(exec.LeaseExpiresAt), nullString(exec.BlockedReason), nullString(exec.ResumeSignal), exec.CreatedAt, exec.UpdatedAt)
+	`, exec.ID, exec.SessionID, exec.TriggerEventID, mustJSONValue(triggerEventIDs(exec)), nullString(exec.PolicyBundleID), nullString(exec.ProposalID), nullString(exec.RolloutID), nullString(exec.SelectionReason), nullString(exec.TraceID), exec.Status, nullString(exec.LeaseOwner), nullTime(exec.LeaseExpiresAt), nullString(exec.BlockedReason), nullString(exec.ResumeSignal), exec.CreatedAt, exec.UpdatedAt)
 	if err != nil {
 		return err
 	}
@@ -1437,9 +1437,102 @@ func (c *Client) CreateExecution(ctx context.Context, exec execution.TurnExecuti
 	return tx.Commit(ctx)
 }
 
+func (c *Client) CreateOrCoalesceExecution(ctx context.Context, exec execution.TurnExecution, steps []execution.ExecutionStep, triggerEventID string, coalesceUntil time.Time) (execution.TurnExecution, []execution.ExecutionStep, bool, error) {
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		return execution.TurnExecution{}, nil, false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	row := tx.QueryRow(ctx, `
+		SELECT id, session_id, trigger_event_id, trigger_event_ids, COALESCE(policy_bundle_id,''), COALESCE(proposal_id,''), COALESCE(rollout_id,''), COALESCE(selection_reason,''), COALESCE(trace_id,''), status, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), created_at, updated_at
+		FROM turn_executions
+		WHERE session_id = $1
+		  AND status IN ('pending','waiting')
+		  AND COALESCE(blocked_reason, '') = ''
+		  AND NOT EXISTS (
+			SELECT 1 FROM session_events
+			WHERE execution_id = turn_executions.id
+			  AND source = 'ai_agent'
+		  )
+		  AND NOT EXISTS (
+			SELECT 1 FROM execution_steps
+			WHERE execution_id = turn_executions.id
+			  AND name = 'compose_response'
+			  AND status IN ('running','succeeded','blocked','failed','abandoned')
+		  )
+		ORDER BY created_at DESC
+		LIMIT 1
+		FOR UPDATE
+	`, exec.SessionID)
+	var existing execution.TurnExecution
+	var raw []byte
+	if err := row.Scan(&existing.ID, &existing.SessionID, &existing.TriggerEventID, &raw, &existing.PolicyBundleID, &existing.ProposalID, &existing.RolloutID, &existing.SelectionReason, &existing.TraceID, &existing.Status, &existing.LeaseOwner, &existing.LeaseExpiresAt, &existing.BlockedReason, &existing.ResumeSignal, &existing.CreatedAt, &existing.UpdatedAt); err == nil {
+		_ = json.Unmarshal(raw, &existing.TriggerEventIDs)
+		existing.TriggerEventIDs = appendUniqueString(triggerEventIDs(existing), triggerEventID)
+		existing.LeaseExpiresAt = coalesceUntil
+		if existing.Status != execution.StatusRunning {
+			existing.Status = execution.StatusWaiting
+		}
+		existing.UpdatedAt = exec.UpdatedAt
+		_, err = tx.Exec(ctx, `
+			UPDATE turn_executions
+			SET trigger_event_ids = $2, lease_owner = '', lease_expires_at = $3, status = $4, updated_at = $5
+			WHERE id = $1
+		`, existing.ID, mustJSONValue(existing.TriggerEventIDs), nullTime(existing.LeaseExpiresAt), existing.Status, existing.UpdatedAt)
+		if err != nil {
+			return execution.TurnExecution{}, nil, false, err
+		}
+		_, err = tx.Exec(ctx, `
+			UPDATE execution_steps
+			SET status = 'waiting', next_attempt_at = $2, lease_owner = '', lease_expires_at = $2, updated_at = $3
+			WHERE execution_id = $1
+			  AND status IN ('pending','waiting')
+			  AND name = (
+				SELECT name FROM execution_steps
+				WHERE execution_id = $1 AND status IN ('pending','waiting')
+				ORDER BY created_at ASC LIMIT 1
+			  )
+		`, existing.ID, nullTime(coalesceUntil), existing.UpdatedAt)
+		if err != nil {
+			return execution.TurnExecution{}, nil, false, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return execution.TurnExecution{}, nil, false, err
+		}
+		loaded, loadedSteps, err := c.GetExecution(ctx, existing.ID)
+		return loaded, loadedSteps, true, err
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return execution.TurnExecution{}, nil, false, err
+	}
+
+	if len(exec.TriggerEventIDs) == 0 {
+		exec.TriggerEventIDs = []string{triggerEventID}
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO turn_executions (
+			id, session_id, trigger_event_id, trigger_event_ids, policy_bundle_id, proposal_id, rollout_id, selection_reason, trace_id, status, lease_owner, lease_expires_at, blocked_reason, resume_signal, created_at, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+	`, exec.ID, exec.SessionID, exec.TriggerEventID, mustJSONValue(triggerEventIDs(exec)), nullString(exec.PolicyBundleID), nullString(exec.ProposalID), nullString(exec.RolloutID), nullString(exec.SelectionReason), nullString(exec.TraceID), exec.Status, nullString(exec.LeaseOwner), nullTime(exec.LeaseExpiresAt), nullString(exec.BlockedReason), nullString(exec.ResumeSignal), exec.CreatedAt, exec.UpdatedAt)
+	if err != nil {
+		return execution.TurnExecution{}, nil, false, err
+	}
+	for _, step := range steps {
+		_, err = tx.Exec(ctx, `
+			INSERT INTO execution_steps (
+				id, execution_id, name, status, attempt, recomputable, lease_owner, lease_expires_at, idempotency_key, last_error, next_attempt_at, max_attempts, max_elapsed_seconds, backoff_seconds, retry_reason, blocked_reason, resume_signal, started_at, finished_at, created_at, updated_at
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+		`, step.ID, step.ExecutionID, step.Name, step.Status, step.Attempt, step.Recomputable, nullString(step.LeaseOwner), nullTime(step.LeaseExpiresAt), step.IdempotencyKey, nullString(step.LastError), nullTime(step.NextAttemptAt), stepMaxAttemptsForStore(step), step.MaxElapsedSeconds, stepBackoffSecondsForStore(step), nullString(step.RetryReason), nullString(step.BlockedReason), nullString(step.ResumeSignal), nullTime(step.StartedAt), nullTime(step.FinishedAt), step.CreatedAt, step.UpdatedAt)
+		if err != nil {
+			return execution.TurnExecution{}, nil, false, err
+		}
+	}
+	return exec, steps, false, tx.Commit(ctx)
+}
+
 func (c *Client) ListExecutions(ctx context.Context) ([]execution.TurnExecution, error) {
 	rows, err := c.Pool.Query(ctx, `
-		SELECT id, session_id, trigger_event_id, COALESCE(policy_bundle_id,''), COALESCE(proposal_id,''), COALESCE(rollout_id,''), COALESCE(selection_reason,''), COALESCE(trace_id,''), status, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), created_at, updated_at
+		SELECT id, session_id, trigger_event_id, trigger_event_ids, COALESCE(policy_bundle_id,''), COALESCE(proposal_id,''), COALESCE(rollout_id,''), COALESCE(selection_reason,''), COALESCE(trace_id,''), status, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), created_at, updated_at
 		FROM turn_executions
 		ORDER BY created_at DESC
 	`)
@@ -1450,9 +1543,11 @@ func (c *Client) ListExecutions(ctx context.Context) ([]execution.TurnExecution,
 	var out []execution.TurnExecution
 	for rows.Next() {
 		var exec execution.TurnExecution
-		if err := rows.Scan(&exec.ID, &exec.SessionID, &exec.TriggerEventID, &exec.PolicyBundleID, &exec.ProposalID, &exec.RolloutID, &exec.SelectionReason, &exec.TraceID, &exec.Status, &exec.LeaseOwner, &exec.LeaseExpiresAt, &exec.BlockedReason, &exec.ResumeSignal, &exec.CreatedAt, &exec.UpdatedAt); err != nil {
+		var raw []byte
+		if err := rows.Scan(&exec.ID, &exec.SessionID, &exec.TriggerEventID, &raw, &exec.PolicyBundleID, &exec.ProposalID, &exec.RolloutID, &exec.SelectionReason, &exec.TraceID, &exec.Status, &exec.LeaseOwner, &exec.LeaseExpiresAt, &exec.BlockedReason, &exec.ResumeSignal, &exec.CreatedAt, &exec.UpdatedAt); err != nil {
 			return nil, err
 		}
+		_ = json.Unmarshal(raw, &exec.TriggerEventIDs)
 		out = append(out, exec)
 	}
 	return out, rows.Err()
@@ -1460,17 +1555,19 @@ func (c *Client) ListExecutions(ctx context.Context) ([]execution.TurnExecution,
 
 func (c *Client) GetExecution(ctx context.Context, executionID string) (execution.TurnExecution, []execution.ExecutionStep, error) {
 	row := c.Pool.QueryRow(ctx, `
-		SELECT id, session_id, trigger_event_id, COALESCE(policy_bundle_id,''), COALESCE(proposal_id,''), COALESCE(rollout_id,''), COALESCE(selection_reason,''), COALESCE(trace_id,''), status, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), created_at, updated_at
+		SELECT id, session_id, trigger_event_id, trigger_event_ids, COALESCE(policy_bundle_id,''), COALESCE(proposal_id,''), COALESCE(rollout_id,''), COALESCE(selection_reason,''), COALESCE(trace_id,''), status, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), created_at, updated_at
 		FROM turn_executions
 		WHERE id = $1
 	`, executionID)
 	var exec execution.TurnExecution
-	if err := row.Scan(&exec.ID, &exec.SessionID, &exec.TriggerEventID, &exec.PolicyBundleID, &exec.ProposalID, &exec.RolloutID, &exec.SelectionReason, &exec.TraceID, &exec.Status, &exec.LeaseOwner, &exec.LeaseExpiresAt, &exec.BlockedReason, &exec.ResumeSignal, &exec.CreatedAt, &exec.UpdatedAt); err != nil {
+	var raw []byte
+	if err := row.Scan(&exec.ID, &exec.SessionID, &exec.TriggerEventID, &raw, &exec.PolicyBundleID, &exec.ProposalID, &exec.RolloutID, &exec.SelectionReason, &exec.TraceID, &exec.Status, &exec.LeaseOwner, &exec.LeaseExpiresAt, &exec.BlockedReason, &exec.ResumeSignal, &exec.CreatedAt, &exec.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return execution.TurnExecution{}, nil, errors.New("execution not found")
 		}
 		return execution.TurnExecution{}, nil, err
 	}
+	_ = json.Unmarshal(raw, &exec.TriggerEventIDs)
 
 	rows, err := c.Pool.Query(ctx, `
 		SELECT id, execution_id, name, status, attempt, recomputable, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), idempotency_key, COALESCE(last_error,''), COALESCE(next_attempt_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(max_attempts, 0), COALESCE(max_elapsed_seconds, 0), COALESCE(backoff_seconds, 0), COALESCE(retry_reason,''), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), COALESCE(started_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(finished_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at
@@ -1498,19 +1595,20 @@ func (c *Client) UpdateExecution(ctx context.Context, exec execution.TurnExecuti
 		UPDATE turn_executions
 		SET session_id = $2,
 		    trigger_event_id = $3,
-		    policy_bundle_id = $4,
-		    proposal_id = $5,
-		    rollout_id = $6,
-		    selection_reason = $7,
-		    trace_id = $8,
-		    status = $9,
-		    lease_owner = $10,
-		    lease_expires_at = $11,
-		    blocked_reason = $12,
-		    resume_signal = $13,
-		    updated_at = $14
+		    trigger_event_ids = $4,
+		    policy_bundle_id = $5,
+		    proposal_id = $6,
+		    rollout_id = $7,
+		    selection_reason = $8,
+		    trace_id = $9,
+		    status = $10,
+		    lease_owner = $11,
+		    lease_expires_at = $12,
+		    blocked_reason = $13,
+		    resume_signal = $14,
+		    updated_at = $15
 		WHERE id = $1
-	`, exec.ID, exec.SessionID, exec.TriggerEventID, nullString(exec.PolicyBundleID), nullString(exec.ProposalID), nullString(exec.RolloutID), nullString(exec.SelectionReason), nullString(exec.TraceID), exec.Status, nullString(exec.LeaseOwner), nullTime(exec.LeaseExpiresAt), nullString(exec.BlockedReason), nullString(exec.ResumeSignal), exec.UpdatedAt)
+	`, exec.ID, exec.SessionID, exec.TriggerEventID, mustJSONValue(triggerEventIDs(exec)), nullString(exec.PolicyBundleID), nullString(exec.ProposalID), nullString(exec.RolloutID), nullString(exec.SelectionReason), nullString(exec.TraceID), exec.Status, nullString(exec.LeaseOwner), nullTime(exec.LeaseExpiresAt), nullString(exec.BlockedReason), nullString(exec.ResumeSignal), exec.UpdatedAt)
 	return err
 }
 
@@ -1541,7 +1639,7 @@ func (c *Client) UpdateExecutionStep(ctx context.Context, step execution.Executi
 
 func (c *Client) ListRunnableExecutions(ctx context.Context, now time.Time) ([]execution.TurnExecution, error) {
 	rows, err := c.Pool.Query(ctx, `
-		SELECT id, session_id, trigger_event_id, COALESCE(policy_bundle_id,''), COALESCE(proposal_id,''), COALESCE(rollout_id,''), COALESCE(selection_reason,''), COALESCE(trace_id,''), status, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), created_at, updated_at
+		SELECT id, session_id, trigger_event_id, trigger_event_ids, COALESCE(policy_bundle_id,''), COALESCE(proposal_id,''), COALESCE(rollout_id,''), COALESCE(selection_reason,''), COALESCE(trace_id,''), status, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), created_at, updated_at
 		FROM turn_executions
 		WHERE (
 			(status IN ('pending', 'running') AND (lease_expires_at IS NULL OR lease_expires_at < $1 OR lease_owner = ''))
@@ -1556,9 +1654,11 @@ func (c *Client) ListRunnableExecutions(ctx context.Context, now time.Time) ([]e
 	var out []execution.TurnExecution
 	for rows.Next() {
 		var exec execution.TurnExecution
-		if err := rows.Scan(&exec.ID, &exec.SessionID, &exec.TriggerEventID, &exec.PolicyBundleID, &exec.ProposalID, &exec.RolloutID, &exec.SelectionReason, &exec.TraceID, &exec.Status, &exec.LeaseOwner, &exec.LeaseExpiresAt, &exec.BlockedReason, &exec.ResumeSignal, &exec.CreatedAt, &exec.UpdatedAt); err != nil {
+		var raw []byte
+		if err := rows.Scan(&exec.ID, &exec.SessionID, &exec.TriggerEventID, &raw, &exec.PolicyBundleID, &exec.ProposalID, &exec.RolloutID, &exec.SelectionReason, &exec.TraceID, &exec.Status, &exec.LeaseOwner, &exec.LeaseExpiresAt, &exec.BlockedReason, &exec.ResumeSignal, &exec.CreatedAt, &exec.UpdatedAt); err != nil {
 			return nil, err
 		}
+		_ = json.Unmarshal(raw, &exec.TriggerEventIDs)
 		out = append(out, exec)
 	}
 	return out, rows.Err()
@@ -2142,6 +2242,27 @@ func stepBackoffSecondsForStore(step execution.ExecutionStep) int {
 	return execution.DefaultRetryPolicy(step.Recomputable).BackoffSeconds
 }
 
+func triggerEventIDs(exec execution.TurnExecution) []string {
+	ids := append([]string(nil), exec.TriggerEventIDs...)
+	if strings.TrimSpace(exec.TriggerEventID) != "" {
+		ids = appendUniqueString(ids, exec.TriggerEventID)
+	}
+	return ids
+}
+
+func appendUniqueString(items []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return items
+	}
+	for _, item := range items {
+		if item == value {
+			return items
+		}
+	}
+	return append(items, value)
+}
+
 func vectorLiteral(values []float32) string {
 	if len(values) == 0 {
 		return ""
@@ -2176,6 +2297,14 @@ func mustJSON(v string) []byte {
 	raw, err := normalizeJSON(v)
 	if err != nil {
 		return []byte(`{}`)
+	}
+	return raw
+}
+
+func mustJSONValue(v any) []byte {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return []byte(`null`)
 	}
 	return raw
 }

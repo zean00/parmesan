@@ -46,3 +46,30 @@ func TestRenderResponseUsesJourneyInstructionInStrictModeWithoutTemplate(t *test
 		t.Fatalf("renderResponse() = %q, want %q", got, want)
 	}
 }
+
+func TestRenderResponseEmitsTemplateMessageSequence(t *testing.T) {
+	view := resolvedView{
+		CompositionMode: "strict",
+		ResponseAnalysisStage: policyruntime.ResponseAnalysisStageResult{
+			CandidateTemplates: []policy.Template{{
+				ID:   "handoff_sequence",
+				Mode: "strict",
+				Messages: []string{
+					"I can help with that.",
+					"First, please share your order number.",
+				},
+			}},
+		},
+	}
+
+	got := renderResponseMessages(view, nil)
+	want := []string{"I can help with that.", "First, please share your order number."}
+	if len(got) != len(want) {
+		t.Fatalf("messages len = %d, want %d (%#v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("message[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

@@ -1,6 +1,7 @@
 ALTER TABLE turn_executions
     ADD COLUMN IF NOT EXISTS blocked_reason TEXT,
-    ADD COLUMN IF NOT EXISTS resume_signal TEXT;
+    ADD COLUMN IF NOT EXISTS resume_signal TEXT,
+    ADD COLUMN IF NOT EXISTS trigger_event_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
 
 ALTER TABLE execution_steps
     ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ,

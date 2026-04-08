@@ -37,6 +37,7 @@ type TurnExecution struct {
 	ID              string    `json:"id"`
 	SessionID       string    `json:"session_id"`
 	TriggerEventID  string    `json:"trigger_event_id"`
+	TriggerEventIDs []string  `json:"trigger_event_ids,omitempty"`
 	PolicyBundleID  string    `json:"policy_bundle_id,omitempty"`
 	ProposalID      string    `json:"proposal_id,omitempty"`
 	RolloutID       string    `json:"rollout_id,omitempty"`
