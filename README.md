@@ -268,6 +268,11 @@ The script defaults reasoning, structured, and embedding providers to
 OpenRouter; override `DEFAULT_REASONING_PROVIDER`,
 `DEFAULT_STRUCTURED_PROVIDER`, and `DEFAULT_EMBEDDING_PROVIDER` if needed.
 
+Operator quality review:
+
+- `GET /v1/operator/quality/regressions` lists regression fixture candidates derived from labeled feedback.
+- `POST /v1/operator/quality/regressions/{feedback_id}/state` marks a candidate as `candidate`, `accepted`, or `rejected`.
+
 ## ACP v1 Contract
 
 ACP is exposed as a path-versioned public facade under `/v1/acp/...`.

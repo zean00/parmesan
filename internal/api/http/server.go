@@ -211,6 +211,8 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/feedback", s.operatorCreateFeedback)
 	mux.HandleFunc("GET /v1/operator/feedback", s.operatorListFeedback)
 	mux.HandleFunc("GET /v1/operator/feedback/{id}", s.operatorGetFeedback)
+	mux.HandleFunc("GET /v1/operator/quality/regressions", s.operatorListRegressionFixtures)
+	mux.HandleFunc("POST /v1/operator/quality/regressions/{id}/state", s.operatorTransitionRegressionFixture)
 	mux.HandleFunc("POST /v1/operator/operators", s.operatorCreateOperator)
 	mux.HandleFunc("GET /v1/operator/operators", s.operatorListOperators)
 	mux.HandleFunc("GET /v1/operator/operators/{id}", s.operatorGetOperator)
@@ -1676,6 +1678,167 @@ func (s *Server) operatorGetFeedback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, item)
+}
+
+type regressionFixtureView struct {
+	FeedbackID        string         `json:"feedback_id"`
+	SessionID         string         `json:"session_id"`
+	ExecutionID       string         `json:"execution_id,omitempty"`
+	TraceID           string         `json:"trace_id,omitempty"`
+	OperatorID        string         `json:"operator_id,omitempty"`
+	ScenarioID        string         `json:"scenario_id"`
+	Input             string         `json:"input,omitempty"`
+	Labels            []string       `json:"labels,omitempty"`
+	QualityDimensions map[string]any `json:"quality_dimensions,omitempty"`
+	ExpectedBehavior  string         `json:"expected_behavior,omitempty"`
+	ReviewStatus      string         `json:"review_status"`
+	ReviewedBy        string         `json:"reviewed_by,omitempty"`
+	ReviewedAt        string         `json:"reviewed_at,omitempty"`
+	CreatedAt         time.Time      `json:"created_at"`
+	UpdatedAt         time.Time      `json:"updated_at"`
+}
+
+func (s *Server) operatorListRegressionFixtures(w http.ResponseWriter, r *http.Request) {
+	limit, err := positiveQueryInt(r.URL.Query().Get("limit"), "limit")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	items, err := s.store.ListFeedbackRecords(r.Context(), feedback.Query{
+		SessionID:  strings.TrimSpace(r.URL.Query().Get("session_id")),
+		OperatorID: strings.TrimSpace(r.URL.Query().Get("operator_id")),
+		Limit:      limit,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var out []regressionFixtureView
+	for _, item := range items {
+		view, ok := regressionFixtureViewFromFeedback(item)
+		if !ok {
+			continue
+		}
+		if status != "" && view.ReviewStatus != status {
+			continue
+		}
+		out = append(out, view)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) operatorTransitionRegressionFixture(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetFeedbackRecord(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	var req struct {
+		State      string `json:"state"`
+		OperatorID string `json:"operator_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	state := strings.TrimSpace(req.State)
+	if state != "accepted" && state != "rejected" && state != "candidate" {
+		http.Error(w, "state must be one of candidate, accepted, rejected", http.StatusBadRequest)
+		return
+	}
+	fixture, ok := regressionFixtureMetadata(item)
+	if !ok {
+		http.Error(w, "feedback record does not contain a regression fixture candidate", http.StatusNotFound)
+		return
+	}
+	now := time.Now().UTC()
+	fixture["review_status"] = state
+	fixture["reviewed_by"] = requestOperatorID(r, req.OperatorID)
+	fixture["reviewed_at"] = now.Format(time.RFC3339Nano)
+	if item.Metadata == nil {
+		item.Metadata = map[string]any{}
+	}
+	item.Metadata["regression_fixture_candidate"] = fixture
+	item.UpdatedAt = now
+	if err := s.store.SaveFeedbackRecord(r.Context(), item); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	view, _ := regressionFixtureViewFromFeedback(item)
+	writeJSON(w, http.StatusOK, view)
+}
+
+func regressionFixtureViewFromFeedback(item feedback.Record) (regressionFixtureView, bool) {
+	fixture, ok := regressionFixtureMetadata(item)
+	if !ok {
+		return regressionFixtureView{}, false
+	}
+	view := regressionFixtureView{
+		FeedbackID:  item.ID,
+		SessionID:   item.SessionID,
+		ExecutionID: item.ExecutionID,
+		TraceID:     item.TraceID,
+		OperatorID:  item.OperatorID,
+		CreatedAt:   item.CreatedAt,
+		UpdatedAt:   item.UpdatedAt,
+	}
+	if value, _ := fixture["scenario_id"].(string); value != "" {
+		view.ScenarioID = value
+	}
+	if value, _ := fixture["input"].(string); value != "" {
+		view.Input = value
+	}
+	view.Labels = anyStringSlice(fixture["labels"])
+	if value, ok := fixture["quality_dimensions"].(map[string]any); ok {
+		view.QualityDimensions = value
+	} else if value, ok := fixture["quality_dimensions"].(map[string]string); ok {
+		view.QualityDimensions = map[string]any{}
+		for key, item := range value {
+			view.QualityDimensions[key] = item
+		}
+	}
+	if value, _ := fixture["expected_behavior"].(string); value != "" {
+		view.ExpectedBehavior = value
+	}
+	if value, _ := fixture["review_status"].(string); value != "" {
+		view.ReviewStatus = value
+	}
+	if value, _ := fixture["reviewed_by"].(string); value != "" {
+		view.ReviewedBy = value
+	}
+	if value, _ := fixture["reviewed_at"].(string); value != "" {
+		view.ReviewedAt = value
+	}
+	if view.ReviewStatus == "" {
+		view.ReviewStatus = "candidate"
+	}
+	return view, true
+}
+
+func regressionFixtureMetadata(item feedback.Record) (map[string]any, bool) {
+	if item.Metadata == nil {
+		return nil, false
+	}
+	fixture, ok := item.Metadata["regression_fixture_candidate"].(map[string]any)
+	return fixture, ok
+}
+
+func anyStringSlice(value any) []string {
+	switch items := value.(type) {
+	case []string:
+		return append([]string(nil), items...)
+	case []any:
+		var out []string
+		for _, item := range items {
+			if text, ok := item.(string); ok && text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func (s *Server) operatorCreateOperator(w http.ResponseWriter, r *http.Request) {

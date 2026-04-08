@@ -623,6 +623,82 @@ func TestOperatorFeedbackQualityLabelsRouteToProposals(t *testing.T) {
 	}
 }
 
+func TestOperatorRegressionFixturesListAndTransition(t *testing.T) {
+	repo := memory.New()
+	srv := New(":0", repo, asyncwrite.New(repo, 16), sse.NewBroker(), model.NewRouter(config.Load("api").Provider), nil)
+	now := time.Now().UTC()
+	item := feedback.Record{
+		ID:          "feedback_regression_1",
+		SessionID:   "sess_regression",
+		ExecutionID: "exec_regression",
+		TraceID:     "trace_regression",
+		OperatorID:  "op_seed",
+		Text:        "The agent answered out of scope.",
+		Metadata: map[string]any{
+			"regression_fixture_candidate": map[string]any{
+				"scenario_id":        "operator_feedback_answered_out_of_scope",
+				"input":              "How do I cook pasta?",
+				"labels":             []string{"answered_out_of_scope"},
+				"quality_dimensions": map[string]any{"answered_out_of_scope": "topic_scope_compliance"},
+				"expected_behavior":  "The agent should refuse or redirect instead of answering an out-of-scope request.",
+				"review_status":      "candidate",
+			},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := repo.SaveFeedbackRecord(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveFeedbackRecord(context.Background(), feedback.Record{
+		ID:        "feedback_plain",
+		SessionID: "sess_other",
+		Text:      "plain feedback",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/quality/regressions?status=candidate", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list regressions status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var listed []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0]["feedback_id"] != "feedback_regression_1" {
+		t.Fatalf("listed = %#v, want one candidate regression fixture", listed)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/quality/regressions/feedback_regression_1/state", strings.NewReader(`{"state":"accepted","operator_id":"op_reviewer"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("transition regression status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var transitioned map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &transitioned); err != nil {
+		t.Fatal(err)
+	}
+	if transitioned["review_status"] != "accepted" || transitioned["reviewed_by"] != "op_reviewer" {
+		t.Fatalf("transitioned = %#v, want accepted review state", transitioned)
+	}
+
+	saved, err := repo.GetFeedbackRecord(context.Background(), "feedback_regression_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture, ok := saved.Metadata["regression_fixture_candidate"].(map[string]any)
+	if !ok || fixture["review_status"] != "accepted" {
+		t.Fatalf("saved metadata = %#v, want accepted fixture state", saved.Metadata)
+	}
+}
+
 func TestRegisterProviderPersistsImmediatelyBeforeAsyncSync(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
