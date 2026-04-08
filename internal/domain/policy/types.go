@@ -18,6 +18,7 @@ type Bundle struct {
 	Version                   string                     `json:"version" yaml:"version"`
 	CompositionMode           string                     `json:"composition_mode,omitempty" yaml:"composition_mode,omitempty"`
 	NoMatch                   string                     `json:"no_match,omitempty" yaml:"no_match,omitempty"`
+	DomainBoundary            DomainBoundary             `json:"domain_boundary,omitempty" yaml:"domain_boundary,omitempty"`
 	Soul                      Soul                       `json:"soul,omitempty" yaml:"soul,omitempty"`
 	SoulMarkdown              string                     `json:"soul_markdown,omitempty" yaml:"soul_markdown,omitempty"`
 	ImportedAt                time.Time                  `json:"imported_at" yaml:"-"`
@@ -30,6 +31,16 @@ type Bundle struct {
 	ToolPolicies              []ToolPolicy               `json:"tool_policies" yaml:"tool_policies"`
 	Retrievers                []RetrieverBinding         `json:"retrievers,omitempty" yaml:"retrievers,omitempty"`
 	GuidelineToolAssociations []GuidelineToolAssociation `json:"guideline_tool_associations,omitempty" yaml:"-"`
+}
+
+type DomainBoundary struct {
+	Mode              string   `json:"mode,omitempty" yaml:"mode,omitempty"`
+	AllowedTopics     []string `json:"allowed_topics,omitempty" yaml:"allowed_topics,omitempty"`
+	AdjacentTopics    []string `json:"adjacent_topics,omitempty" yaml:"adjacent_topics,omitempty"`
+	BlockedTopics     []string `json:"blocked_topics,omitempty" yaml:"blocked_topics,omitempty"`
+	AdjacentAction    string   `json:"adjacent_action,omitempty" yaml:"adjacent_action,omitempty"`
+	UncertaintyAction string   `json:"uncertainty_action,omitempty" yaml:"uncertainty_action,omitempty"`
+	OutOfScopeReply   string   `json:"out_of_scope_reply,omitempty" yaml:"out_of_scope_reply,omitempty"`
 }
 
 type Soul struct {

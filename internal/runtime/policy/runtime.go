@@ -35,7 +35,7 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	if len(matchCtx.DerivedSignals) > 0 {
 		matchCtx.ConversationText = strings.TrimSpace(matchCtx.ConversationText + " " + strings.Join(matchCtx.DerivedSignals, " "))
 	}
-	agentRetrieverTasks := startAgentRetrieverTasks(ctx, options, bundle.Retrievers, matchCtx)
+	scopeBoundary := evaluateScopeBoundary(ctx, options.Router, bundle.DomainBoundary, matchCtx)
 	resolver := newStrategyResolver(genericStrategy{})
 	resolver.Register(customStrategy{})
 	matcher := newGuidelineMatcher(resolver)
@@ -43,6 +43,7 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	if err != nil {
 		return EngineResult{}, err
 	}
+	state.scopeBoundaryStage = scopeBoundary
 	// Journey-node projected guidelines only become active once the active state is known.
 	if state.activeJourney != nil && state.activeJourneyState != nil {
 		projected := projectedNodeGuideline(*state.activeJourney, *state.activeJourneyState)
@@ -51,6 +52,14 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 			rebuildProjectedGuidelineStages(ctx, state)
 		}
 	}
+	if shouldBypassScopeBoundary(scopeBoundary) {
+		mode := strings.ToLower(strings.TrimSpace(bundle.CompositionMode))
+		if mode == "" {
+			mode = inferCompositionMode(state.responseAnalysisStage.CandidateTemplates)
+		}
+		return resolvedViewFromState(bundle, state, mode, arqsFromState(state)), nil
+	}
+	agentRetrieverTasks := startAgentRetrieverTasks(ctx, options, bundle.Retrievers, matchCtx)
 	if len(bundle.Retrievers) > 0 {
 		retrieverResult := buildRetrieverStageResult(ctx, options, state, agentRetrieverTasks)
 		retrieverResult.Apply(state)
@@ -121,6 +130,7 @@ func resolvedViewFromState(bundle policy.Bundle, state *matchingState, mode stri
 		CustomerDependencyStage:     state.customerDependencyStage,
 		RelationshipResolutionStage: state.relationshipResolutionStage,
 		DisambiguationStage:         state.disambiguationStage,
+		ScopeBoundaryStage:          state.scopeBoundaryStage,
 		RetrieverStage:              state.retrieverStage,
 		ResponseAnalysisStage:       state.responseAnalysisStage,
 		ToolExposureStage:           state.toolExposureStage,
@@ -136,6 +146,15 @@ func resolvedViewFromState(bundle policy.Bundle, state *matchingState, mode stri
 }
 
 func VerifyDraft(view EngineResult, draft string, toolOutput map[string]any) VerificationResult {
+	if replacement := scopeBoundaryReplacement(view.ScopeBoundaryStage); replacement != "" {
+		if normalizeText(draft) != normalizeText(replacement) {
+			return VerificationResult{
+				Status:      "revise",
+				Reasons:     append([]string{"scope_boundary_enforced"}, view.ScopeBoundaryStage.Reasons...),
+				Replacement: replacement,
+			}
+		}
+	}
 	analysis := view.ResponseAnalysisStage.Analysis
 	reapplyDecisions := view.PreviouslyAppliedStage.Decisions
 	if strings.TrimSpace(view.DisambiguationPrompt) != "" {
@@ -231,6 +250,25 @@ func VerifyDraft(view EngineResult, draft string, toolOutput map[string]any) Ver
 		}
 	}
 	return VerificationResult{Status: "pass"}
+}
+
+func shouldBypassScopeBoundary(result ScopeBoundaryStageResult) bool {
+	if result.Classification == "" {
+		return false
+	}
+	switch result.Action {
+	case "refuse", "redirect", "escalate":
+		return true
+	default:
+		return false
+	}
+}
+
+func scopeBoundaryReplacement(result ScopeBoundaryStageResult) string {
+	if !shouldBypassScopeBoundary(result) {
+		return ""
+	}
+	return strings.TrimSpace(result.Reply)
 }
 
 func strictNoMatchText(configured string) string {
@@ -651,6 +689,190 @@ func buildMatchingContext(events []session.Event) MatchingContext {
 	}
 	sort.Strings(ctx.AppliedGuidelines)
 	return ctx
+}
+
+func evaluateScopeBoundary(ctx context.Context, router *model.Router, boundary policy.DomainBoundary, matchCtx MatchingContext) ScopeBoundaryStageResult {
+	mode := strings.TrimSpace(boundary.Mode)
+	if mode == "" {
+		return ScopeBoundaryStageResult{}
+	}
+	latest := strings.ToLower(strings.TrimSpace(matchCtx.LatestCustomerText))
+	if latest == "" {
+		return ScopeBoundaryStageResult{}
+	}
+
+	blocked := matchedBoundaryTopics(latest, boundary.BlockedTopics)
+	if len(blocked) > 0 {
+		return newScopeBoundaryResult("out_of_scope", "refuse", blocked, append([]string{"matched_blocked_topic"}, blocked...), boundary, "matched blocked topic")
+	}
+	allowed := matchedBoundaryTopics(latest, boundary.AllowedTopics)
+	if len(allowed) > 0 {
+		return ScopeBoundaryStageResult{
+			Classification: "in_scope",
+			Action:         "allow",
+			MatchedTopics:  allowed,
+			Reasons:        append([]string{"matched_allowed_topic"}, allowed...),
+		}
+	}
+	adjacent := matchedBoundaryTopics(latest, boundary.AdjacentTopics)
+	if len(adjacent) > 0 {
+		action := firstNonEmpty(strings.TrimSpace(boundary.AdjacentAction), defaultAdjacentAction(mode))
+		return newScopeBoundaryResult("adjacent", action, adjacent, append([]string{"matched_adjacent_topic"}, adjacent...), boundary, "matched adjacent topic")
+	}
+
+	if router != nil && (len(boundary.AllowedTopics) > 0 || len(boundary.AdjacentTopics) > 0 || len(boundary.BlockedTopics) > 0) {
+		type structuredBoundary struct {
+			Classification string   `json:"classification"`
+			Action         string   `json:"action"`
+			Topics         []string `json:"topics"`
+			Rationale      string   `json:"rationale"`
+		}
+		var structured structuredBoundary
+		if generateStructuredWithRetry(ctx, router, buildScopeBoundaryPrompt(boundary, matchCtx), &structured) {
+			classification := normalizeScopeClassification(structured.Classification)
+			action := normalizeScopeAction(structured.Action)
+			switch classification {
+			case "in_scope":
+				return ScopeBoundaryStageResult{
+					Classification: classification,
+					Action:         "allow",
+					MatchedTopics:  append([]string(nil), structured.Topics...),
+					Reasons:        append([]string{"structured_scope_classification", strings.TrimSpace(structured.Rationale)}, structured.Topics...),
+				}
+			case "adjacent":
+				if action == "" {
+					action = firstNonEmpty(strings.TrimSpace(boundary.AdjacentAction), defaultAdjacentAction(mode))
+				}
+				return newScopeBoundaryResult(classification, action, structured.Topics, append([]string{"structured_scope_classification", strings.TrimSpace(structured.Rationale)}, structured.Topics...), boundary, strings.TrimSpace(structured.Rationale))
+			case "out_of_scope", "uncertain":
+				if action == "" {
+					action = defaultUncertaintyAction(boundary, mode, classification)
+				}
+				return newScopeBoundaryResult(classification, action, structured.Topics, append([]string{"structured_scope_classification", strings.TrimSpace(structured.Rationale)}, structured.Topics...), boundary, strings.TrimSpace(structured.Rationale))
+			}
+		}
+	}
+
+	classification := "uncertain"
+	action := defaultUncertaintyAction(boundary, mode, classification)
+	return newScopeBoundaryResult(classification, action, nil, []string{"no_boundary_topic_match"}, boundary, "no configured topic matched")
+}
+
+func newScopeBoundaryResult(classification, action string, topics []string, reasons []string, boundary policy.DomainBoundary, fallbackReason string) ScopeBoundaryStageResult {
+	result := ScopeBoundaryStageResult{
+		Classification: classification,
+		Action:         normalizeScopeAction(action),
+		MatchedTopics:  dedupe(topics),
+		Reasons:        compactReasons(reasons, fallbackReason),
+	}
+	switch result.Action {
+	case "refuse", "redirect":
+		result.Reply = strings.TrimSpace(boundary.OutOfScopeReply)
+	}
+	return result
+}
+
+func matchedBoundaryTopics(text string, topics []string) []string {
+	var out []string
+	for _, topic := range topics {
+		topic = strings.TrimSpace(topic)
+		if topic == "" {
+			continue
+		}
+		if strings.Contains(text, strings.ToLower(topic)) {
+			out = append(out, topic)
+		}
+	}
+	return dedupe(out)
+}
+
+func buildScopeBoundaryPrompt(boundary policy.DomainBoundary, ctx MatchingContext) string {
+	lines := []string{
+		"Return only JSON.",
+		`Schema: {"classification":"in_scope|adjacent|out_of_scope|uncertain","action":"allow|redirect|refuse|escalate","topics":["string"],"rationale":"string"}`,
+		"Classify whether the latest customer message stays within the agent's allowed domain.",
+		"Latest customer message: " + ctx.LatestCustomerText,
+		"Conversation context: " + firstNonEmpty(ctx.ConversationText, ctx.LatestCustomerText),
+		"Allowed topics: " + firstNonEmpty(strings.Join(boundary.AllowedTopics, ", "), "none"),
+		"Adjacent topics: " + firstNonEmpty(strings.Join(boundary.AdjacentTopics, ", "), "none"),
+		"Blocked topics: " + firstNonEmpty(strings.Join(boundary.BlockedTopics, ", "), "none"),
+		"When blocked or clearly unrelated to the allowed domain, classify as out_of_scope.",
+		"When related but outside the main domain, classify as adjacent.",
+		"When the message clearly belongs to the agent's domain, classify as in_scope.",
+	}
+	return strings.Join(lines, "\n")
+}
+
+func normalizeScopeClassification(value string) string {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "in_scope":
+		return "in_scope"
+	case "adjacent":
+		return "adjacent"
+	case "out_of_scope":
+		return "out_of_scope"
+	case "uncertain":
+		return "uncertain"
+	default:
+		return ""
+	}
+}
+
+func normalizeScopeAction(value string) string {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "allow":
+		return "allow"
+	case "redirect":
+		return "redirect"
+	case "refuse":
+		return "refuse"
+	case "escalate":
+		return "escalate"
+	default:
+		return ""
+	}
+}
+
+func defaultAdjacentAction(mode string) string {
+	switch strings.TrimSpace(mode) {
+	case "broad_concierge":
+		return "allow"
+	case "soft_redirect":
+		return "redirect"
+	default:
+		return "refuse"
+	}
+}
+
+func defaultUncertaintyAction(boundary policy.DomainBoundary, mode string, classification string) string {
+	if action := normalizeScopeAction(boundary.UncertaintyAction); action != "" {
+		return action
+	}
+	switch strings.TrimSpace(mode) {
+	case "broad_concierge":
+		if classification == "uncertain" {
+			return "redirect"
+		}
+		return "allow"
+	case "soft_redirect":
+		return "redirect"
+	default:
+		return "refuse"
+	}
+}
+
+func compactReasons(reasons []string, fallback string) []string {
+	var out []string
+	for _, reason := range reasons {
+		reason = strings.TrimSpace(reason)
+		if reason != "" {
+			out = append(out, reason)
+		}
+	}
+	if len(out) == 0 && strings.TrimSpace(fallback) != "" {
+		out = append(out, strings.TrimSpace(fallback))
+	}
+	return dedupe(out)
 }
 
 func stagedToolCallFromPart(event session.Event, part session.ContentPart) (StagedToolCall, bool) {

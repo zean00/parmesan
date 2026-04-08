@@ -102,3 +102,63 @@ journeys:
 		t.Fatalf("journey edges = %#v, want ask_name -> ask_email edge", j.Edges)
 	}
 }
+
+func TestParseBundleSupportsDomainBoundary(t *testing.T) {
+	raw := []byte(`
+id: pet-store
+version: v1
+domain_boundary:
+  mode: hard_refuse
+  allowed_topics:
+    - pet food
+    - dog toys
+  adjacent_topics:
+    - pet-safe ingredients
+  blocked_topics:
+    - human food
+    - cooking
+  adjacent_action: redirect
+  uncertainty_action: refuse
+  out_of_scope_reply: I can help with pet-store questions, but I cannot help with cooking or human food.
+`)
+
+	bundle, err := ParseBundle(raw)
+	if err != nil {
+		t.Fatalf("ParseBundle() error = %v", err)
+	}
+	if bundle.DomainBoundary.Mode != "hard_refuse" || bundle.DomainBoundary.OutOfScopeReply == "" {
+		t.Fatalf("domain boundary = %#v, want parsed boundary policy", bundle.DomainBoundary)
+	}
+}
+
+func TestParseBundleRejectsInvalidDomainBoundary(t *testing.T) {
+	raw := []byte(`
+id: pet-store
+version: v1
+domain_boundary:
+  mode: hard_refuse
+  blocked_topics:
+    - cooking
+`)
+
+	if _, err := ParseBundle(raw); err == nil {
+		t.Fatal("ParseBundle() error = nil, want missing out_of_scope_reply error")
+	}
+}
+
+func TestParseBundleRejectsBroadConciergeBlockedTopicsWithoutReply(t *testing.T) {
+	raw := []byte(`
+id: pet-store
+version: v1
+domain_boundary:
+  mode: broad_concierge
+  allowed_topics:
+    - pet food
+  blocked_topics:
+    - human food
+`)
+
+	if _, err := ParseBundle(raw); err == nil {
+		t.Fatal("ParseBundle() error = nil, want missing out_of_scope_reply error for blocked topics")
+	}
+}

@@ -3584,6 +3584,70 @@ func TestVerifyDraftAllowsStrictJourneyInstructionFallback(t *testing.T) {
 	}
 }
 
+func TestResolveWithOptionsClassifiesOutOfScopeBoundary(t *testing.T) {
+	bundle := policy.Bundle{
+		ID:      "pet_store",
+		Version: "v1",
+		DomainBoundary: policy.DomainBoundary{
+			Mode:            "hard_refuse",
+			AllowedTopics:   []string{"pet food", "dog toys"},
+			BlockedTopics:   []string{"human food", "cooking"},
+			OutOfScopeReply: "I can help with pet-store questions, but I cannot help with cooking or human food.",
+		},
+		Guidelines: []policy.Guideline{{
+			ID:   "pet_help",
+			When: "pet food",
+			Then: "Help with pet food questions.",
+		}},
+		Retrievers: []policy.RetrieverBinding{{
+			ID:    "wiki",
+			Kind:  "knowledge",
+			Scope: "agent",
+		}},
+	}
+	view, err := ResolveWithOptions(context.Background(), []session.Event{{
+		ID:        "evt",
+		SessionID: "sess",
+		Source:    "customer",
+		Kind:      "message",
+		Content:   []session.ContentPart{{Type: "text", Text: "How do I season pasta for human food?"}},
+	}}, []policy.Bundle{bundle}, nil, []tool.CatalogEntry{{
+		ID:          "tool_pet",
+		Name:        "find_pet_food",
+		Description: "find pet food",
+	}}, ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.ScopeBoundaryStage.Classification != "out_of_scope" || view.ScopeBoundaryStage.Action != "refuse" {
+		t.Fatalf("scope boundary stage = %#v, want out_of_scope refuse", view.ScopeBoundaryStage)
+	}
+	if len(view.ToolExposureStage.ExposedTools) != 0 {
+		t.Fatalf("exposed tools = %#v, want none for out-of-scope turn", view.ToolExposureStage.ExposedTools)
+	}
+	if len(view.RetrieverStage.Results) != 0 {
+		t.Fatalf("retriever results = %#v, want none for out-of-scope turn", view.RetrieverStage.Results)
+	}
+	if reply := view.ScopeBoundaryStage.Reply; reply == "" {
+		t.Fatalf("scope boundary reply = %q, want configured response", reply)
+	}
+}
+
+func TestVerifyDraftReplacesOutOfScopeAnswer(t *testing.T) {
+	view := EngineResult{
+		ScopeBoundaryStage: ScopeBoundaryStageResult{
+			Classification: "out_of_scope",
+			Action:         "refuse",
+			Reply:          "I can help with pet-store questions, but I cannot help with cooking or human food.",
+			Reasons:        []string{"matched_blocked_topic"},
+		},
+	}
+	got := VerifyDraft(view, "Here is how to cook pasta.", nil)
+	if got.Status != "revise" || got.Replacement != view.ScopeBoundaryStage.Reply {
+		t.Fatalf("VerifyDraft() = %#v, want out-of-scope replacement", got)
+	}
+}
+
 func TestExtractMentionedAgeRequiresExplicitAgeContext(t *testing.T) {
 	cases := []struct {
 		text string

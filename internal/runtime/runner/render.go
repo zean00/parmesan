@@ -9,6 +9,9 @@ import (
 )
 
 func renderResponse(view resolvedView, toolOutput map[string]any) string {
+	if reply := strings.TrimSpace(view.ScopeBoundaryStage.Reply); reply != "" && (view.ScopeBoundaryStage.Action == "refuse" || view.ScopeBoundaryStage.Action == "redirect") {
+		return reply
+	}
 	analysis := view.ResponseAnalysisStage.Analysis
 	if view.DisambiguationPrompt != "" {
 		return view.DisambiguationPrompt

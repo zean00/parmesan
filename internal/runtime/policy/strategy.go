@@ -111,6 +111,7 @@ type matchingState struct {
 	customerDependencyStage     CustomerDependencyStageResult
 	relationshipResolutionStage RelationshipResolutionStageResult
 	disambiguationStage         DisambiguationStageResult
+	scopeBoundaryStage          ScopeBoundaryStageResult
 	retrieverStage              RetrieverStageResult
 	responseAnalysisStage       ResponseAnalysisStageResult
 	toolExposureStage           ToolExposureStageResult
@@ -140,6 +141,7 @@ type matchingSnapshot struct {
 	customerDependencyStage     CustomerDependencyStageResult
 	relationshipResolutionStage RelationshipResolutionStageResult
 	disambiguationStage         DisambiguationStageResult
+	scopeBoundaryStage          ScopeBoundaryStageResult
 	retrieverStage              RetrieverStageResult
 	responseAnalysisStage       ResponseAnalysisStageResult
 	toolExposureStage           ToolExposureStageResult
@@ -173,6 +175,7 @@ func snapshotFromState(state *matchingState) matchingSnapshot {
 		customerDependencyStage:     state.customerDependencyStage,
 		relationshipResolutionStage: state.relationshipResolutionStage,
 		disambiguationStage:         state.disambiguationStage,
+		scopeBoundaryStage:          state.scopeBoundaryStage,
 		retrieverStage:              state.retrieverStage,
 		responseAnalysisStage:       state.responseAnalysisStage,
 		toolExposureStage:           state.toolExposureStage,

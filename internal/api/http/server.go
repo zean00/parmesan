@@ -93,22 +93,22 @@ type sessionSummary struct {
 }
 
 type sessionView struct {
-	ID                   string         `json:"id"`
-	Channel              string         `json:"channel"`
-	CustomerID           string         `json:"customer_id,omitempty"`
-	AgentID              string         `json:"agent_id,omitempty"`
-	Mode                 string         `json:"mode,omitempty"`
-	Title                string         `json:"title,omitempty"`
-	Metadata             map[string]any `json:"metadata,omitempty"`
-	Labels               []string       `json:"labels,omitempty"`
-	Summary              sessionSummary `json:"summary"`
-	CreatedAt            time.Time      `json:"created_at"`
-	AssignedOperatorID   string         `json:"assigned_operator_id,omitempty"`
-	LastActivityAt       time.Time      `json:"last_activity_at,omitempty"`
-	PendingApprovalCount int            `json:"pending_approval_count,omitempty"`
-	FailedMediaCount     int            `json:"failed_media_count,omitempty"`
-	UnresolvedLintCount  int            `json:"unresolved_lint_count,omitempty"`
-	PendingPreferenceCount int          `json:"pending_preference_count,omitempty"`
+	ID                     string         `json:"id"`
+	Channel                string         `json:"channel"`
+	CustomerID             string         `json:"customer_id,omitempty"`
+	AgentID                string         `json:"agent_id,omitempty"`
+	Mode                   string         `json:"mode,omitempty"`
+	Title                  string         `json:"title,omitempty"`
+	Metadata               map[string]any `json:"metadata,omitempty"`
+	Labels                 []string       `json:"labels,omitempty"`
+	Summary                sessionSummary `json:"summary"`
+	CreatedAt              time.Time      `json:"created_at"`
+	AssignedOperatorID     string         `json:"assigned_operator_id,omitempty"`
+	LastActivityAt         time.Time      `json:"last_activity_at,omitempty"`
+	PendingApprovalCount   int            `json:"pending_approval_count,omitempty"`
+	FailedMediaCount       int            `json:"failed_media_count,omitempty"`
+	UnresolvedLintCount    int            `json:"unresolved_lint_count,omitempty"`
+	PendingPreferenceCount int            `json:"pending_preference_count,omitempty"`
 }
 
 type traceTimelineEntry struct {
@@ -3992,11 +3992,11 @@ func (s *Server) policyProposalPreview(ctx context.Context, item rollout.Proposa
 		return nil, err
 	}
 	changes := map[string]any{
-		"guidelines":  diffPolicyIDs(guidelineIDs(candidate.Guidelines), guidelineIDs(source.Guidelines)),
-		"journeys":    diffPolicyIDs(journeyIDs(candidate.Journeys), journeyIDs(source.Journeys)),
-		"templates":   diffPolicyIDs(templateIDsForAPI(candidate.Templates), templateIDsForAPI(source.Templates)),
+		"guidelines":    diffPolicyIDs(guidelineIDs(candidate.Guidelines), guidelineIDs(source.Guidelines)),
+		"journeys":      diffPolicyIDs(journeyIDs(candidate.Journeys), journeyIDs(source.Journeys)),
+		"templates":     diffPolicyIDs(templateIDsForAPI(candidate.Templates), templateIDsForAPI(source.Templates)),
 		"tool_policies": diffPolicyIDs(toolPolicyIDs(candidate.ToolPolicies), toolPolicyIDs(source.ToolPolicies)),
-		"soul":        soulFieldDiff(source.Soul, candidate.Soul),
+		"soul":          soulFieldDiff(source.Soul, candidate.Soul),
 	}
 	findings := s.policyProposalFindings(item, source, candidate, changes)
 	blocked := false
@@ -4009,15 +4009,15 @@ func (s *Server) policyProposalPreview(ctx context.Context, item rollout.Proposa
 		}
 	}
 	return map[string]any{
-		"proposal":        item,
-		"source_bundle":   map[string]any{"id": source.ID, "version": source.Version},
+		"proposal":         item,
+		"source_bundle":    map[string]any{"id": source.ID, "version": source.Version},
 		"candidate_bundle": map[string]any{"id": candidate.ID, "version": candidate.Version},
-		"origin":          firstNonEmpty(item.Origin, proposalOrigin(item)),
-		"changes":         changes,
-		"lint_findings":   findings,
-		"apply_blocked":   blocked,
-		"apply_warnings":  warnings,
-		"blocked_reasons": lintLikeMessages(findings, true),
+		"origin":           firstNonEmpty(item.Origin, proposalOrigin(item)),
+		"changes":          changes,
+		"lint_findings":    findings,
+		"apply_blocked":    blocked,
+		"apply_warnings":   warnings,
+		"blocked_reasons":  lintLikeMessages(findings, true),
 	}, nil
 }
 
@@ -5230,6 +5230,9 @@ type resolvedPolicyResponse struct {
 	ExposedTools         []string                          `json:"exposed_tools,omitempty"`
 	CandidateTemplates   []string                          `json:"candidate_templates,omitempty"`
 	DisambiguationPrompt string                            `json:"disambiguation_prompt,omitempty"`
+	ScopeClassification  string                            `json:"scope_classification,omitempty"`
+	ScopeAction          string                            `json:"scope_action,omitempty"`
+	ScopeReasons         []string                          `json:"scope_reasons,omitempty"`
 	BatchResults         []policyruntime.BatchResult       `json:"batch_results,omitempty"`
 	PromptSetVersions    map[string]string                 `json:"prompt_set_versions,omitempty"`
 	ARQResults           []string                          `json:"arq_results,omitempty"`
@@ -5309,6 +5312,9 @@ func toResolvedPolicyResponse(exec execution.TurnExecution, view policyruntime.E
 		ExposedTools:         append([]string(nil), view.ToolExposureStage.ExposedTools...),
 		CandidateTemplates:   templateIDsForAPI(view.ResponseAnalysisStage.CandidateTemplates),
 		DisambiguationPrompt: view.DisambiguationPrompt,
+		ScopeClassification:  view.ScopeBoundaryStage.Classification,
+		ScopeAction:          view.ScopeBoundaryStage.Action,
+		ScopeReasons:         append([]string(nil), view.ScopeBoundaryStage.Reasons...),
 		BatchResults:         append([]policyruntime.BatchResult(nil), view.BatchResults...),
 		PromptSetVersions:    cloneStringMap(view.PromptSetVersions),
 		ARQResults:           arqNames(view.ARQResults),
@@ -5578,20 +5584,20 @@ func firstNonEmpty(values ...string) string {
 
 func preferenceView(item customer.Preference) map[string]any {
 	view := map[string]any{
-		"id":              item.ID,
-		"agent_id":        item.AgentID,
-		"customer_id":     item.CustomerID,
-		"key":             item.Key,
-		"value":           item.Value,
-		"source":          item.Source,
-		"confidence":      item.Confidence,
-		"status":          item.Status,
-		"evidence_refs":   item.EvidenceRefs,
-		"metadata":        item.Metadata,
+		"id":                item.ID,
+		"agent_id":          item.AgentID,
+		"customer_id":       item.CustomerID,
+		"key":               item.Key,
+		"value":             item.Value,
+		"source":            item.Source,
+		"confidence":        item.Confidence,
+		"status":            item.Status,
+		"evidence_refs":     item.EvidenceRefs,
+		"metadata":          item.Metadata,
 		"last_confirmed_at": item.LastConfirmedAt,
-		"expires_at":      item.ExpiresAt,
-		"created_at":      item.CreatedAt,
-		"updated_at":      item.UpdatedAt,
+		"expires_at":        item.ExpiresAt,
+		"created_at":        item.CreatedAt,
+		"updated_at":        item.UpdatedAt,
 	}
 	if item.Status == customer.PreferenceStatusPending {
 		view["review_reason"] = stringMetadata(item.Metadata, "review_reason")

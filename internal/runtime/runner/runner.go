@@ -991,6 +991,10 @@ func traceIDForExecution(eventID, sessionID string) string {
 }
 
 func (r *Runner) learnFromExecution(ctx context.Context, exec execution.TurnExecution) error {
+	view, _, err := r.resolveView(ctx, exec)
+	if err == nil && view.ScopeBoundaryStage.Classification == "out_of_scope" {
+		return nil
+	}
 	sess, err := r.repo.GetSession(ctx, exec.SessionID)
 	if err != nil {
 		return err

@@ -325,6 +325,14 @@ type VerificationResult struct {
 	Replacement string   `json:"replacement,omitempty"`
 }
 
+type ScopeBoundaryStageResult struct {
+	Classification string   `json:"classification,omitempty"`
+	Action         string   `json:"action,omitempty"`
+	MatchedTopics  []string `json:"matched_topics,omitempty"`
+	Reasons        []string `json:"reasons,omitempty"`
+	Reply          string   `json:"reply,omitempty"`
+}
+
 type ARQResult struct {
 	Name    string         `json:"name"`
 	Version string         `json:"version"`
@@ -360,6 +368,7 @@ type EngineResult struct {
 	CustomerDependencyStage     CustomerDependencyStageResult
 	RelationshipResolutionStage RelationshipResolutionStageResult
 	DisambiguationStage         DisambiguationStageResult
+	ScopeBoundaryStage          ScopeBoundaryStageResult
 	RetrieverStage              RetrieverStageResult
 	ResponseAnalysisStage       ResponseAnalysisStageResult
 	ToolExposureStage           ToolExposureStageResult

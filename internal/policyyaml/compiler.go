@@ -39,6 +39,9 @@ func ValidateBundle(bundle policy.Bundle) error {
 	if err := validateSoul(bundle.Soul); err != nil {
 		return err
 	}
+	if err := validateDomainBoundary(bundle.DomainBoundary); err != nil {
+		return err
+	}
 
 	seen := map[string]struct{}{}
 	for _, item := range bundle.Observations {
@@ -185,6 +188,48 @@ func validateSoul(soul policy.Soul) error {
 	}
 	if err := validateNonEmptyUnique("soul.formatting_rules", soul.FormattingRules); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateDomainBoundary(boundary policy.DomainBoundary) error {
+	mode := strings.TrimSpace(boundary.Mode)
+	if mode == "" {
+		return nil
+	}
+	switch mode {
+	case "hard_refuse", "soft_redirect", "broad_concierge":
+	default:
+		return fmt.Errorf("domain_boundary.mode has unsupported value %q", boundary.Mode)
+	}
+	if err := validateNonEmptyUnique("domain_boundary.allowed_topics", boundary.AllowedTopics); err != nil {
+		return err
+	}
+	if err := validateNonEmptyUnique("domain_boundary.adjacent_topics", boundary.AdjacentTopics); err != nil {
+		return err
+	}
+	if err := validateNonEmptyUnique("domain_boundary.blocked_topics", boundary.BlockedTopics); err != nil {
+		return err
+	}
+	action := strings.TrimSpace(boundary.AdjacentAction)
+	if action != "" {
+		switch action {
+		case "allow", "redirect", "refuse":
+		default:
+			return fmt.Errorf("domain_boundary.adjacent_action has unsupported value %q", boundary.AdjacentAction)
+		}
+	}
+	uncertainty := strings.TrimSpace(boundary.UncertaintyAction)
+	if uncertainty != "" {
+		switch uncertainty {
+		case "redirect", "refuse", "escalate":
+		default:
+			return fmt.Errorf("domain_boundary.uncertainty_action has unsupported value %q", boundary.UncertaintyAction)
+		}
+	}
+	if (mode == "hard_refuse" || mode == "soft_redirect" || len(boundary.BlockedTopics) > 0 || action == "redirect" || action == "refuse" || uncertainty == "redirect" || uncertainty == "refuse") &&
+		strings.TrimSpace(boundary.OutOfScopeReply) == "" {
+		return errors.New("domain_boundary.out_of_scope_reply is required when domain boundary can refuse or redirect")
 	}
 	return nil
 }
