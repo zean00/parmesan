@@ -1202,7 +1202,7 @@ func normalizeScenarioSeed(seed ScenarioExpectation) ScenarioExpectation {
 func minimumOverallForRisk(risk string) float64 {
 	switch strings.ToLower(strings.TrimSpace(risk)) {
 	case "high":
-		return 0.8
+		return 0.85
 	case "medium":
 		return 0.78
 	case "low":

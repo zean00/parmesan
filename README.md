@@ -275,7 +275,8 @@ go run ./cmd/quality-release-trend -dir artifacts/quality-release-history
 ```
 
 `quality-report-check` now applies stricter per-scenario minimums from the
-catalog when they exceed the global `-min-overall` floor.
+catalog when they exceed the global `-min-overall` floor; high-risk built-in
+scenarios currently require at least `0.85` overall.
 If `QUALITY_SCENARIO_SEEDS` points at a reviewed seed file, the catalog and
 report checker merge those scenarios automatically, with matching IDs overriding
 built-in expectations.

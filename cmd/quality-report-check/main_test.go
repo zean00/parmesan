@@ -63,9 +63,9 @@ func TestCheckReportsFailsMissingExpectedScenario(t *testing.T) {
 
 func TestCheckReportsUsesScenarioMinimumOverallWhenHigherThanGlobal(t *testing.T) {
 	dir := t.TempDir()
-	writeScenarioReport(t, dir, "TestPlatformValidationScenario", "support_multilingual_english_fallback", true, false, 0.71)
+	writeScenarioReport(t, dir, "TestPlatformValidationScenario", "ecommerce_knowledge_grounding_damaged_toaster_replacem", true, false, 0.82)
 
-	_, err := checkReports(dir, reportExpectations{Scenarios: []string{"support_multilingual_english_fallback"}, MinOverall: 0.7})
+	_, err := checkReports(dir, reportExpectations{Scenarios: []string{"ecommerce_knowledge_grounding_damaged_toaster_replacem"}, MinOverall: 0.7})
 	if err == nil || !strings.Contains(err.Error(), "below minimum") {
 		t.Fatalf("error = %v, want scenario-specific threshold failure", err)
 	}
