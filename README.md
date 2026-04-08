@@ -263,6 +263,7 @@ go run ./cmd/quality-catalog -summary
 go run ./cmd/quality-catalog -live-only
 OPERATOR_API_KEY=... go run ./cmd/regression-export -base-url http://127.0.0.1:8080 -out artifacts/regression-fixtures.json
 go run ./cmd/regression-seed -in artifacts/regression-fixtures.json -out artifacts/regression-scenario-seeds.json
+go run ./cmd/quality-seed-check -in artifacts/regression-scenario-seeds.json
 QUALITY_SCENARIO_SEEDS=artifacts/regression-scenario-seeds.json go run ./cmd/quality-catalog -summary
 go run ./cmd/quality-report-check -dir /tmp/parmesan-platform-validation-live -expect-scenarios ecommerce_knowledge_grounding_damaged_toaster_replacem,ecommerce_knowledge_grounding_refund_timing_question,pet_store_topic_scope_human_cooking_question,pet_store_topic_scope_pet_food_question,support_multilingual_english_fallback,support_multilingual_respond_in_indonesian,support_preference_call_me_rina,support_preference_prefer_email,support_refusal_escalation_operator_handoff,support_refusal_escalation_unsafe_request -min-overall 0.7
 ```
@@ -283,6 +284,7 @@ Operator quality review:
 - `POST /v1/operator/quality/regressions/{feedback_id}/state` marks a candidate as `candidate`, `accepted`, or `rejected`.
 - `GET /v1/operator/quality/regressions/export` exports accepted fixtures as scenario-shaped review artifacts with derived `expected_quality` and `risk`.
 - `go run ./cmd/regression-seed` converts that accepted export into `ScenarioExpectation`-shaped seed JSON for catalog review.
+- `go run ./cmd/quality-seed-check` validates reviewed seed files before they are merged into the catalog or release gates.
 - `go run ./cmd/regression-export` fetches those exported regression fixtures from the operator API and writes a reviewable JSON artifact for catalog curation.
 
 ## ACP v1 Contract

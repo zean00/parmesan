@@ -3,6 +3,7 @@ package quality
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 
@@ -100,6 +101,19 @@ var failureLabelDimensions = map[string]string{
 	"bad_escalation":        "refusal_escalation_quality",
 	"retrieval_miss":        "knowledge_grounding",
 	"premature_commitment":  "policy_adherence",
+}
+
+var allowedQualityDimensions = map[string]struct{}{
+	"policy_adherence":           {},
+	"topic_scope_compliance":     {},
+	"journey_adherence":          {},
+	"knowledge_grounding":        {},
+	"retrieval_quality":          {},
+	"tone_persona":               {},
+	"customer_preference":        {},
+	"multilingual_quality":       {},
+	"refusal_escalation_quality": {},
+	"hallucination_risk":         {},
 }
 
 func FailureLabelDimensions(labels []string) map[string]string {
@@ -772,6 +786,35 @@ func mergeScenarioSeeds(base, seeds []ScenarioExpectation) []ScenarioExpectation
 		index[seed.ID] = len(out) - 1
 	}
 	return out
+}
+
+func ValidateScenarioSeeds(seeds []ScenarioExpectation) []error {
+	var errs []error
+	seen := map[string]struct{}{}
+	for i, seed := range seeds {
+		label := fmt.Sprintf("seed[%d]", i)
+		if strings.TrimSpace(seed.ID) == "" {
+			errs = append(errs, fmt.Errorf("%s missing id", label))
+		}
+		if strings.TrimSpace(seed.Input) == "" {
+			errs = append(errs, fmt.Errorf("%s missing input", label))
+		}
+		if strings.TrimSpace(seed.ID) != "" {
+			if _, ok := seen[seed.ID]; ok {
+				errs = append(errs, fmt.Errorf("%s duplicate id %q", label, seed.ID))
+			}
+			seen[seed.ID] = struct{}{}
+		}
+		if seed.MinimumOverall < 0 || seed.MinimumOverall > 1 {
+			errs = append(errs, fmt.Errorf("%s invalid minimum_overall %.2f", label, seed.MinimumOverall))
+		}
+		for _, dimension := range seed.ExpectedQuality {
+			if _, ok := allowedQualityDimensions[strings.TrimSpace(dimension)]; !ok {
+				errs = append(errs, fmt.Errorf("%s unknown expected_quality %q", label, dimension))
+			}
+		}
+	}
+	return errs
 }
 
 func loadScenarioSeedsFromEnv() []ScenarioExpectation {
