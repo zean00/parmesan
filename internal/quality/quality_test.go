@@ -53,6 +53,44 @@ func TestGradePassesConfiguredBoundaryReply(t *testing.T) {
 	}
 }
 
+func TestGradeFailsWeakEscalationReply(t *testing.T) {
+	view := policyruntime.EngineResult{
+		ScopeBoundaryStage: policyruntime.ScopeBoundaryStageResult{
+			Classification: "uncertain",
+			Action:         "escalate",
+			Reply:          "I will continue.",
+			Reasons:        []string{"needs_operator"},
+		},
+	}
+
+	card := Grade(view, view.ScopeBoundaryStage.Reply, nil)
+	if !HardFailed(card) {
+		t.Fatalf("scorecard = %#v, want hard failure for weak escalation", card)
+	}
+	if got := card.Dimensions["refusal_escalation_quality"]; got.Passed {
+		t.Fatalf("refusal escalation dimension = %#v, want failed", got)
+	}
+}
+
+func TestGradeFailsWeakRefusalReply(t *testing.T) {
+	view := policyruntime.EngineResult{
+		ScopeBoundaryStage: policyruntime.ScopeBoundaryStageResult{
+			Classification: "out_of_scope",
+			Action:         "refuse",
+			Reply:          "Okay.",
+			Reasons:        []string{"blocked_topic"},
+		},
+	}
+
+	card := Grade(view, view.ScopeBoundaryStage.Reply, nil)
+	if !HardFailed(card) {
+		t.Fatalf("scorecard = %#v, want hard failure for weak refusal", card)
+	}
+	if got := card.Dimensions["refusal_escalation_quality"]; got.Passed {
+		t.Fatalf("refusal escalation dimension = %#v, want failed", got)
+	}
+}
+
 func TestBuildResponsePlanIncludesQualityInputs(t *testing.T) {
 	view := policyruntime.EngineResult{
 		Bundle: &policy.Bundle{
@@ -295,8 +333,8 @@ func TestProductionReadinessScenariosDefinesTwoHundredCases(t *testing.T) {
 			liveGate++
 		}
 	}
-	if liveGate != 60 {
-		t.Fatalf("live gate scenario count = %d, want 60", liveGate)
+	if liveGate != 65 {
+		t.Fatalf("live gate scenario count = %d, want 65", liveGate)
 	}
 	if len(categories) < 10 {
 		t.Fatalf("categories = %#v, want broad platform coverage", categories)
