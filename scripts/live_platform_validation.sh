@@ -37,15 +37,19 @@ EXPECTED_SCENARIOS="$(go run ./cmd/quality-catalog -live-only -ids)"
 mkdir -p "$REPORT_DIR"
 rm -f "$REPORT_DIR"/TestPlatformValidation*.json
 
-echo "[1/3] Production-readiness catalog summary"
+echo "[1/4] Production-readiness catalog summary"
 go run ./cmd/quality-catalog -summary
 
 echo
-echo "[2/3] Live-gate scenario catalog"
+echo "[2/4] Domain launch-pack coverage"
+go run ./cmd/quality-domain-pack -fail
+
+echo
+echo "[3/4] Live-gate scenario catalog"
 go run ./cmd/quality-catalog -summary -live-only
 
 echo
-echo "[3/3] Live platform validation using $DEFAULT_REASONING_PROVIDER"
+echo "[4/4] Live platform validation using $DEFAULT_REASONING_PROVIDER"
 go test -count=1 ./internal/api/http -run 'TestPlatformValidation(EcommerceLifecycle|PendingPreferenceReviewFlow|LanguagePreferenceLearning|PetStoreScopeQuality|LiveGateCatalog)$' -v
 
 echo

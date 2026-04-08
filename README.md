@@ -262,13 +262,14 @@ Inspect the catalog directly with:
 go run ./cmd/quality-catalog -summary
 go run ./cmd/quality-catalog -live-only
 go run ./cmd/quality-catalog -live-only -ids
+go run ./cmd/quality-domain-pack -fail
 go run ./cmd/quality-live-diff
 OPERATOR_API_KEY=... go run ./cmd/regression-export -base-url http://127.0.0.1:8080 -out artifacts/regression-fixtures.json
 go run ./cmd/regression-seed -in artifacts/regression-fixtures.json -out artifacts/regression-scenario-seeds.json
 go run ./cmd/regression-seed -in artifacts/regression-fixtures.json -out artifacts/regression-scenario-seeds.json -promote-live seed_id_one,seed_id_two
 go run ./cmd/quality-seed-check -in artifacts/regression-scenario-seeds.json
 QUALITY_SCENARIO_SEEDS=artifacts/regression-scenario-seeds.json go run ./cmd/quality-catalog -summary
-go run ./cmd/quality-report-check -dir /tmp/parmesan-platform-validation-live -expect-scenarios ecommerce_knowledge_grounding_damaged_toaster_replacem,ecommerce_knowledge_grounding_refund_timing_question,pet_store_topic_scope_human_cooking_question,pet_store_topic_scope_pet_food_question,support_multilingual_english_fallback,support_multilingual_respond_in_indonesian,support_preference_call_me_rina,support_preference_prefer_email,support_refusal_escalation_operator_handoff,support_refusal_escalation_unsafe_request -min-overall 0.7
+go run ./cmd/quality-report-check -dir /tmp/parmesan-platform-validation-live -expect-scenarios "$(go run ./cmd/quality-catalog -live-only -ids)" -min-overall 0.7
 go run ./cmd/quality-release-snapshot -dir /tmp/parmesan-platform-validation-live -out artifacts/quality-release-snapshot.json
 go run ./cmd/quality-release-history -dir artifacts/quality-release-history -require-consecutive 3
 go run ./cmd/quality-release-trend -dir artifacts/quality-release-history
@@ -277,6 +278,9 @@ go run ./cmd/quality-release-trend -dir artifacts/quality-release-history
 `quality-report-check` now applies stricter per-scenario minimums from the
 catalog when they exceed the global `-min-overall` floor; high-risk built-in
 scenarios currently require at least `0.85` overall.
+`quality-domain-pack -fail` verifies every domain-specific launch pack has
+deterministic coverage, live-gate coverage, category coverage, and live coverage
+for high-risk scenarios.
 If `QUALITY_SCENARIO_SEEDS` points at a reviewed seed file, the catalog and
 report checker merge those scenarios automatically, with matching IDs overriding
 built-in expectations.
