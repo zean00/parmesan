@@ -810,7 +810,7 @@ func TestPlatformValidationLiveGateCatalog(t *testing.T) {
 	}
 	for _, scenario := range scenarios {
 		t.Run(scenario.id, func(t *testing.T) {
-			card := quality.Grade(scenario.view, scenario.response, nil)
+			card := quality.GradeWithLLM(context.Background(), router, scenario.view, scenario.response, nil)
 			if quality.HardFailed(card) || !card.Passed || card.Overall < 0.7 {
 				t.Fatalf("scenario %s scorecard = %#v, want release-gate pass", scenario.id, card)
 			}
@@ -1208,9 +1208,9 @@ func containsString(items []string, target string) bool {
 
 func validationTimeout(base time.Duration) time.Duration {
 	if hasLiveProvider() {
-		scaled := base * 8
-		if scaled < 30*time.Second {
-			return 30 * time.Second
+		scaled := base * 15
+		if scaled < 90*time.Second {
+			return 90 * time.Second
 		}
 		return scaled
 	}

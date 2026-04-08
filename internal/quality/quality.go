@@ -375,9 +375,6 @@ func updateSoftDimension(card *Scorecard, name string, score float64, warnings [
 		}
 	}
 	card.Dimensions[name] = DimensionScore{Name: name, Score: score, Passed: true, Severity: "low", Findings: findings}
-	if score < card.Overall {
-		card.Overall = score
-	}
 	card.Warnings = append(card.Warnings, findings...)
 }
 

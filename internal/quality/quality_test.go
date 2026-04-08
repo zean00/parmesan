@@ -142,6 +142,21 @@ func TestGradeFlagsMissedIndonesianPreference(t *testing.T) {
 	}
 }
 
+func TestSoftDimensionUpdatesDoNotLowerOverall(t *testing.T) {
+	card := Scorecard{
+		Overall:    1,
+		Passed:     true,
+		Dimensions: map[string]DimensionScore{},
+	}
+	updateSoftDimension(&card, "tone_persona", 0.2, []string{"too terse"})
+	if card.Overall != 1 {
+		t.Fatalf("overall = %v, want unchanged by subjective warning", card.Overall)
+	}
+	if got := card.Dimensions["tone_persona"]; got.Score != 0.2 || !got.Passed {
+		t.Fatalf("tone dimension = %#v, want warning-only score", got)
+	}
+}
+
 func TestProductionReadinessScenariosDefinesFiftyCases(t *testing.T) {
 	scenarios := ProductionReadinessScenarios()
 	if len(scenarios) != 50 {
