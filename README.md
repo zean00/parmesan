@@ -273,6 +273,9 @@ catalog when they exceed the global `-min-overall` floor.
 If `QUALITY_SCENARIO_SEEDS` points at a reviewed seed file, the catalog and
 report checker merge those scenarios automatically, with matching IDs overriding
 built-in expectations.
+`./scripts/live_platform_validation.sh` now auto-detects
+`artifacts/regression-scenario-seeds.json`, validates it with
+`quality-seed-check`, and exports `QUALITY_SCENARIO_SEEDS` automatically.
 
 The script defaults reasoning, structured, and embedding providers to
 OpenRouter; override `DEFAULT_REASONING_PROVIDER`,
