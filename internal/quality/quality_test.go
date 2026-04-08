@@ -175,6 +175,35 @@ func TestGradeSupportsSpecificKnowledgeClaimFromRetrievedEvidence(t *testing.T) 
 	}
 }
 
+func TestBuildResponsePlanIncludesHighRiskBlueprint(t *testing.T) {
+	view := policyruntime.EngineResult{
+		ActiveJourneyState: &policy.JourneyNode{
+			ID:          "verify_state",
+			Instruction: "Please share the order number before I review refund or replacement options.",
+		},
+		RetrieverStage: policyruntime.RetrieverStageResult{Results: []knowledgeretriever.Result{{
+			RetrieverID: "wiki",
+			Data:        "Damaged orders can be reviewed for replacement after verification.",
+			ResultHash:  "hash_verify",
+			Citations:   []knowledge.Citation{{URI: "kb://verify"}},
+		}}},
+	}
+
+	plan := BuildResponsePlan(view)
+	if plan.RiskTier != "high" {
+		t.Fatalf("risk tier = %q, want high", plan.RiskTier)
+	}
+	if len(plan.DesiredStructure) == 0 {
+		t.Fatalf("desired structure = %#v, want constrained blueprint", plan.DesiredStructure)
+	}
+	if !containsString(plan.DesiredStructure, []string{"When you rely on retrieved knowledge, cite the supporting source identifier or URI."}) {
+		t.Fatalf("desired structure = %#v, want citation guidance", plan.DesiredStructure)
+	}
+	if !containsString(plan.DesiredStructure, []string{"Do not promise eligibility, approval, or timing before verification is complete."}) {
+		t.Fatalf("desired structure = %#v, want verification-first guidance", plan.DesiredStructure)
+	}
+}
+
 func TestGradeFlagsNoisyUnusedRetrieval(t *testing.T) {
 	view := policyruntime.EngineResult{
 		RetrieverStage: policyruntime.RetrieverStageResult{Results: []knowledgeretriever.Result{{

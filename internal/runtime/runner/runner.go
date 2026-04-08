@@ -1460,6 +1460,13 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 	if plan := quality.FormatResponsePlan(responsePlan); plan != "" {
 		parts = append(parts, "Response quality plan: "+plan)
 	}
+	if len(responsePlan.DesiredStructure) > 0 {
+		lines := make([]string, 0, len(responsePlan.DesiredStructure))
+		for i, item := range responsePlan.DesiredStructure {
+			lines = append(lines, fmt.Sprintf("%d. %s", i+1, item))
+		}
+		parts = append(parts, "High-risk response blueprint:\n"+strings.Join(lines, "\n"))
+	}
 	if strings.EqualFold(responsePlan.RiskTier, "high") {
 		var contract []string
 		contract = append(contract, "Do not promise refunds, replacements, approvals, or eligibility unless the answer explicitly stays within verified evidence and required review steps.")

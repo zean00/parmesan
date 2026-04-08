@@ -186,6 +186,7 @@ func BuildResponsePlan(view policyruntime.EngineResult) ResponsePlan {
 	if shouldUseBoundaryReply(view.ScopeBoundaryStage) {
 		plan.DesiredStructure = append(plan.DesiredStructure, "Use the configured domain-boundary refusal or redirect response exactly.")
 	}
+	plan.DesiredStructure = append(plan.DesiredStructure, highRiskBlueprintForView(view, plan)...)
 	return plan
 }
 
@@ -1277,6 +1278,78 @@ func inferRiskTier(view policyruntime.EngineResult) string {
 		return "medium"
 	}
 	return "low"
+}
+
+func highRiskBlueprintForView(view policyruntime.EngineResult, plan ResponsePlan) []string {
+	if !strings.EqualFold(plan.RiskTier, "high") {
+		return nil
+	}
+	intent := highRiskIntent(view)
+	switch intent {
+	case "approval":
+		return []string{
+			"Start by stating that approval or review is still required.",
+			"Do not imply the requested change is already approved or completed.",
+			"End with the next approval or review step.",
+		}
+	case "escalation":
+		return []string{
+			"Start by stating that a human operator or escalation path is required.",
+			"Briefly explain why the escalation is needed without adding unsupported promises.",
+			"End with the next handoff step or expected follow-up.",
+		}
+	case "refund_replacement":
+		out := []string{
+			"Start by stating what still must be verified before any refund or replacement decision.",
+			"Do not promise eligibility, approval, or timing before verification is complete.",
+			"End with the next review step or the information the customer must provide.",
+		}
+		if plan.RetrievalRequired {
+			out = append(out, "When you rely on retrieved knowledge, cite the supporting source identifier or URI.")
+		}
+		return out
+	default:
+		return []string{
+			"Start with the blocking verification or policy requirement.",
+			"Keep any commitment inside the verified evidence-backed envelope.",
+			"End with the next safe step for the customer.",
+		}
+	}
+}
+
+func highRiskIntent(view policyruntime.EngineResult) string {
+	text := strings.ToLower(strings.TrimSpace(strings.Join(highRiskSignals(view), " ")))
+	switch {
+	case strings.Contains(text, "approval") || strings.Contains(text, "approve"):
+		return "approval"
+	case strings.Contains(text, "escalat") || strings.Contains(text, "handoff") || strings.Contains(text, "operator"):
+		return "escalation"
+	case strings.Contains(text, "refund") || strings.Contains(text, "replacement") || strings.Contains(text, "exchange") || strings.Contains(text, "return"):
+		return "refund_replacement"
+	default:
+		return ""
+	}
+}
+
+func highRiskSignals(view policyruntime.EngineResult) []string {
+	var out []string
+	if view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
+		out = append(out, view.ActiveJourneyState.Instruction)
+	}
+	for _, guideline := range view.MatchFinalizeStage.MatchedGuidelines {
+		if strings.TrimSpace(guideline.Then) != "" {
+			out = append(out, guideline.Then)
+		}
+	}
+	for _, result := range view.RetrieverStage.Results {
+		if strings.TrimSpace(result.Data) != "" {
+			out = append(out, result.Data)
+		}
+	}
+	if view.ScopeBoundaryStage.Action == "escalate" {
+		out = append(out, "escalate")
+	}
+	return out
 }
 
 func requiredEvidenceKindsForView(view policyruntime.EngineResult) []string {

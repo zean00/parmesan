@@ -663,6 +663,8 @@ func TestComposePromptIncludesSoulGuidance(t *testing.T) {
 		!strings.Contains(prompt, "Customer preferences (soft constraints):\npreferred_name: Alex") ||
 		!strings.Contains(prompt, "Response quality plan:") ||
 		!strings.Contains(prompt, `"preference_hints":["preferred_name: Alex"]`) ||
+		!strings.Contains(prompt, "High-risk response blueprint:") ||
+		!strings.Contains(prompt, "Do not promise eligibility, approval, or timing before verification is complete.") ||
 		!strings.Contains(prompt, "High-risk response contract:") ||
 		!strings.Contains(prompt, "cite the supporting source identifier or URI") {
 		t.Fatalf("prompt = %q, want SOUL style guidance", prompt)
