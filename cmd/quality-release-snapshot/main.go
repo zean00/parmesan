@@ -48,6 +48,7 @@ type snapshot struct {
 	MergedLive  []string              `json:"merged_live"`
 	AddedLive   []string              `json:"added_live"`
 	RemovedLive []string              `json:"removed_live"`
+	Passed      bool                  `json:"passed"`
 	Summary     snapshotSummary       `json:"summary"`
 	Providers   []providerStats       `json:"providers"`
 	Reports     []snapshotReportBrief `json:"reports"`
@@ -117,6 +118,7 @@ func buildSnapshot(dir string) (snapshot, error) {
 		MergedLive:  mergedLive,
 		AddedLive:   diffIDs(mergedLive, builtInLive),
 		RemovedLive: diffIDs(builtInLive, mergedLive),
+		Passed:      true,
 		Summary: snapshotSummary{
 			MinOverall: 1,
 		},
@@ -164,6 +166,10 @@ func buildSnapshot(dir string) (snapshot, error) {
 				if scorecard.HardFailed {
 					out.Summary.HardFailedScorecard++
 					reportBrief.HardFailed = true
+					out.Passed = false
+				}
+				if !scorecard.Passed {
+					out.Passed = false
 				}
 				if scorecard.Overall < out.Summary.MinOverall {
 					out.Summary.MinOverall = scorecard.Overall
@@ -183,6 +189,7 @@ func buildSnapshot(dir string) (snapshot, error) {
 	}
 	if out.Summary.ScorecardCount == 0 {
 		out.Summary.MinOverall = 0
+		out.Passed = false
 	}
 	out.Summary.ReportCount = len(out.Reports)
 	out.Summary.Scenarios = mapKeysSorted(scenarios)

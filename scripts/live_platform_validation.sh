@@ -8,6 +8,8 @@ REPORT_DIR="${PLATFORM_VALIDATION_REPORT_DIR:-/tmp/parmesan-platform-validation-
 PROVIDER="${DEFAULT_REASONING_PROVIDER:-openrouter}"
 SEED_FILE="${QUALITY_SCENARIO_SEEDS:-artifacts/regression-scenario-seeds.json}"
 SNAPSHOT_OUT="${QUALITY_RELEASE_SNAPSHOT_OUT:-artifacts/quality-release-snapshot.json}"
+HISTORY_DIR="${QUALITY_RELEASE_HISTORY_DIR:-artifacts/quality-release-history}"
+REQUIRE_CONSECUTIVE="${QUALITY_RELEASE_REQUIRE_CONSECUTIVE_CLEAN:-1}"
 
 if [[ "$PROVIDER" == "openrouter" && -z "${OPENROUTER_API_KEY:-}" ]]; then
   echo "OPENROUTER_API_KEY is required for OpenRouter live validation." >&2
@@ -54,6 +56,14 @@ echo
 echo "Release snapshot"
 go run ./cmd/quality-release-snapshot -dir "$REPORT_DIR" -out "$SNAPSHOT_OUT"
 
+mkdir -p "$HISTORY_DIR"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+cp "$SNAPSHOT_OUT" "$HISTORY_DIR/$STAMP.json"
+
+echo
+echo "Release history check"
+go run ./cmd/quality-release-history -dir "$HISTORY_DIR" -require-consecutive "$REQUIRE_CONSECUTIVE"
+
 echo
 echo "Scorecard summary from $REPORT_DIR"
 if command -v jq >/dev/null 2>&1; then
@@ -82,3 +92,4 @@ fi
 
 echo
 echo "Release snapshot written to $SNAPSHOT_OUT"
+echo "Release history directory: $HISTORY_DIR"

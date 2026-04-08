@@ -65,6 +65,9 @@ func TestBuildSnapshotAggregatesReports(t *testing.T) {
 	if item.Summary.ReportCount != 2 {
 		t.Fatalf("ReportCount = %d, want 2", item.Summary.ReportCount)
 	}
+	if item.Passed {
+		t.Fatalf("Passed = %t, want false because one scorecard hard-failed", item.Passed)
+	}
 	if item.Summary.ScenarioCount != 2 {
 		t.Fatalf("ScenarioCount = %d, want 2", item.Summary.ScenarioCount)
 	}
