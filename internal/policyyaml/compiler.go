@@ -121,6 +121,11 @@ func ValidateBundle(bundle policy.Bundle) error {
 			return fmt.Errorf("template %q requires text or messages", item.ID)
 		}
 	}
+	for _, item := range bundle.Glossary {
+		if strings.TrimSpace(item.Term) == "" {
+			return fmt.Errorf("glossary term requires term")
+		}
+	}
 	for _, item := range bundle.ToolPolicies {
 		if err := validateID("tool_policy", item.ID, seen); err != nil {
 			return err

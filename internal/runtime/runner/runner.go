@@ -24,6 +24,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/media"
 	"github.com/sahal/parmesan/internal/domain/policy"
+	responsedomain "github.com/sahal/parmesan/internal/domain/response"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/domain/toolrun"
@@ -50,9 +51,12 @@ type Runner struct {
 	leaseOwner string
 	leaseTTL   time.Duration
 	interval   time.Duration
+	responseMu sync.Mutex
+	responses  map[string]responsedomain.Response
 }
 
 var errApprovalRequired = errors.New("approval required")
+var errResponsePreparationExhausted = errors.New("response preparation exhausted")
 
 func New(repo store.Repository, writes *asyncwrite.Queue, broker *sse.Broker, router *model.Router, leaseOwner string) *Runner {
 	return &Runner{
@@ -65,10 +69,13 @@ func New(repo store.Repository, writes *asyncwrite.Queue, broker *sse.Broker, ro
 		leaseOwner: leaseOwner,
 		leaseTTL:   10 * time.Second,
 		interval:   500 * time.Millisecond,
+		responses:  map[string]responsedomain.Response{},
 	}
 }
 
 type resolvedView = policyruntime.EngineResult
+
+const maxResponsePreparationIterations = 4
 
 func (r *Runner) Start(ctx context.Context) {
 	go r.loop(ctx)
@@ -185,6 +192,7 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 	if err != nil {
 		return err
 	}
+	responseRecord, _ := r.ensureResponseRecord(ctx, exec)
 	if exec.Status == execution.StatusSucceeded || exec.Status == execution.StatusFailed || exec.Status == execution.StatusAbandoned {
 		return nil
 	}
@@ -209,6 +217,9 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 	if err := r.repo.UpdateExecution(ctx, exec); err != nil {
 		return err
 	}
+	_ = r.updateResponseState(ctx, responseRecord, responsedomain.StatusProcessing, "", func(record *responsedomain.Response) {
+		record.StartedAt = now
+	})
 
 	for _, step := range steps {
 		if step.Status == execution.StatusSucceeded {
@@ -221,6 +232,7 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 			exec.LeaseExpiresAt = step.NextAttemptAt
 			exec.UpdatedAt = now
 			_ = r.repo.UpdateExecution(ctx, exec)
+			_ = r.updateResponseState(ctx, responseRecord, responsedomain.StatusBlocked, step.BlockedReason, nil)
 			return nil
 		}
 		if step.Status == execution.StatusBlocked {
@@ -272,6 +284,26 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 				exec.LeaseExpiresAt = time.Time{}
 				exec.UpdatedAt = time.Now().UTC()
 				_ = r.repo.UpdateExecution(ctx, exec)
+				_ = r.updateResponseState(ctx, responseRecord, responsedomain.StatusBlocked, execution.BlockedReasonApprovalRequired, nil)
+				return nil
+			}
+			if errors.Is(err, errResponsePreparationExhausted) {
+				step.Status = execution.StatusBlocked
+				step.LastError = err.Error()
+				step.BlockedReason = "response_preparation_exhausted"
+				step.LeaseOwner = ""
+				step.LeaseExpiresAt = time.Time{}
+				step.FinishedAt = time.Now().UTC()
+				step.UpdatedAt = time.Now().UTC()
+				_ = r.repo.UpdateExecutionStep(ctx, step)
+				exec.Status = execution.StatusBlocked
+				exec.BlockedReason = "response_preparation_exhausted"
+				exec.ResumeSignal = "operator_retry"
+				exec.LeaseOwner = ""
+				exec.LeaseExpiresAt = time.Time{}
+				exec.UpdatedAt = time.Now().UTC()
+				_ = r.repo.UpdateExecution(ctx, exec)
+				_ = r.updateResponseState(ctx, responseRecord, responsedomain.StatusBlocked, "response_preparation_exhausted", nil)
 				return nil
 			}
 			if step.Recomputable && stepRetryBudgetAllows(step) && isRetryableExecutionError(err) {
@@ -291,6 +323,7 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 				exec.ResumeSignal = ""
 				exec.UpdatedAt = time.Now().UTC()
 				_ = r.repo.UpdateExecution(ctx, exec)
+				_ = r.updateResponseState(ctx, responseRecord, responsedomain.StatusPreparing, step.RetryReason, nil)
 				r.appendTrace(ctx, audit.Record{
 					ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
 					Kind:        "execution.retry_scheduled",
@@ -320,6 +353,7 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 				exec.LeaseExpiresAt = time.Time{}
 				exec.UpdatedAt = time.Now().UTC()
 				_ = r.repo.UpdateExecution(ctx, exec)
+				_ = r.updateResponseState(ctx, responseRecord, responsedomain.StatusBlocked, execution.BlockedReasonRetryBudgetExhausted, nil)
 				r.appendTrace(ctx, audit.Record{
 					ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
 					Kind:        "execution.blocked",
@@ -344,6 +378,9 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 			exec.LeaseExpiresAt = time.Time{}
 			exec.UpdatedAt = time.Now().UTC()
 			_ = r.repo.UpdateExecution(ctx, exec)
+			_ = r.updateResponseState(ctx, responseRecord, responsedomain.StatusFailed, err.Error(), func(record *responsedomain.Response) {
+				record.CompletedAt = time.Now().UTC()
+			})
 			r.appendTrace(ctx, audit.Record{
 				ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
 				Kind:        "execution.failed",
@@ -380,6 +417,9 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 	if err := r.repo.UpdateExecution(ctx, exec); err != nil {
 		return err
 	}
+	_ = r.updateResponseState(ctx, responseRecord, responsedomain.StatusReady, "", func(record *responsedomain.Response) {
+		record.CompletedAt = time.Now().UTC()
+	})
 	return r.learnFromExecution(ctx, exec)
 }
 
@@ -513,17 +553,33 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 		}
 		return nil
 	case "compose_response":
-		view, events, err := r.resolveView(ctx, *exec)
+		responseRecord, err := r.ensureResponseRecord(ctx, *exec)
 		if err != nil {
 			return err
 		}
-		toolOutput, err := r.maybeRunTool(ctx, *exec, view)
+		view, events, toolOutput, responseRecord, err := r.prepareResponse(ctx, *exec, responseRecord)
 		if err != nil {
+			return err
+		}
+		generationMode := normalizeGenerationMode(view.CompositionMode)
+		if err := r.updateResponseState(ctx, responseRecord, responseRecord.Status, responseRecord.Reason, func(record *responsedomain.Response) {
+			record.GenerationMode = generationMode
+		}); err != nil {
 			return err
 		}
 		respMessages := renderResponseMessages(view, toolOutput)
 		if len(respMessages) == 0 {
 			prompt := composePrompt(view, events, toolOutput)
+			r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
+				ResponseID:  responseRecord.ID,
+				SessionID:   exec.SessionID,
+				ExecutionID: exec.ID,
+				TraceID:     exec.TraceID,
+				Kind:        "message.generate",
+				Name:        generationMode,
+				Status:      "started",
+				StartedAt:   time.Now().UTC(),
+			})
 			resp, err := r.router.Generate(ctx, model.CapabilityReasoning, model.Request{Prompt: prompt})
 			if err != nil {
 				return err
@@ -533,6 +589,17 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 		respMessages = normalizeResponseMessages(respMessages)
 		respText := strings.Join(respMessages, "\n\n")
 		verification := policyruntime.VerifyDraft(view, respText, toolOutput)
+		r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
+			ResponseID:  responseRecord.ID,
+			SessionID:   exec.SessionID,
+			ExecutionID: exec.ID,
+			TraceID:     exec.TraceID,
+			Kind:        "response.verify",
+			Status:      verification.Status,
+			Fields:      map[string]any{"reasons": verification.Reasons},
+			StartedAt:   time.Now().UTC(),
+			FinishedAt:  time.Now().UTC(),
+		})
 		switch verification.Status {
 		case "revise", "block":
 			if strings.TrimSpace(verification.Replacement) != "" {
@@ -545,6 +612,11 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			return err
 		}
 		eventIDs := eventIDs(assistantEvents)
+		if err := r.updateResponseState(ctx, responseRecord, responsedomain.StatusProcessing, "", func(record *responsedomain.Response) {
+			record.MessageEventIDs = append([]string(nil), eventIDs...)
+		}); err != nil {
+			return err
+		}
 		journeyDecision := view.JourneyProgressStage.Decision
 		if view.JourneyInstance != nil && view.ActiveJourney != nil && view.ActiveJourneyState != nil {
 			next := policyruntime.AdvanceJourney(view.JourneyInstance, view.ActiveJourneyState, view.ActiveJourney, journeyDecision)
@@ -591,6 +663,17 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 		}
 		eventIDs := eventIDs(assistantEvents)
 		if len(eventIDs) > 0 {
+			r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
+				ResponseID:  r.responseIDForExecution(ctx, exec.ID),
+				SessionID:   exec.SessionID,
+				ExecutionID: exec.ID,
+				TraceID:     exec.TraceID,
+				Kind:        "response.deliver",
+				Status:      "queued",
+				Fields:      map[string]any{"event_ids": eventIDs},
+				StartedAt:   time.Now().UTC(),
+				FinishedAt:  time.Now().UTC(),
+			})
 			if _, err := r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "response.delivered", "queued", exec.ID, exec.TraceID, map[string]any{
 				"event_id":  firstString(eventIDs),
 				"event_ids": eventIDs,
@@ -689,6 +772,187 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 		}
 	}
 	return view, events, nil
+}
+
+func (r *Runner) prepareResponse(ctx context.Context, exec execution.TurnExecution, record responsedomain.Response) (resolvedView, []session.Event, map[string]any, responsedomain.Response, error) {
+	var (
+		view       resolvedView
+		events     []session.Event
+		toolOutput map[string]any
+		err        error
+	)
+	record.MaxIterations = maxResponsePreparationIterations
+	for iteration := 1; iteration <= maxResponsePreparationIterations; iteration++ {
+		started := time.Now().UTC()
+		view, events, err = r.resolveView(ctx, exec)
+		if err != nil {
+			return resolvedView{}, nil, nil, record, err
+		}
+		insights := toolInsightsFromView(view)
+		record.IterationCount = iteration
+		record.ToolInsights = append([]string(nil), insights...)
+		record.GlossaryTerms = append([]string(nil), glossaryHitsFromView(view, events)...)
+		record.UpdatedAt = started
+		if err := r.updateResponseState(ctx, record, responsedomain.StatusProcessing, "", func(item *responsedomain.Response) {
+			item.IterationCount = iteration
+			item.MaxIterations = maxResponsePreparationIterations
+			item.ToolInsights = append([]string(nil), insights...)
+			item.GlossaryTerms = append([]string(nil), glossaryHitsFromView(view, events)...)
+		}); err != nil {
+			return resolvedView{}, nil, nil, record, err
+		}
+		r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
+			ResponseID:  record.ID,
+			SessionID:   exec.SessionID,
+			ExecutionID: exec.ID,
+			TraceID:     exec.TraceID,
+			Kind:        "response.iteration",
+			Iteration:   iteration,
+			Status:      "started",
+			Fields: map[string]any{
+				"tool_insights":  insights,
+				"active_journey": journeyID(view.ActiveJourney),
+				"active_state":   journeyStateID(view.ActiveJourneyState),
+			},
+			StartedAt:  started,
+			FinishedAt: time.Now().UTC(),
+		})
+		r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
+			ResponseID:  record.ID,
+			SessionID:   exec.SessionID,
+			ExecutionID: exec.ID,
+			TraceID:     exec.TraceID,
+			Kind:        "guideline.match",
+			Iteration:   iteration,
+			Status:      "completed",
+			Fields:      map[string]any{"matched_guidelines": idsFromGuidelines(view.MatchFinalizeStage.MatchedGuidelines)},
+			StartedAt:   started,
+			FinishedAt:  time.Now().UTC(),
+		})
+		r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
+			ResponseID:  record.ID,
+			SessionID:   exec.SessionID,
+			ExecutionID: exec.ID,
+			TraceID:     exec.TraceID,
+			Kind:        "journey.progress",
+			Iteration:   iteration,
+			Status:      "completed",
+			Fields:      map[string]any{"action": view.JourneyProgressStage.Decision.Action, "next_state": view.JourneyProgressStage.Decision.NextState},
+			StartedAt:   started,
+			FinishedAt:  time.Now().UTC(),
+		})
+		if !needsToolPreparation(view) {
+			record.StabilityReached = true
+			_ = r.updateResponseState(ctx, record, responsedomain.StatusProcessing, "", func(item *responsedomain.Response) {
+				item.StabilityReached = true
+			})
+			return view, events, toolOutput, record, nil
+		}
+		toolOutput, err = r.maybeRunTool(ctx, exec, view)
+		if err != nil {
+			return resolvedView{}, nil, nil, record, err
+		}
+		r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
+			ResponseID:  record.ID,
+			SessionID:   exec.SessionID,
+			ExecutionID: exec.ID,
+			TraceID:     exec.TraceID,
+			Kind:        "tool.insight",
+			Iteration:   iteration,
+			Status:      "completed",
+			Fields:      map[string]any{"tool_insights": insights, "tool_output_present": toolOutput != nil},
+			StartedAt:   started,
+			FinishedAt:  time.Now().UTC(),
+		})
+		if toolOutput == nil || iteration == maxResponsePreparationIterations {
+			if iteration == maxResponsePreparationIterations {
+				record.Reason = "response_preparation_iteration_exhausted"
+				record.StabilityReached = false
+				_ = r.updateResponseState(ctx, record, responsedomain.StatusBlocked, record.Reason, func(item *responsedomain.Response) {
+					item.StabilityReached = false
+				})
+				return resolvedView{}, nil, nil, record, errResponsePreparationExhausted
+			}
+			record.StabilityReached = true
+			_ = r.updateResponseState(ctx, record, responsedomain.StatusProcessing, "", func(item *responsedomain.Response) {
+				item.StabilityReached = true
+			})
+			return view, events, toolOutput, record, nil
+		}
+	}
+	return resolvedView{}, nil, nil, record, errResponsePreparationExhausted
+}
+
+func needsToolPreparation(view resolvedView) bool {
+	plan := view.ToolPlanStage.Plan
+	for _, candidate := range plan.Candidates {
+		if candidate.AlreadySatisfied || candidate.AlreadyStaged {
+			continue
+		}
+		if strings.EqualFold(candidate.ApprovalMode, "required") {
+			return true
+		}
+		if len(candidate.MissingIssues) == 0 && len(candidate.InvalidIssues) == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func toolInsightsFromView(view resolvedView) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, candidate := range view.ToolPlanStage.Plan.Candidates {
+		insight := "cannot_run"
+		switch {
+		case candidate.AlreadySatisfied:
+			insight = "data_already_in_context"
+		case strings.EqualFold(candidate.ApprovalMode, "required") && !candidate.AlreadySatisfied:
+			insight = "blocked_on_approval"
+		case !candidate.AlreadyStaged && !candidate.AlreadySatisfied && len(candidate.MissingIssues) == 0 && len(candidate.InvalidIssues) == 0:
+			insight = "needs_to_run"
+		}
+		key := strings.TrimSpace(candidate.ToolID) + ":" + insight
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func glossaryHitsFromView(view resolvedView, events []session.Event) []string {
+	if view.Bundle == nil || len(view.Bundle.Glossary) == 0 {
+		return nil
+	}
+	text := strings.ToLower(latestText(events))
+	var out []string
+	for _, item := range view.Bundle.Glossary {
+		if strings.Contains(text, strings.ToLower(item.Term)) {
+			out = append(out, item.Term)
+			continue
+		}
+		for _, alias := range item.Aliases {
+			if strings.Contains(text, strings.ToLower(alias)) {
+				out = append(out, item.Term)
+				break
+			}
+		}
+	}
+	sort.Strings(out)
+	return dedupeStrings(out)
+}
+
+func normalizeGenerationMode(mode string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "strict", "fluid", "canned_fluid", "canned_composited":
+		return mode
+	default:
+		return "fluid"
+	}
 }
 
 func selectPolicyBundles(bundles []policy.Bundle, preferred string, fallback string) []policy.Bundle {
@@ -1252,6 +1516,7 @@ func (r *Runner) runToolCallsParallel(ctx context.Context, exec execution.TurnEx
 }
 
 func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution, view resolvedView, entry tool.CatalogEntry, decision policyruntime.ToolDecision) (map[string]any, error) {
+	responseID := r.responseIDForExecution(ctx, exec.ID)
 	if !decision.CanRun {
 		payload := map[string]any{
 			"tool":              entry.Name,
@@ -1279,6 +1544,18 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 			"missing_issues":    append([]policyruntime.ToolArgumentIssue(nil), decision.MissingIssues...),
 			"invalid_issues":    append([]policyruntime.ToolArgumentIssue(nil), decision.InvalidIssues...),
 		}, map[string]any{"provider_id": entry.ProviderID}, false)
+		r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
+			ResponseID:  responseID,
+			SessionID:   exec.SessionID,
+			ExecutionID: exec.ID,
+			TraceID:     exec.TraceID,
+			Kind:        "tool.run",
+			Name:        entry.Name,
+			Status:      "cannot_run",
+			Fields:      payload,
+			StartedAt:   time.Now().UTC(),
+			FinishedAt:  time.Now().UTC(),
+		})
 		r.publish(exec.SessionID, exec.ID, "runtime.tool.blocked", payload)
 		return payload, nil
 	}
@@ -1338,6 +1615,18 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 		"provider_id": entry.ProviderID,
 		"arguments":   cloneAnyMap(decision.Arguments),
 	}, nil, false)
+	toolRunStarted := time.Now().UTC()
+	r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
+		ResponseID:  responseID,
+		SessionID:   exec.SessionID,
+		ExecutionID: exec.ID,
+		TraceID:     exec.TraceID,
+		Kind:        "tool.run",
+		Name:        entry.Name,
+		Status:      "started",
+		Fields:      map[string]any{"arguments": cloneAnyMap(decision.Arguments)},
+		StartedAt:   toolRunStarted,
+	})
 	r.publish(exec.SessionID, exec.ID, "runtime.tool.started", map[string]any{"tool": entry.Name})
 	output, err := r.invoker.Invoke(ctx, binding, auth, entry, decision.Arguments)
 	if err != nil {
@@ -1362,6 +1651,18 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 			"retryable":   toolErrorPayload(err)["retryable"],
 			"status":      toolErrorPayload(err)["status"],
 		}, nil, false)
+		r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
+			ResponseID:  responseID,
+			SessionID:   exec.SessionID,
+			ExecutionID: exec.ID,
+			TraceID:     exec.TraceID,
+			Kind:        "tool.run",
+			Name:        entry.Name,
+			Status:      "failed",
+			Fields:      toolErrorPayload(err),
+			StartedAt:   toolRunStarted,
+			FinishedAt:  time.Now().UTC(),
+		})
 		return nil, err
 	}
 	run.Status = "succeeded"
@@ -1384,6 +1685,18 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 		"provider_id": entry.ProviderID,
 		"output":      output,
 	}, nil, false)
+	r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
+		ResponseID:  responseID,
+		SessionID:   exec.SessionID,
+		ExecutionID: exec.ID,
+		TraceID:     exec.TraceID,
+		Kind:        "tool.run",
+		Name:        entry.Name,
+		Status:      "completed",
+		Fields:      map[string]any{"output": output},
+		StartedAt:   toolRunStarted,
+		FinishedAt:  time.Now().UTC(),
+	})
 	r.publish(exec.SessionID, exec.ID, "runtime.tool.completed", map[string]any{"tool": entry.Name, "output": output})
 	return output, nil
 }
@@ -1582,6 +1895,7 @@ func (r *Runner) reuseToolRun(ctx context.Context, executionID string, toolID st
 }
 
 func (r *Runner) approvalStatus(ctx context.Context, exec execution.TurnExecution, entry tool.CatalogEntry, view resolvedView) (string, error) {
+	responseID := r.responseIDForExecution(ctx, exec.ID)
 	toolApprovals := view.ToolExposureStage.ToolApprovals
 	approvalMode := toolApprovals[entry.ID]
 	if approvalMode == "" {
@@ -1636,6 +1950,18 @@ func (r *Runner) approvalStatus(ctx context.Context, exec execution.TurnExecutio
 	_, _ = r.sessions.CreateApprovalRequestedEvent(ctx, exec.SessionID, "runtime", exec.ID, exec.TraceID, item.ID, entry.ID, item.RequestText, item.ExpiresAt, map[string]any{
 		"tool_name": entry.Name,
 	}, false)
+	r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
+		ResponseID:  responseID,
+		SessionID:   exec.SessionID,
+		ExecutionID: exec.ID,
+		TraceID:     exec.TraceID,
+		Kind:        "tool.insight",
+		Name:        entry.Name,
+		Status:      "blocked_on_approval",
+		Fields:      map[string]any{"approval_id": item.ID},
+		StartedAt:   now,
+		FinishedAt:  now,
+	})
 	r.publish(exec.SessionID, exec.ID, "approval.requested", map[string]any{"approval_id": item.ID, "tool": entry.Name, "message": item.RequestText})
 	return string(approval.StatusPending), nil
 }
@@ -1917,6 +2243,100 @@ func (r *Runner) appendTrace(ctx context.Context, record audit.Record) {
 		return
 	}
 	_ = r.repo.AppendAuditRecord(ctx, record)
+}
+
+func (r *Runner) appendResponseTraceSpan(ctx context.Context, span responsedomain.TraceSpan) {
+	if span.ID == "" {
+		span.ID = fmt.Sprintf("span_%d", time.Now().UnixNano())
+	}
+	if r.writes != nil {
+		_ = r.writes.SaveResponseTraceSpan(ctx, span)
+		return
+	}
+	_ = r.repo.SaveResponseTraceSpan(ctx, span)
+}
+
+func (r *Runner) cachedResponse(executionID string) (responsedomain.Response, bool) {
+	r.responseMu.Lock()
+	defer r.responseMu.Unlock()
+	record, ok := r.responses[executionID]
+	return record, ok
+}
+
+func (r *Runner) cacheResponse(record responsedomain.Response) {
+	if record.ExecutionID == "" {
+		return
+	}
+	r.responseMu.Lock()
+	defer r.responseMu.Unlock()
+	r.responses[record.ExecutionID] = record
+}
+
+func (r *Runner) ensureResponseRecord(ctx context.Context, exec execution.TurnExecution) (responsedomain.Response, error) {
+	if record, ok := r.cachedResponse(exec.ID); ok {
+		return record, nil
+	}
+	items, err := r.repo.ListResponses(ctx, responsedomain.Query{ExecutionID: exec.ID, Limit: 1})
+	if err == nil && len(items) > 0 {
+		r.cacheResponse(items[0])
+		return items[0], nil
+	}
+	now := time.Now().UTC()
+	record := responsedomain.Response{
+		ID:              fmt.Sprintf("resp_%d", now.UnixNano()),
+		SessionID:       exec.SessionID,
+		ExecutionID:     exec.ID,
+		TraceID:         exec.TraceID,
+		TriggerEventIDs: append([]string(nil), exec.TriggerEventIDs...),
+		Status:          responsedomain.StatusPreparing,
+		MaxIterations:   maxResponsePreparationIterations,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if r.writes != nil {
+		if err := r.writes.SaveResponse(ctx, record); err != nil {
+			return responsedomain.Response{}, err
+		}
+	} else if err := r.repo.SaveResponse(ctx, record); err != nil {
+		return responsedomain.Response{}, err
+	}
+	r.cacheResponse(record)
+	return record, nil
+}
+
+func (r *Runner) updateResponseState(ctx context.Context, record responsedomain.Response, status responsedomain.Status, reason string, mutate func(*responsedomain.Response)) error {
+	current := record
+	if cached, ok := r.cachedResponse(record.ExecutionID); ok {
+		current = cached
+	} else if record.ID != "" {
+		stored, err := r.repo.GetResponse(ctx, record.ID)
+		if err == nil {
+			current = stored
+		}
+	}
+	current.Status = status
+	current.Reason = strings.TrimSpace(reason)
+	current.UpdatedAt = time.Now().UTC()
+	if mutate != nil {
+		mutate(&current)
+	}
+	r.cacheResponse(current)
+	if r.writes != nil {
+		return r.writes.SaveResponse(ctx, current)
+	}
+	return r.repo.SaveResponse(ctx, current)
+}
+
+func (r *Runner) responseIDForExecution(ctx context.Context, executionID string) string {
+	if cached, ok := r.cachedResponse(executionID); ok {
+		return cached.ID
+	}
+	items, err := r.repo.ListResponses(ctx, responsedomain.Query{ExecutionID: executionID, Limit: 1})
+	if err != nil || len(items) == 0 {
+		return ""
+	}
+	r.cacheResponse(items[0])
+	return items[0].ID
 }
 
 func (r *Runner) createAssistantMessageSequence(ctx context.Context, exec execution.TurnExecution, messages []string) ([]session.Event, error) {

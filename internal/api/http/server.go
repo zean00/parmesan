@@ -34,6 +34,7 @@ import (
 	operatordomain "github.com/sahal/parmesan/internal/domain/operator"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/replay"
+	responsedomain "github.com/sahal/parmesan/internal/domain/response"
 	"github.com/sahal/parmesan/internal/domain/rollout"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
@@ -130,6 +131,46 @@ type traceTimelineResponse struct {
 	Entries     []traceTimelineEntry `json:"entries"`
 }
 
+type responseView struct {
+	ID               string          `json:"id"`
+	SessionID        string          `json:"session_id"`
+	ExecutionID      string          `json:"execution_id"`
+	TraceID          string          `json:"trace_id,omitempty"`
+	TriggerEventIDs  []string        `json:"trigger_event_ids,omitempty"`
+	Status           string          `json:"status"`
+	Reason           string          `json:"reason,omitempty"`
+	IterationCount   int             `json:"iteration_count,omitempty"`
+	MaxIterations    int             `json:"max_iterations,omitempty"`
+	StabilityReached bool            `json:"stability_reached,omitempty"`
+	GenerationMode   string          `json:"generation_mode,omitempty"`
+	PreambleEventID  string          `json:"preamble_event_id,omitempty"`
+	MessageEventIDs  []string        `json:"message_event_ids,omitempty"`
+	ToolInsights     []string        `json:"tool_insights,omitempty"`
+	GlossaryTerms    []string        `json:"glossary_terms,omitempty"`
+	StartedAt        time.Time       `json:"started_at,omitempty"`
+	CompletedAt      time.Time       `json:"completed_at,omitempty"`
+	CanceledAt       time.Time       `json:"canceled_at,omitempty"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
+	TraceSpans       []traceSpanView `json:"trace_spans,omitempty"`
+}
+
+type traceSpanView struct {
+	ID          string         `json:"id"`
+	ResponseID  string         `json:"response_id,omitempty"`
+	SessionID   string         `json:"session_id,omitempty"`
+	ExecutionID string         `json:"execution_id,omitempty"`
+	TraceID     string         `json:"trace_id,omitempty"`
+	ParentID    string         `json:"parent_id,omitempty"`
+	Kind        string         `json:"kind"`
+	Name        string         `json:"name,omitempty"`
+	Iteration   int            `json:"iteration,omitempty"`
+	Status      string         `json:"status,omitempty"`
+	Fields      map[string]any `json:"fields,omitempty"`
+	StartedAt   time.Time      `json:"started_at"`
+	FinishedAt  time.Time      `json:"finished_at,omitempty"`
+}
+
 type mediaAssetView struct {
 	ID               string         `json:"id"`
 	SessionID        string         `json:"session_id"`
@@ -186,6 +227,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/admin/events/stream", s.streamAdminEvents)
 	mux.HandleFunc("POST /v1/sessions", s.createSession)
 	mux.HandleFunc("GET /v1/sessions/{id}", s.getSession)
+	mux.HandleFunc("GET /v1/sessions/{id}/responses", s.listSessionResponses)
 	mux.HandleFunc("GET /v1/sessions/{id}/events", s.listEvents)
 	mux.HandleFunc("POST /v1/sessions/{id}/events", s.appendEvent)
 	mux.HandleFunc("GET /v1/sessions/{id}/events/stream", s.streamEvents)
@@ -274,6 +316,8 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/replays/{id}/diff", s.getReplayDiff)
 	mux.HandleFunc("GET /v1/traces", s.listTraces)
 	mux.HandleFunc("GET /v1/traces/{id}", s.getTraceTimeline)
+	mux.HandleFunc("GET /v1/responses/{id}", s.getResponse)
+	mux.HandleFunc("POST /v1/responses/{id}/cancel", s.cancelResponse)
 
 	s.httpServer = &http.Server{
 		Addr:              addr,
@@ -775,6 +819,120 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess)))
+}
+
+func responseViewFromDomain(record responsedomain.Response, spans []responsedomain.TraceSpan) responseView {
+	view := responseView{
+		ID:               record.ID,
+		SessionID:        record.SessionID,
+		ExecutionID:      record.ExecutionID,
+		TraceID:          record.TraceID,
+		TriggerEventIDs:  append([]string(nil), record.TriggerEventIDs...),
+		Status:           string(record.Status),
+		Reason:           record.Reason,
+		IterationCount:   record.IterationCount,
+		MaxIterations:    record.MaxIterations,
+		StabilityReached: record.StabilityReached,
+		GenerationMode:   record.GenerationMode,
+		PreambleEventID:  record.PreambleEventID,
+		MessageEventIDs:  append([]string(nil), record.MessageEventIDs...),
+		ToolInsights:     append([]string(nil), record.ToolInsights...),
+		GlossaryTerms:    append([]string(nil), record.GlossaryTerms...),
+		StartedAt:        record.StartedAt,
+		CompletedAt:      record.CompletedAt,
+		CanceledAt:       record.CanceledAt,
+		CreatedAt:        record.CreatedAt,
+		UpdatedAt:        record.UpdatedAt,
+	}
+	for _, span := range spans {
+		view.TraceSpans = append(view.TraceSpans, traceSpanView{
+			ID:          span.ID,
+			ResponseID:  span.ResponseID,
+			SessionID:   span.SessionID,
+			ExecutionID: span.ExecutionID,
+			TraceID:     span.TraceID,
+			ParentID:    span.ParentID,
+			Kind:        span.Kind,
+			Name:        span.Name,
+			Iteration:   span.Iteration,
+			Status:      span.Status,
+			Fields:      span.Fields,
+			StartedAt:   span.StartedAt,
+			FinishedAt:  span.FinishedAt,
+		})
+	}
+	return view
+}
+
+func (s *Server) listSessionResponses(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListResponses(r.Context(), responsedomain.Query{SessionID: r.PathValue("id")})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out := make([]responseView, 0, len(items))
+	for _, item := range items {
+		spans, _ := s.store.ListResponseTraceSpans(r.Context(), responsedomain.TraceSpanQuery{ResponseID: item.ID})
+		out = append(out, responseViewFromDomain(item, spans))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) getResponse(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetResponse(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	spans, _ := s.store.ListResponseTraceSpans(r.Context(), responsedomain.TraceSpanQuery{ResponseID: item.ID})
+	writeJSON(w, http.StatusOK, responseViewFromDomain(item, spans))
+}
+
+func (s *Server) cancelResponse(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetResponse(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if item.Status == responsedomain.StatusReady || item.Status == responsedomain.StatusCanceled || item.Status == responsedomain.StatusFailed {
+		http.Error(w, "response is already terminal", http.StatusConflict)
+		return
+	}
+	now := time.Now().UTC()
+	item.Status = responsedomain.StatusCanceled
+	item.Reason = "operator_canceled"
+	item.CanceledAt = now
+	item.UpdatedAt = now
+	if err := s.store.SaveResponse(r.Context(), item); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if exec, steps, err := s.store.GetExecution(r.Context(), item.ExecutionID); err == nil {
+		if exec.Status != execution.StatusSucceeded && exec.Status != execution.StatusFailed && exec.Status != execution.StatusAbandoned {
+			exec.Status = execution.StatusAbandoned
+			exec.BlockedReason = "response_canceled"
+			exec.LeaseOwner = ""
+			exec.LeaseExpiresAt = time.Time{}
+			exec.UpdatedAt = now
+			_ = s.store.UpdateExecution(r.Context(), exec)
+			for _, step := range steps {
+				if step.Status == execution.StatusSucceeded || step.Status == execution.StatusAbandoned {
+					continue
+				}
+				step.Status = execution.StatusAbandoned
+				step.BlockedReason = "response_canceled"
+				step.LeaseOwner = ""
+				step.LeaseExpiresAt = time.Time{}
+				step.UpdatedAt = now
+				_ = s.store.UpdateExecutionStep(r.Context(), step)
+			}
+		}
+	}
+	_, _ = s.sessions.CreateACPStatusEvent(r.Context(), item.SessionID, "runtime", "response.canceled", "completed", item.ExecutionID, item.TraceID, map[string]any{
+		"response_id": item.ID,
+		"reason":      item.Reason,
+	}, nil, false)
+	writeJSON(w, http.StatusOK, responseViewFromDomain(item, nil))
 }
 
 func (s *Server) appendEvent(w http.ResponseWriter, r *http.Request) {
@@ -5109,12 +5267,36 @@ func (s *Server) createExecutionForEvent(ctx context.Context, sessionID, eventID
 		if err != nil {
 			return execution.TurnExecution{}, err
 		}
+		_ = s.ensureResponseForExecution(ctx, created, eventID, now)
 		return created, nil
 	}
 	if err := s.store.CreateExecution(ctx, exec, steps); err != nil {
 		return execution.TurnExecution{}, err
 	}
+	_ = s.ensureResponseForExecution(ctx, exec, eventID, now)
 	return exec, nil
+}
+
+func (s *Server) ensureResponseForExecution(ctx context.Context, exec execution.TurnExecution, triggerEventID string, now time.Time) error {
+	existing, err := s.store.ListResponses(ctx, responsedomain.Query{ExecutionID: exec.ID, Limit: 1})
+	if err == nil && len(existing) > 0 {
+		record := existing[0]
+		record.TriggerEventIDs = appendUniqueIDs(record.TriggerEventIDs, triggerEventID)
+		record.UpdatedAt = now
+		return s.store.SaveResponse(ctx, record)
+	}
+	record := responsedomain.Response{
+		ID:              fmt.Sprintf("resp_%d", now.UnixNano()),
+		SessionID:       exec.SessionID,
+		ExecutionID:     exec.ID,
+		TraceID:         exec.TraceID,
+		TriggerEventIDs: appendUniqueIDs(exec.TriggerEventIDs, triggerEventID),
+		Status:          responsedomain.StatusPreparing,
+		MaxIterations:   4,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	return s.store.SaveResponse(ctx, record)
 }
 
 func responseCoalesceWindow() time.Duration {
@@ -5127,6 +5309,27 @@ func responseCoalesceWindow() time.Duration {
 		return 1500 * time.Millisecond
 	}
 	return time.Duration(ms) * time.Millisecond
+}
+
+func appendUniqueIDs(items []string, values ...string) []string {
+	out := append([]string(nil), items...)
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		found := false
+		for _, item := range out {
+			if item == value {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func (s *Server) publishSessionEvent(sessionID string, event session.Event, executionID, traceID string, createdAt time.Time) {
@@ -5688,6 +5891,14 @@ func (s *Server) buildTraceTimeline(ctx context.Context, traceID string) (traceT
 	if err != nil {
 		return traceTimelineResponse{}, err
 	}
+	responses, err := s.store.ListResponses(ctx, responsedomain.Query{})
+	if err != nil {
+		return traceTimelineResponse{}, err
+	}
+	spans, err := s.store.ListResponseTraceSpans(ctx, responsedomain.TraceSpanQuery{TraceID: traceID})
+	if err != nil {
+		return traceTimelineResponse{}, err
+	}
 	var targetExec execution.TurnExecution
 	var sessionID string
 	var entries []traceTimelineEntry
@@ -5754,6 +5965,38 @@ func (s *Server) buildTraceTimeline(ctx context.Context, traceID string) (traceT
 				})
 			}
 		}
+	}
+	for _, item := range responses {
+		if item.TraceID != traceID {
+			continue
+		}
+		if sessionID == "" {
+			sessionID = item.SessionID
+		}
+		entries = append(entries, traceTimelineEntry{
+			Kind:        "response",
+			ID:          item.ID,
+			SessionID:   item.SessionID,
+			ExecutionID: item.ExecutionID,
+			TraceID:     item.TraceID,
+			When:        item.CreatedAt,
+			Payload:     responseViewFromDomain(item, nil),
+		})
+	}
+	for _, span := range spans {
+		when := span.StartedAt
+		if when.IsZero() {
+			when = span.FinishedAt
+		}
+		entries = append(entries, traceTimelineEntry{
+			Kind:        "response.trace_span",
+			ID:          span.ID,
+			SessionID:   span.SessionID,
+			ExecutionID: span.ExecutionID,
+			TraceID:     span.TraceID,
+			When:        when,
+			Payload:     traceSpanView{ID: span.ID, ResponseID: span.ResponseID, SessionID: span.SessionID, ExecutionID: span.ExecutionID, TraceID: span.TraceID, ParentID: span.ParentID, Kind: span.Kind, Name: span.Name, Iteration: span.Iteration, Status: span.Status, Fields: span.Fields, StartedAt: span.StartedAt, FinishedAt: span.FinishedAt},
+		})
 	}
 	if sessionID != "" {
 		events, err := s.store.ListEventsFiltered(ctx, session.EventQuery{SessionID: sessionID, TraceID: traceID})

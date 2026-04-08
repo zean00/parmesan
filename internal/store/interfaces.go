@@ -18,6 +18,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/operator"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/replay"
+	responsedomain "github.com/sahal/parmesan/internal/domain/response"
 	"github.com/sahal/parmesan/internal/domain/rollout"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
@@ -74,6 +75,11 @@ type Repository interface {
 	ListCatalogEntries(ctx context.Context) ([]tool.CatalogEntry, error)
 	AppendAuditRecord(ctx context.Context, record audit.Record) error
 	ListAuditRecords(ctx context.Context) ([]audit.Record, error)
+	SaveResponse(ctx context.Context, record responsedomain.Response) error
+	GetResponse(ctx context.Context, responseID string) (responsedomain.Response, error)
+	ListResponses(ctx context.Context, query responsedomain.Query) ([]responsedomain.Response, error)
+	SaveResponseTraceSpan(ctx context.Context, span responsedomain.TraceSpan) error
+	ListResponseTraceSpans(ctx context.Context, query responsedomain.TraceSpanQuery) ([]responsedomain.TraceSpan, error)
 	SaveApprovalSession(ctx context.Context, session approval.Session) error
 	GetApprovalSession(ctx context.Context, approvalID string) (approval.Session, error)
 	ListApprovalSessions(ctx context.Context, sessionID string) ([]approval.Session, error)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/operator"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/replay"
+	responsedomain "github.com/sahal/parmesan/internal/domain/response"
 	"github.com/sahal/parmesan/internal/domain/rollout"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
@@ -1883,6 +1885,185 @@ func (c *Client) ListAuditRecords(ctx context.Context) ([]audit.Record, error) {
 			}
 		}
 		out = append(out, record)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) SaveResponse(ctx context.Context, record responsedomain.Response) error {
+	_, err := c.Pool.Exec(ctx, `
+		INSERT INTO responses (
+			id, session_id, execution_id, trace_id, trigger_event_ids, status, reason, iteration_count, max_iterations,
+			stability_reached, generation_mode, preamble_event_id, message_event_ids, tool_insights, glossary_terms,
+			started_at, completed_at, canceled_at, created_at, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+		ON CONFLICT (id) DO UPDATE
+		SET session_id = EXCLUDED.session_id,
+		    execution_id = EXCLUDED.execution_id,
+		    trace_id = EXCLUDED.trace_id,
+		    trigger_event_ids = EXCLUDED.trigger_event_ids,
+		    status = EXCLUDED.status,
+		    reason = EXCLUDED.reason,
+		    iteration_count = EXCLUDED.iteration_count,
+		    max_iterations = EXCLUDED.max_iterations,
+		    stability_reached = EXCLUDED.stability_reached,
+		    generation_mode = EXCLUDED.generation_mode,
+		    preamble_event_id = EXCLUDED.preamble_event_id,
+		    message_event_ids = EXCLUDED.message_event_ids,
+		    tool_insights = EXCLUDED.tool_insights,
+		    glossary_terms = EXCLUDED.glossary_terms,
+		    started_at = EXCLUDED.started_at,
+		    completed_at = EXCLUDED.completed_at,
+		    canceled_at = EXCLUDED.canceled_at,
+		    updated_at = EXCLUDED.updated_at
+	`, record.ID, record.SessionID, record.ExecutionID, nullString(record.TraceID), mustJSONValue(record.TriggerEventIDs), record.Status, nullString(record.Reason), record.IterationCount, record.MaxIterations, record.StabilityReached, nullString(record.GenerationMode), nullString(record.PreambleEventID), mustJSONValue(record.MessageEventIDs), mustJSONValue(record.ToolInsights), mustJSONValue(record.GlossaryTerms), nullTime(record.StartedAt), nullTime(record.CompletedAt), nullTime(record.CanceledAt), record.CreatedAt, record.UpdatedAt)
+	return err
+}
+
+func (c *Client) GetResponse(ctx context.Context, responseID string) (responsedomain.Response, error) {
+	row := c.Pool.QueryRow(ctx, `
+		SELECT id, session_id, execution_id, COALESCE(trace_id,''), trigger_event_ids, status, COALESCE(reason,''), iteration_count,
+		       max_iterations, stability_reached, COALESCE(generation_mode,''), COALESCE(preamble_event_id,''), message_event_ids,
+		       tool_insights, glossary_terms, COALESCE(started_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
+		       COALESCE(completed_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
+		       COALESCE(canceled_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at
+		FROM responses WHERE id = $1
+	`, responseID)
+	var record responsedomain.Response
+	var triggerIDs, messageIDs, toolInsights, glossary []byte
+	if err := row.Scan(&record.ID, &record.SessionID, &record.ExecutionID, &record.TraceID, &triggerIDs, &record.Status, &record.Reason, &record.IterationCount, &record.MaxIterations, &record.StabilityReached, &record.GenerationMode, &record.PreambleEventID, &messageIDs, &toolInsights, &glossary, &record.StartedAt, &record.CompletedAt, &record.CanceledAt, &record.CreatedAt, &record.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return responsedomain.Response{}, errors.New("response not found")
+		}
+		return responsedomain.Response{}, err
+	}
+	_ = json.Unmarshal(triggerIDs, &record.TriggerEventIDs)
+	_ = json.Unmarshal(messageIDs, &record.MessageEventIDs)
+	_ = json.Unmarshal(toolInsights, &record.ToolInsights)
+	_ = json.Unmarshal(glossary, &record.GlossaryTerms)
+	return record, nil
+}
+
+func (c *Client) ListResponses(ctx context.Context, query responsedomain.Query) ([]responsedomain.Response, error) {
+	sql := `
+		SELECT id, session_id, execution_id, COALESCE(trace_id,''), trigger_event_ids, status, COALESCE(reason,''), iteration_count,
+		       max_iterations, stability_reached, COALESCE(generation_mode,''), COALESCE(preamble_event_id,''), message_event_ids,
+		       tool_insights, glossary_terms, COALESCE(started_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
+		       COALESCE(completed_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
+		       COALESCE(canceled_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at
+		FROM responses WHERE 1=1`
+	var args []any
+	idx := 1
+	if query.SessionID != "" {
+		sql += fmt.Sprintf(" AND session_id = $%d", idx)
+		args = append(args, query.SessionID)
+		idx++
+	}
+	if query.ExecutionID != "" {
+		sql += fmt.Sprintf(" AND execution_id = $%d", idx)
+		args = append(args, query.ExecutionID)
+		idx++
+	}
+	if query.Status != "" {
+		sql += fmt.Sprintf(" AND status = $%d", idx)
+		args = append(args, query.Status)
+		idx++
+	}
+	sql += " ORDER BY created_at DESC"
+	if query.Limit > 0 {
+		sql += fmt.Sprintf(" LIMIT $%d", idx)
+		args = append(args, query.Limit)
+	}
+	rows, err := c.Pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []responsedomain.Response
+	for rows.Next() {
+		var record responsedomain.Response
+		var triggerIDs, messageIDs, toolInsights, glossary []byte
+		if err := rows.Scan(&record.ID, &record.SessionID, &record.ExecutionID, &record.TraceID, &triggerIDs, &record.Status, &record.Reason, &record.IterationCount, &record.MaxIterations, &record.StabilityReached, &record.GenerationMode, &record.PreambleEventID, &messageIDs, &toolInsights, &glossary, &record.StartedAt, &record.CompletedAt, &record.CanceledAt, &record.CreatedAt, &record.UpdatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(triggerIDs, &record.TriggerEventIDs)
+		_ = json.Unmarshal(messageIDs, &record.MessageEventIDs)
+		_ = json.Unmarshal(toolInsights, &record.ToolInsights)
+		_ = json.Unmarshal(glossary, &record.GlossaryTerms)
+		out = append(out, record)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) SaveResponseTraceSpan(ctx context.Context, span responsedomain.TraceSpan) error {
+	fields, err := json.Marshal(span.Fields)
+	if err != nil {
+		return err
+	}
+	_, err = c.Pool.Exec(ctx, `
+		INSERT INTO response_trace_spans (id, response_id, session_id, execution_id, trace_id, parent_id, kind, name, iteration, status, fields, started_at, finished_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		ON CONFLICT (id) DO UPDATE
+		SET response_id = EXCLUDED.response_id,
+		    session_id = EXCLUDED.session_id,
+		    execution_id = EXCLUDED.execution_id,
+		    trace_id = EXCLUDED.trace_id,
+		    parent_id = EXCLUDED.parent_id,
+		    kind = EXCLUDED.kind,
+		    name = EXCLUDED.name,
+		    iteration = EXCLUDED.iteration,
+		    status = EXCLUDED.status,
+		    fields = EXCLUDED.fields,
+		    started_at = EXCLUDED.started_at,
+		    finished_at = EXCLUDED.finished_at
+	`, span.ID, nullString(span.ResponseID), nullString(span.SessionID), nullString(span.ExecutionID), nullString(span.TraceID), nullString(span.ParentID), span.Kind, nullString(span.Name), span.Iteration, nullString(span.Status), fields, span.StartedAt, nullTime(span.FinishedAt))
+	return err
+}
+
+func (c *Client) ListResponseTraceSpans(ctx context.Context, query responsedomain.TraceSpanQuery) ([]responsedomain.TraceSpan, error) {
+	sql := `
+		SELECT id, COALESCE(response_id,''), COALESCE(session_id,''), COALESCE(execution_id,''), COALESCE(trace_id,''), COALESCE(parent_id,''),
+		       kind, COALESCE(name,''), iteration, COALESCE(status,''), fields, started_at, COALESCE(finished_at, TIMESTAMPTZ '0001-01-01 00:00:00+00')
+		FROM response_trace_spans WHERE 1=1`
+	var args []any
+	idx := 1
+	if query.ResponseID != "" {
+		sql += fmt.Sprintf(" AND response_id = $%d", idx)
+		args = append(args, query.ResponseID)
+		idx++
+	}
+	if query.SessionID != "" {
+		sql += fmt.Sprintf(" AND session_id = $%d", idx)
+		args = append(args, query.SessionID)
+		idx++
+	}
+	if query.ExecutionID != "" {
+		sql += fmt.Sprintf(" AND execution_id = $%d", idx)
+		args = append(args, query.ExecutionID)
+		idx++
+	}
+	if query.TraceID != "" {
+		sql += fmt.Sprintf(" AND trace_id = $%d", idx)
+		args = append(args, query.TraceID)
+	}
+	sql += " ORDER BY started_at ASC"
+	rows, err := c.Pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []responsedomain.TraceSpan
+	for rows.Next() {
+		var span responsedomain.TraceSpan
+		var fields []byte
+		if err := rows.Scan(&span.ID, &span.ResponseID, &span.SessionID, &span.ExecutionID, &span.TraceID, &span.ParentID, &span.Kind, &span.Name, &span.Iteration, &span.Status, &fields, &span.StartedAt, &span.FinishedAt); err != nil {
+			return nil, err
+		}
+		if len(fields) > 0 {
+			if err := json.Unmarshal(fields, &span.Fields); err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, span)
 	}
 	return out, rows.Err()
 }

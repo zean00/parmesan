@@ -21,6 +21,7 @@ type Bundle struct {
 	DomainBoundary            DomainBoundary             `json:"domain_boundary,omitempty" yaml:"domain_boundary,omitempty"`
 	Soul                      Soul                       `json:"soul,omitempty" yaml:"soul,omitempty"`
 	SoulMarkdown              string                     `json:"soul_markdown,omitempty" yaml:"soul_markdown,omitempty"`
+	Glossary                  []GlossaryTerm             `json:"glossary,omitempty" yaml:"glossary,omitempty"`
 	ImportedAt                time.Time                  `json:"imported_at" yaml:"-"`
 	SourceYAML                string                     `json:"source_yaml" yaml:"-"`
 	Observations              []Observation              `json:"observations" yaml:"observations"`
@@ -31,6 +32,12 @@ type Bundle struct {
 	ToolPolicies              []ToolPolicy               `json:"tool_policies" yaml:"tool_policies"`
 	Retrievers                []RetrieverBinding         `json:"retrievers,omitempty" yaml:"retrievers,omitempty"`
 	GuidelineToolAssociations []GuidelineToolAssociation `json:"guideline_tool_associations,omitempty" yaml:"-"`
+}
+
+type GlossaryTerm struct {
+	Term        string   `json:"term" yaml:"term"`
+	Aliases     []string `json:"aliases,omitempty" yaml:"aliases,omitempty"`
+	Description string   `json:"description,omitempty" yaml:"description,omitempty"`
 }
 
 type DomainBoundary struct {

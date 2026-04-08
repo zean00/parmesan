@@ -22,6 +22,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/operator"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/replay"
+	responsedomain "github.com/sahal/parmesan/internal/domain/response"
 	"github.com/sahal/parmesan/internal/domain/rollout"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
@@ -47,6 +48,8 @@ type Store struct {
 	authBindings             []tool.AuthBinding
 	catalog                  []tool.CatalogEntry
 	audit                    []audit.Record
+	responses                []responsedomain.Response
+	responseTraceSpans       []responsedomain.TraceSpan
 	approvals                []approval.Session
 	toolRuns                 []toolrun.Run
 	deliveries               []delivery.Attempt
@@ -759,6 +762,89 @@ func (s *Store) ListAuditRecords(_ context.Context) ([]audit.Record, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := append([]audit.Record(nil), s.audit...)
+	return out, nil
+}
+
+func (s *Store) SaveResponse(_ context.Context, record responsedomain.Response) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, existing := range s.responses {
+		if existing.ID == record.ID {
+			s.responses[i] = record
+			return nil
+		}
+	}
+	s.responses = append(s.responses, record)
+	return nil
+}
+
+func (s *Store) GetResponse(_ context.Context, responseID string) (responsedomain.Response, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, record := range s.responses {
+		if record.ID == responseID {
+			return record, nil
+		}
+	}
+	return responsedomain.Response{}, errors.New("response not found")
+}
+
+func (s *Store) ListResponses(_ context.Context, query responsedomain.Query) ([]responsedomain.Response, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []responsedomain.Response
+	for _, record := range s.responses {
+		if query.SessionID != "" && record.SessionID != query.SessionID {
+			continue
+		}
+		if query.ExecutionID != "" && record.ExecutionID != query.ExecutionID {
+			continue
+		}
+		if query.Status != "" && string(record.Status) != query.Status {
+			continue
+		}
+		out = append(out, record)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if query.Limit > 0 && len(out) > query.Limit {
+		out = out[:query.Limit]
+	}
+	return out, nil
+}
+
+func (s *Store) SaveResponseTraceSpan(_ context.Context, span responsedomain.TraceSpan) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, existing := range s.responseTraceSpans {
+		if existing.ID == span.ID {
+			s.responseTraceSpans[i] = span
+			return nil
+		}
+	}
+	s.responseTraceSpans = append(s.responseTraceSpans, span)
+	return nil
+}
+
+func (s *Store) ListResponseTraceSpans(_ context.Context, query responsedomain.TraceSpanQuery) ([]responsedomain.TraceSpan, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []responsedomain.TraceSpan
+	for _, span := range s.responseTraceSpans {
+		if query.ResponseID != "" && span.ResponseID != query.ResponseID {
+			continue
+		}
+		if query.SessionID != "" && span.SessionID != query.SessionID {
+			continue
+		}
+		if query.ExecutionID != "" && span.ExecutionID != query.ExecutionID {
+			continue
+		}
+		if query.TraceID != "" && span.TraceID != query.TraceID {
+			continue
+		}
+		out = append(out, span)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StartedAt.Before(out[j].StartedAt) })
 	return out, nil
 }
 

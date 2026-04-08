@@ -744,6 +744,12 @@ func buildMatchingContext(events []session.Event) MatchingContext {
 		if event.CreatedAt.After(ctx.OccurredAt) {
 			ctx.OccurredAt = event.CreatedAt
 		}
+		if call, ok := stagedToolCallFromEvent(event); ok {
+			ctx.StagedToolCalls = append(ctx.StagedToolCalls, call)
+			if summary := summarizeStagedToolCall(call); strings.TrimSpace(summary) != "" {
+				ctx.StagedToolText = append(ctx.StagedToolText, summary)
+			}
+		}
 		for _, part := range event.Content {
 			if call, ok := stagedToolCallFromPart(event, part); ok {
 				ctx.StagedToolCalls = append(ctx.StagedToolCalls, call)
@@ -782,6 +788,25 @@ func buildMatchingContext(events []session.Event) MatchingContext {
 	}
 	sort.Strings(ctx.AppliedGuidelines)
 	return ctx
+}
+
+func stagedToolCallFromEvent(event session.Event) (StagedToolCall, bool) {
+	if !strings.HasPrefix(strings.TrimSpace(event.Kind), "tool.") || event.Data == nil {
+		return StagedToolCall{}, false
+	}
+	toolID := strings.TrimSpace(fmt.Sprint(event.Data["tool_id"]))
+	if toolID == "" {
+		return StagedToolCall{}, false
+	}
+	call := StagedToolCall{
+		ToolID:    toolID,
+		Arguments: mapValue(event.Data["arguments"]),
+		Result:    mapValue(event.Data["output"]),
+	}
+	if len(call.Arguments) == 0 && len(call.Result) == 0 {
+		return StagedToolCall{}, false
+	}
+	return call, true
 }
 
 func evaluateScopeBoundary(ctx context.Context, router *model.Router, boundary policy.DomainBoundary, matchCtx MatchingContext) ScopeBoundaryStageResult {

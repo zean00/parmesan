@@ -16,6 +16,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/execution"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/policy"
+	responsedomain "github.com/sahal/parmesan/internal/domain/response"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/domain/toolrun"
@@ -790,6 +791,83 @@ func TestCreateAssistantMessageSequenceAddsBatchMetadata(t *testing.T) {
 		if event.Metadata["response_batch_id"] != batchID || event.Metadata["message_index"] != i || event.Metadata["message_count"] != 2 {
 			t.Fatalf("event[%d] metadata = %#v", i, event.Metadata)
 		}
+	}
+}
+
+func TestUpdateResponseStatePreservesPriorFields(t *testing.T) {
+	repo := memory.New()
+	r := New(repo, nil, nil, nil, "test-runner")
+	ctx := context.Background()
+	now := time.Now().UTC()
+	record := responsedomain.Response{
+		ID:               "resp_1",
+		SessionID:        "sess_1",
+		ExecutionID:      "exec_1",
+		TraceID:          "trace_1",
+		Status:           responsedomain.StatusPreparing,
+		StartedAt:        now,
+		StabilityReached: true,
+		GenerationMode:   "canned_composited",
+		MessageEventIDs:  []string{"evt_agent_1", "evt_agent_2"},
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := repo.SaveResponse(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	r.cacheResponse(record)
+
+	if err := r.updateResponseState(ctx, responsedomain.Response{ID: "resp_1", ExecutionID: "exec_1"}, responsedomain.StatusReady, "", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := repo.GetResponse(ctx, "resp_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.StartedAt.IsZero() || !updated.StartedAt.Equal(now) {
+		t.Fatalf("started_at = %v, want %v", updated.StartedAt, now)
+	}
+	if !updated.StabilityReached {
+		t.Fatal("stability_reached = false, want true")
+	}
+	if updated.GenerationMode != "canned_composited" {
+		t.Fatalf("generation_mode = %q, want canned_composited", updated.GenerationMode)
+	}
+	if len(updated.MessageEventIDs) != 2 {
+		t.Fatalf("message_event_ids = %#v, want preserved ids", updated.MessageEventIDs)
+	}
+}
+
+func TestEnsureResponseRecordUsesCachedResponseWhenAsyncWritesBuffered(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	r := New(repo, writes, nil, nil, "test-runner")
+	ctx := context.Background()
+	exec := execution.TurnExecution{
+		ID:              "exec_1",
+		SessionID:       "sess_1",
+		TraceID:         "trace_1",
+		TriggerEventIDs: []string{"evt_1"},
+	}
+
+	first, err := r.ensureResponseRecord(ctx, exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := r.ensureResponseRecord(ctx, exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("response ids = %q and %q, want same cached response id", first.ID, second.ID)
+	}
+	items, err := repo.ListResponses(ctx, responsedomain.Query{ExecutionID: exec.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("repo responses before async flush = %d, want 0", len(items))
 	}
 }
 

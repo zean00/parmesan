@@ -27,6 +27,7 @@ import (
 	operatordomain "github.com/sahal/parmesan/internal/domain/operator"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/replay"
+	responsedomain "github.com/sahal/parmesan/internal/domain/response"
 	"github.com/sahal/parmesan/internal/domain/rollout"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
@@ -124,6 +125,103 @@ func TestEnqueueSessionTurnDoesNotCoalesceRunningExecution(t *testing.T) {
 	}
 	if got := strings.Join(firstExec.TriggerEventIDs, ","); got != "evt_first" {
 		t.Fatalf("running execution trigger ids = %q, want only original trigger", got)
+	}
+}
+
+func TestResponseLifecycleAPI(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{ID: "sess_response", Channel: "acp", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateExecution(context.Background(), execution.TurnExecution{
+		ID:             "exec_response",
+		SessionID:      "sess_response",
+		TriggerEventID: "evt_1",
+		TraceID:        "trace_response",
+		Status:         execution.StatusWaiting,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}, []execution.ExecutionStep{{
+		ID:          "exec_response_ingest",
+		ExecutionID: "exec_response",
+		Name:        "ingest",
+		Status:      execution.StatusPending,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	record := responsedomain.Response{
+		ID:              "resp_1",
+		SessionID:       "sess_response",
+		ExecutionID:     "exec_response",
+		TraceID:         "trace_response",
+		TriggerEventIDs: []string{"evt_1"},
+		Status:          responsedomain.StatusPreparing,
+		MaxIterations:   4,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if err := repo.SaveResponse(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveResponseTraceSpan(context.Background(), responsedomain.TraceSpan{
+		ID:          "span_1",
+		ResponseID:  "resp_1",
+		SessionID:   "sess_response",
+		ExecutionID: "exec_response",
+		TraceID:     "trace_response",
+		Kind:        "response.prepare",
+		Status:      "completed",
+		StartedAt:   now,
+		FinishedAt:  now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/responses/resp_1", nil)
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get response status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var got responseView
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "resp_1" || len(got.TraceSpans) != 1 {
+		t.Fatalf("response view = %#v, want response plus one span", got)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/sessions/sess_response/responses", nil)
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list responses status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/responses/resp_1/cancel", nil)
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel response status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	updated, err := repo.GetResponse(context.Background(), "resp_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != responsedomain.StatusCanceled {
+		t.Fatalf("response status = %s, want canceled", updated.Status)
+	}
+	exec, _, err := repo.GetExecution(context.Background(), "exec_response")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exec.Status != execution.StatusAbandoned {
+		t.Fatalf("execution status = %s, want abandoned", exec.Status)
 	}
 }
 

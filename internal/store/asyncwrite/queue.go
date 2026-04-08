@@ -15,6 +15,7 @@ import (
 	gatewaydomain "github.com/sahal/parmesan/internal/domain/gateway"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/replay"
+	responsedomain "github.com/sahal/parmesan/internal/domain/response"
 	"github.com/sahal/parmesan/internal/domain/rollout"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
@@ -122,6 +123,18 @@ func (q *Queue) SaveCatalogEntries(ctx context.Context, entries []tool.CatalogEn
 func (q *Queue) AppendAuditRecord(ctx context.Context, record audit.Record) error {
 	return q.enqueue(ctx, "append_audit_record", func(ctx context.Context) error {
 		return q.repo.AppendAuditRecord(ctx, record)
+	})
+}
+
+func (q *Queue) SaveResponse(ctx context.Context, record responsedomain.Response) error {
+	return q.enqueue(ctx, "save_response", func(ctx context.Context) error {
+		return q.repo.SaveResponse(ctx, record)
+	})
+}
+
+func (q *Queue) SaveResponseTraceSpan(ctx context.Context, span responsedomain.TraceSpan) error {
+	return q.enqueue(ctx, "save_response_trace_span", func(ctx context.Context) error {
+		return q.repo.SaveResponseTraceSpan(ctx, span)
 	})
 }
 
