@@ -53,6 +53,7 @@ type Store struct {
 	proposals                []rollout.Proposal
 	rollouts                 []rollout.Record
 	knowledgeSources         []knowledge.Source
+	knowledgeSyncJobs        []knowledge.SyncJob
 	knowledgePages           []knowledge.Page
 	knowledgeChunks          []knowledge.Chunk
 	knowledgeSnapshots       []knowledge.Snapshot
@@ -902,6 +903,63 @@ func (s *Store) ListKnowledgeSources(_ context.Context, scopeKind string, scopeI
 		}
 		out = append(out, item)
 	}
+	return out, nil
+}
+
+func (s *Store) SaveKnowledgeSyncJob(_ context.Context, job knowledge.SyncJob) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.knowledgeSyncJobs {
+		if item.ID == job.ID {
+			s.knowledgeSyncJobs[i] = job
+			return nil
+		}
+	}
+	s.knowledgeSyncJobs = append(s.knowledgeSyncJobs, job)
+	return nil
+}
+
+func (s *Store) GetKnowledgeSyncJob(_ context.Context, jobID string) (knowledge.SyncJob, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.knowledgeSyncJobs {
+		if item.ID == jobID {
+			return item, nil
+		}
+	}
+	return knowledge.SyncJob{}, errors.New("knowledge sync job not found")
+}
+
+func (s *Store) ListKnowledgeSyncJobs(_ context.Context, query knowledge.SyncJobQuery) ([]knowledge.SyncJob, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []knowledge.SyncJob
+	for _, item := range s.knowledgeSyncJobs {
+		if query.SourceID != "" && item.SourceID != query.SourceID {
+			continue
+		}
+		if query.Status != "" && item.Status != query.Status {
+			continue
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if query.Limit > 0 && len(out) > query.Limit {
+		out = out[:query.Limit]
+	}
+	return out, nil
+}
+
+func (s *Store) ListRunnableKnowledgeSyncJobs(_ context.Context) ([]knowledge.SyncJob, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []knowledge.SyncJob
+	for _, item := range s.knowledgeSyncJobs {
+		if item.Status == "queued" || item.Status == "running" {
+			out = append(out, item)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out, nil
 }
 

@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +26,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/domain/toolrun"
+	knowledgecompiler "github.com/sahal/parmesan/internal/knowledge/compiler"
 	knowledgeenrichment "github.com/sahal/parmesan/internal/knowledge/enrichment"
 	knowledgelearning "github.com/sahal/parmesan/internal/knowledge/learning"
 	"github.com/sahal/parmesan/internal/model"
@@ -84,6 +87,12 @@ func (r *Runner) loop(ctx context.Context) {
 
 func (r *Runner) runOnce(ctx context.Context) {
 	r.retryFailedMediaAssets(ctx, time.Now().UTC())
+	jobs, err := r.repo.ListRunnableKnowledgeSyncJobs(ctx)
+	if err == nil {
+		for _, job := range jobs {
+			_ = r.processKnowledgeSyncJob(ctx, job.ID)
+		}
+	}
 	executions, err := r.repo.ListRunnableExecutions(ctx, time.Now().UTC())
 	if err != nil {
 		return
@@ -91,6 +100,82 @@ func (r *Runner) runOnce(ctx context.Context) {
 	for _, exec := range executions {
 		_ = r.processExecution(ctx, exec.ID)
 	}
+}
+
+func (r *Runner) processKnowledgeSyncJob(ctx context.Context, jobID string) error {
+	job, err := r.repo.GetKnowledgeSyncJob(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	if job.Status == "succeeded" || job.Status == "failed" || job.Status == "skipped" {
+		return nil
+	}
+	source, err := r.repo.GetKnowledgeSource(ctx, job.SourceID)
+	if err != nil {
+		job.Status = "failed"
+		job.Error = err.Error()
+		now := time.Now().UTC()
+		job.FinishedAt = &now
+		return r.repo.SaveKnowledgeSyncJob(ctx, job)
+	}
+	now := time.Now().UTC()
+	job.Status = "running"
+	job.StartedAt = &now
+	job.OldChecksum = source.Checksum
+	if err := r.repo.SaveKnowledgeSyncJob(ctx, job); err != nil {
+		return err
+	}
+	checksum, err := knowledgeSourceChecksum(source)
+	if err != nil {
+		job.Status = "failed"
+		job.Error = err.Error()
+		done := time.Now().UTC()
+		job.FinishedAt = &done
+		_ = r.repo.SaveKnowledgeSyncJob(ctx, job)
+		return err
+	}
+	job.NewChecksum = checksum
+	if !job.Force && source.Checksum != "" && checksum == source.Checksum {
+		job.Status = "skipped"
+		job.Changed = false
+		done := time.Now().UTC()
+		job.FinishedAt = &done
+		if job.Metadata == nil {
+			job.Metadata = map[string]any{}
+		}
+		job.Metadata["reason"] = "unchanged_checksum"
+		return r.repo.SaveKnowledgeSyncJob(ctx, job)
+	}
+	snapshot, err := r.compileKnowledgeSource(ctx, source, true)
+	if err != nil {
+		job.Status = "failed"
+		job.Error = err.Error()
+		done := time.Now().UTC()
+		job.FinishedAt = &done
+		_ = r.repo.SaveKnowledgeSyncJob(ctx, job)
+		source.Status = "failed"
+		source.UpdatedAt = done
+		source.Metadata = mergeMaps(source.Metadata, map[string]any{"error": err.Error()})
+		_ = r.repo.SaveKnowledgeSource(ctx, source)
+		return err
+	}
+	done := time.Now().UTC()
+	job.Status = "succeeded"
+	job.Changed = true
+	job.SnapshotID = snapshot.ID
+	job.Error = ""
+	job.FinishedAt = &done
+	if err := r.repo.SaveKnowledgeSyncJob(ctx, job); err != nil {
+		return err
+	}
+	r.appendTrace(ctx, audit.Record{
+		ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+		Kind:      "knowledge.source.resynced",
+		Message:   "knowledge source resynced",
+		Fields:    map[string]any{"source_id": source.ID, "snapshot_id": snapshot.ID, "job_id": job.ID, "force": job.Force},
+		CreatedAt: done,
+	})
+	return nil
 }
 
 func (r *Runner) processExecution(ctx context.Context, executionID string) error {
@@ -1622,4 +1707,116 @@ func hasEvent(events []session.Event, eventID string) bool {
 		}
 	}
 	return false
+}
+
+func mergeMaps(base map[string]any, extra map[string]any) map[string]any {
+	if base == nil && extra == nil {
+		return nil
+	}
+	out := map[string]any{}
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range extra {
+		out[k] = v
+	}
+	return out
+}
+
+func stableChecksum(text string) string {
+	sum := sha1.Sum([]byte(text))
+	return hex.EncodeToString(sum[:])
+}
+
+func (r *Runner) compileKnowledgeSource(ctx context.Context, source knowledge.Source, updateSource bool) (knowledge.Snapshot, error) {
+	if source.Kind != "folder" {
+		return knowledge.Snapshot{}, fmt.Errorf("only folder knowledge sources are supported")
+	}
+	root, err := validatedKnowledgePath(source.URI)
+	if err != nil {
+		return knowledge.Snapshot{}, err
+	}
+	snapshot, err := knowledgecompiler.NewWithEmbedder(r.repo, r.router).CompileFolder(ctx, knowledgecompiler.Input{
+		ScopeKind: source.ScopeKind,
+		ScopeID:   source.ScopeID,
+		SourceID:  source.ID,
+		Root:      root,
+	})
+	if err != nil {
+		return knowledge.Snapshot{}, err
+	}
+	if updateSource {
+		source.Status = "ready"
+		source.UpdatedAt = time.Now().UTC()
+		source.Checksum, _ = knowledgeSourceChecksum(source)
+		source.Metadata = mergeMaps(source.Metadata, map[string]any{"current_checksum": source.Checksum, "snapshot_id": snapshot.ID})
+		if err := r.repo.SaveKnowledgeSource(ctx, source); err != nil {
+			return knowledge.Snapshot{}, err
+		}
+	}
+	return snapshot, nil
+}
+
+func validatedKnowledgePath(uri string) (string, error) {
+	path := strings.TrimSpace(uri)
+	if path == "" {
+		return "", fmt.Errorf("knowledge source uri is required")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	root := strings.TrimSpace(os.Getenv("KNOWLEDGE_SOURCE_ROOT"))
+	if root == "" {
+		return abs, nil
+	}
+	allowedRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(allowedRoot, abs)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("knowledge source path must stay within KNOWLEDGE_SOURCE_ROOT")
+	}
+	return abs, nil
+}
+
+func knowledgeSourceChecksum(source knowledge.Source) (string, error) {
+	root, err := validatedKnowledgePath(source.URI)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return stableChecksum(root + "\x00" + info.ModTime().UTC().Format(time.RFC3339Nano)), nil
+	}
+	var parts []string
+	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(strings.ToLower(info.Name()), ".md") && !strings.HasSuffix(strings.ToLower(info.Name()), ".txt") {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		parts = append(parts, rel+"\x00"+info.ModTime().UTC().Format(time.RFC3339Nano)+"\x00"+strconv.FormatInt(info.Size(), 10))
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	sort.Strings(parts)
+	return stableChecksum(strings.Join(parts, "\n")), nil
 }

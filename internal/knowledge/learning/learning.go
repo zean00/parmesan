@@ -110,6 +110,10 @@ var (
 	rePrefer         = regexp.MustCompile(`(?i)\bi prefer ([^.!\n]+)`)
 	reCallMe         = regexp.MustCompile(`(?i)\bcall me ([^.!\n]+)`)
 	reName           = regexp.MustCompile(`(?i)\bmy name is ([^.!\n]+)`)
+	reContactChannel = regexp.MustCompile(`(?i)\b(?:contact me|reach me|send(?: me)? updates?) (?:via|by|through)\s+(email|sms|phone|chat)\b`)
+	reLanguage       = regexp.MustCompile(`(?i)\b(?:please )?(?:reply|respond|speak|write) in\s+([a-zA-Z]+)\b`)
+	reConcise        = regexp.MustCompile(`(?i)\b(?:be|keep it|please be)\s+(concise|brief|short)\b`)
+	reFormality      = regexp.MustCompile(`(?i)\b(?:be|please be)\s+(formal|casual)\b`)
 	reInferredPrefer = regexp.MustCompile(`(?i)\b(?:seems like|it looks like|maybe|probably)\s+(?:the customer\s+)?(?:prefers|likes|wants)\s+([^.!\n]+)`)
 )
 
@@ -172,12 +176,65 @@ func (l *Learner) preferenceRecord(ctx context.Context, sess session.Session, ex
 		action = "pending"
 		confidence = 0.65
 	}
+	metadata := map[string]any{"compiler": "deterministic"}
+	if finding.ReviewReason != "" {
+		metadata["review_reason"] = finding.ReviewReason
+	}
+	if finding.ConfirmationPrompt != "" {
+		metadata["confirmation_prompt"] = finding.ConfirmationPrompt
+	}
 	var confirmedAt *time.Time
 	if status == customer.PreferenceStatusActive {
 		confirmedAt = &now
 	}
 	if existing, err := l.repo.GetCustomerPreference(ctx, strings.TrimSpace(sess.AgentID), strings.TrimSpace(sess.CustomerID), finding.Key); err == nil {
+		if !finding.Inferred && existing.Status == customer.PreferenceStatusActive && existing.Value == finding.Value {
+			return existing, customer.PreferenceEvent{
+				ID:           stableID("cpevt", prefID, source, "confirmed", finding.Value, now.Format(time.RFC3339Nano)),
+				PreferenceID: prefID,
+				AgentID:      strings.TrimSpace(sess.AgentID),
+				CustomerID:   strings.TrimSpace(sess.CustomerID),
+				Key:          finding.Key,
+				Value:        finding.Value,
+				Action:       "confirmed",
+				Source:       source,
+				Confidence:   1,
+				EvidenceRefs: evidence,
+				Metadata:     metadata,
+				CreatedAt:    now,
+			}, nil
+		}
 		if existing.Status == customer.PreferenceStatusActive && existing.Value != finding.Value {
+			if !finding.Inferred {
+				return customer.Preference{
+						ID:              prefID,
+						AgentID:         strings.TrimSpace(sess.AgentID),
+						CustomerID:      strings.TrimSpace(sess.CustomerID),
+						Key:             finding.Key,
+						Value:           finding.Value,
+						Source:          source,
+						Confidence:      1,
+						Status:          customer.PreferenceStatusActive,
+						EvidenceRefs:    evidence,
+						Metadata:        metadata,
+						LastConfirmedAt: &now,
+						CreatedAt:       existing.CreatedAt,
+						UpdatedAt:       now,
+					}, customer.PreferenceEvent{
+						ID:           stableID("cpevt", prefID, source, "supersede", finding.Value, now.Format(time.RFC3339Nano)),
+						PreferenceID: prefID,
+						AgentID:      strings.TrimSpace(sess.AgentID),
+						CustomerID:   strings.TrimSpace(sess.CustomerID),
+						Key:          finding.Key,
+						Value:        finding.Value,
+						Action:       "supersede",
+						Source:       source,
+						Confidence:   1,
+						EvidenceRefs: evidence,
+						Metadata:     map[string]any{"compiler": "deterministic", "previous_value": existing.Value},
+						CreatedAt:    now,
+					}, nil
+			}
 			return customer.Preference{}, customer.PreferenceEvent{
 				ID:           stableID("cpevt", prefID, source, "conflict", finding.Value, now.Format(time.RFC3339Nano)),
 				PreferenceID: prefID,
@@ -189,7 +246,7 @@ func (l *Learner) preferenceRecord(ctx context.Context, sess session.Session, ex
 				Source:       source,
 				Confidence:   confidence,
 				EvidenceRefs: evidence,
-				Metadata:     map[string]any{"compiler": "deterministic", "current_value": existing.Value, "proposed_value": finding.Value},
+				Metadata:     mergeMaps(metadata, map[string]any{"current_value": existing.Value, "proposed_value": finding.Value}),
 				CreatedAt:    now,
 			}, nil
 		}
@@ -204,7 +261,7 @@ func (l *Learner) preferenceRecord(ctx context.Context, sess session.Session, ex
 			Confidence:      confidence,
 			Status:          status,
 			EvidenceRefs:    evidence,
-			Metadata:        map[string]any{"compiler": "deterministic"},
+			Metadata:        metadata,
 			LastConfirmedAt: confirmedAt,
 			CreatedAt:       now,
 			UpdatedAt:       now,
@@ -219,7 +276,7 @@ func (l *Learner) preferenceRecord(ctx context.Context, sess session.Session, ex
 			Source:       source,
 			Confidence:   confidence,
 			EvidenceRefs: evidence,
-			Metadata:     map[string]any{"compiler": "deterministic"},
+			Metadata:     metadata,
 			CreatedAt:    now,
 		}, nil
 }
@@ -310,16 +367,14 @@ func (l *Learner) proposePolicyChange(ctx context.Context, sess session.Session,
 	candidate.ImportedAt = now
 	candidate.SourceYAML = base.SourceYAML
 	if soulOnly {
-		rule := "Operator feedback: " + record.Text
-		if !containsString(candidate.Soul.StyleRules, rule) {
-			candidate.Soul.StyleRules = append(candidate.Soul.StyleRules, rule)
-		}
+		applySoulFeedback(&candidate.Soul, record.Text)
 	} else {
 		candidate.Guidelines = append(candidate.Guidelines, policy.Guideline{
-			ID:    "feedback_" + short,
-			When:  "operator feedback applies",
-			Then:  record.Text,
-			Scope: "operator_feedback",
+			ID:          "feedback_" + short,
+			When:        "feedback:" + record.ID,
+			Then:        record.Text,
+			Scope:       "operator_feedback",
+			Criticality: "high",
 		})
 	}
 	if err := l.repo.SaveBundle(ctx, candidate); err != nil {
@@ -335,6 +390,7 @@ func (l *Learner) proposePolicyChange(ctx context.Context, sess session.Session,
 		EvidenceRefs:           []string{"session:" + sess.ID, "feedback:" + record.ID},
 		RiskFlags:              []string{"operator_feedback"},
 		RequiresManualApproval: true,
+		Origin:                 "feedback",
 		CreatedAt:              now,
 		UpdatedAt:              now,
 	}
@@ -362,9 +418,11 @@ func (l *Learner) baseBundle(ctx context.Context, sess session.Session) (policy.
 }
 
 type preferenceFinding struct {
-	Key      string
-	Value    string
-	Inferred bool
+	Key                string
+	Value              string
+	Inferred           bool
+	ReviewReason       string
+	ConfirmationPrompt string
 }
 
 func preferenceFindings(text string) []preferenceFinding {
@@ -373,12 +431,19 @@ func preferenceFindings(text string) []preferenceFinding {
 	for _, item := range []struct {
 		re       *regexp.Regexp
 		key      func(string) string
+		value    func(string) string
 		inferred bool
+		reason   string
+		prompt   func(string) string
 	}{
-		{rePrefer, func(value string) string { return "preference." + stableChecksum(strings.ToLower(value))[:12] }, false},
-		{reCallMe, func(string) string { return "preferred_name" }, false},
-		{reName, func(string) string { return "name" }, false},
-		{reInferredPrefer, func(string) string { return "inferred_preference" }, true},
+		{rePrefer, func(value string) string { return "preference." + stableChecksum(strings.ToLower(value))[:12] }, func(value string) string { return value }, false, "", nil},
+		{reCallMe, func(string) string { return "preferred_name" }, func(value string) string { return value }, false, "", nil},
+		{reName, func(string) string { return "name" }, func(value string) string { return value }, false, "", nil},
+		{reContactChannel, func(string) string { return "contact_channel" }, func(value string) string { return strings.ToLower(value) }, false, "", nil},
+		{reLanguage, func(string) string { return "preferred_language" }, func(value string) string { return strings.ToLower(value) }, false, "", nil},
+		{reConcise, func(string) string { return "response_style" }, func(value string) string { return strings.ToLower(value) }, false, "", nil},
+		{reFormality, func(string) string { return "formality" }, func(value string) string { return strings.ToLower(value) }, false, "", nil},
+		{reInferredPrefer, func(string) string { return "inferred_preference" }, func(value string) string { return value }, true, "inferred from ambiguous language", func(value string) string { return "Confirm whether the customer prefers " + value + "." }},
 	} {
 		match := item.re.FindStringSubmatch(text)
 		if len(match) != 2 {
@@ -388,7 +453,14 @@ func preferenceFindings(text string) []preferenceFinding {
 		if value == "" {
 			continue
 		}
-		out = append(out, preferenceFinding{Key: item.key(value), Value: value, Inferred: item.inferred})
+		if item.value != nil {
+			value = item.value(value)
+		}
+		var prompt string
+		if item.prompt != nil {
+			prompt = item.prompt(value)
+		}
+		out = append(out, preferenceFinding{Key: item.key(value), Value: value, Inferred: item.inferred, ReviewReason: item.reason, ConfirmationPrompt: prompt})
 	}
 	return out
 }
@@ -430,6 +502,35 @@ func proposalKindLabel(soulOnly bool) string {
 	return "policy"
 }
 
+func applySoulFeedback(soul *policy.Soul, text string) {
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "concise") || strings.Contains(lower, "brief") || strings.Contains(lower, "short") {
+		soul.Verbosity = "concise"
+	}
+	if strings.Contains(lower, "formal") {
+		soul.Formality = "formal"
+	}
+	if strings.Contains(lower, "casual") {
+		soul.Formality = "casual"
+	}
+	if strings.Contains(lower, "warm") {
+		soul.Tone = "warm"
+	}
+	if strings.Contains(lower, "friendly") {
+		soul.Tone = "friendly"
+	}
+	if strings.Contains(lower, "indonesia") || strings.Contains(lower, "bahasa") {
+		soul.DefaultLanguage = "id"
+	}
+	if strings.Contains(lower, "english") {
+		soul.DefaultLanguage = "en"
+	}
+	rule := "Operator feedback: " + text
+	if !containsString(soul.StyleRules, rule) {
+		soul.StyleRules = append(soul.StyleRules, rule)
+	}
+}
+
 func sharedScope(sess session.Session) (string, string) {
 	if strings.TrimSpace(sess.AgentID) != "" {
 		return "agent", strings.TrimSpace(sess.AgentID)
@@ -456,4 +557,18 @@ func stableID(prefix string, parts ...string) string {
 func stableChecksum(text string) string {
 	sum := sha1.Sum([]byte(text))
 	return hex.EncodeToString(sum[:])
+}
+
+func mergeMaps(base map[string]any, extra map[string]any) map[string]any {
+	if base == nil && extra == nil {
+		return nil
+	}
+	out := map[string]any{}
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range extra {
+		out[k] = v
+	}
+	return out
 }

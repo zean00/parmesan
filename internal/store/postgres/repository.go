@@ -783,6 +783,101 @@ func (c *Client) ListKnowledgeSources(ctx context.Context, scopeKind string, sco
 	return out, rows.Err()
 }
 
+func (c *Client) SaveKnowledgeSyncJob(ctx context.Context, job knowledge.SyncJob) error {
+	metadata, err := json.Marshal(job.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = c.sessionQuery().Exec(ctx, `
+		INSERT INTO knowledge_source_sync_jobs (id, source_id, status, force, requested_by, error, old_checksum, new_checksum, snapshot_id, changed, metadata_json, created_at, started_at, finished_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		ON CONFLICT (id) DO UPDATE
+		SET status = EXCLUDED.status,
+		    force = EXCLUDED.force,
+		    requested_by = EXCLUDED.requested_by,
+		    error = EXCLUDED.error,
+		    old_checksum = EXCLUDED.old_checksum,
+		    new_checksum = EXCLUDED.new_checksum,
+		    snapshot_id = EXCLUDED.snapshot_id,
+		    changed = EXCLUDED.changed,
+		    metadata_json = EXCLUDED.metadata_json,
+		    started_at = EXCLUDED.started_at,
+		    finished_at = EXCLUDED.finished_at
+	`, job.ID, job.SourceID, job.Status, job.Force, nullString(job.RequestedBy), nullString(job.Error), nullString(job.OldChecksum), nullString(job.NewChecksum), nullString(job.SnapshotID), job.Changed, metadata, job.CreatedAt, job.StartedAt, job.FinishedAt)
+	return err
+}
+
+func (c *Client) GetKnowledgeSyncJob(ctx context.Context, jobID string) (knowledge.SyncJob, error) {
+	row := c.sessionQuery().QueryRow(ctx, `
+		SELECT id, source_id, status, force, COALESCE(requested_by,''), COALESCE(error,''), COALESCE(old_checksum,''), COALESCE(new_checksum,''), COALESCE(snapshot_id,''), changed, metadata_json, created_at, started_at, finished_at
+		FROM knowledge_source_sync_jobs WHERE id = $1
+	`, jobID)
+	var item knowledge.SyncJob
+	var metadata []byte
+	if err := row.Scan(&item.ID, &item.SourceID, &item.Status, &item.Force, &item.RequestedBy, &item.Error, &item.OldChecksum, &item.NewChecksum, &item.SnapshotID, &item.Changed, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return knowledge.SyncJob{}, errors.New("knowledge sync job not found")
+		}
+		return knowledge.SyncJob{}, err
+	}
+	_ = json.Unmarshal(metadata, &item.Metadata)
+	return item, nil
+}
+
+func (c *Client) ListKnowledgeSyncJobs(ctx context.Context, query knowledge.SyncJobQuery) ([]knowledge.SyncJob, error) {
+	limit := query.Limit
+	if limit <= 0 {
+		limit = 1000
+	}
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT id, source_id, status, force, COALESCE(requested_by,''), COALESCE(error,''), COALESCE(old_checksum,''), COALESCE(new_checksum,''), COALESCE(snapshot_id,''), changed, metadata_json, created_at, started_at, finished_at
+		FROM knowledge_source_sync_jobs
+		WHERE ($1 = '' OR source_id = $1)
+		  AND ($2 = '' OR status = $2)
+		ORDER BY created_at DESC
+		LIMIT $3
+	`, query.SourceID, query.Status, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []knowledge.SyncJob
+	for rows.Next() {
+		var item knowledge.SyncJob
+		var metadata []byte
+		if err := rows.Scan(&item.ID, &item.SourceID, &item.Status, &item.Force, &item.RequestedBy, &item.Error, &item.OldChecksum, &item.NewChecksum, &item.SnapshotID, &item.Changed, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(metadata, &item.Metadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) ListRunnableKnowledgeSyncJobs(ctx context.Context) ([]knowledge.SyncJob, error) {
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT id, source_id, status, force, COALESCE(requested_by,''), COALESCE(error,''), COALESCE(old_checksum,''), COALESCE(new_checksum,''), COALESCE(snapshot_id,''), changed, metadata_json, created_at, started_at, finished_at
+		FROM knowledge_source_sync_jobs
+		WHERE status IN ('queued','running')
+		ORDER BY created_at ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []knowledge.SyncJob
+	for rows.Next() {
+		var item knowledge.SyncJob
+		var metadata []byte
+		if err := rows.Scan(&item.ID, &item.SourceID, &item.Status, &item.Force, &item.RequestedBy, &item.Error, &item.OldChecksum, &item.NewChecksum, &item.SnapshotID, &item.Changed, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(metadata, &item.Metadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (c *Client) SaveKnowledgePage(ctx context.Context, page knowledge.Page, chunks []knowledge.Chunk) error {
 	citations, err := json.Marshal(page.Citations)
 	if err != nil {
@@ -1893,8 +1988,8 @@ func (c *Client) SaveProposal(ctx context.Context, proposal rollout.Proposal) er
 		return err
 	}
 	_, err = c.Pool.Exec(ctx, `
-		INSERT INTO policy_proposals (id, source_bundle_id, candidate_bundle_id, state, rationale, evidence_refs, replay_score, safety_score, risk_flags, requires_manual_approval, eval_summary_json, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		INSERT INTO policy_proposals (id, source_bundle_id, candidate_bundle_id, state, rationale, evidence_refs, replay_score, safety_score, risk_flags, requires_manual_approval, eval_summary_json, origin, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		ON CONFLICT (id) DO UPDATE
 		SET state = EXCLUDED.state,
 		    rationale = EXCLUDED.rationale,
@@ -1904,19 +1999,20 @@ func (c *Client) SaveProposal(ctx context.Context, proposal rollout.Proposal) er
 		    risk_flags = EXCLUDED.risk_flags,
 		    requires_manual_approval = EXCLUDED.requires_manual_approval,
 		    eval_summary_json = EXCLUDED.eval_summary_json,
+		    origin = EXCLUDED.origin,
 		    updated_at = EXCLUDED.updated_at
-	`, proposal.ID, proposal.SourceBundleID, proposal.CandidateBundleID, proposal.State, proposal.Rationale, evidence, proposal.ReplayScore, proposal.SafetyScore, risks, proposal.RequiresManualApproval, mustJSON(proposal.EvalSummaryJSON), proposal.CreatedAt, proposal.UpdatedAt)
+	`, proposal.ID, proposal.SourceBundleID, proposal.CandidateBundleID, proposal.State, proposal.Rationale, evidence, proposal.ReplayScore, proposal.SafetyScore, risks, proposal.RequiresManualApproval, mustJSON(proposal.EvalSummaryJSON), nullString(proposal.Origin), proposal.CreatedAt, proposal.UpdatedAt)
 	return err
 }
 
 func (c *Client) GetProposal(ctx context.Context, proposalID string) (rollout.Proposal, error) {
 	row := c.Pool.QueryRow(ctx, `
-		SELECT id, source_bundle_id, candidate_bundle_id, state, rationale, evidence_refs, replay_score, safety_score, risk_flags, requires_manual_approval, eval_summary_json::text, created_at, updated_at
+		SELECT id, source_bundle_id, candidate_bundle_id, state, rationale, evidence_refs, replay_score, safety_score, risk_flags, requires_manual_approval, eval_summary_json::text, COALESCE(origin,''), created_at, updated_at
 		FROM policy_proposals WHERE id = $1
 	`, proposalID)
 	var item rollout.Proposal
 	var evidence, risks []byte
-	if err := row.Scan(&item.ID, &item.SourceBundleID, &item.CandidateBundleID, &item.State, &item.Rationale, &evidence, &item.ReplayScore, &item.SafetyScore, &risks, &item.RequiresManualApproval, &item.EvalSummaryJSON, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	if err := row.Scan(&item.ID, &item.SourceBundleID, &item.CandidateBundleID, &item.State, &item.Rationale, &evidence, &item.ReplayScore, &item.SafetyScore, &risks, &item.RequiresManualApproval, &item.EvalSummaryJSON, &item.Origin, &item.CreatedAt, &item.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return rollout.Proposal{}, errors.New("proposal not found")
 		}
@@ -1929,7 +2025,7 @@ func (c *Client) GetProposal(ctx context.Context, proposalID string) (rollout.Pr
 
 func (c *Client) ListProposals(ctx context.Context) ([]rollout.Proposal, error) {
 	rows, err := c.Pool.Query(ctx, `
-		SELECT id, source_bundle_id, candidate_bundle_id, state, rationale, evidence_refs, replay_score, safety_score, risk_flags, requires_manual_approval, eval_summary_json::text, created_at, updated_at
+		SELECT id, source_bundle_id, candidate_bundle_id, state, rationale, evidence_refs, replay_score, safety_score, risk_flags, requires_manual_approval, eval_summary_json::text, COALESCE(origin,''), created_at, updated_at
 		FROM policy_proposals ORDER BY created_at DESC
 	`)
 	if err != nil {
@@ -1940,7 +2036,7 @@ func (c *Client) ListProposals(ctx context.Context) ([]rollout.Proposal, error) 
 	for rows.Next() {
 		var item rollout.Proposal
 		var evidence, risks []byte
-		if err := rows.Scan(&item.ID, &item.SourceBundleID, &item.CandidateBundleID, &item.State, &item.Rationale, &evidence, &item.ReplayScore, &item.SafetyScore, &risks, &item.RequiresManualApproval, &item.EvalSummaryJSON, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.SourceBundleID, &item.CandidateBundleID, &item.State, &item.Rationale, &evidence, &item.ReplayScore, &item.SafetyScore, &risks, &item.RequiresManualApproval, &item.EvalSummaryJSON, &item.Origin, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(evidence, &item.EvidenceRefs)

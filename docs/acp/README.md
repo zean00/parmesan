@@ -40,6 +40,8 @@ Knowledge workspace routes:
 - `GET /v1/operator/knowledge/sources/{id}`
 - `POST /v1/operator/knowledge/sources/{id}/compile`
 - `POST /v1/operator/knowledge/sources/{id}/resync`
+- `GET /v1/operator/knowledge/sources/{id}/jobs`
+- `GET /v1/operator/knowledge/jobs/{id}`
 - `GET /v1/operator/knowledge/snapshots/{id}`
 - `GET /v1/operator/knowledge/pages`
 - `GET /v1/operator/knowledge/proposals`
@@ -68,9 +70,10 @@ Knowledge rules:
 - Non-text ACP content parts are treated as media assets; image/audio parts now produce derived signals like OCR text, summaries, labels, transcripts, and language hints.
 - Retrieval prefers customer-scoped `customer_agent` knowledge when available, then falls back to shared agent or bundle knowledge.
 - Shared conversation learning creates draft knowledge proposals; low-risk customer facts update first-class customer preferences directly.
-- Inferred or conflicting preference signals are reviewable and are not injected into runtime responses until confirmed active.
+- Inferred preference signals are reviewable and are not injected into runtime responses until confirmed active; explicit customer statements can supersede older active values.
 - Policy and SOUL changes inferred from operator feedback always become draft rollout proposals and never auto-apply.
-- Proposal review supports explicit `draft`, `approved`, `rejected`, and `applied` states, plus a preview surface before apply.
+- Policy proposal preview returns deterministic diffs for guideline, journey, template, tool-policy, and SOUL changes before review or rollout.
+- Knowledge source resync is asynchronous and returns a background sync job instead of compiling inline.
 - Knowledge lint findings are surfaced during preview/apply; unresolved high-risk citation, staleness, or contradiction findings block apply.
 - Knowledge proposals can apply whole-page or section-level changes; payload citations are preserved into applied pages and chunks.
 - OpenRouter multimodal enrichers are used when configured:

@@ -108,6 +108,7 @@ type sessionView struct {
 	PendingApprovalCount int            `json:"pending_approval_count,omitempty"`
 	FailedMediaCount     int            `json:"failed_media_count,omitempty"`
 	UnresolvedLintCount  int            `json:"unresolved_lint_count,omitempty"`
+	PendingPreferenceCount int          `json:"pending_preference_count,omitempty"`
 }
 
 type traceTimelineEntry struct {
@@ -172,6 +173,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("POST /v1/proposals", s.createProposal)
 	mux.HandleFunc("GET /v1/proposals", s.listProposals)
 	mux.HandleFunc("GET /v1/proposals/{id}", s.getProposal)
+	mux.HandleFunc("GET /v1/proposals/{id}/preview", s.getProposalPreview)
 	mux.HandleFunc("GET /v1/proposals/{id}/summary", s.getProposalSummary)
 	mux.HandleFunc("POST /v1/proposals/{id}/state", s.transitionProposal)
 	mux.HandleFunc("POST /v1/rollouts", s.createRollout)
@@ -194,6 +196,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/acp/sessions/{id}/approvals", s.acpListApprovals)
 	mux.HandleFunc("POST /v1/acp/sessions/{id}/approvals/{approval_id}", s.acpRespondApproval)
 	mux.HandleFunc("GET /v1/operator/sessions", s.operatorListSessions)
+	mux.HandleFunc("GET /v1/operator/queue/summary", s.operatorQueueSummary)
 	mux.HandleFunc("GET /v1/operator/sessions/{id}", s.operatorGetSession)
 	mux.HandleFunc("GET /v1/operator/sessions/{id}/events", s.operatorListEvents)
 	mux.HandleFunc("GET /v1/operator/sessions/{id}/stream", s.operatorStreamEvents)
@@ -213,6 +216,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("POST /v1/operator/operators/{id}/tokens", s.operatorCreateOperatorToken)
 	mux.HandleFunc("POST /v1/operator/operators/{id}/tokens/{token_id}/revoke", s.operatorRevokeOperatorToken)
 	mux.HandleFunc("GET /v1/operator/customers/{customer_id}/preferences", s.operatorListCustomerPreferences)
+	mux.HandleFunc("GET /v1/operator/customers/{customer_id}/preferences/pending", s.operatorListCustomerPreferences)
 	mux.HandleFunc("PUT /v1/operator/customers/{customer_id}/preferences/{key}", s.operatorUpsertCustomerPreference)
 	mux.HandleFunc("POST /v1/operator/customers/{customer_id}/preferences/{key}/confirm", s.operatorConfirmCustomerPreference)
 	mux.HandleFunc("POST /v1/operator/customers/{customer_id}/preferences/{key}/reject", s.operatorRejectCustomerPreference)
@@ -227,6 +231,8 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/operator/knowledge/sources/{id}", s.operatorGetKnowledgeSource)
 	mux.HandleFunc("POST /v1/operator/knowledge/sources/{id}/compile", s.operatorCompileKnowledgeSource)
 	mux.HandleFunc("POST /v1/operator/knowledge/sources/{id}/resync", s.operatorResyncKnowledgeSource)
+	mux.HandleFunc("GET /v1/operator/knowledge/sources/{id}/jobs", s.operatorListKnowledgeSourceJobs)
+	mux.HandleFunc("GET /v1/operator/knowledge/jobs/{id}", s.operatorGetKnowledgeSyncJob)
 	mux.HandleFunc("GET /v1/operator/knowledge/snapshots/{id}", s.operatorGetKnowledgeSnapshot)
 	mux.HandleFunc("GET /v1/operator/knowledge/pages", s.operatorListKnowledgePages)
 	mux.HandleFunc("GET /v1/operator/knowledge/proposals", s.operatorListKnowledgeProposals)
@@ -402,6 +408,7 @@ func (s *Server) createProposal(w http.ResponseWriter, r *http.Request) {
 		EvidenceRefs:           req.EvidenceRefs,
 		RiskFlags:              req.RiskFlags,
 		RequiresManualApproval: req.RequiresManualApproval,
+		Origin:                 "manual",
 		CreatedAt:              now,
 		UpdatedAt:              now,
 	}
@@ -441,6 +448,20 @@ func (s *Server) getProposal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) getProposalPreview(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetProposal(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	preview, err := s.policyProposalPreview(r.Context(), item)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, preview)
 }
 
 func (s *Server) getProposalSummary(w http.ResponseWriter, r *http.Request) {
@@ -496,6 +517,17 @@ func (s *Server) transitionProposal(w http.ResponseWriter, r *http.Request) {
 	if !validProposalTransition(item.State, req.State, item.RequiresManualApproval, req.ApprovedHighRisk) {
 		http.Error(w, "invalid proposal state transition", http.StatusBadRequest)
 		return
+	}
+	if req.State == rollout.StateReviewed || req.State == rollout.StateShadow {
+		preview, err := s.policyProposalPreview(r.Context(), item)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if blocked, _ := preview["apply_blocked"].(bool); blocked {
+			writeJSON(w, http.StatusUnprocessableEntity, preview)
+			return
+		}
 	}
 	if req.State == rollout.StateActive {
 		if err := s.promoteProposalActive(r.Context(), item); err != nil {
@@ -1086,6 +1118,7 @@ func (s *Server) operatorListSessions(w http.ResponseWriter, r *http.Request) {
 	pendingApprovalOnly := strings.EqualFold(strings.TrimSpace(query.Get("pending_approval")), "true")
 	failedMediaOnly := strings.EqualFold(strings.TrimSpace(query.Get("failed_media")), "true")
 	unresolvedLintOnly := strings.EqualFold(strings.TrimSpace(query.Get("unresolved_lint")), "true")
+	viewName := strings.TrimSpace(query.Get("view"))
 	after, err := parseOptionalTime(query.Get("last_activity_after"))
 	if err != nil {
 		http.Error(w, "invalid last_activity_after", http.StatusBadRequest)
@@ -1102,8 +1135,7 @@ func (s *Server) operatorListSessions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	cursorSeen := cursor == ""
-	out := make([]sessionView, 0, len(items))
+	views := make([]sessionView, 0, len(items))
 	for _, sess := range items {
 		if customerID != "" && sess.CustomerID != customerID {
 			continue
@@ -1133,6 +1165,7 @@ func (s *Server) operatorListSessions(w http.ResponseWriter, r *http.Request) {
 		view.PendingApprovalCount = s.pendingApprovalCount(r.Context(), sess.ID)
 		view.FailedMediaCount = s.failedMediaCount(r.Context(), sess.ID)
 		view.UnresolvedLintCount = s.unresolvedLintCount(r.Context(), sess.AgentID)
+		view.PendingPreferenceCount = s.pendingPreferenceCount(r.Context(), sess.AgentID, sess.CustomerID)
 		if pendingApprovalOnly && view.PendingApprovalCount == 0 {
 			continue
 		}
@@ -1148,18 +1181,96 @@ func (s *Server) operatorListSessions(w http.ResponseWriter, r *http.Request) {
 		if !before.IsZero() && !view.LastActivityAt.Before(before) {
 			continue
 		}
-		if !cursorSeen {
-			if view.ID == cursor {
-				cursorSeen = true
-			}
+		if !matchesQueueView(view, viewName, operatorFromRequest(r, assignedOperatorID)) {
 			continue
 		}
-		out = append(out, view)
-		if limit > 0 && len(out) >= limit {
-			break
+		views = append(views, view)
+	}
+	sort.Slice(views, func(i, j int) bool {
+		if views[i].LastActivityAt.Equal(views[j].LastActivityAt) {
+			return views[i].ID > views[j].ID
 		}
+		return views[i].LastActivityAt.After(views[j].LastActivityAt)
+	})
+	start := sessionCursorStart(views, cursor)
+	if start > len(views) {
+		start = len(views)
+	}
+	out := views[start:]
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	if len(out) > 0 && start+len(out) < len(views) {
+		w.Header().Set("X-Next-Cursor", encodeSessionCursor(out[len(out)-1]))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) operatorQueueSummary(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListSessions(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	agentID := strings.TrimSpace(r.URL.Query().Get("agent_id"))
+	operatorID := operatorFromRequest(r, strings.TrimSpace(r.URL.Query().Get("operator_id")))
+	summary := map[string]int{
+		"mine":                      0,
+		"unassigned":                0,
+		"manual_takeover":           0,
+		"pending_approval":          0,
+		"failed_media":              0,
+		"pending_preference_review": 0,
+		"pending_knowledge":         0,
+		"pending_policy":            0,
+		"needs_attention":           0,
+	}
+	for _, sess := range items {
+		if agentID != "" && sess.AgentID != agentID {
+			continue
+		}
+		view := sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess))
+		view.AssignedOperatorID = stringMetadata(sess.Metadata, "assigned_operator_id")
+		view.LastActivityAt = s.sessionLastActivityAt(r.Context(), sess)
+		view.PendingApprovalCount = s.pendingApprovalCount(r.Context(), sess.ID)
+		view.FailedMediaCount = s.failedMediaCount(r.Context(), sess.ID)
+		view.UnresolvedLintCount = s.unresolvedLintCount(r.Context(), sess.AgentID)
+		view.PendingPreferenceCount = s.pendingPreferenceCount(r.Context(), sess.AgentID, sess.CustomerID)
+		if operatorID != "" && view.AssignedOperatorID == operatorID {
+			summary["mine"]++
+		}
+		if view.AssignedOperatorID == "" {
+			summary["unassigned"]++
+		}
+		if sessionMode(sess) == "manual" || view.AssignedOperatorID != "" {
+			summary["manual_takeover"]++
+		}
+		if view.PendingApprovalCount > 0 {
+			summary["pending_approval"]++
+		}
+		if view.FailedMediaCount > 0 {
+			summary["failed_media"]++
+		}
+		if view.PendingPreferenceCount > 0 {
+			summary["pending_preference_review"]++
+		}
+		if view.PendingApprovalCount > 0 || view.FailedMediaCount > 0 || view.UnresolvedLintCount > 0 || view.PendingPreferenceCount > 0 {
+			summary["needs_attention"]++
+		}
+	}
+	kprops, _ := s.store.ListKnowledgeUpdateProposals(r.Context(), "agent", agentID)
+	for _, item := range kprops {
+		if item.State == "draft" || item.State == "approved" {
+			summary["pending_knowledge"]++
+		}
+	}
+	proposals, _ := s.store.ListProposals(r.Context())
+	for _, item := range proposals {
+		if item.State == rollout.StateProposed || item.State == rollout.StateReviewed || item.State == rollout.StateShadow || item.State == rollout.StateCanary {
+			summary["pending_policy"]++
+		}
+	}
+	writeJSON(w, http.StatusOK, summary)
 }
 
 func (s *Server) operatorGetSession(w http.ResponseWriter, r *http.Request) {
@@ -1631,10 +1742,14 @@ func (s *Server) operatorListCustomerPreferences(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	if strings.HasSuffix(r.URL.Path, "/preferences/pending") && status == "" {
+		status = customer.PreferenceStatusPending
+	}
 	items, err := s.store.ListCustomerPreferences(r.Context(), customer.PreferenceQuery{
 		AgentID:        agentID,
 		CustomerID:     r.PathValue("customer_id"),
-		Status:         strings.TrimSpace(r.URL.Query().Get("status")),
+		Status:         status,
 		Key:            strings.TrimSpace(r.URL.Query().Get("key")),
 		Source:         strings.TrimSpace(r.URL.Query().Get("source")),
 		IncludeExpired: strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_expired")), "true"),
@@ -1644,7 +1759,11 @@ func (s *Server) operatorListCustomerPreferences(w http.ResponseWriter, r *http.
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, items)
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, preferenceView(item))
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) operatorUpsertCustomerPreference(w http.ResponseWriter, r *http.Request) {
@@ -2092,28 +2211,42 @@ func (s *Server) operatorResyncKnowledgeSource(w http.ResponseWriter, r *http.Re
 		return
 	}
 	force := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("force")), "true")
-	checksum, err := knowledgeSourceChecksum(source)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	now := time.Now().UTC()
+	job := knowledge.SyncJob{
+		ID:          fmt.Sprintf("ksync_%d", now.UnixNano()),
+		SourceID:    source.ID,
+		Status:      "queued",
+		Force:       force,
+		RequestedBy: requestOperatorID(r, ""),
+		CreatedAt:   now,
+	}
+	if err := s.store.SaveKnowledgeSyncJob(r.Context(), job); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if !force && source.Checksum != "" && checksum == source.Checksum {
-		writeJSON(w, http.StatusOK, map[string]any{"source": source, "changed": false})
-		return
-	}
-	snapshot, err := s.compileKnowledgeSource(r.Context(), source, true)
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+func (s *Server) operatorListKnowledgeSourceJobs(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListKnowledgeSyncJobs(r.Context(), knowledge.SyncJobQuery{
+		SourceID: r.PathValue("id"),
+		Status:   strings.TrimSpace(r.URL.Query().Get("status")),
+		Limit:    1000,
+	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.appendTrace(r.Context(), audit.Record{
-		ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
-		Kind:      "knowledge.source.resynced",
-		Message:   "knowledge source resynced",
-		Fields:    map[string]any{"source_id": source.ID, "snapshot_id": snapshot.ID, "force": force},
-		CreatedAt: time.Now().UTC(),
-	})
-	writeJSON(w, http.StatusCreated, map[string]any{"source_id": source.ID, "snapshot": snapshot, "changed": true})
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) operatorGetKnowledgeSyncJob(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetKnowledgeSyncJob(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
 }
 
 func (s *Server) compileKnowledgeSource(ctx context.Context, source knowledge.Source, updateSource bool) (knowledge.Snapshot, error) {
@@ -3853,6 +3986,131 @@ func validProposalTransition(current, next rollout.ProposalState, requiresManual
 	}
 }
 
+func (s *Server) policyProposalPreview(ctx context.Context, item rollout.Proposal) (map[string]any, error) {
+	source, candidate, err := s.proposalBundles(ctx, item)
+	if err != nil {
+		return nil, err
+	}
+	changes := map[string]any{
+		"guidelines":  diffPolicyIDs(guidelineIDs(candidate.Guidelines), guidelineIDs(source.Guidelines)),
+		"journeys":    diffPolicyIDs(journeyIDs(candidate.Journeys), journeyIDs(source.Journeys)),
+		"templates":   diffPolicyIDs(templateIDsForAPI(candidate.Templates), templateIDsForAPI(source.Templates)),
+		"tool_policies": diffPolicyIDs(toolPolicyIDs(candidate.ToolPolicies), toolPolicyIDs(source.ToolPolicies)),
+		"soul":        soulFieldDiff(source.Soul, candidate.Soul),
+	}
+	findings := s.policyProposalFindings(item, source, candidate, changes)
+	blocked := false
+	var warnings []map[string]any
+	for _, finding := range findings {
+		if severity, _ := finding["severity"].(string); severity == "high" {
+			blocked = true
+		} else {
+			warnings = append(warnings, finding)
+		}
+	}
+	return map[string]any{
+		"proposal":        item,
+		"source_bundle":   map[string]any{"id": source.ID, "version": source.Version},
+		"candidate_bundle": map[string]any{"id": candidate.ID, "version": candidate.Version},
+		"origin":          firstNonEmpty(item.Origin, proposalOrigin(item)),
+		"changes":         changes,
+		"lint_findings":   findings,
+		"apply_blocked":   blocked,
+		"apply_warnings":  warnings,
+		"blocked_reasons": lintLikeMessages(findings, true),
+	}, nil
+}
+
+func (s *Server) proposalBundles(ctx context.Context, item rollout.Proposal) (policy.Bundle, policy.Bundle, error) {
+	bundles, err := s.store.ListBundles(ctx)
+	if err != nil {
+		return policy.Bundle{}, policy.Bundle{}, err
+	}
+	var source, candidate policy.Bundle
+	for _, bundle := range bundles {
+		if bundle.ID == item.SourceBundleID {
+			source = bundle
+		}
+		if bundle.ID == item.CandidateBundleID {
+			candidate = bundle
+		}
+	}
+	if source.ID == "" {
+		return policy.Bundle{}, policy.Bundle{}, errors.New("source bundle not found")
+	}
+	if candidate.ID == "" {
+		return policy.Bundle{}, policy.Bundle{}, errors.New("candidate bundle not found")
+	}
+	return source, candidate, nil
+}
+
+func (s *Server) policyProposalFindings(item rollout.Proposal, source, candidate policy.Bundle, changes map[string]any) []map[string]any {
+	var out []map[string]any
+	if len(item.EvidenceRefs) == 0 {
+		out = append(out, map[string]any{"kind": "missing_evidence", "severity": "high", "message": "Policy proposal has no evidence refs."})
+	}
+	if !proposalHasDelta(changes) {
+		out = append(out, map[string]any{"kind": "empty_delta", "severity": "high", "message": "Candidate bundle has no effective change from the source bundle."})
+	}
+	if ids := duplicateIDs(candidate.Guidelines); len(ids) > 0 {
+		out = append(out, map[string]any{"kind": "duplicate_guideline_ids", "severity": "high", "message": "Candidate bundle has duplicate guideline IDs.", "ids": ids})
+	}
+	if source.Soul.DefaultLanguage != candidate.Soul.DefaultLanguage && strings.TrimSpace(candidate.Soul.DefaultLanguage) != "" {
+		out = append(out, map[string]any{"kind": "soul_language_change", "severity": "high", "message": "SOUL default language change requires explicit review."})
+	}
+	if source.Soul.EscalationStyle != candidate.Soul.EscalationStyle && strings.TrimSpace(candidate.Soul.EscalationStyle) != "" {
+		out = append(out, map[string]any{"kind": "soul_escalation_change", "severity": "high", "message": "SOUL escalation style change requires explicit review."})
+	}
+	if len(candidate.ToolPolicies) > len(source.ToolPolicies) {
+		out = append(out, map[string]any{"kind": "tool_policy_change", "severity": "medium", "message": "Candidate adds or changes tool policy exposure/approval behavior."})
+	}
+	if len(candidate.Journeys) > len(source.Journeys) {
+		out = append(out, map[string]any{"kind": "journey_change", "severity": "medium", "message": "Candidate adds or changes journeys."})
+	}
+	return out
+}
+
+func proposalHasDelta(changes map[string]any) bool {
+	for _, key := range []string{"guidelines", "journeys", "templates", "tool_policies"} {
+		if section, ok := changes[key].(map[string]any); ok {
+			if added, _ := section["added"].([]string); len(added) > 0 {
+				return true
+			}
+			if removed, _ := section["removed"].([]string); len(removed) > 0 {
+				return true
+			}
+		}
+	}
+	if soul, ok := changes["soul"].(map[string]any); ok && len(soul) > 0 {
+		return true
+	}
+	return false
+}
+
+func proposalOrigin(item rollout.Proposal) string {
+	if item.Origin != "" {
+		return item.Origin
+	}
+	if strings.Contains(strings.ToLower(item.Rationale), "feedback") {
+		return "feedback"
+	}
+	return "manual"
+}
+
+func lintLikeMessages(findings []map[string]any, blockedOnly bool) []string {
+	var out []string
+	for _, finding := range findings {
+		severity, _ := finding["severity"].(string)
+		if blockedOnly && severity != "high" {
+			continue
+		}
+		if msg, _ := finding["message"].(string); msg != "" {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
+
 func (s *Server) promoteProposalActive(ctx context.Context, active rollout.Proposal) error {
 	proposals, err := s.store.ListProposals(ctx)
 	if err != nil {
@@ -3951,7 +4209,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 
 func (s *Server) operatorAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/v1/operator/") && r.URL.Path != "/v1/operator" {
+		if !strings.HasPrefix(r.URL.Path, "/v1/operator/") && r.URL.Path != "/v1/operator" && !strings.HasPrefix(r.URL.Path, "/v1/proposals") && !strings.HasPrefix(r.URL.Path, "/v1/rollouts") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -4047,6 +4305,12 @@ func requestOperatorID(r *http.Request, fallback string) string {
 }
 
 func operatorPermission(method, path string) string {
+	if strings.HasPrefix(path, "/v1/proposals") || strings.HasPrefix(path, "/v1/rollouts") {
+		if method == http.MethodGet {
+			return "operator.view"
+		}
+		return "policy.manage"
+	}
 	if strings.HasPrefix(path, "/v1/operator/operators") {
 		return "operator.manage"
 	}
@@ -5088,6 +5352,22 @@ func guidelineIDs(items []policy.Guideline) []string {
 	return out
 }
 
+func journeyIDs(items []policy.Journey) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.ID)
+	}
+	return out
+}
+
+func toolPolicyIDs(items []policy.ToolPolicy) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.ID)
+	}
+	return out
+}
+
 func templateIDsForAPI(items []policy.Template) []string {
 	out := make([]string, 0, len(items))
 	for _, item := range items {
@@ -5130,6 +5410,194 @@ func customerBlockedIDs(items []policyruntime.CustomerDependencyDecision) []stri
 		}
 	}
 	return out
+}
+
+func diffPolicyIDs(candidate, source []string) map[string]any {
+	sourceSet := map[string]struct{}{}
+	candidateSet := map[string]struct{}{}
+	for _, id := range source {
+		sourceSet[id] = struct{}{}
+	}
+	for _, id := range candidate {
+		candidateSet[id] = struct{}{}
+	}
+	var added, removed []string
+	for _, id := range candidate {
+		if _, ok := sourceSet[id]; !ok {
+			added = append(added, id)
+		}
+	}
+	for _, id := range source {
+		if _, ok := candidateSet[id]; !ok {
+			removed = append(removed, id)
+		}
+	}
+	return map[string]any{"added": added, "removed": removed}
+}
+
+func soulFieldDiff(source, candidate policy.Soul) map[string]any {
+	var diff = map[string]any{}
+	add := func(key, oldValue, newValue string) {
+		if strings.TrimSpace(oldValue) != strings.TrimSpace(newValue) {
+			diff[key] = map[string]string{"from": oldValue, "to": newValue}
+		}
+	}
+	add("identity", source.Identity, candidate.Identity)
+	add("role", source.Role, candidate.Role)
+	add("brand", source.Brand, candidate.Brand)
+	add("default_language", source.DefaultLanguage, candidate.DefaultLanguage)
+	add("language_matching", source.LanguageMatching, candidate.LanguageMatching)
+	add("tone", source.Tone, candidate.Tone)
+	add("formality", source.Formality, candidate.Formality)
+	add("verbosity", source.Verbosity, candidate.Verbosity)
+	add("escalation_style", source.EscalationStyle, candidate.EscalationStyle)
+	if !equalStringSlices(source.SupportedLanguages, candidate.SupportedLanguages) {
+		diff["supported_languages"] = map[string][]string{"from": source.SupportedLanguages, "to": candidate.SupportedLanguages}
+	}
+	if !equalStringSlices(source.StyleRules, candidate.StyleRules) {
+		diff["style_rules"] = map[string][]string{"from": source.StyleRules, "to": candidate.StyleRules}
+	}
+	if !equalStringSlices(source.AvoidRules, candidate.AvoidRules) {
+		diff["avoid_rules"] = map[string][]string{"from": source.AvoidRules, "to": candidate.AvoidRules}
+	}
+	if !equalStringSlices(source.FormattingRules, candidate.FormattingRules) {
+		diff["formatting_rules"] = map[string][]string{"from": source.FormattingRules, "to": candidate.FormattingRules}
+	}
+	return diff
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func duplicateIDs(items []policy.Guideline) []string {
+	seen := map[string]int{}
+	var out []string
+	for _, item := range items {
+		seen[item.ID]++
+		if seen[item.ID] == 2 {
+			out = append(out, item.ID)
+		}
+	}
+	return out
+}
+
+func operatorFromRequest(r *http.Request, fallback string) string {
+	return requestOperatorID(r, fallback)
+}
+
+func (s *Server) pendingPreferenceCount(ctx context.Context, agentID string, customerID string) int {
+	if strings.TrimSpace(agentID) == "" || strings.TrimSpace(customerID) == "" {
+		return 0
+	}
+	items, err := s.store.ListCustomerPreferences(ctx, customer.PreferenceQuery{
+		AgentID:        agentID,
+		CustomerID:     customerID,
+		Status:         customer.PreferenceStatusPending,
+		IncludeExpired: true,
+		Limit:          1000,
+	})
+	if err != nil {
+		return 0
+	}
+	return len(items)
+}
+
+func matchesQueueView(view sessionView, viewName, operatorID string) bool {
+	switch viewName {
+	case "", "all":
+		return true
+	case "mine":
+		return operatorID != "" && view.AssignedOperatorID == operatorID
+	case "unassigned":
+		return view.AssignedOperatorID == ""
+	case "manual_takeover":
+		return view.Mode == "manual" || view.AssignedOperatorID != ""
+	case "pending_approval":
+		return view.PendingApprovalCount > 0
+	case "failed_media":
+		return view.FailedMediaCount > 0
+	case "pending_preference_review":
+		return view.PendingPreferenceCount > 0
+	case "needs_attention":
+		return view.PendingApprovalCount > 0 || view.FailedMediaCount > 0 || view.UnresolvedLintCount > 0 || view.PendingPreferenceCount > 0
+	default:
+		return true
+	}
+}
+
+type sessionCursor struct {
+	LastActivityAt string `json:"last_activity_at"`
+	ID             string `json:"id"`
+}
+
+func encodeSessionCursor(view sessionView) string {
+	raw, _ := json.Marshal(sessionCursor{LastActivityAt: view.LastActivityAt.UTC().Format(time.RFC3339Nano), ID: view.ID})
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func sessionCursorStart(items []sessionView, cursor string) int {
+	if cursor == "" {
+		return 0
+	}
+	if decoded, err := base64.RawURLEncoding.DecodeString(cursor); err == nil {
+		var item sessionCursor
+		if json.Unmarshal(decoded, &item) == nil {
+			for i, view := range items {
+				if view.ID == item.ID && view.LastActivityAt.UTC().Format(time.RFC3339Nano) == item.LastActivityAt {
+					return i + 1
+				}
+			}
+			return len(items)
+		}
+	}
+	for i, view := range items {
+		if view.ID == cursor {
+			return i + 1
+		}
+	}
+	return len(items)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func preferenceView(item customer.Preference) map[string]any {
+	view := map[string]any{
+		"id":              item.ID,
+		"agent_id":        item.AgentID,
+		"customer_id":     item.CustomerID,
+		"key":             item.Key,
+		"value":           item.Value,
+		"source":          item.Source,
+		"confidence":      item.Confidence,
+		"status":          item.Status,
+		"evidence_refs":   item.EvidenceRefs,
+		"metadata":        item.Metadata,
+		"last_confirmed_at": item.LastConfirmedAt,
+		"expires_at":      item.ExpiresAt,
+		"created_at":      item.CreatedAt,
+		"updated_at":      item.UpdatedAt,
+	}
+	if item.Status == customer.PreferenceStatusPending {
+		view["review_reason"] = stringMetadata(item.Metadata, "review_reason")
+		view["confirmation_prompt"] = firstNonEmpty(stringMetadata(item.Metadata, "confirmation_prompt"), "Confirm pending preference "+item.Key+" for this customer.")
+	}
+	return view
 }
 
 func changedIDs(left, right []string) map[string][]string {

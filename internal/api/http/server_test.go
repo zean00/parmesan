@@ -411,7 +411,7 @@ func TestCustomerPreferenceLifecycleConfirmRejectExpire(t *testing.T) {
 	}
 }
 
-func TestPreferenceConflictCreatesPendingEventWithoutOverwrite(t *testing.T) {
+func TestExplicitPreferenceFeedbackSupersedesActiveValue(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
 	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
@@ -438,21 +438,21 @@ func TestPreferenceConflictCreatesPendingEventWithoutOverwrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pref.Value != "Ada" || pref.Status != customer.PreferenceStatusActive {
-		t.Fatalf("preference = %#v, want original active value preserved", pref)
+	if pref.Value != "Bob" || pref.Status != customer.PreferenceStatusActive {
+		t.Fatalf("preference = %#v, want explicit new active value", pref)
 	}
 	events, err := repo.ListCustomerPreferenceEvents(context.Background(), customer.PreferenceQuery{AgentID: "agent_1", CustomerID: "cust_1", Key: "name"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var foundConflict bool
+	var foundSupersede bool
 	for _, event := range events {
-		if event.Action == "conflict_pending" && event.Value == "Bob" {
-			foundConflict = true
+		if event.Action == "supersede" && event.Value == "Bob" {
+			foundSupersede = true
 		}
 	}
-	if !foundConflict {
-		t.Fatalf("events = %#v, want conflict_pending event", events)
+	if !foundSupersede {
+		t.Fatalf("events = %#v, want supersede event", events)
 	}
 }
 
@@ -718,6 +718,55 @@ func TestProposalSummaryIncludesRolloutsAndEvalRuns(t *testing.T) {
 	}
 	if payload.Proposal.ID != "proposal_1" || len(payload.Rollouts) != 1 || len(payload.EvalRuns) != 1 {
 		t.Fatalf("summary = %#v, want linked proposal, rollout, and eval run", payload)
+	}
+}
+
+func TestProposalPreviewShowsSoulAndGuidelineChanges(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	now := time.Now().UTC()
+	base := policy.Bundle{ID: "bundle_a", Version: "v1", ImportedAt: now, Soul: policy.Soul{Tone: "calm"}, Guidelines: []policy.Guideline{{ID: "greet", When: "customer says hi", Then: "greet"}}}
+	candidate := base
+	candidate.ID = "bundle_b"
+	candidate.Version = "v2"
+	candidate.Soul.Tone = "warm"
+	candidate.Guidelines = append(candidate.Guidelines, policy.Guideline{ID: "handoff", When: "handoff requested", Then: "handoff"})
+	if err := repo.SaveBundle(context.Background(), base); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveBundle(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveProposal(context.Background(), rollout.Proposal{
+		ID:                "proposal_1",
+		SourceBundleID:    base.ID,
+		CandidateBundleID: candidate.ID,
+		State:             rollout.StateProposed,
+		EvidenceRefs:      []string{"feedback:1"},
+		Origin:            "feedback",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/proposals/proposal_1/preview", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	changes, ok := payload["changes"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload = %#v, want changes map", payload)
+	}
+	if soul, ok := changes["soul"].(map[string]any); !ok || len(soul) == 0 {
+		t.Fatalf("changes = %#v, want soul diff", changes)
 	}
 }
 
@@ -1670,7 +1719,7 @@ func TestOperatorSessionListFiltersByOperatorAndActiveState(t *testing.T) {
 	}{
 		{name: "operator", path: "/v1/operator/sessions?operator_id=op_1", want: "sess_1"},
 		{name: "active", path: "/v1/operator/sessions?active=true", want: "sess_1"},
-		{name: "limit", path: "/v1/operator/sessions?limit=1", want: "sess_1"},
+		{name: "limit", path: "/v1/operator/sessions?limit=1", want: "sess_2"},
 		{name: "pending approval", path: "/v1/operator/sessions?pending_approval=true", want: "sess_1"},
 		{name: "failed media", path: "/v1/operator/sessions?failed_media=true", want: "sess_1"},
 		{name: "unresolved lint", path: "/v1/operator/sessions?unresolved_lint=true", want: "sess_1"},
@@ -1719,11 +1768,15 @@ func TestOperatorSessionListCursorFollowsListingOrder(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &page1); err != nil {
 		t.Fatalf("decode page1: %v", err)
 	}
-	if len(page1) != 2 || page1[0].ID != "z_session" || page1[1].ID != "a_session" {
-		t.Fatalf("page1 = %#v, want z_session then a_session", page1)
+	if len(page1) != 2 || page1[0].ID != "m_session" || page1[1].ID != "a_session" {
+		t.Fatalf("page1 = %#v, want m_session then a_session", page1)
+	}
+	cursor := rec.Header().Get("X-Next-Cursor")
+	if cursor == "" {
+		t.Fatalf("missing X-Next-Cursor header")
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/v1/operator/sessions?cursor=a_session", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/sessions?cursor="+cursor, nil)
 	rec = httptest.NewRecorder()
 	srv.httpServer.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -1733,8 +1786,42 @@ func TestOperatorSessionListCursorFollowsListingOrder(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &page2); err != nil {
 		t.Fatalf("decode page2: %v", err)
 	}
-	if len(page2) != 1 || page2[0].ID != "m_session" {
-		t.Fatalf("page2 = %#v, want only m_session", page2)
+	if len(page2) != 1 || page2[0].ID != "z_session" {
+		t.Fatalf("page2 = %#v, want only z_session", page2)
+	}
+}
+
+func TestOperatorQueueSummary(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_1", Channel: "acp", CustomerID: "cust_1", AgentID: "agent_1", Mode: "manual", CreatedAt: now, Metadata: map[string]any{"assigned_operator_id": "op_1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveApprovalSession(context.Background(), approval.Session{ID: "approval_1", SessionID: "sess_1", Status: approval.StatusPending, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveCustomerPreference(context.Background(), customer.Preference{
+		ID: "pref_1", AgentID: "agent_1", CustomerID: "cust_1", Key: "preferred_language", Value: "id", Source: "operator_feedback", Confidence: 0.65, Status: customer.PreferenceStatusPending, CreatedAt: now, UpdatedAt: now,
+	}, customer.PreferenceEvent{ID: "pevt_1", PreferenceID: "pref_1", AgentID: "agent_1", CustomerID: "cust_1", Key: "preferred_language", Value: "id", Action: "pending", Source: "operator_feedback", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/queue/summary?operator_id=op_1", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("queue summary status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var summary map[string]int
+	if err := json.Unmarshal(rec.Body.Bytes(), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary["mine"] != 1 || summary["pending_approval"] != 1 || summary["pending_preference_review"] != 1 {
+		t.Fatalf("summary = %#v, want mine/pending counts", summary)
 	}
 }
 
@@ -2213,8 +2300,27 @@ func TestOperatorKnowledgeSourceCompileCreatesSnapshot(t *testing.T) {
 	req = httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/sources/src_1/resync", nil)
 	rec = httptest.NewRecorder()
 	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("queued resync status = %d, want %d body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	var job knowledge.SyncJob
+	if err := json.Unmarshal(rec.Body.Bytes(), &job); err != nil {
+		t.Fatal(err)
+	}
+	if job.ID == "" || job.Status != "queued" {
+		t.Fatalf("job = %#v, want queued sync job", job)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/knowledge/sources/src_1/jobs", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("unchanged resync status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		t.Fatalf("list jobs status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/knowledge/jobs/"+job.ID, nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get job status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	if err := os.WriteFile(filepath.Join(docDir, "shipping.md"), []byte("# Shipping\n\nShips in two days."), 0o600); err != nil {
 		t.Fatal(err)
@@ -2222,8 +2328,8 @@ func TestOperatorKnowledgeSourceCompileCreatesSnapshot(t *testing.T) {
 	req = httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/sources/src_1/resync", nil)
 	rec = httptest.NewRecorder()
 	srv.httpServer.Handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("changed resync status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("changed resync status = %d, want %d body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/sources", strings.NewReader(`{

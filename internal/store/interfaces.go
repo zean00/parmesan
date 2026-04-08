@@ -94,6 +94,10 @@ type Repository interface {
 	SaveKnowledgeSource(ctx context.Context, source knowledge.Source) error
 	GetKnowledgeSource(ctx context.Context, sourceID string) (knowledge.Source, error)
 	ListKnowledgeSources(ctx context.Context, scopeKind string, scopeID string) ([]knowledge.Source, error)
+	SaveKnowledgeSyncJob(ctx context.Context, job knowledge.SyncJob) error
+	GetKnowledgeSyncJob(ctx context.Context, jobID string) (knowledge.SyncJob, error)
+	ListKnowledgeSyncJobs(ctx context.Context, query knowledge.SyncJobQuery) ([]knowledge.SyncJob, error)
+	ListRunnableKnowledgeSyncJobs(ctx context.Context) ([]knowledge.SyncJob, error)
 	SaveKnowledgePage(ctx context.Context, page knowledge.Page, chunks []knowledge.Chunk) error
 	ListKnowledgePages(ctx context.Context, query knowledge.PageQuery) ([]knowledge.Page, error)
 	ListKnowledgeChunks(ctx context.Context, query knowledge.ChunkQuery) ([]knowledge.Chunk, error)

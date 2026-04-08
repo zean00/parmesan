@@ -56,6 +56,7 @@ tokens or trusted identity headers via `OPERATOR_TRUSTED_ID_HEADER` and
 - `POST /v1/proposals`
 - `GET /v1/proposals`
 - `GET /v1/proposals/{id}`
+- `GET /v1/proposals/{id}/preview`
 - `GET /v1/proposals/{id}/summary`
 - `POST /v1/proposals/{id}/state`
 - `POST /v1/rollouts`
@@ -76,7 +77,8 @@ tokens or trusted identity headers via `OPERATOR_TRUSTED_ID_HEADER` and
 - `GET /v1/acp/sessions/{id}/events/stream`
 - `GET /v1/acp/sessions/{id}/approvals`
 - `POST /v1/acp/sessions/{id}/approvals/{approval_id}`
-- `GET /v1/operator/sessions` with optional `customer_id`, `agent_id`, `mode`, `label`, `operator_id`, `assigned_operator_id`, `unassigned=true`, `active=true`, `pending_approval=true`, `failed_media=true`, `unresolved_lint=true`, `last_activity_after`, `last_activity_before`, `cursor`, and `limit` filters
+- `GET /v1/operator/sessions` with optional `customer_id`, `agent_id`, `mode`, `label`, `operator_id`, `assigned_operator_id`, `unassigned=true`, `active=true`, `pending_approval=true`, `failed_media=true`, `unresolved_lint=true`, `last_activity_after`, `last_activity_before`, `view`, `cursor`, and `limit` filters
+- `GET /v1/operator/queue/summary`
 - `GET /v1/operator/sessions/{id}`
 - `GET /v1/operator/sessions/{id}/events` with optional `min_offset`, `limit`, `source`, `trace_id`, and `kind` filters
 - `GET /v1/operator/sessions/{id}/stream`
@@ -96,6 +98,7 @@ tokens or trusted identity headers via `OPERATOR_TRUSTED_ID_HEADER` and
 - `POST /v1/operator/operators/{id}/tokens`
 - `POST /v1/operator/operators/{id}/tokens/{token_id}/revoke`
 - `GET /v1/operator/customers/{customer_id}/preferences` with required `agent_id` and optional `status`, `key`, `source`, `include_expired`, and `limit` filters
+- `GET /v1/operator/customers/{customer_id}/preferences/pending` with required `agent_id`
 - `PUT /v1/operator/customers/{customer_id}/preferences/{key}`
 - `POST /v1/operator/customers/{customer_id}/preferences/{key}/confirm`
 - `POST /v1/operator/customers/{customer_id}/preferences/{key}/reject`
@@ -110,6 +113,8 @@ tokens or trusted identity headers via `OPERATOR_TRUSTED_ID_HEADER` and
 - `GET /v1/operator/knowledge/sources/{id}`
 - `POST /v1/operator/knowledge/sources/{id}/compile`
 - `POST /v1/operator/knowledge/sources/{id}/resync`
+- `GET /v1/operator/knowledge/sources/{id}/jobs`
+- `GET /v1/operator/knowledge/jobs/{id}`
 - `GET /v1/operator/knowledge/snapshots/{id}`
 - `GET /v1/operator/knowledge/pages` with optional `scope_kind`, `scope_id`, `snapshot_id`, and `limit` filters
 - `GET /v1/operator/knowledge/proposals` with optional `scope_kind` and `scope_id`
@@ -157,12 +162,14 @@ knowledge as draft `KnowledgeUpdateProposal` records until an operator reviews
 them. Operator feedback uses the same compiler path and can create customer
 preferences, shared knowledge proposals, or draft policy/SOUL rollout proposals.
 Preference learning now keeps explicit preferences active while routing inferred
-or conflicting preferences through pending events for operator confirmation.
-Proposal workflow now supports preview plus explicit `draft`, `approved`,
-`rejected`, and `applied` states; shared knowledge apply is gated by lint
-findings for high-risk citation, staleness, and contradiction issues. Proposal
-payloads can target whole pages or section-level updates, and payload citations
-are preserved into applied pages and chunks.
+signals through pending events for operator confirmation; explicit customer
+statements can supersede older active values with preserved evidence. Policy and
+SOUL rollout proposals now expose deterministic preview diffs and review gates
+before promotion, while shared knowledge apply remains gated by lint findings
+for high-risk citation, staleness, and contradiction issues. Proposal payloads
+can target whole pages or section-level updates, and payload citations are
+preserved into applied pages and chunks. Knowledge source resync now runs as an
+asynchronous background job and exposes per-source job history/status.
 
 Multimodal provider config:
 - `OPENROUTER_API_KEY`

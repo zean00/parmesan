@@ -25,6 +25,7 @@ type Proposal struct {
 	RiskFlags             []string      `json:"risk_flags,omitempty"`
 	RequiresManualApproval bool         `json:"requires_manual_approval,omitempty"`
 	EvalSummaryJSON       string        `json:"eval_summary_json,omitempty"`
+	Origin                string        `json:"origin,omitempty"`
 	CreatedAt             time.Time     `json:"created_at"`
 	UpdatedAt             time.Time     `json:"updated_at"`
 }
