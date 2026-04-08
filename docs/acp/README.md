@@ -91,6 +91,7 @@ Knowledge rules:
 - Accepted regression fixtures can be exported at `GET /v1/operator/quality/regressions/export` to seed deterministic scenario packs and future catalog curation.
 - `OPERATOR_API_KEY=... go run ./cmd/regression-export -base-url http://127.0.0.1:8080 -out artifacts/regression-fixtures.json` pulls those accepted fixtures into a reviewable JSON file.
 - `go run ./cmd/regression-seed -in artifacts/regression-fixtures.json -out artifacts/regression-scenario-seeds.json` converts that reviewable export into catalog-seed scenario entries.
+- `go run ./cmd/regression-seed -in artifacts/regression-fixtures.json -out artifacts/regression-scenario-seeds.json -promote-live scenario_id` promotes reviewed seed IDs into the catalog-driven live gate.
 - `go run ./cmd/quality-seed-check -in artifacts/regression-scenario-seeds.json` validates reviewed seed entries before they are merged into the catalog.
 - Setting `QUALITY_SCENARIO_SEEDS=artifacts/regression-scenario-seeds.json` causes the quality catalog and report checker to merge reviewed seed scenarios automatically.
 - `./scripts/live_platform_validation.sh` auto-detects `artifacts/regression-scenario-seeds.json`, validates it, exports `QUALITY_SCENARIO_SEEDS`, and derives the expected live-gate scenario IDs from `go run ./cmd/quality-catalog -live-only -ids`.

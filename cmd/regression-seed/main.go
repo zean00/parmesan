@@ -28,7 +28,9 @@ type fixtureExport struct {
 func main() {
 	inPath := flag.String("in", envOrDefault("REGRESSION_SEED_IN", "artifacts/regression-fixtures.json"), "accepted regression fixture export JSON")
 	outPath := flag.String("out", envOrDefault("REGRESSION_SEED_OUT", "artifacts/regression-scenario-seeds.json"), "scenario seed output JSON")
+	promoteLive := flag.String("promote-live", envOrDefault("REGRESSION_SEED_PROMOTE_LIVE_IDS", ""), "comma-separated scenario ids to mark live_gate=true")
 	flag.Parse()
+	liveIDs := csvSet(*promoteLive)
 
 	raw, err := os.ReadFile(*inPath)
 	if err != nil {
@@ -52,6 +54,7 @@ func main() {
 			Risk:            fallback(item.Risk, "high"),
 			RequiredClaims:  nonEmpty([]string{strings.TrimSpace(item.ExpectedBehavior)}, nil),
 			MinimumOverall:  minimumOverallForRisk(item.Risk),
+			LiveGate:        liveIDs[strings.TrimSpace(item.ID)],
 		})
 	}
 	if err := os.MkdirAll(filepath.Dir(*outPath), 0o755); err != nil {
@@ -138,6 +141,17 @@ func envOrDefault(key, fallback string) string {
 		return got
 	}
 	return fallback
+}
+
+func csvSet(value string) map[string]bool {
+	out := map[string]bool{}
+	for _, item := range strings.Split(value, ",") {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			out[item] = true
+		}
+	}
+	return out
 }
 
 func fatalf(format string, args ...any) {

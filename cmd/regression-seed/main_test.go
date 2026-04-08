@@ -25,3 +25,15 @@ func TestInferDomain(t *testing.T) {
 		t.Fatalf("inferDomain(default) = %q", got)
 	}
 }
+
+func TestCSVSet(t *testing.T) {
+	items := csvSet("a, b ,,c")
+	for _, want := range []string{"a", "b", "c"} {
+		if !items[want] {
+			t.Fatalf("csvSet missing %q: %#v", want, items)
+		}
+	}
+	if len(items) != 3 {
+		t.Fatalf("csvSet = %#v, want 3 items", items)
+	}
+}
