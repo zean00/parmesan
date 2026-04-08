@@ -64,6 +64,10 @@ func TestBuildResponsePlanIncludesQualityInputs(t *testing.T) {
 			Action:         "redirect",
 			Reply:          "I can help with pet-safe food questions.",
 		},
+		ActiveJourneyState: &policy.JourneyNode{
+			ID:          "verify_step",
+			Instruction: "Verify the order number first.",
+		},
 		MatchFinalizeStage: policyruntime.FinalizeStageResult{MatchedGuidelines: []policy.Guideline{{
 			ID:   "verify",
 			Then: "Verify the order number first.",
@@ -80,6 +84,12 @@ func TestBuildResponsePlanIncludesQualityInputs(t *testing.T) {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("plan = %s, want %q", rendered, want)
 		}
+	}
+	if !plan.RetrievalRequired {
+		t.Fatalf("plan = %#v, want retrieval required", plan)
+	}
+	if len(plan.RequiredEvidenceClasses) == 0 || len(plan.RequiredVerificationSteps) == 0 {
+		t.Fatalf("plan = %#v, want evidence classes and verification steps", plan)
 	}
 }
 
@@ -181,6 +191,23 @@ func TestGradeFlagsNoisyUnusedRetrieval(t *testing.T) {
 	}
 }
 
+func TestGradeFailsWhenRetrievalIsRequiredButMissing(t *testing.T) {
+	view := policyruntime.EngineResult{
+		MatchFinalizeStage: policyruntime.FinalizeStageResult{MatchedGuidelines: []policy.Guideline{{
+			ID:   "refund_verify",
+			Then: "Verify the order before promising a refund or replacement.",
+		}}},
+	}
+
+	card := Grade(view, "According to the policy, you qualify for a refund after review.", nil)
+	if !HardFailed(card) {
+		t.Fatalf("scorecard = %#v, want hard failure", card)
+	}
+	if got := card.Dimensions["retrieval_quality"]; got.Passed {
+		t.Fatalf("retrieval quality dimension = %#v, want failed", got)
+	}
+}
+
 func TestGradeFlagsMissedIndonesianPreference(t *testing.T) {
 	view := policyruntime.EngineResult{
 		CustomerPreferences: []customer.Preference{{
@@ -214,10 +241,10 @@ func TestSoftDimensionUpdatesDoNotLowerOverall(t *testing.T) {
 	}
 }
 
-func TestProductionReadinessScenariosDefinesHundredCases(t *testing.T) {
+func TestProductionReadinessScenariosDefinesTwoHundredCases(t *testing.T) {
 	scenarios := ProductionReadinessScenarios()
-	if len(scenarios) != 100 {
-		t.Fatalf("scenario count = %d, want 100", len(scenarios))
+	if len(scenarios) != 200 {
+		t.Fatalf("scenario count = %d, want 200", len(scenarios))
 	}
 	liveGate := 0
 	categories := map[string]struct{}{}
@@ -228,13 +255,19 @@ func TestProductionReadinessScenariosDefinesHundredCases(t *testing.T) {
 		if scenario.MinimumOverall <= 0 || scenario.MinimumOverall > 1 {
 			t.Fatalf("scenario = %#v, want valid minimum overall", scenario)
 		}
+		if scenario.RiskTier == "" {
+			t.Fatalf("scenario = %#v, want risk tier", scenario)
+		}
+		if len(scenario.RequiredEvidenceClasses) == 0 && (scenario.Category == "knowledge_grounding" || scenario.Category == "retrieval_quality") {
+			t.Fatalf("scenario = %#v, want required evidence classes", scenario)
+		}
 		categories[scenario.Category] = struct{}{}
 		if scenario.LiveGate {
 			liveGate++
 		}
 	}
-	if liveGate < 10 {
-		t.Fatalf("live gate scenario count = %d, want at least 10", liveGate)
+	if liveGate != 30 {
+		t.Fatalf("live gate scenario count = %d, want 30", liveGate)
 	}
 	if len(categories) < 10 {
 		t.Fatalf("categories = %#v, want broad platform coverage", categories)
@@ -257,6 +290,9 @@ func TestProductionReadinessScenariosHaveDeterministicQualityCoverage(t *testing
 					t.Fatalf("scenario %s dimensions = %#v, want %s", scenario.ID, card.Dimensions, dimension)
 				}
 			}
+			if scenario.ExpectedRefusalMode != "" && scenario.ExpectedRefusalMode != view.ScopeBoundaryStage.Action && scenario.ExpectedRefusalMode != "allow" {
+				t.Fatalf("scenario %s action = %q, want %q", scenario.ID, view.ScopeBoundaryStage.Action, scenario.ExpectedRefusalMode)
+			}
 			if scenario.ExpectedLanguage != "" && scenario.Category == "multilingual" && scenario.ExpectedLanguage == "id" && !looksIndonesian(response) {
 				t.Fatalf("scenario %s response = %q, want Indonesian", scenario.ID, response)
 			}
@@ -273,7 +309,7 @@ func TestProductionReadinessScenariosMergesSeedFileFromEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	if _, err := file.WriteString(`[{"id":"seed_custom_quality_case","domain":"support","category":"failure_modes","input":"seeded case","expected_quality":["policy_adherence"],"risk":"medium","minimum_overall":0.75}]`); err != nil {
+	if _, err := file.WriteString(`[{"id":"seed_custom_quality_case","domain":"support","category":"failure_modes","input":"seeded case","expected_quality":["policy_adherence"],"risk":"medium","risk_tier":"medium","minimum_overall":0.75,"required_verification_steps":["confirm missing detail"],"allowed_commitments":["cautious policy-backed guidance"]}]`); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("QUALITY_SCENARIO_SEEDS", file.Name())
@@ -285,6 +321,9 @@ func TestProductionReadinessScenariosMergesSeedFileFromEnv(t *testing.T) {
 			found = true
 			if scenario.MinimumOverall != 0.75 {
 				t.Fatalf("scenario = %#v, want merged minimum overall", scenario)
+			}
+			if scenario.RiskTier != "medium" || len(scenario.RequiredVerificationSteps) == 0 {
+				t.Fatalf("scenario = %#v, want merged richer scenario fields", scenario)
 			}
 		}
 	}
