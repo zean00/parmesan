@@ -122,6 +122,25 @@ func TestGradeSupportsSpecificKnowledgeClaimFromRetrievedEvidence(t *testing.T) 
 	if len(card.EvidenceMatches) == 0 || !card.EvidenceMatches[0].Supported {
 		t.Fatalf("evidence matches = %#v, want supported match", card.EvidenceMatches)
 	}
+	if got := card.Dimensions["retrieval_quality"]; !got.Passed {
+		t.Fatalf("retrieval quality dimension = %#v, want passed", got)
+	}
+}
+
+func TestGradeFlagsNoisyUnusedRetrieval(t *testing.T) {
+	view := policyruntime.EngineResult{
+		RetrieverStage: policyruntime.RetrieverStageResult{Results: []knowledgeretriever.Result{{
+			RetrieverID: "wiki",
+			Data:        strings.Repeat("Long irrelevant catalog text without matching the answer. ", 60),
+			ResultHash:  "hash_irrelevant",
+			Citations:   []knowledge.Citation{{URI: "kb://irrelevant"}},
+		}}},
+	}
+
+	card := Grade(view, "I can help with that.", nil)
+	if got := card.Dimensions["retrieval_quality"]; got.Score >= 1 || HardFailed(card) {
+		t.Fatalf("retrieval quality dimension = %#v, want warning-only degraded score", got)
+	}
 }
 
 func TestGradeFlagsMissedIndonesianPreference(t *testing.T) {
@@ -157,16 +176,19 @@ func TestSoftDimensionUpdatesDoNotLowerOverall(t *testing.T) {
 	}
 }
 
-func TestProductionReadinessScenariosDefinesFiftyCases(t *testing.T) {
+func TestProductionReadinessScenariosDefinesHundredCases(t *testing.T) {
 	scenarios := ProductionReadinessScenarios()
-	if len(scenarios) != 50 {
-		t.Fatalf("scenario count = %d, want 50", len(scenarios))
+	if len(scenarios) != 100 {
+		t.Fatalf("scenario count = %d, want 100", len(scenarios))
 	}
 	liveGate := 0
 	categories := map[string]struct{}{}
 	for _, scenario := range scenarios {
 		if scenario.ID == "" || scenario.Domain == "" || scenario.Category == "" || scenario.Input == "" {
 			t.Fatalf("scenario = %#v, want required fields", scenario)
+		}
+		if scenario.MinimumOverall <= 0 || scenario.MinimumOverall > 1 {
+			t.Fatalf("scenario = %#v, want valid minimum overall", scenario)
 		}
 		categories[scenario.Category] = struct{}{}
 		if scenario.LiveGate {
@@ -194,6 +216,9 @@ func TestProductionReadinessScenariosHaveDeterministicQualityCoverage(t *testing
 					t.Fatalf("scenario %s dimensions = %#v, want %s", scenario.ID, card.Dimensions, dimension)
 				}
 			}
+			if scenario.ExpectedLanguage != "" && scenario.Category == "multilingual" && scenario.ExpectedLanguage == "id" && !looksIndonesian(response) {
+				t.Fatalf("scenario %s response = %q, want Indonesian", scenario.ID, response)
+			}
 			if HardFailed(card) {
 				t.Fatalf("scenario %s scorecard = %#v, want deterministic passing baseline", scenario.ID, card)
 			}
@@ -205,6 +230,9 @@ func deterministicScenarioQualityCase(scenario ScenarioExpectation) (policyrunti
 	switch scenario.Category {
 	case "knowledge_grounding", "retrieval_quality":
 		evidence := "Order support requires verification before refund or replacement review. Damaged items may qualify after policy review. Notifications can be sent by email."
+		if scenario.Category == "retrieval_quality" && strings.Contains(strings.ToLower(scenario.Input), "citation") {
+			evidence = "Policy support requires citation-backed retrieval before a replacement answer."
+		}
 		return policyruntime.EngineResult{
 			RetrieverStage: policyruntime.RetrieverStageResult{Results: []knowledgeretriever.Result{{
 				RetrieverID: "wiki",
@@ -212,7 +240,7 @@ func deterministicScenarioQualityCase(scenario ScenarioExpectation) (policyrunti
 				ResultHash:  "scenario_evidence",
 				Citations:   []knowledge.Citation{{URI: "kb://scenario"}},
 			}}},
-		}, "Order support requires verification before refund or replacement review."
+		}, strings.TrimSuffix(evidence, ".")
 	case "topic_scope":
 		reply := "I can help with pet-store questions, but not cooking or human food."
 		if strings.Contains(scenario.Input, "pet food") || strings.Contains(scenario.Input, "pet-safe") {

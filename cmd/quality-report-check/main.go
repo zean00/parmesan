@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sahal/parmesan/internal/quality"
 )
 
 type report struct {
@@ -82,14 +84,18 @@ func checkReports(dir string, expectations reportExpectations) (int, error) {
 		}
 		seenTests[item.TestName] = struct{}{}
 		seenScenarios[item.Scenario] = struct{}{}
+		scenarioThreshold := expectations.MinOverall
+		if scenario, ok := quality.FindScenarioByID(item.Scenario); ok && scenario.MinimumOverall > scenarioThreshold {
+			scenarioThreshold = scenario.MinimumOverall
+		}
 		for _, session := range item.Sessions {
 			for executionID, scorecard := range session.Scorecards {
 				checked++
 				if scorecard.HardFailed || !scorecard.Passed {
 					failures = append(failures, fmt.Errorf("%s session=%s execution=%s failed quality gate hard_failed=%t passed=%t failures=%v", item.TestName, session.ID, executionID, scorecard.HardFailed, scorecard.Passed, scorecard.HardFailures))
 				}
-				if scorecard.Overall < expectations.MinOverall {
-					failures = append(failures, fmt.Errorf("%s session=%s execution=%s overall score %.2f below minimum %.2f", item.TestName, session.ID, executionID, scorecard.Overall, expectations.MinOverall))
+				if scorecard.Overall < scenarioThreshold {
+					failures = append(failures, fmt.Errorf("%s session=%s execution=%s overall score %.2f below minimum %.2f", item.TestName, session.ID, executionID, scorecard.Overall, scenarioThreshold))
 				}
 			}
 		}

@@ -61,11 +61,43 @@ func TestCheckReportsFailsMissingExpectedScenario(t *testing.T) {
 	}
 }
 
+func TestCheckReportsUsesScenarioMinimumOverallWhenHigherThanGlobal(t *testing.T) {
+	dir := t.TempDir()
+	writeScenarioReport(t, dir, "TestPlatformValidationScenario", "support_multilingual_english_fallback", true, false, 0.71)
+
+	_, err := checkReports(dir, reportExpectations{Scenarios: []string{"support_multilingual_english_fallback"}, MinOverall: 0.7})
+	if err == nil || !strings.Contains(err.Error(), "below minimum") {
+		t.Fatalf("error = %v, want scenario-specific threshold failure", err)
+	}
+}
+
 func writeReport(t *testing.T, dir, testName string, passed, hardFailed bool, overall float64) {
 	t.Helper()
 	raw := `{
   "test_name": "` + testName + `",
   "scenario": "` + testName + `_scenario",
+  "sessions": [{
+    "id": "sess_1",
+    "scorecards": {
+      "exec_1": {
+        "overall": ` + floatJSON(overall) + `,
+        "passed": ` + boolJSON(passed) + `,
+        "hard_failed": ` + boolJSON(hardFailed) + `,
+        "hard_failures": []
+      }
+    }
+  }]
+}`
+	if err := os.WriteFile(filepath.Join(dir, testName+".json"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeScenarioReport(t *testing.T, dir, testName, scenario string, passed, hardFailed bool, overall float64) {
+	t.Helper()
+	raw := `{
+  "test_name": "` + testName + `",
+  "scenario": "` + scenario + `",
   "sessions": [{
     "id": "sess_1",
     "scorecards": {

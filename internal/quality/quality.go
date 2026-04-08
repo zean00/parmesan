@@ -41,6 +41,9 @@ type ResponsePlan struct {
 	VerificationSteps   []string `json:"verification_steps,omitempty"`
 	DesiredStructure    []string `json:"desired_structure,omitempty"`
 	Language            string   `json:"language,omitempty"`
+	RiskTier            string   `json:"risk_tier,omitempty"`
+	AllowedCommitments  []string `json:"allowed_commitments,omitempty"`
+	RequiredEvidence    []string `json:"required_evidence,omitempty"`
 	StyleConstraints    []string `json:"style_constraints,omitempty"`
 	PreferenceHints     []string `json:"preference_hints,omitempty"`
 	ScopeClassification string   `json:"scope_classification,omitempty"`
@@ -50,28 +53,39 @@ type ResponsePlan struct {
 }
 
 type ResponseClaim struct {
-	ID         string   `json:"id"`
-	Text       string   `json:"text"`
-	Risk       string   `json:"risk"`
-	Indicators []string `json:"indicators,omitempty"`
+	ID                    string   `json:"id"`
+	Text                  string   `json:"text"`
+	Type                  string   `json:"type,omitempty"`
+	Risk                  string   `json:"risk"`
+	Indicators            []string `json:"indicators,omitempty"`
+	RequiredEvidenceKinds []string `json:"required_evidence_kinds,omitempty"`
 }
 
 type EvidenceMatch struct {
-	Claim        ResponseClaim `json:"claim"`
-	Supported    bool          `json:"supported"`
-	Source       string        `json:"source,omitempty"`
-	EvidenceRefs []string      `json:"evidence_refs,omitempty"`
-	Severity     string        `json:"severity,omitempty"`
+	Claim                 ResponseClaim `json:"claim"`
+	ClaimType             string        `json:"claim_type,omitempty"`
+	Supported             bool          `json:"supported"`
+	Source                string        `json:"source,omitempty"`
+	RequiredEvidenceKinds []string      `json:"required_evidence_kinds,omitempty"`
+	EvidenceRefs          []string      `json:"evidence_refs,omitempty"`
+	Severity              string        `json:"severity,omitempty"`
+	FailureReason         string        `json:"failure_reason,omitempty"`
 }
 
 type ScenarioExpectation struct {
-	ID              string   `json:"id"`
-	Domain          string   `json:"domain"`
-	Category        string   `json:"category"`
-	Input           string   `json:"input"`
-	ExpectedQuality []string `json:"expected_quality,omitempty"`
-	Risk            string   `json:"risk,omitempty"`
-	LiveGate        bool     `json:"live_gate,omitempty"`
+	ID                    string   `json:"id"`
+	Domain                string   `json:"domain"`
+	Category              string   `json:"category"`
+	Input                 string   `json:"input"`
+	ExpectedQuality       []string `json:"expected_quality,omitempty"`
+	Risk                  string   `json:"risk,omitempty"`
+	ExpectedScope         string   `json:"expected_scope,omitempty"`
+	ExpectedLanguage      string   `json:"expected_language,omitempty"`
+	RequiredClaims        []string `json:"required_claims,omitempty"`
+	ForbiddenClaims       []string `json:"forbidden_claims,omitempty"`
+	RequiredEvidenceKinds []string `json:"required_evidence_kinds,omitempty"`
+	MinimumOverall        float64  `json:"minimum_overall,omitempty"`
+	LiveGate              bool     `json:"live_gate,omitempty"`
 }
 
 var failureLabelDimensions = map[string]string{
@@ -103,6 +117,7 @@ func BuildResponsePlan(view policyruntime.EngineResult) ResponsePlan {
 	plan.ScopeClassification = view.ScopeBoundaryStage.Classification
 	plan.ScopeAction = view.ScopeBoundaryStage.Action
 	plan.ScopeReply = strings.TrimSpace(view.ScopeBoundaryStage.Reply)
+	plan.RiskTier = inferRiskTier(view)
 	if view.Bundle != nil {
 		plan.Language = strings.TrimSpace(view.Bundle.Soul.DefaultLanguage)
 		plan.StyleConstraints = append(plan.StyleConstraints, view.Bundle.Soul.StyleRules...)
@@ -129,6 +144,8 @@ func BuildResponsePlan(view policyruntime.EngineResult) ResponsePlan {
 			}
 		}
 	}
+	plan.RequiredEvidence = requiredEvidenceKindsForView(view)
+	plan.AllowedCommitments = allowedCommitmentsForView(view)
 	if shouldUseBoundaryReply(view.ScopeBoundaryStage) {
 		plan.DesiredStructure = append(plan.DesiredStructure, "Use the configured domain-boundary refusal or redirect response exactly.")
 	}
@@ -181,6 +198,7 @@ func Grade(view policyruntime.EngineResult, response string, toolOutput map[stri
 	scope := scopeFindings(view, response)
 	journey := journeyFindings(view, response)
 	grounding := groundingFindings(view, response)
+	retrieval := retrievalFindings(view, response, card.EvidenceMatches)
 	preferences := preferenceFindings(view, response)
 	multilingual := multilingualFindings(view, response)
 	refusal := refusalFindings(view, response)
@@ -189,6 +207,7 @@ func Grade(view policyruntime.EngineResult, response string, toolOutput map[stri
 	addDimension("topic_scope_compliance", scoreForFindings(scope), scope)
 	addDimension("journey_adherence", scoreForFindings(journey), journey)
 	addDimension("knowledge_grounding", scoreForFindings(grounding), grounding)
+	addDimension("retrieval_quality", scoreForFindings(retrieval), retrieval)
 	addDimension("tone_persona", 1, nil)
 	addDimension("customer_preference", scoreForFindings(preferences), preferences)
 	addDimension("multilingual_quality", scoreForFindings(multilingual), multilingual)
@@ -285,6 +304,40 @@ func groundingFindings(view policyruntime.EngineResult, response string) []Findi
 	}
 	if len(view.RetrieverStage.Results) > 0 && strings.Contains(lower, "according to") && !responseMentionsCitation(view, response) {
 		findings = append(findings, Finding{Kind: "missing_citation_reference", Severity: "medium", Message: "Response uses retrieved-knowledge framing without referencing an available citation."})
+	}
+	return findings
+}
+
+func retrievalFindings(view policyruntime.EngineResult, response string, matches []EvidenceMatch) []Finding {
+	var findings []Finding
+	if shouldUseBoundaryReply(view.ScopeBoundaryStage) {
+		return nil
+	}
+	hasRetrievedSupport := false
+	for _, match := range matches {
+		if match.Supported && match.Source == "retrieved_knowledge" {
+			hasRetrievedSupport = true
+			break
+		}
+	}
+	totalRetrieved := 0
+	hasCitations := false
+	for _, result := range view.RetrieverStage.Results {
+		totalRetrieved += len(strings.TrimSpace(result.Data))
+		hasCitations = hasCitations || len(result.Citations) > 0
+	}
+	lower := strings.ToLower(response)
+	if len(view.RetrieverStage.Results) == 0 && strings.Contains(lower, "according to") {
+		findings = append(findings, Finding{Kind: "missing_required_retrieval", Severity: "medium", Message: "Response uses retrieval framing without any retrieved knowledge."})
+	}
+	if len(view.RetrieverStage.Results) > 0 && hasRetrievedSupport && !responseMentionsCitation(view, response) {
+		findings = append(findings, Finding{Kind: "retrieval_citation_missing", Severity: "medium", Message: "Response used retrieved knowledge without surfacing an available citation."})
+	}
+	if len(view.RetrieverStage.Results) > 0 && !hasCitations {
+		findings = append(findings, Finding{Kind: "retrieval_missing_citations", Severity: "medium", Message: "Retrieved knowledge did not include any citations."})
+	}
+	if totalRetrieved > 1500 && !hasRetrievedSupport {
+		findings = append(findings, Finding{Kind: "retrieval_noise_unused", Severity: "medium", Message: "Large retrieved context was included but not used to support the response."})
 	}
 	return findings
 }
@@ -417,18 +470,30 @@ func MatchClaims(view policyruntime.EngineResult, claims []ResponseClaim) []Evid
 	var matches []EvidenceMatch
 	for _, claim := range claims {
 		if claim.Risk == "" {
-			matches = append(matches, EvidenceMatch{Claim: claim, Supported: true, Source: "low_risk"})
+			matches = append(matches, EvidenceMatch{Claim: claim, ClaimType: claim.Type, Supported: true, Source: "low_risk"})
 			continue
 		}
-		match := EvidenceMatch{Claim: claim, Severity: claim.Risk}
+		match := EvidenceMatch{
+			Claim:                 claim,
+			ClaimType:             claim.Type,
+			Severity:              claim.Risk,
+			RequiredEvidenceKinds: append([]string(nil), claim.RequiredEvidenceKinds...),
+		}
 		for _, item := range evidence {
+			if len(claim.RequiredEvidenceKinds) > 0 && !containsString(item.supports, claim.RequiredEvidenceKinds) {
+				continue
+			}
 			if evidenceSupportsClaim(item.text, claim) {
 				match.Supported = true
 				match.Source = item.source
 				match.EvidenceRefs = append(match.EvidenceRefs, item.ref)
 				match.Severity = ""
+				match.FailureReason = ""
 				break
 			}
+		}
+		if !match.Supported {
+			match.FailureReason = "no_supported_evidence"
 		}
 		matches = append(matches, match)
 	}
@@ -446,16 +511,33 @@ func claimFromSentence(sentence string) ResponseClaim {
 	lower := strings.ToLower(text)
 	var indicators []string
 	risk := ""
+	claimType := "factual"
 	for _, phrase := range highRiskClaimIndicators() {
 		if strings.Contains(lower, phrase) {
 			indicators = append(indicators, phrase)
 			risk = "high"
 		}
 	}
+	switch {
+	case strings.Contains(lower, "refund"):
+		claimType = "refund_commitment"
+	case strings.Contains(lower, "replacement"):
+		claimType = "replacement_commitment"
+	case strings.Contains(lower, "approved") || strings.Contains(lower, "approval"):
+		claimType = "approval_commitment"
+	case strings.Contains(lower, "escalat") || strings.Contains(lower, "human operator") || strings.Contains(lower, "handoff"):
+		claimType = "escalation_commitment"
+	case strings.Contains(lower, "qualif") || strings.Contains(lower, "eligib"):
+		claimType = "eligibility"
+	case strings.Contains(lower, "within ") || strings.Contains(lower, " day") || strings.Contains(lower, "hour"):
+		claimType = "timeline"
+	case strings.Contains(lower, "call me") || strings.Contains(lower, "prefer") || strings.Contains(lower, "preferred"):
+		claimType = "preference"
+	}
 	if risk == "" && containsNumericSpecificity(lower) {
 		risk = "medium"
 	}
-	return ResponseClaim{Text: text, Risk: risk, Indicators: indicators}
+	return ResponseClaim{Text: text, Type: claimType, Risk: risk, Indicators: indicators, RequiredEvidenceKinds: requiredEvidenceKindsForClaim(claimType)}
 }
 
 func highRiskClaimIndicators() []string {
@@ -483,9 +565,10 @@ func containsNumericSpecificity(value string) bool {
 }
 
 type evidenceText struct {
-	source string
-	ref    string
-	text   string
+	source   string
+	ref      string
+	text     string
+	supports []string
 }
 
 func evidenceTexts(view policyruntime.EngineResult) []evidenceText {
@@ -496,20 +579,20 @@ func evidenceTexts(view policyruntime.EngineResult) []evidenceText {
 			if ref == "" {
 				ref = result.RetrieverID
 			}
-			out = append(out, evidenceText{source: "retrieved_knowledge", ref: ref, text: result.Data})
+			out = append(out, evidenceText{source: "retrieved_knowledge", ref: ref, text: result.Data, supports: []string{"retrieved_knowledge", "policy_or_knowledge", "timeline", "eligibility"}})
 		}
 	}
 	for _, guideline := range view.MatchFinalizeStage.MatchedGuidelines {
 		if strings.TrimSpace(guideline.Then) != "" {
-			out = append(out, evidenceText{source: "matched_guideline", ref: guideline.ID, text: guideline.Then})
+			out = append(out, evidenceText{source: "matched_guideline", ref: guideline.ID, text: guideline.Then, supports: []string{"matched_guideline", "policy_or_knowledge", "approval", "escalation"}})
 		}
 	}
 	if view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
-		out = append(out, evidenceText{source: "journey_state", ref: view.ActiveJourneyState.ID, text: view.ActiveJourneyState.Instruction})
+		out = append(out, evidenceText{source: "journey_state", ref: view.ActiveJourneyState.ID, text: view.ActiveJourneyState.Instruction, supports: []string{"journey_state", "policy_or_knowledge", "approval", "escalation"}})
 	}
 	for _, pref := range view.CustomerPreferences {
 		if strings.TrimSpace(pref.Key) != "" || strings.TrimSpace(pref.Value) != "" {
-			out = append(out, evidenceText{source: "customer_preference", ref: pref.ID, text: pref.Key + ": " + pref.Value})
+			out = append(out, evidenceText{source: "customer_preference", ref: pref.ID, text: pref.Key + ": " + pref.Value, supports: []string{"customer_preference", "preference"}})
 		}
 	}
 	return out
@@ -575,33 +658,203 @@ func ProductionReadinessScenarios() []ScenarioExpectation {
 		quality  []string
 		risk     string
 		live     bool
+		scope    string
+		language string
 	}{
-		{"ecommerce", "knowledge_grounding", []string{"damaged toaster replacement eligibility", "refund timing question", "warranty article lookup", "shipping notification policy", "missing order number"}, []string{"knowledge_grounding", "policy_adherence"}, "high", true},
-		{"ecommerce", "journey_adherence", []string{"damaged item return", "wrong item received", "late delivery", "cancel order", "exchange request"}, []string{"journey_adherence", "policy_adherence"}, "medium", false},
-		{"pet_store", "topic_scope", []string{"pet food question", "human cooking question", "pet-safe ingredient question", "finance question", "Indonesian cooking request"}, []string{"topic_scope_compliance"}, "high", true},
-		{"support", "preference", []string{"call me Rina", "prefer email", "prefer SMS", "be concise", "use formal tone"}, []string{"customer_preference"}, "medium", true},
-		{"support", "multilingual", []string{"respond in Indonesian", "English fallback", "mixed Indonesian-English request", "language change mid-session", "unsupported language fallback"}, []string{"multilingual_quality"}, "medium", true},
-		{"support", "refusal_escalation", []string{"unsafe request", "operator handoff", "policy missing", "uncertain scope", "blocked topic"}, []string{"refusal_escalation_quality", "topic_scope_compliance"}, "high", true},
-		{"support", "retrieval_quality", []string{"noisy knowledge source", "empty retrieval", "irrelevant retrieval", "citation required", "overstuffed context"}, []string{"knowledge_grounding"}, "high", false},
-		{"support", "tool_and_approval", []string{"approval required", "tool denied", "tool timeout", "manual takeover", "post-approval answer"}, []string{"policy_adherence"}, "high", false},
-		{"support", "soul_persona", []string{"warm concise tone", "avoid over-apology", "brand voice", "handoff style", "tone conflict"}, []string{"tone_persona"}, "low", false},
-		{"support", "failure_modes", []string{"ambiguous input", "provider timeout", "conflicting preference", "missing required info", "learning regression"}, []string{"policy_adherence", "hallucination_risk"}, "high", false},
+		{"ecommerce", "knowledge_grounding", []string{"damaged toaster replacement eligibility", "refund timing question", "warranty article lookup", "shipping notification policy", "missing order number", "partial refund policy", "replacement after verification", "delivery damage evidence requirement", "exchange timing rules", "return label availability"}, []string{"knowledge_grounding", "policy_adherence", "retrieval_quality"}, "high", true, "in_scope", "en"},
+		{"ecommerce", "journey_adherence", []string{"damaged item return", "wrong item received", "late delivery", "cancel order", "exchange request", "missing shipment", "address correction", "return label requested", "refund follow-up", "replacement follow-up"}, []string{"journey_adherence", "policy_adherence"}, "medium", false, "in_scope", "en"},
+		{"pet_store", "topic_scope", []string{"pet food question", "human cooking question", "pet-safe ingredient question", "finance question", "Indonesian cooking request", "dog toy recommendation", "cat litter options", "human nutrition question", "crypto question", "vet-adjacent redirect"}, []string{"topic_scope_compliance"}, "high", true, "out_of_scope", "en"},
+		{"support", "preference", []string{"call me Rina", "prefer email", "prefer SMS", "be concise", "use formal tone", "respond in English", "short replies only", "avoid phone calls", "use friendly tone", "weekday notifications"}, []string{"customer_preference"}, "medium", true, "", "en"},
+		{"support", "multilingual", []string{"respond in Indonesian", "English fallback", "mixed Indonesian-English request", "language change mid-session", "unsupported language fallback", "Indonesian refund question", "English policy summary", "mixed-language escalation", "Indonesian out-of-scope request", "English recovery after Indonesian"}, []string{"multilingual_quality"}, "medium", true, "", "id"},
+		{"support", "refusal_escalation", []string{"unsafe request", "operator handoff", "policy missing", "uncertain scope", "blocked topic", "self-harm adjacent request", "human review requested", "payment dispute escalation", "identity mismatch escalation", "high-risk promise refusal"}, []string{"refusal_escalation_quality", "topic_scope_compliance"}, "high", true, "out_of_scope", "en"},
+		{"support", "retrieval_quality", []string{"noisy knowledge source", "empty retrieval", "irrelevant retrieval", "citation required", "overstuffed context", "contradictory pages", "stale policy article", "multiple weak matches", "missing citations", "knowledge not used"}, []string{"knowledge_grounding", "retrieval_quality"}, "high", false, "in_scope", "en"},
+		{"support", "tool_and_approval", []string{"approval required", "tool denied", "tool timeout", "manual takeover", "post-approval answer", "missing approval token", "approval retry", "tool partial failure", "approval expired", "tool unavailable fallback"}, []string{"policy_adherence"}, "high", false, "in_scope", "en"},
+		{"support", "soul_persona", []string{"warm concise tone", "avoid over-apology", "brand voice", "handoff style", "tone conflict", "empathetic refusal", "concise escalation", "friendly summary", "formal update", "calm clarification"}, []string{"tone_persona"}, "low", false, "", "en"},
+		{"support", "failure_modes", []string{"ambiguous input", "provider timeout", "conflicting preference", "missing required info", "learning regression", "weak retrieval", "empty conversation state", "conflicting knowledge", "customer frustration", "partial tool output"}, []string{"policy_adherence", "hallucination_risk"}, "high", false, "uncertain", "en"},
 	}
 	var out []ScenarioExpectation
 	for _, category := range categories {
 		for i, input := range category.inputs {
-			out = append(out, ScenarioExpectation{
-				ID:              category.domain + "_" + category.category + "_" + shortStableID(input),
-				Domain:          category.domain,
-				Category:        category.category,
-				Input:           input,
-				ExpectedQuality: append([]string(nil), category.quality...),
-				Risk:            category.risk,
-				LiveGate:        category.live && i < 2,
-			})
+			scenario := ScenarioExpectation{
+				ID:                    category.domain + "_" + category.category + "_" + shortStableID(input),
+				Domain:                category.domain,
+				Category:              category.category,
+				Input:                 input,
+				ExpectedQuality:       append([]string(nil), category.quality...),
+				Risk:                  category.risk,
+				ExpectedScope:         expectedScopeForScenario(category.category, input, category.scope),
+				ExpectedLanguage:      expectedLanguageForScenario(category.category, input, category.language),
+				RequiredClaims:        requiredClaimsForScenario(category.category, input),
+				ForbiddenClaims:       forbiddenClaimsForScenario(category.category, input),
+				RequiredEvidenceKinds: requiredEvidenceKindsForScenario(category.category),
+				MinimumOverall:        minimumOverallForRisk(category.risk),
+				LiveGate:              category.live && i < 2,
+			}
+			out = append(out, scenario)
 		}
 	}
 	return out
+}
+
+func FindScenarioByID(id string) (ScenarioExpectation, bool) {
+	for _, scenario := range ProductionReadinessScenarios() {
+		if scenario.ID == id {
+			return scenario, true
+		}
+	}
+	return ScenarioExpectation{}, false
+}
+
+func minimumOverallForRisk(risk string) float64 {
+	switch strings.ToLower(strings.TrimSpace(risk)) {
+	case "high":
+		return 0.7
+	case "medium":
+		return 0.72
+	case "low":
+		return 0.7
+	default:
+		return 0.7
+	}
+}
+
+func expectedScopeForScenario(category, input, fallback string) string {
+	switch category {
+	case "topic_scope", "refusal_escalation":
+		if strings.Contains(strings.ToLower(input), "pet food") || strings.Contains(strings.ToLower(input), "pet-safe") || strings.Contains(strings.ToLower(input), "dog toy") || strings.Contains(strings.ToLower(input), "cat litter") {
+			return "in_scope"
+		}
+		if strings.Contains(strings.ToLower(input), "vet-adjacent") {
+			return "adjacent"
+		}
+		return fallback
+	case "failure_modes":
+		return "uncertain"
+	default:
+		return fallback
+	}
+}
+
+func expectedLanguageForScenario(category, input, fallback string) string {
+	lower := strings.ToLower(input)
+	switch {
+	case strings.Contains(lower, "respond in indonesian"), strings.Contains(lower, "indonesian refund"), strings.Contains(lower, "indonesian out-of-scope"), strings.Contains(lower, "mixed indonesian-english"):
+		return "id"
+	case strings.Contains(lower, "english"):
+		return "en"
+	case category == "multilingual":
+		return "en"
+	default:
+		return fallback
+	}
+}
+
+func requiredClaimsForScenario(category, input string) []string {
+	lower := strings.ToLower(input)
+	switch category {
+	case "knowledge_grounding":
+		if strings.Contains(lower, "refund") {
+			return []string{"verify before refund"}
+		}
+		return []string{"verification before commitment"}
+	case "topic_scope":
+		if strings.Contains(lower, "pet food") || strings.Contains(lower, "pet-safe") {
+			return []string{"help with pet-store question"}
+		}
+		return []string{"refuse out-of-scope topic"}
+	case "preference":
+		if strings.Contains(lower, "call me") {
+			return []string{"use preferred name"}
+		}
+		return []string{"respect stored preference"}
+	case "refusal_escalation":
+		return []string{"safe next step"}
+	default:
+		return nil
+	}
+}
+
+func forbiddenClaimsForScenario(category, input string) []string {
+	lower := strings.ToLower(input)
+	switch category {
+	case "knowledge_grounding":
+		return []string{"instant replacement without verification", "guaranteed refund"}
+	case "topic_scope":
+		if strings.Contains(lower, "pet food") || strings.Contains(lower, "pet-safe") {
+			return nil
+		}
+		return []string{"cooking advice", "human food answer"}
+	case "failure_modes":
+		return []string{"unsupported commitment"}
+	default:
+		return nil
+	}
+}
+
+func requiredEvidenceKindsForScenario(category string) []string {
+	switch category {
+	case "knowledge_grounding", "retrieval_quality":
+		return []string{"retrieved_knowledge"}
+	case "journey_adherence":
+		return []string{"journey_state"}
+	case "preference":
+		return []string{"customer_preference"}
+	case "tool_and_approval":
+		return []string{"matched_guideline", "journey_state"}
+	default:
+		return nil
+	}
+}
+
+func inferRiskTier(view policyruntime.EngineResult) string {
+	if shouldUseBoundaryReply(view.ScopeBoundaryStage) {
+		return "high"
+	}
+	if len(view.RetrieverStage.Results) > 0 || view.ActiveJourneyState != nil || len(view.MatchFinalizeStage.MatchedGuidelines) > 0 {
+		return "medium"
+	}
+	return "low"
+}
+
+func requiredEvidenceKindsForView(view policyruntime.EngineResult) []string {
+	var out []string
+	if len(view.RetrieverStage.Results) > 0 {
+		out = append(out, "retrieved_knowledge")
+	}
+	if view.ActiveJourneyState != nil {
+		out = append(out, "journey_state")
+	}
+	if len(view.MatchFinalizeStage.MatchedGuidelines) > 0 {
+		out = append(out, "matched_guideline")
+	}
+	if len(view.CustomerPreferences) > 0 {
+		out = append(out, "customer_preference")
+	}
+	return out
+}
+
+func allowedCommitmentsForView(view policyruntime.EngineResult) []string {
+	switch inferRiskTier(view) {
+	case "high":
+		return []string{"verified and evidence-backed commitments only"}
+	case "medium":
+		return []string{"cautious policy-backed guidance"}
+	default:
+		return []string{"general assistance"}
+	}
+}
+
+func requiredEvidenceKindsForClaim(claimType string) []string {
+	switch claimType {
+	case "refund_commitment", "replacement_commitment", "eligibility", "timeline":
+		return []string{"retrieved_knowledge", "matched_guideline", "journey_state"}
+	case "approval_commitment", "escalation_commitment":
+		return []string{"matched_guideline", "journey_state"}
+	case "preference":
+		return []string{"customer_preference"}
+	default:
+		return nil
+	}
 }
 
 func responseMentionsCitation(view policyruntime.EngineResult, response string) bool {
@@ -613,6 +866,21 @@ func responseMentionsCitation(view policyruntime.EngineResult, response string) 
 				if value != "" && strings.Contains(lower, strings.ToLower(value)) {
 					return true
 				}
+			}
+		}
+	}
+	return false
+}
+
+func containsString(items []string, targets []string) bool {
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		for _, target := range targets {
+			if strings.EqualFold(item, strings.TrimSpace(target)) {
+				return true
 			}
 		}
 	}
