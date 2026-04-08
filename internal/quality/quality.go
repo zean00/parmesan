@@ -448,6 +448,9 @@ func prematureCommitmentFindings(view policyruntime.EngineResult, response strin
 	if !containsAny(lower, []string{"refund", "replacement", "eligible", "approval", "approved", "qualify"}) {
 		return nil
 	}
+	if verificationFirstOptionsResponse(lower) {
+		return nil
+	}
 	if containsAny(lower, []string{"need approval", "need review", "requires approval", "await approval", "before changing", "before i review"}) {
 		return nil
 	}
@@ -460,6 +463,16 @@ func prematureCommitmentFindings(view policyruntime.EngineResult, response strin
 		Message:     "Response makes a high-risk commitment before the required verification or review step is reflected in the answer.",
 		EvidenceRef: append([]string(nil), plan.VerificationSteps...),
 	}}
+}
+
+func verificationFirstOptionsResponse(lower string) bool {
+	if !strings.Contains(lower, "option") {
+		return false
+	}
+	if containsAny(lower, []string{"qualify", "eligible", "approved", "guarantee", "instant", "right away", "within "}) {
+		return false
+	}
+	return containsAny(lower, []string{"please share", "provide", "need", "verify", "verification", "review"})
 }
 
 func multilingualFindings(view policyruntime.EngineResult, response string) []Finding {

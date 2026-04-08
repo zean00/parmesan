@@ -188,6 +188,20 @@ func TestGradeAllowsHighRiskCommitmentAfterVerificationLanguage(t *testing.T) {
 	}
 }
 
+func TestGradeAllowsVerificationFirstOptionsLanguage(t *testing.T) {
+	view := policyruntime.EngineResult{
+		ActiveJourneyState: &policy.JourneyNode{
+			ID:          "verify_state",
+			Instruction: "Verify the order details before offering refund or replacement options.",
+		},
+	}
+
+	card := Grade(view, "Please share the order number and tell me what arrived damaged so I can review replacement or refund options.", nil)
+	if HardFailed(card) {
+		t.Fatalf("scorecard = %#v, want verification-first options language to pass", card)
+	}
+}
+
 func TestGradeSupportsSpecificKnowledgeClaimFromRetrievedEvidence(t *testing.T) {
 	view := policyruntime.EngineResult{
 		RetrieverStage: policyruntime.RetrieverStageResult{Results: []knowledgeretriever.Result{{
