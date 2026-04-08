@@ -23,6 +23,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/rollout"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/model"
+	"github.com/sahal/parmesan/internal/quality"
 	"github.com/sahal/parmesan/internal/runtime/runner"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/store/memory"
@@ -622,6 +623,119 @@ retrievers:
 	}
 }
 
+func TestPlatformValidationPetStoreScopeQuality(t *testing.T) {
+	repo := memory.New()
+	var router *model.Router
+	sessionIDs := []string{}
+	defer func() {
+		writePlatformValidationReport(t, repo, router, t.Name(), "pet_store_scope_quality", "agent_pet_store", "cust_scope", sessionIDs)
+	}()
+	writes := asyncwrite.New(repo, 64)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	broker := sse.NewBroker()
+	router = model.NewRouter(config.Load("api").Provider)
+	r := runner.New(repo, writes, broker, router, "test-worker")
+	r.Start(ctx)
+	srv := New(":0", repo, writes, broker, router, nil)
+
+	rec := doJSONRequest(t, srv, http.MethodPost, "/v1/policy/import", `
+id: pet_store_scope
+version: v1
+domain_boundary:
+  mode: hard_refuse
+  allowed_topics:
+    - pet food
+    - pet toys
+    - grooming
+  adjacent_topics:
+    - pet-safe ingredients
+    - veterinarian
+  adjacent_action: redirect
+  blocked_topics:
+    - cooking
+    - human food
+    - memasak
+    - makanan manusia
+  out_of_scope_reply: I can help with pet-store questions, but not cooking or human food. If you want, I can help with pet-safe food options.
+soul:
+  identity: Pet Store Assistant
+  role: Pet-store support agent
+  default_language: en
+  supported_languages:
+    - en
+    - id
+  tone: practical
+  verbosity: concise
+guidelines:
+  - id: pet_food_help
+    when: customer asks about pet food
+    then: help the customer compare pet food options within the store catalog
+`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("import policy status = %d, want %d body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	waitFor(t, 2*time.Second, func() bool {
+		bundles, err := repo.ListBundles(context.Background())
+		if err != nil {
+			return false
+		}
+		for _, bundle := range bundles {
+			if bundle.ID == "pet_store_scope" {
+				return true
+			}
+		}
+		return false
+	})
+	rec = doJSONRequest(t, srv, http.MethodPost, "/v1/operator/agents", `{
+		"id":"agent_pet_store",
+		"name":"Pet Store Assistant",
+		"default_policy_bundle_id":"pet_store_scope",
+		"default_knowledge_scope_kind":"agent",
+		"default_knowledge_scope_id":"agent_pet_store"
+	}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create agent status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	rec = doJSONRequest(t, srv, http.MethodPost, "/v1/acp/sessions", `{
+		"id":"sess_pet_scope_1",
+		"channel":"acp",
+		"agent_id":"agent_pet_store",
+		"customer_id":"cust_scope"
+	}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create session status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	sessionIDs = append(sessionIDs, "sess_pet_scope_1")
+	rec = doJSONRequest(t, srv, http.MethodPost, "/v1/acp/sessions/sess_pet_scope_1/messages", `{
+		"id":"evt_pet_scope_1",
+		"text":"Bagaimana cara memasak makanan manusia untuk makan malam?"
+	}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("send message status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	exec := waitForExecutionStatus(t, repo, "sess_pet_scope_1", execution.StatusSucceeded, validationTimeout(4*time.Second))
+	assistant := waitForAssistantText(t, repo, "sess_pet_scope_1", validationTimeout(2*time.Second))
+	if assistant != "I can help with pet-store questions, but not cooking or human food. If you want, I can help with pet-safe food options." {
+		t.Fatalf("assistant = %q, want configured out-of-scope boundary reply", assistant)
+	}
+	rec = doJSONRequest(t, srv, http.MethodGet, "/v1/executions/"+exec.ID+"/resolved-policy", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resolved policy status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resolved resolvedPolicyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resolved); err != nil {
+		t.Fatalf("decode resolved policy: %v", err)
+	}
+	if resolved.ScopeClassification != "out_of_scope" || resolved.ScopeAction != "refuse" {
+		t.Fatalf("resolved scope = %#v, want out_of_scope refuse", resolved)
+	}
+}
+
 func doJSONRequest(t *testing.T, srv *Server, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -724,6 +838,7 @@ type platformValidationSession struct {
 	ID         string                         `json:"id"`
 	Transcript []platformValidationTranscript `json:"transcript,omitempty"`
 	Executions []execution.TurnExecution      `json:"executions,omitempty"`
+	Scorecards map[string]quality.Scorecard   `json:"scorecards,omitempty"`
 }
 
 type platformValidationTranscript struct {
@@ -772,9 +887,16 @@ func writePlatformValidationReport(t *testing.T, repo *memory.Store, router *mod
 		sort.Slice(transcript, func(i, j int) bool { return transcript[i].CreatedAt.Before(transcript[j].CreatedAt) })
 		execs, _ := repo.ListExecutions(context.Background())
 		var sessionExecs []execution.TurnExecution
+		scorecards := map[string]quality.Scorecard{}
 		for _, item := range execs {
 			if item.SessionID == sessionID {
 				sessionExecs = append(sessionExecs, item)
+				srv := &Server{store: repo, router: router}
+				if payload, err := srv.executionQualityPayload(context.Background(), item, ""); err == nil {
+					if card, ok := payload["scorecard"].(quality.Scorecard); ok {
+						scorecards[item.ID] = card
+					}
+				}
 			}
 		}
 		sort.Slice(sessionExecs, func(i, j int) bool { return sessionExecs[i].CreatedAt.Before(sessionExecs[j].CreatedAt) })
@@ -782,6 +904,7 @@ func writePlatformValidationReport(t *testing.T, repo *memory.Store, router *mod
 			ID:         sessionID,
 			Transcript: transcript,
 			Executions: sessionExecs,
+			Scorecards: scorecards,
 		})
 	}
 	if agentID != "" && customerID != "" {

@@ -30,6 +30,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/domain/toolrun"
 	"github.com/sahal/parmesan/internal/model"
+	"github.com/sahal/parmesan/internal/quality"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/store/memory"
 )
@@ -521,6 +522,89 @@ func TestOperatorFeedbackCreatesSoulProposal(t *testing.T) {
 	}
 }
 
+func TestOperatorFeedbackQualityLabelsRouteToProposals(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.SaveBundle(context.Background(), policy.Bundle{
+		ID:      "bundle_1",
+		Version: "v1",
+		Guidelines: []policy.Guideline{{
+			ID: "g1", When: "customer asks for help", Then: "help the customer",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveAgentProfile(context.Background(), agent.Profile{
+		ID: "agent_1", Name: "Support", Status: "active", DefaultPolicyBundleID: "bundle_1", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_quality_feedback", Channel: "acp", AgentID: "agent_1", CustomerID: "cust_1", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_quality_feedback/feedback", strings.NewReader(`{
+		"id":"feedback_scope_quality",
+		"labels":["answered_out_of_scope"],
+		"text":"The agent answered a cooking question instead of redirecting to pet-store support."
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("feedback status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var item feedback.Record
+	if err := json.Unmarshal(rec.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	if len(item.Outputs.PolicyProposalIDs) != 1 {
+		t.Fatalf("outputs = %#v, want policy proposal from scope quality label", item.Outputs)
+	}
+	if labels, ok := item.Metadata["quality_failure_labels"].([]any); !ok || len(labels) != 1 || labels[0] != "answered_out_of_scope" {
+		t.Fatalf("metadata = %#v, want normalized quality failure labels", item.Metadata)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_quality_feedback/feedback", strings.NewReader(`{
+		"id":"feedback_tone_quality",
+		"labels":["tone_mismatch"],
+		"text":"The response sounded too cold for the brand."
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("tone feedback status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	if len(item.Outputs.PolicyProposalIDs) != 1 {
+		t.Fatalf("outputs = %#v, want SOUL proposal from tone quality label", item.Outputs)
+	}
+	proposal, err := repo.GetProposal(context.Background(), item.Outputs.PolicyProposalIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateFound := false
+	bundles, err := repo.ListBundles(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bundle := range bundles {
+		if bundle.ID == proposal.CandidateBundleID && len(bundle.Soul.StyleRules) > 0 {
+			candidateFound = true
+		}
+	}
+	if !candidateFound {
+		t.Fatalf("proposal = %#v bundles = %#v, want SOUL candidate from tone quality label", proposal, bundles)
+	}
+}
+
 func TestRegisterProviderPersistsImmediatelyBeforeAsyncSync(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
@@ -693,6 +777,7 @@ func TestProposalSummaryIncludesRolloutsAndEvalRuns(t *testing.T) {
 		ProposalID:        "proposal_1",
 		SourceExecutionID: "exec_1",
 		Status:            replay.StatusSucceeded,
+		ResultJSON:        `{"quality":{"shadow":{"overall":1,"passed":true,"dimensions":{"topic_scope_compliance":{"name":"topic_scope_compliance","score":1,"passed":true}}}}}`,
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}); err != nil {
@@ -709,15 +794,19 @@ func TestProposalSummaryIncludesRolloutsAndEvalRuns(t *testing.T) {
 	}
 
 	var payload struct {
-		Proposal rollout.Proposal `json:"proposal"`
-		Rollouts []rollout.Record `json:"rollouts"`
-		EvalRuns []replay.Run     `json:"eval_runs"`
+		Proposal      rollout.Proposal `json:"proposal"`
+		Rollouts      []rollout.Record `json:"rollouts"`
+		EvalRuns      []replay.Run     `json:"eval_runs"`
+		LatestQuality map[string]any   `json:"latest_quality"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode summary: %v", err)
 	}
 	if payload.Proposal.ID != "proposal_1" || len(payload.Rollouts) != 1 || len(payload.EvalRuns) != 1 {
 		t.Fatalf("summary = %#v, want linked proposal, rollout, and eval run", payload)
+	}
+	if payload.LatestQuality == nil || payload.LatestQuality["overall"] == nil {
+		t.Fatalf("summary = %#v, want latest quality payload", payload)
 	}
 }
 
@@ -767,6 +856,221 @@ func TestProposalPreviewShowsSoulAndGuidelineChanges(t *testing.T) {
 	}
 	if soul, ok := changes["soul"].(map[string]any); !ok || len(soul) == 0 {
 		t.Fatalf("changes = %#v, want soul diff", changes)
+	}
+}
+
+func TestProposalTransitionBlocksHardQualityFailure(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	now := time.Now().UTC()
+	if err := repo.SaveProposal(context.Background(), rollout.Proposal{
+		ID:                "proposal_quality",
+		SourceBundleID:    "bundle_a",
+		CandidateBundleID: "bundle_b",
+		State:             rollout.StateShadow,
+		EvidenceRefs:      []string{"feedback:1"},
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resultRaw, err := json.Marshal(map[string]any{
+		"quality": map[string]any{
+			"shadow": quality.Scorecard{
+				Overall:    0,
+				Passed:     false,
+				HardFailed: true,
+				Dimensions: map[string]quality.DimensionScore{
+					"topic_scope_compliance": {
+						Name:   "topic_scope_compliance",
+						Score:  0,
+						Passed: false,
+						Findings: []quality.Finding{{
+							Kind:     "scope_boundary_reply_mismatch",
+							Severity: "hard",
+							Message:  "Out-of-scope turn answered a blocked topic.",
+						}},
+					},
+				},
+				HardFailures: []quality.Finding{{
+					Kind:     "scope_boundary_reply_mismatch",
+					Severity: "hard",
+					Message:  "Out-of-scope turn answered a blocked topic.",
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateEvalRun(context.Background(), replay.Run{
+		ID:                "eval_quality",
+		Type:              replay.TypeShadow,
+		ProposalID:        "proposal_quality",
+		SourceExecutionID: "exec_1",
+		Status:            replay.StatusSucceeded,
+		ResultJSON:        string(resultRaw),
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/proposals/proposal_quality/state", strings.NewReader(`{"state":"canary"}`))
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("transition status = %d, want %d body=%s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "quality_blocked") || !strings.Contains(rec.Body.String(), "topic_scope_compliance") {
+		t.Fatalf("body = %s, want quality blocking payload", rec.Body.String())
+	}
+}
+
+func TestProposalTransitionIgnoresActiveOnlyReplayQuality(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	now := time.Now().UTC()
+	if err := repo.SaveProposal(context.Background(), rollout.Proposal{
+		ID:                "proposal_quality_active_only",
+		SourceBundleID:    "bundle_a",
+		CandidateBundleID: "bundle_b",
+		State:             rollout.StateShadow,
+		EvidenceRefs:      []string{"feedback:1"},
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resultRaw, err := json.Marshal(map[string]any{
+		"quality": map[string]any{
+			"active": quality.Scorecard{
+				Overall:    0,
+				Passed:     false,
+				HardFailed: true,
+				Dimensions: map[string]quality.DimensionScore{
+					"topic_scope_compliance": {
+						Name:   "topic_scope_compliance",
+						Score:  0,
+						Passed: false,
+						Findings: []quality.Finding{{
+							Kind:     "scope_boundary_reply_mismatch",
+							Severity: "hard",
+							Message:  "Current policy answered a blocked topic.",
+						}},
+					},
+				},
+				HardFailures: []quality.Finding{{
+					Kind:     "scope_boundary_reply_mismatch",
+					Severity: "hard",
+					Message:  "Current policy answered a blocked topic.",
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateEvalRun(context.Background(), replay.Run{
+		ID:                "eval_active_only_quality",
+		Type:              replay.TypeReplay,
+		ProposalID:        "proposal_quality_active_only",
+		SourceExecutionID: "exec_1",
+		Status:            replay.StatusSucceeded,
+		ResultJSON:        string(resultRaw),
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/proposals/proposal_quality_active_only/state", strings.NewReader(`{"state":"canary"}`))
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("transition status = %d, want %d body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+}
+
+func TestProposalTransitionUsesLatestShadowQualityDespiteNewerActiveReplay(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	now := time.Now().UTC()
+	if err := repo.SaveProposal(context.Background(), rollout.Proposal{
+		ID:                "proposal_shadow_quality",
+		SourceBundleID:    "bundle_a",
+		CandidateBundleID: "bundle_b",
+		State:             rollout.StateShadow,
+		EvidenceRefs:      []string{"feedback:1"},
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	shadowRaw, err := json.Marshal(map[string]any{
+		"quality": map[string]any{
+			"shadow": quality.Scorecard{
+				Overall:    0,
+				Passed:     false,
+				HardFailed: true,
+				Dimensions: map[string]quality.DimensionScore{
+					"topic_scope_compliance": {Name: "topic_scope_compliance", Score: 0, Passed: false},
+				},
+				HardFailures: []quality.Finding{{Kind: "scope_boundary_reply_mismatch", Severity: "hard", Message: "Candidate answered a blocked topic."}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeRaw, err := json.Marshal(map[string]any{
+		"quality": map[string]any{
+			"active": quality.Scorecard{
+				Overall:    1,
+				Passed:     true,
+				Dimensions: map[string]quality.DimensionScore{"overall": {Name: "overall", Score: 1, Passed: true}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateEvalRun(context.Background(), replay.Run{
+		ID:                "eval_shadow_quality",
+		Type:              replay.TypeShadow,
+		ProposalID:        "proposal_shadow_quality",
+		SourceExecutionID: "exec_1",
+		Status:            replay.StatusSucceeded,
+		ResultJSON:        string(shadowRaw),
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateEvalRun(context.Background(), replay.Run{
+		ID:                "eval_active_newer",
+		Type:              replay.TypeReplay,
+		ProposalID:        "proposal_shadow_quality",
+		SourceExecutionID: "exec_1",
+		Status:            replay.StatusSucceeded,
+		ResultJSON:        string(activeRaw),
+		CreatedAt:         now.Add(time.Second),
+		UpdatedAt:         now.Add(time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/proposals/proposal_shadow_quality/state", strings.NewReader(`{"state":"canary"}`))
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("transition status = %d, want %d body=%s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "eval_shadow_quality") {
+		t.Fatalf("body = %s, want blocking shadow eval id", rec.Body.String())
 	}
 }
 
@@ -997,7 +1301,7 @@ func TestGetReplayDiffReturnsDecodedStructuredPayload(t *testing.T) {
 		Type:              replay.TypeShadow,
 		SourceExecutionID: "exec_1",
 		Status:            replay.StatusSucceeded,
-		ResultJSON:        `{"active":{"bundle_id":"bundle_a"},"shadow":{"bundle_id":"bundle_b"}}`,
+		ResultJSON:        `{"active":{"bundle_id":"bundle_a"},"shadow":{"bundle_id":"bundle_b"},"quality":{"shadow":{"overall":1,"passed":true,"dimensions":{"topic_scope_compliance":{"name":"topic_scope_compliance","score":1,"passed":true}}}}}`,
 		DiffJSON:          `{"tools":{"only_left":["a"],"only_right":["b"]},"composition_mode":{"left":"strict","right":"fluid"}}`,
 		CreatedAt:         now,
 		UpdatedAt:         now,
@@ -1023,6 +1327,13 @@ func TestGetReplayDiffReturnsDecodedStructuredPayload(t *testing.T) {
 	}
 	if _, ok := diff["composition_mode"]; !ok {
 		t.Fatalf("diff = %#v, want composition_mode change", diff)
+	}
+	qualityPayload, ok := payload["quality"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload quality = %#v, want decoded quality object", payload["quality"])
+	}
+	if _, ok := qualityPayload["shadow"]; !ok {
+		t.Fatalf("quality = %#v, want shadow scorecard", qualityPayload)
 	}
 }
 
@@ -1344,6 +1655,80 @@ func TestGetSessionReturnsTypedSummary(t *testing.T) {
 	}
 	if summary["last_trace_id"] != "trace_1" || summary["last_execution_id"] != "exec_1" {
 		t.Fatalf("summary = %#v, want trace/execution summary", summary)
+	}
+}
+
+func TestGetExecutionQualityReturnsScorecard(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	now := time.Now().UTC()
+	if err := repo.SaveBundle(context.Background(), policy.Bundle{
+		ID:      "pet_bundle",
+		Version: "v1",
+		DomainBoundary: policy.DomainBoundary{
+			Mode:            "hard_refuse",
+			BlockedTopics:   []string{"cooking"},
+			OutOfScopeReply: "I can help with pet-store questions, but not cooking.",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateSession(context.Background(), session.Session{ID: "sess_quality", Channel: "acp", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID:        "evt_customer",
+		SessionID: "sess_quality",
+		Source:    "customer",
+		Kind:      "message",
+		CreatedAt: now,
+		Content:   []session.ContentPart{{Type: "text", Text: "Tell me about cooking."}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID:          "evt_agent",
+		SessionID:   "sess_quality",
+		ExecutionID: "exec_quality",
+		Source:      "ai_agent",
+		Kind:        "message",
+		CreatedAt:   now.Add(time.Millisecond),
+		Content:     []session.ContentPart{{Type: "text", Text: "I can help with pet-store questions, but not cooking."}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateExecution(context.Background(), execution.TurnExecution{
+		ID:             "exec_quality",
+		SessionID:      "sess_quality",
+		TriggerEventID: "evt_customer",
+		PolicyBundleID: "pet_bundle",
+		Status:         execution.StatusSucceeded,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/executions/exec_quality/quality", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("quality status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var payload struct {
+		ExecutionID string            `json:"execution_id"`
+		Scorecard   quality.Scorecard `json:"scorecard"`
+		HardFailed  bool              `json:"hard_failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.ExecutionID != "exec_quality" || payload.HardFailed || !payload.Scorecard.Passed {
+		t.Fatalf("quality payload = %#v, want passing scorecard for configured refusal", payload)
+	}
+	if got := payload.Scorecard.Dimensions["topic_scope_compliance"]; !got.Passed {
+		t.Fatalf("topic scope dimension = %#v, want passed", got)
 	}
 }
 

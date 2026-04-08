@@ -648,7 +648,9 @@ func TestComposePromptIncludesSoulGuidance(t *testing.T) {
 		!strings.Contains(prompt, "Brand: Parmesan") ||
 		!strings.Contains(prompt, "ask one question at a time") ||
 		!strings.Contains(prompt, "Avoid rules: unsupported promises") ||
-		!strings.Contains(prompt, "Customer preferences (soft constraints):\npreferred_name: Alex") {
+		!strings.Contains(prompt, "Customer preferences (soft constraints):\npreferred_name: Alex") ||
+		!strings.Contains(prompt, "Response quality plan:") ||
+		!strings.Contains(prompt, `"preference_hints":["preferred_name: Alex"]`) {
 		t.Fatalf("prompt = %q, want SOUL style guidance", prompt)
 	}
 }

@@ -500,11 +500,11 @@ func isKnowledgeFeedback(text string) bool {
 }
 
 func isPolicyFeedback(text string) bool {
-	return containsAny(text, "policy", "guideline", "journey", "scenario", "guardrail", "rule", "behavior", "approval", "escalate")
+	return containsAny(text, "policy", "guideline", "journey", "scenario", "guardrail", "rule", "behavior", "approval", "escalate", "answered_out_of_scope", "out_of_scope", "hallucinated_policy")
 }
 
 func isSoulFeedback(text string) bool {
-	return containsAny(text, "soul", "persona", "tone", "voice", "brand", "style", "language", "verbosity", "formal", "handoff")
+	return containsAny(text, "soul", "persona", "tone", "voice", "brand", "style", "language", "verbosity", "formal", "handoff", "tone_mismatch", "bad_language")
 }
 
 func containsAny(text string, needles ...string) bool {

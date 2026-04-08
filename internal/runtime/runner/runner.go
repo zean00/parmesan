@@ -30,6 +30,7 @@ import (
 	knowledgeenrichment "github.com/sahal/parmesan/internal/knowledge/enrichment"
 	knowledgelearning "github.com/sahal/parmesan/internal/knowledge/learning"
 	"github.com/sahal/parmesan/internal/model"
+	"github.com/sahal/parmesan/internal/quality"
 	rolloutengine "github.com/sahal/parmesan/internal/rollout"
 	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
 	"github.com/sahal/parmesan/internal/sessionsvc"
@@ -1454,6 +1455,9 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 	var parts []string
 	if latest := latestText(events); latest != "" {
 		parts = append(parts, "Customer message: "+latest)
+	}
+	if plan := quality.FormatResponsePlan(quality.BuildResponsePlan(view)); plan != "" {
+		parts = append(parts, "Response quality plan: "+plan)
 	}
 	guidelines := view.MatchFinalizeStage.MatchedGuidelines
 	if len(guidelines) > 0 {

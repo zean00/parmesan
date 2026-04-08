@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sahal/parmesan/internal/domain/audit"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	replaydomain "github.com/sahal/parmesan/internal/domain/replay"
+	"github.com/sahal/parmesan/internal/domain/session"
+	"github.com/sahal/parmesan/internal/quality"
 	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
 	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
@@ -90,18 +93,34 @@ func (r *Runner) process(ctx context.Context, run replaydomain.Run) error {
 	if err != nil {
 		return r.fail(ctx, run, err)
 	}
+	activeResponse := latestAssistantText(events)
+	if activeResponse == "" {
+		activeResponse = quality.ResponseFromView(activeView)
+	}
+	activeQuality := quality.Grade(activeView, activeResponse, nil)
 	result := map[string]any{
 		"execution_id": exec.ID,
 		"active":       summarizeView(activeView),
+		"quality": map[string]any{
+			"active": activeQuality,
+		},
 	}
 	diff := map[string]any{}
+	qualityDiff := map[string]any{}
 
 	if run.Type == replaydomain.TypeShadow && run.ShadowBundleID != "" {
 		shadowView, err := policyruntime.Resolve(events, selectBundles(bundles, run.ShadowBundleID, exec.PolicyBundleID), journeys, catalog)
 		if err != nil {
 			return r.fail(ctx, run, err)
 		}
+		shadowResponse := quality.ResponseFromView(shadowView)
+		shadowQuality := quality.Grade(shadowView, shadowResponse, nil)
 		result["shadow"] = summarizeView(shadowView)
+		result["quality"] = map[string]any{
+			"active": activeQuality,
+			"shadow": shadowQuality,
+		}
+		qualityDiff = qualityScoreDiff(activeQuality, shadowQuality)
 		activeJourneyDecision := activeView.JourneyProgressStage.Decision
 		shadowJourneyDecision := shadowView.JourneyProgressStage.Decision
 		activeToolDecision := activeView.ToolDecisionStage.Decision
@@ -129,6 +148,7 @@ func (r *Runner) process(ctx context.Context, run replaydomain.Run) error {
 			"response_revision":   changedBool(activeView.ResponseAnalysisStage.Analysis.NeedsRevision, shadowView.ResponseAnalysisStage.Analysis.NeedsRevision),
 			"response_strict":     changedBool(activeView.ResponseAnalysisStage.Analysis.NeedsStrictMode, shadowView.ResponseAnalysisStage.Analysis.NeedsStrictMode),
 			"arqs":                changedStrings(arqNames(activeView), arqNames(shadowView)),
+			"quality":             qualityDiff,
 		}
 	}
 
@@ -175,9 +195,10 @@ func (r *Runner) updateProposalSummary(ctx context.Context, run replaydomain.Run
 		"type":        run.Type,
 		"result":      result,
 		"diff":        diff,
+		"quality":     result["quality"],
 	})
 	proposal.ReplayScore = computeReplayScore(diff)
-	proposal.SafetyScore = proposal.ReplayScore
+	proposal.SafetyScore = qualityScoreFromResult(result)
 	proposal.UpdatedAt = time.Now().UTC()
 	return r.repo.SaveProposal(ctx, proposal)
 }
@@ -228,6 +249,7 @@ func summarizeView(view policyruntime.EngineResult) map[string]any {
 		"tool_invalid_issues": toolDecision.InvalidIssues,
 		"templates":           templateIDs(view),
 		"arqs":                arqNames(view),
+		"scope":               view.ScopeBoundaryStage,
 	}
 	if view.Bundle != nil {
 		out["bundle_id"] = view.Bundle.ID
@@ -242,6 +264,48 @@ func summarizeView(view policyruntime.EngineResult) map[string]any {
 		out["journey_decision"] = journeyDecision
 	}
 	return out
+}
+
+func latestAssistantText(events []session.Event) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Source != "ai_agent" {
+			continue
+		}
+		for _, part := range events[i].Content {
+			if part.Type == "text" && strings.TrimSpace(part.Text) != "" {
+				return strings.TrimSpace(part.Text)
+			}
+		}
+	}
+	return ""
+}
+
+func qualityScoreDiff(active, shadow quality.Scorecard) map[string]any {
+	return map[string]any{
+		"active_overall":          active.Overall,
+		"shadow_overall":          shadow.Overall,
+		"delta":                   shadow.Overall - active.Overall,
+		"active_hard_failed":      active.HardFailed,
+		"shadow_hard_failed":      shadow.HardFailed,
+		"hard_failure_regression": !active.HardFailed && shadow.HardFailed,
+	}
+}
+
+func qualityScoreFromResult(result map[string]any) float64 {
+	qualityMap, _ := result["quality"].(map[string]any)
+	if shadow, ok := qualityMap["shadow"].(quality.Scorecard); ok {
+		if shadow.HardFailed {
+			return 0
+		}
+		return shadow.Overall
+	}
+	if active, ok := qualityMap["active"].(quality.Scorecard); ok {
+		if active.HardFailed {
+			return 0
+		}
+		return active.Overall
+	}
+	return 1
 }
 
 func observationIDs(items []policy.Observation) []string {

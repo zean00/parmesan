@@ -2,6 +2,7 @@ package replay
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -150,5 +151,17 @@ func TestReplayRunnerUpdatesProposalSummary(t *testing.T) {
 	}
 	if proposal.EvalSummaryJSON == "" || proposal.ReplayScore == 0 {
 		t.Fatalf("proposal = %#v, want populated eval summary and replay score", proposal)
+	}
+	var summary struct {
+		Quality map[string]any `json:"quality"`
+	}
+	if err := json.Unmarshal([]byte(proposal.EvalSummaryJSON), &summary); err != nil {
+		t.Fatalf("decode eval summary: %v", err)
+	}
+	if len(summary.Quality) == 0 {
+		t.Fatalf("eval summary = %s, want quality scorecards", proposal.EvalSummaryJSON)
+	}
+	if proposal.SafetyScore == 0 {
+		t.Fatalf("proposal safety score = %v, want quality-derived score", proposal.SafetyScore)
 	}
 }

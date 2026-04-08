@@ -42,6 +42,7 @@ import (
 	knowledgelearning "github.com/sahal/parmesan/internal/knowledge/learning"
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/policyyaml"
+	"github.com/sahal/parmesan/internal/quality"
 	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
 	"github.com/sahal/parmesan/internal/sessionsvc"
 	"github.com/sahal/parmesan/internal/store"
@@ -257,6 +258,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/executions", s.listExecutions)
 	mux.HandleFunc("GET /v1/executions/{id}", s.getExecution)
 	mux.HandleFunc("GET /v1/executions/{id}/resolved-policy", s.getResolvedPolicy)
+	mux.HandleFunc("GET /v1/executions/{id}/quality", s.getExecutionQuality)
 	mux.HandleFunc("GET /v1/executions/{id}/tool-runs", s.listToolRuns)
 	mux.HandleFunc("GET /v1/executions/{id}/delivery-attempts", s.listDeliveryAttempts)
 	mux.HandleFunc("POST /v1/replays", s.replayExecution)
@@ -494,9 +496,10 @@ func (s *Server) getProposalSummary(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"proposal":  item,
-		"rollouts":  filteredRollouts,
-		"eval_runs": filteredRuns,
+		"proposal":       item,
+		"rollouts":       filteredRollouts,
+		"eval_runs":      filteredRuns,
+		"latest_quality": latestProposalQuality(r.Context(), s.store, proposalID),
 	})
 }
 
@@ -526,6 +529,12 @@ func (s *Server) transitionProposal(w http.ResponseWriter, r *http.Request) {
 		}
 		if blocked, _ := preview["apply_blocked"].(bool); blocked {
 			writeJSON(w, http.StatusUnprocessableEntity, preview)
+			return
+		}
+	}
+	if req.State == rollout.StateShadow || req.State == rollout.StateCanary || req.State == rollout.StateActive {
+		if blocked, payload := s.policyProposalQualityBlocked(r.Context(), item); blocked && !req.ApprovedHighRisk {
+			writeJSON(w, http.StatusUnprocessableEntity, payload)
 			return
 		}
 	}
@@ -1502,6 +1511,15 @@ func (s *Server) operatorCreateFeedback(w http.ResponseWriter, r *http.Request) 
 	record.OperatorID = requestOperatorID(r, record.OperatorID)
 	if record.Metadata == nil {
 		record.Metadata = map[string]any{}
+	}
+	if dimensions := quality.FailureLabelDimensions(record.Labels); len(dimensions) > 0 {
+		var labels []string
+		for label := range dimensions {
+			labels = append(labels, label)
+		}
+		sort.Strings(labels)
+		record.Metadata["quality_failure_labels"] = labels
+		record.Metadata["quality_dimensions"] = dimensions
 	}
 	if strings.TrimSpace(record.ExecutionID) == "" || strings.TrimSpace(record.TraceID) == "" {
 		if exec, ok := s.latestSessionExecution(r.Context(), sessionID); ok {
@@ -3839,6 +3857,20 @@ func (s *Server) getResolvedPolicy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, view)
 }
 
+func (s *Server) getExecutionQuality(w http.ResponseWriter, r *http.Request) {
+	exec, _, err := s.store.GetExecution(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	payload, err := s.executionQualityPayload(r.Context(), exec, "")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
 func (s *Server) listTraces(w http.ResponseWriter, r *http.Request) {
 	records, err := s.store.ListAuditRecords(r.Context())
 	if err != nil {
@@ -4018,7 +4050,72 @@ func (s *Server) policyProposalPreview(ctx context.Context, item rollout.Proposa
 		"apply_blocked":    blocked,
 		"apply_warnings":   warnings,
 		"blocked_reasons":  lintLikeMessages(findings, true),
+		"quality":          latestProposalQuality(ctx, s.store, item.ID),
 	}, nil
+}
+
+func (s *Server) policyProposalQualityBlocked(ctx context.Context, item rollout.Proposal) (bool, map[string]any) {
+	qualityPayload := latestProposalQuality(ctx, s.store, item.ID)
+	if qualityPayload == nil {
+		return false, nil
+	}
+	if blocked, _ := qualityPayload["hard_failed"].(bool); !blocked {
+		return false, nil
+	}
+	return true, map[string]any{
+		"proposal":        item,
+		"quality_blocked": true,
+		"quality":         qualityPayload,
+		"message":         "latest quality eval has hard failures",
+	}
+}
+
+func latestProposalQuality(ctx context.Context, repo store.Repository, proposalID string) map[string]any {
+	runs, err := repo.ListEvalRuns(ctx)
+	if err != nil {
+		return nil
+	}
+	var latest replay.Run
+	var latestCard quality.Scorecard
+	for _, run := range runs {
+		if run.ProposalID != proposalID || run.Status != replay.StatusSucceeded {
+			continue
+		}
+		card, ok := shadowQualityScorecard(run.ResultJSON)
+		if !ok {
+			continue
+		}
+		if latest.ID == "" || run.UpdatedAt.After(latest.UpdatedAt) || (run.UpdatedAt.Equal(latest.UpdatedAt) && run.CreatedAt.After(latest.CreatedAt)) {
+			latest = run
+			latestCard = card
+		}
+	}
+	if latest.ID == "" {
+		return nil
+	}
+	return map[string]any{
+		"eval_run_id":   latest.ID,
+		"type":          latest.Type,
+		"scorecard":     latestCard,
+		"overall":       latestCard.Overall,
+		"hard_failed":   quality.HardFailed(latestCard),
+		"hard_failures": latestCard.HardFailures,
+		"warnings":      latestCard.Warnings,
+	}
+}
+
+func shadowQualityScorecard(resultJSON string) (quality.Scorecard, bool) {
+	var result struct {
+		Quality map[string]quality.Scorecard `json:"quality"`
+	}
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil || len(result.Quality) == 0 {
+		return quality.Scorecard{}, false
+	}
+	card := result.Quality["shadow"]
+	if card.Dimensions == nil {
+		return quality.Scorecard{}, false
+	}
+	return card, true
 }
 
 func (s *Server) proposalBundles(ctx context.Context, item rollout.Proposal) (policy.Bundle, policy.Bundle, error) {
@@ -4184,19 +4281,32 @@ func (s *Server) getReplayDiff(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var result any = map[string]any{}
+	var qualityPayload any
 	if strings.TrimSpace(run.ResultJSON) != "" {
 		if err := json.Unmarshal([]byte(run.ResultJSON), &result); err != nil {
 			result = map[string]any{"raw": run.ResultJSON}
 		}
+		qualityPayload = replayQualityPayload(run.ResultJSON)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":     run.ID,
-		"type":   run.Type,
-		"status": run.Status,
-		"result": result,
-		"diff":   diff,
-		"error":  run.LastError,
+		"id":      run.ID,
+		"type":    run.Type,
+		"status":  run.Status,
+		"result":  result,
+		"diff":    diff,
+		"quality": qualityPayload,
+		"error":   run.LastError,
 	})
+}
+
+func replayQualityPayload(resultJSON string) map[string]quality.Scorecard {
+	var result struct {
+		Quality map[string]quality.Scorecard `json:"quality"`
+	}
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil || len(result.Quality) == 0 {
+		return nil
+	}
+	return result.Quality
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {
@@ -5261,6 +5371,87 @@ func (s *Server) resolveExecutionView(ctx context.Context, exec execution.TurnEx
 		return resolvedPolicyResponse{}, err
 	}
 	return toResolvedPolicyResponse(exec, view), nil
+}
+
+func (s *Server) executionQualityPayload(ctx context.Context, exec execution.TurnExecution, bundleID string) (map[string]any, error) {
+	events, err := s.store.ListEvents(ctx, exec.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	journeyInstances, err := s.store.ListJourneyInstances(ctx, exec.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	catalog, err := s.store.ListCatalogEntries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	bundles, err := s.store.ListBundles(ctx)
+	if err != nil {
+		return nil, err
+	}
+	selected := selectBundles(bundles, bundleID, exec.PolicyBundleID)
+	view, err := policyruntime.ResolveWithRouter(ctx, s.router, eventsForExecutionResolve(events, exec), selected, journeyInstances, catalog)
+	if err != nil {
+		return nil, err
+	}
+	response := assistantTextForExecution(events, exec.ID)
+	if response == "" {
+		response = quality.ResponseFromView(view)
+	}
+	card := quality.GradeWithLLM(ctx, s.router, view, response, nil)
+	return map[string]any{
+		"execution_id": exec.ID,
+		"session_id":   exec.SessionID,
+		"bundle_id":    exec.PolicyBundleID,
+		"response":     response,
+		"plan":         quality.BuildResponsePlan(view),
+		"scorecard":    card,
+		"hard_failed":  quality.HardFailed(card),
+	}, nil
+}
+
+func eventsForExecutionResolve(events []session.Event, exec execution.TurnExecution) []session.Event {
+	if exec.TriggerEventID == "" {
+		return events
+	}
+	var trigger session.Event
+	for _, event := range events {
+		if event.ID == exec.TriggerEventID {
+			trigger = event
+			break
+		}
+	}
+	if trigger.ID == "" {
+		return events
+	}
+	out := make([]session.Event, 0, len(events))
+	for _, event := range events {
+		if event.ID == trigger.ID || event.CreatedAt.Before(trigger.CreatedAt) || event.CreatedAt.Equal(trigger.CreatedAt) {
+			if event.Source != "ai_agent" || event.ID == trigger.ID {
+				out = append(out, event)
+			}
+		}
+	}
+	return out
+}
+
+func assistantTextForExecution(events []session.Event, executionID string) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Source != "ai_agent" || (executionID != "" && events[i].ExecutionID != executionID) {
+			continue
+		}
+		var parts []string
+		for _, part := range events[i].Content {
+			if part.Type == "text" && strings.TrimSpace(part.Text) != "" {
+				parts = append(parts, strings.TrimSpace(part.Text))
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n")
+		}
+	}
+	return ""
 }
 
 func selectBundles(bundles []policy.Bundle, explicitID string, executionBundleID string) []policy.Bundle {
