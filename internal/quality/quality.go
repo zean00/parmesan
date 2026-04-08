@@ -713,6 +713,10 @@ func ProductionReadinessScenarios() []ScenarioExpectation {
 	return mergeScenarioSeeds(builtInProductionReadinessScenarios(), loadScenarioSeedsFromEnv())
 }
 
+func BuiltInProductionReadinessScenarios() []ScenarioExpectation {
+	return builtInProductionReadinessScenarios()
+}
+
 func builtInProductionReadinessScenarios() []ScenarioExpectation {
 	categories := []struct {
 		domain   string
