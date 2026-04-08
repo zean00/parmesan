@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -581,6 +582,9 @@ func TestOperatorFeedbackQualityLabelsRouteToProposals(t *testing.T) {
 	fixture, ok := item.Metadata["regression_fixture_candidate"].(map[string]any)
 	if !ok || fixture["input"] != "How do I cook pasta?" || fixture["review_status"] != "candidate" {
 		t.Fatalf("metadata = %#v, want regression fixture candidate", item.Metadata)
+	}
+	if fixture["scenario_id"] != "operator_feedback_answered_out_of_scope" || !strings.Contains(fmt.Sprint(fixture["expected_behavior"]), "out-of-scope") {
+		t.Fatalf("fixture = %#v, want scenario id and expected behavior", fixture)
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_quality_feedback/feedback", strings.NewReader(`{

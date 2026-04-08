@@ -1581,8 +1581,14 @@ func qualityRegressionFixtureCandidate(record feedback.Record, sess session.Sess
 		}
 	}
 	dimensions, _ := record.Metadata["quality_dimensions"].(map[string]string)
+	labels, _ := record.Metadata["quality_failure_labels"].([]string)
+	scenarioID := "operator_feedback_" + sanitizeQualityFixtureID(record.ID)
+	if len(labels) > 0 {
+		scenarioID = "operator_feedback_" + sanitizeQualityFixtureID(labels[0])
+	}
 	return map[string]any{
 		"source":             "operator_feedback",
+		"scenario_id":        scenarioID,
 		"feedback_id":        record.ID,
 		"session_id":         record.SessionID,
 		"execution_id":       record.ExecutionID,
@@ -1591,9 +1597,47 @@ func qualityRegressionFixtureCandidate(record feedback.Record, sess session.Sess
 		"customer_id":        sess.CustomerID,
 		"labels":             record.Metadata["quality_failure_labels"],
 		"quality_dimensions": dimensions,
+		"expected_behavior":  qualityFixtureExpectedBehavior(dimensions),
 		"input":              latestCustomer,
 		"review_status":      "candidate",
 	}
+}
+
+func qualityFixtureExpectedBehavior(dimensions map[string]string) string {
+	switch {
+	case containsQualityDimension(dimensions, "topic_scope_compliance"):
+		return "The agent should refuse or redirect instead of answering an out-of-scope request."
+	case containsQualityDimension(dimensions, "knowledge_grounding"):
+		return "The agent should answer only with claims supported by retrieved knowledge, policy, preferences, or tool evidence."
+	case containsQualityDimension(dimensions, "customer_preference"):
+		return "The agent should respect active customer preferences unless current-turn instructions or hard policy override them."
+	case containsQualityDimension(dimensions, "multilingual_quality"):
+		return "The agent should follow the customer's active language preference or the current-turn language instruction."
+	case containsQualityDimension(dimensions, "tone_persona"):
+		return "The agent should follow the active SOUL tone and persona constraints."
+	case containsQualityDimension(dimensions, "refusal_escalation_quality"):
+		return "The agent should refuse or escalate with the configured safe next step."
+	default:
+		return "The agent should satisfy the mapped response-quality dimensions."
+	}
+}
+
+func containsQualityDimension(dimensions map[string]string, target string) bool {
+	for _, dimension := range dimensions {
+		if dimension == target {
+			return true
+		}
+	}
+	return false
+}
+
+func sanitizeQualityFixtureID(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.NewReplacer(" ", "_", "/", "_", "\\", "_", ":", "_", ",", "").Replace(value)
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }
 
 func sessionEventText(event session.Event) string {

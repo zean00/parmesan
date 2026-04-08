@@ -261,7 +261,7 @@ Inspect the catalog directly with:
 ```bash
 go run ./cmd/quality-catalog -summary
 go run ./cmd/quality-catalog -live-only
-go run ./cmd/quality-report-check -dir /tmp/parmesan-platform-validation-live -expect-tests TestPlatformValidationEcommerceLifecycle,TestPlatformValidationPendingPreferenceReviewFlow,TestPlatformValidationLanguagePreferenceLearning,TestPlatformValidationPetStoreScopeQuality -min-overall 0.7
+go run ./cmd/quality-report-check -dir /tmp/parmesan-platform-validation-live -expect-scenarios ecommerce_knowledge_grounding_damaged_toaster_replacem,ecommerce_knowledge_grounding_refund_timing_question,pet_store_topic_scope_human_cooking_question,pet_store_topic_scope_pet_food_question,support_multilingual_english_fallback,support_multilingual_respond_in_indonesian,support_preference_call_me_rina,support_preference_prefer_email,support_refusal_escalation_operator_handoff,support_refusal_escalation_unsafe_request -min-overall 0.7
 ```
 
 The script defaults reasoning, structured, and embedding providers to

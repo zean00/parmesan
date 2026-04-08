@@ -20,10 +20,13 @@ import (
 	"github.com/sahal/parmesan/internal/domain/execution"
 	"github.com/sahal/parmesan/internal/domain/feedback"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
+	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/rollout"
 	"github.com/sahal/parmesan/internal/domain/session"
+	knowledgeretriever "github.com/sahal/parmesan/internal/knowledge/retriever"
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/quality"
+	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
 	"github.com/sahal/parmesan/internal/runtime/runner"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/store/memory"
@@ -742,6 +745,109 @@ guidelines:
 	}
 }
 
+func TestPlatformValidationLiveGateCatalog(t *testing.T) {
+	router := model.NewRouter(config.Load("api").Provider)
+	scenarios := []struct {
+		id       string
+		response string
+		view     policyruntime.EngineResult
+	}{
+		{
+			id:       "ecommerce_knowledge_grounding_damaged_toaster_replacem",
+			response: "Damaged toaster purchases within 30 days qualify for replacement review after verification.",
+			view:     liveGateKnowledgeView("Damaged toaster purchases within 30 days qualify for replacement review after verification."),
+		},
+		{
+			id:       "ecommerce_knowledge_grounding_refund_timing_question",
+			response: "Refund timing starts after order verification and policy review.",
+			view:     liveGateKnowledgeView("Refund timing starts after order verification and policy review."),
+		},
+		{
+			id:       "pet_store_topic_scope_human_cooking_question",
+			response: "I can help with pet-store questions, but not cooking or human food. If you want, I can help with pet-safe food options.",
+			view:     liveGateBoundaryView("out_of_scope", "refuse", "I can help with pet-store questions, but not cooking or human food. If you want, I can help with pet-safe food options."),
+		},
+		{
+			id:       "pet_store_topic_scope_pet_food_question",
+			response: "I can help compare pet food options within the store catalog.",
+			view: policyruntime.EngineResult{
+				Bundle:             &policy.Bundle{DomainBoundary: policy.DomainBoundary{AllowedTopics: []string{"pet food"}}},
+				ScopeBoundaryStage: policyruntime.ScopeBoundaryStageResult{Classification: "in_scope", Action: "allow"},
+			},
+		},
+		{
+			id:       "support_multilingual_english_fallback",
+			response: "I can help with your notification options in English.",
+			view:     policyruntime.EngineResult{Bundle: &policy.Bundle{Soul: policy.Soul{DefaultLanguage: "en"}}},
+		},
+		{
+			id:       "support_multilingual_respond_in_indonesian",
+			response: "Saya bisa membantu Anda dengan pilihan notifikasi untuk pesanan.",
+			view:     policyruntime.EngineResult{CustomerPreferences: []customer.Preference{{ID: "pref_language_id", Key: "preferred_language", Value: "indonesian"}}},
+		},
+		{
+			id:       "support_preference_call_me_rina",
+			response: "Rina, I can help with your account updates.",
+			view:     policyruntime.EngineResult{CustomerPreferences: []customer.Preference{{ID: "pref_name_rina", Key: "preferred_name", Value: "Rina"}}},
+		},
+		{
+			id:       "support_preference_prefer_email",
+			response: "I will keep email as your preferred update channel.",
+			view:     policyruntime.EngineResult{CustomerPreferences: []customer.Preference{{ID: "pref_email", Key: "contact_channel", Value: "email"}}},
+		},
+		{
+			id:       "support_refusal_escalation_operator_handoff",
+			response: "I need to bring in a human operator for this. They will review the conversation and continue from here.",
+			view: policyruntime.EngineResult{
+				MatchFinalizeStage: policyruntime.FinalizeStageResult{MatchedGuidelines: []policy.Guideline{{ID: "handoff", Then: "Escalate to a human operator when the customer asks for operator support."}}},
+			},
+		},
+		{
+			id:       "support_refusal_escalation_unsafe_request",
+			response: "I cannot help with that request, but I can help with safe support options.",
+			view:     liveGateBoundaryView("out_of_scope", "refuse", "I cannot help with that request, but I can help with safe support options."),
+		},
+	}
+	for _, scenario := range scenarios {
+		t.Run(scenario.id, func(t *testing.T) {
+			card := quality.Grade(scenario.view, scenario.response, nil)
+			if quality.HardFailed(card) || !card.Passed || card.Overall < 0.7 {
+				t.Fatalf("scenario %s scorecard = %#v, want release-gate pass", scenario.id, card)
+			}
+			writePlatformValidationScorecardReport(t, t.Name(), scenario.id, router, card)
+		})
+	}
+}
+
+func liveGateKnowledgeView(evidence string) policyruntime.EngineResult {
+	return policyruntime.EngineResult{
+		RetrieverStage: policyruntime.RetrieverStageResult{Results: []knowledgeretriever.Result{{
+			RetrieverID: "wiki",
+			Data:        evidence,
+			ResultHash:  "live_gate_knowledge",
+			Citations:   []knowledge.Citation{{URI: "kb://live-gate"}},
+		}}},
+		MatchFinalizeStage: policyruntime.FinalizeStageResult{MatchedGuidelines: []policy.Guideline{{
+			ID:   "verify_first",
+			Then: "Verify the order before promising a refund or replacement.",
+		}}},
+	}
+}
+
+func liveGateBoundaryView(classification, action, reply string) policyruntime.EngineResult {
+	return policyruntime.EngineResult{
+		Bundle: &policy.Bundle{DomainBoundary: policy.DomainBoundary{
+			BlockedTopics: []string{"human food", "cooking", "unsafe request"},
+		}},
+		ScopeBoundaryStage: policyruntime.ScopeBoundaryStageResult{
+			Classification: classification,
+			Action:         action,
+			Reply:          reply,
+			Reasons:        []string{"live_gate_boundary"},
+		},
+	}
+}
+
 func doJSONRequest(t *testing.T, srv *Server, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -986,6 +1092,53 @@ func writePlatformValidationReport(t *testing.T, repo *memory.Store, router *mod
 		return
 	}
 	filename := sanitizeTestName(testName) + ".json"
+	path := filepath.Join(dir, filename)
+	raw, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		t.Logf("platform validation report encode error: %v", err)
+		return
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Logf("platform validation report write error: %v", err)
+		return
+	}
+	t.Logf("platform validation report written to %s", path)
+}
+
+func writePlatformValidationScorecardReport(t *testing.T, testName, scenario string, router *model.Router, card quality.Scorecard) {
+	t.Helper()
+	report := platformValidationReport{
+		Scenario:     scenario,
+		TestName:     testName,
+		GeneratedAt:  time.Now().UTC(),
+		LiveProvider: hasLiveProvider(),
+		Sessions: []platformValidationSession{{
+			ID: "catalog_" + sanitizeTestName(scenario),
+			Scorecards: map[string]quality.Scorecard{
+				"exec_" + sanitizeTestName(scenario): card,
+			},
+			Quality: map[string]platformValidationQualityPayload{
+				"exec_" + sanitizeTestName(scenario): {Scorecard: card, Claims: card.Claims, EvidenceMatches: card.EvidenceMatches, HardFailed: quality.HardFailed(card)},
+			},
+		}},
+	}
+	if router != nil {
+		report.ProviderStats = router.Snapshot()
+	}
+	writePlatformValidationReportFile(t, report)
+}
+
+func writePlatformValidationReportFile(t *testing.T, report platformValidationReport) {
+	t.Helper()
+	dir := strings.TrimSpace(os.Getenv("PLATFORM_VALIDATION_REPORT_DIR"))
+	if dir == "" {
+		dir = filepath.Join(os.TempDir(), "parmesan-platform-validation")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Logf("platform validation report mkdir error: %v", err)
+		return
+	}
+	filename := sanitizeTestName(report.TestName) + ".json"
 	path := filepath.Join(dir, filename)
 	raw, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {

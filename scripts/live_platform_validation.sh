@@ -6,7 +6,7 @@ cd "$ROOT"
 
 REPORT_DIR="${PLATFORM_VALIDATION_REPORT_DIR:-/tmp/parmesan-platform-validation-live}"
 PROVIDER="${DEFAULT_REASONING_PROVIDER:-openrouter}"
-EXPECTED_TESTS="TestPlatformValidationEcommerceLifecycle,TestPlatformValidationPendingPreferenceReviewFlow,TestPlatformValidationLanguagePreferenceLearning,TestPlatformValidationPetStoreScopeQuality"
+EXPECTED_SCENARIOS="ecommerce_knowledge_grounding_damaged_toaster_replacem,ecommerce_knowledge_grounding_refund_timing_question,pet_store_topic_scope_human_cooking_question,pet_store_topic_scope_pet_food_question,support_multilingual_english_fallback,support_multilingual_respond_in_indonesian,support_preference_call_me_rina,support_preference_prefer_email,support_refusal_escalation_operator_handoff,support_refusal_escalation_unsafe_request"
 
 if [[ "$PROVIDER" == "openrouter" && -z "${OPENROUTER_API_KEY:-}" ]]; then
   echo "OPENROUTER_API_KEY is required for OpenRouter live validation." >&2
@@ -35,11 +35,11 @@ go run ./cmd/quality-catalog -summary -live-only
 
 echo
 echo "[3/3] Live platform validation using $DEFAULT_REASONING_PROVIDER"
-go test -count=1 ./internal/api/http -run 'TestPlatformValidation(EcommerceLifecycle|PendingPreferenceReviewFlow|LanguagePreferenceLearning|PetStoreScopeQuality)$' -v
+go test -count=1 ./internal/api/http -run 'TestPlatformValidation(EcommerceLifecycle|PendingPreferenceReviewFlow|LanguagePreferenceLearning|PetStoreScopeQuality|LiveGateCatalog)$' -v
 
 echo
 echo "Quality gate check"
-go run ./cmd/quality-report-check -dir "$REPORT_DIR" -expect-tests "$EXPECTED_TESTS"
+go run ./cmd/quality-report-check -dir "$REPORT_DIR" -expect-scenarios "$EXPECTED_SCENARIOS"
 
 echo
 echo "Scorecard summary from $REPORT_DIR"

@@ -13,6 +13,7 @@ import (
 
 type report struct {
 	TestName string          `json:"test_name"`
+	Scenario string          `json:"scenario"`
 	Sessions []reportSession `json:"sessions"`
 }
 
@@ -31,20 +32,32 @@ type reportScorecard struct {
 func main() {
 	var dir string
 	var expectedTests string
+	var expectedScenarios string
 	var minOverall float64
 	flag.StringVar(&dir, "dir", "/tmp/parmesan-platform-validation-live", "platform-validation report directory")
 	flag.StringVar(&expectedTests, "expect-tests", "", "comma-separated list of expected test names")
+	flag.StringVar(&expectedScenarios, "expect-scenarios", "", "comma-separated list of expected scenario ids")
 	flag.Float64Var(&minOverall, "min-overall", 0.7, "minimum allowed response-quality overall score")
 	flag.Parse()
 
-	checked, err := checkReports(dir, splitCSV(expectedTests), minOverall)
+	checked, err := checkReports(dir, reportExpectations{
+		TestNames:  splitCSV(expectedTests),
+		Scenarios:  splitCSV(expectedScenarios),
+		MinOverall: minOverall,
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("checked %d platform-validation scorecards in %s\n", checked, dir)
 }
 
-func checkReports(dir string, expectedTests []string, minOverall float64) (int, error) {
+type reportExpectations struct {
+	TestNames  []string
+	Scenarios  []string
+	MinOverall float64
+}
+
+func checkReports(dir string, expectations reportExpectations) (int, error) {
 	paths, err := filepath.Glob(filepath.Join(dir, "TestPlatformValidation*.json"))
 	if err != nil {
 		return 0, err
@@ -55,6 +68,7 @@ func checkReports(dir string, expectedTests []string, minOverall float64) (int, 
 	checked := 0
 	var failures []error
 	seenTests := map[string]struct{}{}
+	seenScenarios := map[string]struct{}{}
 	for _, path := range paths {
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -67,21 +81,27 @@ func checkReports(dir string, expectedTests []string, minOverall float64) (int, 
 			continue
 		}
 		seenTests[item.TestName] = struct{}{}
+		seenScenarios[item.Scenario] = struct{}{}
 		for _, session := range item.Sessions {
 			for executionID, scorecard := range session.Scorecards {
 				checked++
 				if scorecard.HardFailed || !scorecard.Passed {
 					failures = append(failures, fmt.Errorf("%s session=%s execution=%s failed quality gate hard_failed=%t passed=%t failures=%v", item.TestName, session.ID, executionID, scorecard.HardFailed, scorecard.Passed, scorecard.HardFailures))
 				}
-				if scorecard.Overall < minOverall {
-					failures = append(failures, fmt.Errorf("%s session=%s execution=%s overall score %.2f below minimum %.2f", item.TestName, session.ID, executionID, scorecard.Overall, minOverall))
+				if scorecard.Overall < expectations.MinOverall {
+					failures = append(failures, fmt.Errorf("%s session=%s execution=%s overall score %.2f below minimum %.2f", item.TestName, session.ID, executionID, scorecard.Overall, expectations.MinOverall))
 				}
 			}
 		}
 	}
-	for _, testName := range expectedTests {
+	for _, testName := range expectations.TestNames {
 		if _, ok := seenTests[testName]; !ok {
 			failures = append(failures, fmt.Errorf("missing expected platform-validation report for %s", testName))
+		}
+	}
+	for _, scenario := range expectations.Scenarios {
+		if _, ok := seenScenarios[scenario]; !ok {
+			failures = append(failures, fmt.Errorf("missing expected platform-validation report for scenario %s", scenario))
 		}
 	}
 	if checked == 0 {
