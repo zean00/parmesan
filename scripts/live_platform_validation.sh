@@ -74,7 +74,9 @@ go run ./cmd/quality-release-trend -dir "$HISTORY_DIR"
 
 echo
 echo "Scorecard summary from $REPORT_DIR"
-if command -v jq >/dev/null 2>&1; then
+if [[ "${QUALITY_SKIP_SCORECARD_SUMMARY:-}" == "1" ]]; then
+  echo "summary skipped because QUALITY_SKIP_SCORECARD_SUMMARY=1"
+elif command -v jq >/dev/null 2>&1; then
   for report in "$REPORT_DIR"/TestPlatformValidation*.json; do
     [[ -e "$report" ]] || continue
     echo "== $report =="
