@@ -246,11 +246,13 @@ func HardFailed(card Scorecard) bool {
 }
 
 func policyFindings(view policyruntime.EngineResult, response string, toolOutput map[string]any) []Finding {
+	var findings []Finding
 	verification := policyruntime.VerifyDraft(view, response, toolOutput)
 	if (verification.Status == "revise" || verification.Status == "block") && strings.TrimSpace(verification.Replacement) != "" && normalize(response) != normalize(verification.Replacement) {
-		return []Finding{{Kind: "draft_verification_failed", Severity: "hard", Message: "Response did not satisfy deterministic policy verification.", EvidenceRef: verification.Reasons}}
+		findings = append(findings, Finding{Kind: "draft_verification_failed", Severity: "hard", Message: "Response did not satisfy deterministic policy verification.", EvidenceRef: verification.Reasons})
 	}
-	return nil
+	findings = append(findings, prematureCommitmentFindings(view, response)...)
+	return findings
 }
 
 func scopeFindings(view policyruntime.EngineResult, response string) []Finding {
@@ -304,6 +306,15 @@ func groundingFindings(view policyruntime.EngineResult, response string) []Findi
 	}
 	if len(view.RetrieverStage.Results) > 0 && strings.Contains(lower, "according to") && !responseMentionsCitation(view, response) {
 		findings = append(findings, Finding{Kind: "missing_citation_reference", Severity: "medium", Message: "Response uses retrieved-knowledge framing without referencing an available citation."})
+	}
+	if !shouldUseBoundaryReply(view.ScopeBoundaryStage) {
+		for _, forbidden := range BuildResponsePlan(view).ForbiddenClaims {
+			forbidden = strings.TrimSpace(forbidden)
+			if forbidden != "" && strings.Contains(lower, strings.ToLower(forbidden)) {
+				findings = append(findings, Finding{Kind: "forbidden_claim_answered", Severity: "hard", Message: "Response appears to include a forbidden or blocked claim.", EvidenceRef: []string{forbidden}})
+				break
+			}
+		}
 	}
 	return findings
 }
@@ -371,6 +382,25 @@ func hallucinationFindings(view policyruntime.EngineResult, response string) []F
 	return nil
 }
 
+func prematureCommitmentFindings(view policyruntime.EngineResult, response string) []Finding {
+	plan := BuildResponsePlan(view)
+	if len(plan.VerificationSteps) == 0 {
+		return nil
+	}
+	if !containsAny(strings.ToLower(response), []string{"refund", "replacement", "eligible", "approval", "approved", "qualify"}) {
+		return nil
+	}
+	if containsAny(strings.ToLower(response), []string{"after verification", "once verified", "after review", "pending review", "after approval", "once approved"}) {
+		return nil
+	}
+	return []Finding{{
+		Kind:        "premature_commitment",
+		Severity:    "hard",
+		Message:     "Response makes a high-risk commitment before the required verification or review step is reflected in the answer.",
+		EvidenceRef: append([]string(nil), plan.VerificationSteps...),
+	}}
+}
+
 func multilingualFindings(view policyruntime.EngineResult, response string) []Finding {
 	if shouldUseBoundaryReply(view.ScopeBoundaryStage) {
 		return nil
@@ -415,6 +445,16 @@ func shouldUseBoundaryReply(boundary policyruntime.ScopeBoundaryStageResult) boo
 	default:
 		return false
 	}
+}
+
+func containsAny(haystack string, needles []string) bool {
+	for _, needle := range needles {
+		needle = strings.TrimSpace(strings.ToLower(needle))
+		if needle != "" && strings.Contains(haystack, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func updateSoftDimension(card *Scorecard, name string, score float64, warnings []string) {

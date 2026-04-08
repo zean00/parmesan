@@ -102,6 +102,43 @@ func TestGradeFlagsUnsupportedSpecificKnowledgeClaim(t *testing.T) {
 	}
 }
 
+func TestGradeFlagsPrematureHighRiskCommitment(t *testing.T) {
+	view := policyruntime.EngineResult{
+		ActiveJourneyState: &policy.JourneyNode{
+			ID:          "verify_state",
+			Instruction: "Verify the order details before offering refund or replacement options.",
+		},
+	}
+
+	card := Grade(view, "You qualify for a replacement right away.", nil)
+	if !HardFailed(card) {
+		t.Fatalf("scorecard = %#v, want hard failure for premature commitment", card)
+	}
+	if got := card.Dimensions["policy_adherence"]; got.Passed {
+		t.Fatalf("policy adherence dimension = %#v, want failed", got)
+	}
+}
+
+func TestGradeAllowsHighRiskCommitmentAfterVerificationLanguage(t *testing.T) {
+	view := policyruntime.EngineResult{
+		ActiveJourneyState: &policy.JourneyNode{
+			ID:          "verify_state",
+			Instruction: "Verify the order details before offering refund or replacement options.",
+		},
+		RetrieverStage: policyruntime.RetrieverStageResult{Results: []knowledgeretriever.Result{{
+			RetrieverID: "wiki",
+			Data:        "Damaged orders can be reviewed for replacement after verification.",
+			ResultHash:  "hash_verify",
+			Citations:   []knowledge.Citation{{URI: "kb://verify"}},
+		}}},
+	}
+
+	card := Grade(view, "Your order can be reviewed for replacement after verification.", nil)
+	if HardFailed(card) {
+		t.Fatalf("scorecard = %#v, want pass", card)
+	}
+}
+
 func TestGradeSupportsSpecificKnowledgeClaimFromRetrievedEvidence(t *testing.T) {
 	view := policyruntime.EngineResult{
 		RetrieverStage: policyruntime.RetrieverStageResult{Results: []knowledgeretriever.Result{{
