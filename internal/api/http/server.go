@@ -213,6 +213,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/operator/feedback/{id}", s.operatorGetFeedback)
 	mux.HandleFunc("GET /v1/operator/quality/regressions", s.operatorListRegressionFixtures)
 	mux.HandleFunc("POST /v1/operator/quality/regressions/{id}/state", s.operatorTransitionRegressionFixture)
+	mux.HandleFunc("GET /v1/operator/quality/regressions/export", s.operatorExportRegressionFixtures)
 	mux.HandleFunc("POST /v1/operator/operators", s.operatorCreateOperator)
 	mux.HandleFunc("GET /v1/operator/operators", s.operatorListOperators)
 	mux.HandleFunc("GET /v1/operator/operators/{id}", s.operatorGetOperator)
@@ -1698,6 +1699,24 @@ type regressionFixtureView struct {
 	UpdatedAt         time.Time      `json:"updated_at"`
 }
 
+type regressionFixtureExport struct {
+	ID                string         `json:"id"`
+	Source            string         `json:"source"`
+	FeedbackID        string         `json:"feedback_id"`
+	SessionID         string         `json:"session_id"`
+	ExecutionID       string         `json:"execution_id,omitempty"`
+	TraceID           string         `json:"trace_id,omitempty"`
+	Input             string         `json:"input"`
+	ExpectedQuality   []string       `json:"expected_quality,omitempty"`
+	Risk              string         `json:"risk,omitempty"`
+	ExpectedBehavior  string         `json:"expected_behavior,omitempty"`
+	Labels            []string       `json:"labels,omitempty"`
+	QualityDimensions map[string]any `json:"quality_dimensions,omitempty"`
+	ReviewStatus      string         `json:"review_status"`
+	ReviewedBy        string         `json:"reviewed_by,omitempty"`
+	ReviewedAt        string         `json:"reviewed_at,omitempty"`
+}
+
 func (s *Server) operatorListRegressionFixtures(w http.ResponseWriter, r *http.Request) {
 	limit, err := positiveQueryInt(r.URL.Query().Get("limit"), "limit")
 	if err != nil {
@@ -1724,6 +1743,36 @@ func (s *Server) operatorListRegressionFixtures(w http.ResponseWriter, r *http.R
 			continue
 		}
 		out = append(out, view)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) operatorExportRegressionFixtures(w http.ResponseWriter, r *http.Request) {
+	limit, err := positiveQueryInt(r.URL.Query().Get("limit"), "limit")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	if status == "" {
+		status = "accepted"
+	}
+	items, err := s.store.ListFeedbackRecords(r.Context(), feedback.Query{
+		SessionID:  strings.TrimSpace(r.URL.Query().Get("session_id")),
+		OperatorID: strings.TrimSpace(r.URL.Query().Get("operator_id")),
+		Limit:      limit,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var out []regressionFixtureExport
+	for _, item := range items {
+		view, ok := regressionFixtureViewFromFeedback(item)
+		if !ok || view.ReviewStatus != status {
+			continue
+		}
+		out = append(out, regressionFixtureExportFromView(view))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -1822,6 +1871,54 @@ func regressionFixtureMetadata(item feedback.Record) (map[string]any, bool) {
 	}
 	fixture, ok := item.Metadata["regression_fixture_candidate"].(map[string]any)
 	return fixture, ok
+}
+
+func regressionFixtureExportFromView(view regressionFixtureView) regressionFixtureExport {
+	expectedQuality := uniqueSortedQualityDimensions(view.QualityDimensions)
+	return regressionFixtureExport{
+		ID:                view.ScenarioID,
+		Source:            "operator_feedback",
+		FeedbackID:        view.FeedbackID,
+		SessionID:         view.SessionID,
+		ExecutionID:       view.ExecutionID,
+		TraceID:           view.TraceID,
+		Input:             view.Input,
+		ExpectedQuality:   expectedQuality,
+		Risk:              regressionFixtureRisk(expectedQuality),
+		ExpectedBehavior:  view.ExpectedBehavior,
+		Labels:            append([]string(nil), view.Labels...),
+		QualityDimensions: view.QualityDimensions,
+		ReviewStatus:      view.ReviewStatus,
+		ReviewedBy:        view.ReviewedBy,
+		ReviewedAt:        view.ReviewedAt,
+	}
+}
+
+func uniqueSortedQualityDimensions(dimensions map[string]any) []string {
+	seen := map[string]struct{}{}
+	for _, value := range dimensions {
+		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+			seen[strings.TrimSpace(text)] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for dimension := range seen {
+		out = append(out, dimension)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func regressionFixtureRisk(expectedQuality []string) string {
+	for _, dimension := range expectedQuality {
+		switch dimension {
+		case "policy_adherence", "topic_scope_compliance", "knowledge_grounding", "refusal_escalation_quality", "hallucination_risk":
+			return "high"
+		case "customer_preference", "multilingual_quality", "journey_adherence":
+			return "medium"
+		}
+	}
+	return "low"
 }
 
 func anyStringSlice(value any) []string {

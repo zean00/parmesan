@@ -272,6 +272,7 @@ Operator quality review:
 
 - `GET /v1/operator/quality/regressions` lists regression fixture candidates derived from labeled feedback.
 - `POST /v1/operator/quality/regressions/{feedback_id}/state` marks a candidate as `candidate`, `accepted`, or `rejected`.
+- `GET /v1/operator/quality/regressions/export` exports accepted fixtures as scenario-shaped review artifacts with derived `expected_quality` and `risk`.
 
 ## ACP v1 Contract
 

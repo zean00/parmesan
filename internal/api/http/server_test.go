@@ -699,6 +699,76 @@ func TestOperatorRegressionFixturesListAndTransition(t *testing.T) {
 	}
 }
 
+func TestOperatorExportRegressionFixtures(t *testing.T) {
+	repo := memory.New()
+	srv := New(":0", repo, asyncwrite.New(repo, 16), sse.NewBroker(), model.NewRouter(config.Load("api").Provider), nil)
+	now := time.Now().UTC()
+	for _, item := range []feedback.Record{
+		{
+			ID:          "feedback_export_accepted",
+			SessionID:   "sess_export",
+			ExecutionID: "exec_export",
+			TraceID:     "trace_export",
+			Text:        "accepted fixture",
+			Metadata: map[string]any{
+				"regression_fixture_candidate": map[string]any{
+					"scenario_id":        "operator_feedback_answered_out_of_scope",
+					"input":              "How do I cook pasta?",
+					"labels":             []string{"answered_out_of_scope"},
+					"quality_dimensions": map[string]any{"answered_out_of_scope": "topic_scope_compliance", "bad_refusal": "refusal_escalation_quality"},
+					"expected_behavior":  "The agent should refuse or redirect instead of answering an out-of-scope request.",
+					"review_status":      "accepted",
+					"reviewed_by":        "op_reviewer",
+					"reviewed_at":        now.Format(time.RFC3339Nano),
+				},
+			},
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+		{
+			ID:        "feedback_export_candidate",
+			SessionID: "sess_export_2",
+			Text:      "candidate fixture",
+			Metadata: map[string]any{
+				"regression_fixture_candidate": map[string]any{
+					"scenario_id":        "operator_feedback_tone_mismatch",
+					"input":              "That sounded cold.",
+					"quality_dimensions": map[string]any{"tone_mismatch": "tone_persona"},
+					"review_status":      "candidate",
+				},
+			},
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	} {
+		if err := repo.SaveFeedbackRecord(context.Background(), item); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/quality/regressions/export", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("export regressions status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var exported []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &exported); err != nil {
+		t.Fatal(err)
+	}
+	if len(exported) != 1 {
+		t.Fatalf("exported = %#v, want one accepted fixture", exported)
+	}
+	item := exported[0]
+	if item["id"] != "operator_feedback_answered_out_of_scope" || item["risk"] != "high" || item["review_status"] != "accepted" {
+		t.Fatalf("exported item = %#v, want accepted high-risk fixture", item)
+	}
+	expectedQuality, ok := item["expected_quality"].([]any)
+	if !ok || len(expectedQuality) != 2 {
+		t.Fatalf("exported item = %#v, want expected quality dimensions", item)
+	}
+}
+
 func TestRegisterProviderPersistsImmediatelyBeforeAsyncSync(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
