@@ -783,16 +783,75 @@ func buildMatchingContext(events []session.Event) MatchingContext {
 		if ctx.SessionID == "" {
 			ctx.SessionID = event.SessionID
 		}
+		if event.Source == "customer" {
+			applyModerationSignals(&ctx, event)
+		}
 	}
 	segments := append([]string(nil), ctx.CustomerHistory...)
 	segments = append(segments, ctx.AssistantHistory...)
 	segments = append(segments, ctx.StagedToolText...)
+	if ctx.LastMessageCensored {
+		ctx.DerivedSignals = append(ctx.DerivedSignals, "moderation:censored")
+	}
+	if ctx.LastMessageJailbreak {
+		ctx.DerivedSignals = append(ctx.DerivedSignals, "moderation:jailbreak")
+	}
+	for _, category := range ctx.LastMessageModerationCategories {
+		ctx.DerivedSignals = append(ctx.DerivedSignals, "moderation:category:"+strings.ToLower(strings.TrimSpace(category)))
+	}
 	ctx.ConversationText = strings.Join(segments, " ")
 	for id := range applied {
 		ctx.AppliedGuidelines = append(ctx.AppliedGuidelines, id)
 	}
 	sort.Strings(ctx.AppliedGuidelines)
 	return ctx
+}
+
+func applyModerationSignals(ctx *MatchingContext, event session.Event) {
+	if ctx == nil || event.Metadata == nil {
+		return
+	}
+	raw, ok := event.Metadata["moderation"]
+	if !ok {
+		return
+	}
+	meta, ok := raw.(map[string]any)
+	if !ok {
+		return
+	}
+	ctx.LastMessageModerationMode = strings.TrimSpace(fmt.Sprint(meta["mode"]))
+	ctx.LastMessageCensored = boolValue(meta["censored"]) || strings.EqualFold(strings.TrimSpace(fmt.Sprint(meta["decision"])), "censored")
+	ctx.LastMessageJailbreak = boolValue(meta["jailbreak"])
+	ctx.LastMessageModerationCategories = stringSliceValue(meta["categories"])
+}
+
+func boolValue(v any) bool {
+	switch typed := v.(type) {
+	case bool:
+		return typed
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true")
+	default:
+		return false
+	}
+}
+
+func stringSliceValue(v any) []string {
+	switch typed := v.(type) {
+	case []string:
+		return append([]string(nil), typed...)
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text := strings.TrimSpace(fmt.Sprint(item))
+			if text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func stagedToolCallFromEvent(event session.Event) (StagedToolCall, bool) {

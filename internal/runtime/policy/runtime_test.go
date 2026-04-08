@@ -194,6 +194,40 @@ func TestPromptBuildersIncludeShotExamples(t *testing.T) {
 	}
 }
 
+func TestBuildMatchingContextIncludesModerationSignals(t *testing.T) {
+	ctx := buildMatchingContext([]session.Event{{
+		ID:        "evt_1",
+		SessionID: "sess_1",
+		Source:    "customer",
+		Kind:      "message",
+		CreatedAt: time.Now().UTC(),
+		Content:   []session.ContentPart{{Type: "text", Text: "Customer message censored due to unsafe or manipulative content."}},
+		Metadata: map[string]any{
+			"moderation": map[string]any{
+				"mode":       "paranoid",
+				"decision":   "censored",
+				"categories": []any{"prompt_injection", "jailbreak"},
+				"jailbreak":  true,
+			},
+		},
+	}})
+	if !ctx.LastMessageCensored {
+		t.Fatalf("LastMessageCensored = false, want true")
+	}
+	if !ctx.LastMessageJailbreak {
+		t.Fatalf("LastMessageJailbreak = false, want true")
+	}
+	if ctx.LastMessageModerationMode != "paranoid" {
+		t.Fatalf("LastMessageModerationMode = %q, want paranoid", ctx.LastMessageModerationMode)
+	}
+	if !slices.Contains(ctx.DerivedSignals, "moderation:censored") || !slices.Contains(ctx.DerivedSignals, "moderation:jailbreak") {
+		t.Fatalf("DerivedSignals = %#v, want moderation signals", ctx.DerivedSignals)
+	}
+	if !slices.Contains(ctx.DerivedSignals, "moderation:category:prompt_injection") {
+		t.Fatalf("DerivedSignals = %#v, want prompt_injection category signal", ctx.DerivedSignals)
+	}
+}
+
 func TestResolveSuppressesAlreadyAppliedGuidelineWithoutNewTrigger(t *testing.T) {
 	now := time.Now().UTC()
 	view, err := Resolve(

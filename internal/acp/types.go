@@ -50,6 +50,7 @@ type Event struct {
 	SessionID   string                `json:"session_id"`
 	Source      string                `json:"source"`
 	Kind        string                `json:"kind"`
+	Moderation  string                `json:"moderation,omitempty"`
 	Offset      int64                 `json:"offset,omitempty"`
 	TraceID     string                `json:"trace_id,omitempty"`
 	CreatedAt   time.Time             `json:"created_at"`
@@ -61,7 +62,7 @@ type Event struct {
 }
 
 func NormalizeEvent(src session.Event) Event {
-	out := EventFromDomain(src)
+	out := SanitizeEvent(src)
 	switch strings.TrimSpace(out.Kind) {
 	case "approval_result":
 		out.Kind = EventKindApprovalResolved
@@ -85,6 +86,12 @@ func NormalizeEvent(src session.Event) Event {
 			}
 		}
 	}
+	return out
+}
+
+func SanitizeEvent(src session.Event) Event {
+	out := EventFromDomain(src)
+	out.Metadata = sanitizeEventMetadata(out.Metadata)
 	return out
 }
 
@@ -238,4 +245,23 @@ func EventToDomain(src Event) session.Event {
 		Deleted:     src.Deleted,
 		ExecutionID: src.ExecutionID,
 	}
+}
+
+func sanitizeEventMetadata(metadata map[string]any) map[string]any {
+	if len(metadata) == 0 {
+		return metadata
+	}
+	out := map[string]any{}
+	for key, value := range metadata {
+		switch key {
+		case "raw_content", "raw_visibility":
+			continue
+		default:
+			out[key] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

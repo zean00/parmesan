@@ -14,19 +14,23 @@ import (
 )
 
 type MatchingContext struct {
-	SessionID           string
-	LatestCustomerText  string
-	CustomerHistory     []string
-	AssistantHistory    []string
-	StagedToolCalls     []StagedToolCall
-	StagedToolText      []string
-	ConversationText    string
-	AppliedGuidelines   []string
-	AppliedInstructions []string
-	DerivedSignals      []string
-	RetrievedKnowledge  []retrieverdomain.Result
-	OccurredAt          time.Time
-	cache               *matchingEvalCache
+	SessionID                       string
+	LatestCustomerText              string
+	CustomerHistory                 []string
+	AssistantHistory                []string
+	StagedToolCalls                 []StagedToolCall
+	StagedToolText                  []string
+	ConversationText                string
+	AppliedGuidelines               []string
+	AppliedInstructions             []string
+	DerivedSignals                  []string
+	RetrievedKnowledge              []retrieverdomain.Result
+	LastMessageCensored             bool
+	LastMessageJailbreak            bool
+	LastMessageModerationMode       string
+	LastMessageModerationCategories []string
+	OccurredAt                      time.Time
+	cache                           *matchingEvalCache
 }
 
 type StagedToolCall struct {

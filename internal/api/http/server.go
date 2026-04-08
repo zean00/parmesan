@@ -42,6 +42,7 @@ import (
 	knowledgeenrichment "github.com/sahal/parmesan/internal/knowledge/enrichment"
 	knowledgelearning "github.com/sahal/parmesan/internal/knowledge/learning"
 	"github.com/sahal/parmesan/internal/model"
+	"github.com/sahal/parmesan/internal/moderation"
 	"github.com/sahal/parmesan/internal/policyyaml"
 	"github.com/sahal/parmesan/internal/quality"
 	rolloutengine "github.com/sahal/parmesan/internal/rollout"
@@ -60,6 +61,7 @@ type Server struct {
 	router                     *model.Router
 	syncer                     *toolsync.Syncer
 	sessions                   *sessionsvc.Service
+	moderator                  *moderation.Service
 	listener                   *sessionsvc.Listener
 	operatorAPIKey             string
 	trustedOperatorIDHeader    string
@@ -215,6 +217,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 		router:                     router,
 		syncer:                     syncer,
 		sessions:                   sessionsvc.New(repo, writes),
+		moderator:                  moderation.NewService(router, strings.EqualFold(strings.TrimSpace(os.Getenv("MODERATION_LLM_ENABLED")), "true")),
 		listener:                   sessionsvc.NewListener(repo),
 		operatorAPIKey:             strings.TrimSpace(os.Getenv("OPERATOR_API_KEY")),
 		trustedOperatorIDHeader:    strings.TrimSpace(os.Getenv("OPERATOR_TRUSTED_ID_HEADER")),
@@ -1006,10 +1009,11 @@ func (s *Server) cancelResponse(w http.ResponseWriter, r *http.Request) {
 func (s *Server) appendEvent(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
 	var req struct {
-		ID      string                `json:"id"`
-		Source  string                `json:"source"`
-		Kind    string                `json:"kind"`
-		Content []session.ContentPart `json:"content"`
+		ID         string                `json:"id"`
+		Source     string                `json:"source"`
+		Kind       string                `json:"kind"`
+		Content    []session.ContentPart `json:"content"`
+		Moderation string                `json:"moderation"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1026,7 +1030,12 @@ func (s *Server) appendEvent(w http.ResponseWriter, r *http.Request) {
 		req.Kind = "message"
 	}
 
-	event, execID, traceID, err := s.enqueueSessionTurn(r.Context(), sessionID, req.ID, req.Source, req.Kind, req.Content, nil, nil)
+	content, metadata, err := s.prepareModeratedInboundEvent(r.Context(), req.Source, req.Kind, req.Content, nil, req.Moderation)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	event, execID, traceID, err := s.enqueueSessionTurn(r.Context(), sessionID, req.ID, req.Source, req.Kind, content, nil, metadata)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1042,16 +1051,17 @@ func (s *Server) appendEvent(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:   time.Now().UTC(),
 	})
 
-	writeJSON(w, http.StatusCreated, event)
+	writeJSON(w, http.StatusCreated, sanitizeSessionEvent(event))
 }
 
 func (s *Server) acpCreateMessage(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
 	var req struct {
-		ID       string         `json:"id"`
-		Source   string         `json:"source"`
-		Text     string         `json:"text"`
-		Metadata map[string]any `json:"metadata"`
+		ID         string         `json:"id"`
+		Source     string         `json:"source"`
+		Text       string         `json:"text"`
+		Metadata   map[string]any `json:"metadata"`
+		Moderation string         `json:"moderation"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1065,13 +1075,18 @@ func (s *Server) acpCreateMessage(w http.ResponseWriter, r *http.Request) {
 		req.Source = "customer"
 	}
 	content := []session.ContentPart{{Type: "text", Text: req.Text}}
+	content, metadata, err := s.prepareModeratedInboundEvent(r.Context(), req.Source, acp.EventKindMessage, content, req.Metadata, req.Moderation)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	sess, err := s.store.GetSession(r.Context(), sessionID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
 	if sessionMode(sess) == "manual" {
-		metadata := cloneMap(req.Metadata)
+		metadata = cloneMap(metadata)
 		metadata["automation_skipped"] = true
 		metadata["automation_skip_reason"] = "manual_mode"
 		event, err := s.sessions.CreateEvent(r.Context(), sessionsvc.CreateEventParams{
@@ -1091,7 +1106,7 @@ func (s *Server) acpCreateMessage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusCreated, acp.NormalizeEvent(event))
 		return
 	}
-	event, _, _, err := s.enqueueSessionTurn(r.Context(), sessionID, req.ID, req.Source, acp.EventKindMessage, content, nil, req.Metadata)
+	event, _, _, err := s.enqueueSessionTurn(r.Context(), sessionID, req.ID, req.Source, acp.EventKindMessage, content, nil, metadata)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1105,7 +1120,11 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, events)
+	out := make([]session.Event, 0, len(events))
+	for _, event := range events {
+		out = append(out, sanitizeSessionEvent(event))
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
@@ -1212,6 +1231,13 @@ func (s *Server) acpAppendEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	content, metadata, err := s.prepareModeratedInboundEvent(r.Context(), req.Source, req.Kind, req.Content, req.Metadata, req.Moderation)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.Content = content
+	req.Metadata = metadata
 	created, err := service.CreateEvent(r.Context(), req, true)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -5422,11 +5448,11 @@ func (s *Server) createTriggeredResponse(ctx context.Context, sessionID, source,
 		TraceID:     traceID,
 		Message:     "triggered response queued",
 		Fields: map[string]any{
-			"response_id":     record.ID,
-			"trigger_source":  source,
-			"trigger_reason":  reason,
+			"response_id":      record.ID,
+			"trigger_source":   source,
+			"trigger_reason":   reason,
 			"trigger_event_id": event.ID,
-			"dedupe_key":      dedupeKey,
+			"dedupe_key":       dedupeKey,
 		},
 		CreatedAt: time.Now().UTC(),
 	})
@@ -5720,6 +5746,132 @@ func cloneMap(src map[string]any) map[string]any {
 	return out
 }
 
+func mapValue(v any) map[string]any {
+	typed, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return cloneMap(typed)
+}
+
+func sanitizeSessionEvent(item session.Event) session.Event {
+	return acp.EventToDomain(acp.SanitizeEvent(item))
+}
+
+func (s *Server) prepareModeratedInboundEvent(ctx context.Context, source, kind string, content []session.ContentPart, metadata map[string]any, rawMode string) ([]session.ContentPart, map[string]any, error) {
+	mode := moderation.NormalizeMode(rawMode)
+	if rawMode != "" && mode == "" {
+		return nil, nil, fmt.Errorf("invalid moderation mode")
+	}
+	metadata = cloneMap(metadata)
+	if source != "customer" || kind != acp.EventKindMessage {
+		if mode != "" && mode != moderation.ModeOff {
+			metadata["moderation"] = map[string]any{
+				"mode":     string(mode),
+				"decision": string(moderation.DecisionAllowed),
+				"provider": "skipped",
+				"reason":   "non_customer_or_non_message",
+			}
+		}
+		return content, metadata, nil
+	}
+	if mode == "" {
+		mode = moderation.ModeOff
+	}
+	textParts := extractTextParts(content)
+	if strings.TrimSpace(textParts) == "" || mode == moderation.ModeOff {
+		if mode != moderation.ModeOff {
+			metadata["moderation"] = map[string]any{
+				"mode":     string(mode),
+				"decision": string(moderation.DecisionAllowed),
+				"provider": "local",
+			}
+		}
+		return content, metadata, nil
+	}
+	result := s.moderator.Moderate(ctx, mode, textParts)
+	metadata["moderation"] = map[string]any{
+		"mode":       result.Mode,
+		"decision":   result.Decision,
+		"provider":   result.Provider,
+		"reason":     result.Reason,
+		"categories": append([]string(nil), result.Categories...),
+		"jailbreak":  result.Jailbreak,
+		"censored":   result.Censored,
+	}
+	if !result.Censored {
+		return content, metadata, nil
+	}
+	metadata["raw_content"] = textParts
+	metadata["raw_visibility"] = "operator_only"
+	return censorContentParts(content, result.Placeholder), metadata, nil
+}
+
+func extractTextParts(content []session.ContentPart) string {
+	parts := make([]string, 0, len(content))
+	for _, part := range content {
+		if part.Type != "text" || strings.TrimSpace(part.Text) == "" {
+			continue
+		}
+		parts = append(parts, strings.TrimSpace(part.Text))
+	}
+	return strings.Join(parts, "\n")
+}
+
+func censorContentParts(content []session.ContentPart, replacement string) []session.ContentPart {
+	if replacement == "" {
+		replacement = moderation.PlaceholderText
+	}
+	out := make([]session.ContentPart, 0, len(content))
+	inserted := false
+	for _, part := range content {
+		if part.Type == "text" {
+			if inserted {
+				continue
+			}
+			part.Text = replacement
+			out = append(out, part)
+			inserted = true
+			continue
+		}
+		out = append(out, part)
+	}
+	if !inserted {
+		out = append(out, session.ContentPart{Type: "text", Text: replacement})
+	}
+	return out
+}
+
+func (s *Server) executionModerationPayload(ctx context.Context, exec execution.TurnExecution) (map[string]any, error) {
+	events, err := s.store.ListEvents(ctx, exec.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	triggerIDs := map[string]struct{}{}
+	for _, id := range exec.TriggerEventIDs {
+		if strings.TrimSpace(id) != "" {
+			triggerIDs[id] = struct{}{}
+		}
+	}
+	if exec.TriggerEventID != "" {
+		triggerIDs[exec.TriggerEventID] = struct{}{}
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		event := events[i]
+		if len(triggerIDs) > 0 {
+			if _, ok := triggerIDs[event.ID]; !ok {
+				continue
+			}
+		}
+		moderationMap := mapValue(event.Metadata["moderation"])
+		if len(moderationMap) == 0 {
+			continue
+		}
+		return moderationMap, nil
+	}
+	return nil, nil
+}
+
 func stableServerID(prefix string, parts ...string) string {
 	sum := sha1.Sum([]byte(strings.Join(parts, "\x00")))
 	return prefix + "_" + hex.EncodeToString(sum[:8])
@@ -5864,11 +6016,12 @@ func (s *Server) flushPersistedStream(ctx context.Context, w http.ResponseWriter
 		if _, ok := seen[event.ID]; ok {
 			continue
 		}
+		safeEvent := sanitizeSessionEvent(event)
 		items = append(items, streamItem{
 			id:   event.ID,
 			name: "session.event.created",
 			when: event.CreatedAt,
-			body: event,
+			body: safeEvent,
 		})
 		if event.Offset > lastOffset {
 			lastOffset = event.Offset
@@ -6510,6 +6663,7 @@ func (s *Server) executionExplainPayload(ctx context.Context, exec execution.Tur
 			"spans_by_itr": grouped,
 		}
 	}
+	moderationPayload, _ := s.executionModerationPayload(ctx, exec)
 	return map[string]any{
 		"execution_id":   exec.ID,
 		"session_id":     exec.SessionID,
@@ -6519,6 +6673,7 @@ func (s *Server) executionExplainPayload(ctx context.Context, exec execution.Tur
 		"response_state": responsePayload,
 		"resolved":       view,
 		"quality":        qualityPayload,
+		"moderation":     moderationPayload,
 	}, nil
 }
 
@@ -6536,12 +6691,14 @@ func (s *Server) responseExplainPayload(ctx context.Context, record responsedoma
 	if err != nil {
 		return nil, err
 	}
+	moderationPayload, _ := s.executionModerationPayload(ctx, exec)
 	return map[string]any{
 		"response":     responseViewFromDomain(record, spans),
 		"trigger":      responseTriggerViewFromDomain(record),
 		"spans_by_itr": groupTraceSpansByIteration(spans),
 		"resolved":     view,
 		"quality":      qualityPayload,
+		"moderation":   moderationPayload,
 	}, nil
 }
 
