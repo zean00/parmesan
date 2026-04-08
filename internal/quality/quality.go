@@ -25,12 +25,14 @@ type DimensionScore struct {
 }
 
 type Scorecard struct {
-	Overall      float64                   `json:"overall"`
-	Passed       bool                      `json:"passed"`
-	HardFailed   bool                      `json:"hard_failed"`
-	Dimensions   map[string]DimensionScore `json:"dimensions,omitempty"`
-	HardFailures []Finding                 `json:"hard_failures,omitempty"`
-	Warnings     []Finding                 `json:"warnings,omitempty"`
+	Overall         float64                   `json:"overall"`
+	Passed          bool                      `json:"passed"`
+	HardFailed      bool                      `json:"hard_failed"`
+	Dimensions      map[string]DimensionScore `json:"dimensions,omitempty"`
+	HardFailures    []Finding                 `json:"hard_failures,omitempty"`
+	Warnings        []Finding                 `json:"warnings,omitempty"`
+	Claims          []ResponseClaim           `json:"claims,omitempty"`
+	EvidenceMatches []EvidenceMatch           `json:"evidence_matches,omitempty"`
 }
 
 type ResponsePlan struct {
@@ -47,14 +49,42 @@ type ResponsePlan struct {
 	Citations           []string `json:"citations,omitempty"`
 }
 
+type ResponseClaim struct {
+	ID         string   `json:"id"`
+	Text       string   `json:"text"`
+	Risk       string   `json:"risk"`
+	Indicators []string `json:"indicators,omitempty"`
+}
+
+type EvidenceMatch struct {
+	Claim        ResponseClaim `json:"claim"`
+	Supported    bool          `json:"supported"`
+	Source       string        `json:"source,omitempty"`
+	EvidenceRefs []string      `json:"evidence_refs,omitempty"`
+	Severity     string        `json:"severity,omitempty"`
+}
+
+type ScenarioExpectation struct {
+	ID              string   `json:"id"`
+	Domain          string   `json:"domain"`
+	Category        string   `json:"category"`
+	Input           string   `json:"input"`
+	ExpectedQuality []string `json:"expected_quality,omitempty"`
+	Risk            string   `json:"risk,omitempty"`
+	LiveGate        bool     `json:"live_gate,omitempty"`
+}
+
 var failureLabelDimensions = map[string]string{
 	"answered_out_of_scope": "topic_scope_compliance",
 	"hallucinated_policy":   "policy_adherence",
+	"unsupported_claim":     "knowledge_grounding",
 	"tone_mismatch":         "tone_persona",
 	"missed_preference":     "customer_preference",
 	"bad_language":          "multilingual_quality",
 	"bad_refusal":           "refusal_escalation_quality",
 	"bad_escalation":        "refusal_escalation_quality",
+	"retrieval_miss":        "knowledge_grounding",
+	"premature_commitment":  "policy_adherence",
 }
 
 func FailureLabelDimensions(labels []string) map[string]string {
@@ -120,6 +150,8 @@ func Grade(view policyruntime.EngineResult, response string, toolOutput map[stri
 		Overall:    1,
 		Dimensions: map[string]DimensionScore{},
 	}
+	card.Claims = ExtractClaims(response)
+	card.EvidenceMatches = MatchClaims(view, card.Claims)
 	addDimension := func(name string, score float64, findings []Finding) {
 		passed := true
 		severity := ""
@@ -240,10 +272,16 @@ func groundingFindings(view policyruntime.EngineResult, response string) []Findi
 	if strings.Contains(lower, "according to") && len(view.RetrieverStage.Results) == 0 {
 		findings = append(findings, Finding{Kind: "unsupported_grounding_phrase", Severity: "medium", Message: "Response uses grounding language without retrieved knowledge."})
 	}
-	for _, phrase := range []string{"within 30 days", "instant replacement", "guarantee", "guaranteed"} {
-		if strings.Contains(lower, phrase) && !containsText(view, phrase) {
-			findings = append(findings, Finding{Kind: "unsupported_specific_claim", Severity: "high", Message: "Response contains a specific claim not supported by retrieved knowledge or matched policy.", EvidenceRef: []string{phrase}})
+	for _, match := range MatchClaims(view, ExtractClaims(response)) {
+		if match.Supported || match.Severity == "" {
+			continue
 		}
+		findings = append(findings, Finding{
+			Kind:        "unsupported_claim",
+			Severity:    match.Severity,
+			Message:     "Response contains a claim not supported by retrieved knowledge, matched policy, preferences, or tool evidence.",
+			EvidenceRef: append([]string{match.Claim.Text}, match.Claim.Indicators...),
+		})
 	}
 	if len(view.RetrieverStage.Results) > 0 && strings.Contains(lower, "according to") && !responseMentionsCitation(view, response) {
 		findings = append(findings, Finding{Kind: "missing_citation_reference", Severity: "medium", Message: "Response uses retrieved-knowledge framing without referencing an available citation."})
@@ -356,6 +394,217 @@ func containsText(view policyruntime.EngineResult, needle string) bool {
 		}
 	}
 	return false
+}
+
+func ExtractClaims(response string) []ResponseClaim {
+	var claims []ResponseClaim
+	seen := map[string]struct{}{}
+	for _, sentence := range splitSentences(response) {
+		claim := claimFromSentence(sentence)
+		if strings.TrimSpace(claim.Text) == "" {
+			continue
+		}
+		key := normalize(claim.Text)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		claim.ID = "claim_" + shortStableID(key)
+		claims = append(claims, claim)
+	}
+	return claims
+}
+
+func MatchClaims(view policyruntime.EngineResult, claims []ResponseClaim) []EvidenceMatch {
+	evidence := evidenceTexts(view)
+	var matches []EvidenceMatch
+	for _, claim := range claims {
+		if claim.Risk == "" {
+			matches = append(matches, EvidenceMatch{Claim: claim, Supported: true, Source: "low_risk"})
+			continue
+		}
+		match := EvidenceMatch{Claim: claim, Severity: claim.Risk}
+		for _, item := range evidence {
+			if evidenceSupportsClaim(item.text, claim) {
+				match.Supported = true
+				match.Source = item.source
+				match.EvidenceRefs = append(match.EvidenceRefs, item.ref)
+				match.Severity = ""
+				break
+			}
+		}
+		matches = append(matches, match)
+	}
+	return matches
+}
+
+func splitSentences(response string) []string {
+	return strings.FieldsFunc(response, func(r rune) bool {
+		return r == '.' || r == '!' || r == '?' || r == '\n'
+	})
+}
+
+func claimFromSentence(sentence string) ResponseClaim {
+	text := strings.TrimSpace(sentence)
+	lower := strings.ToLower(text)
+	var indicators []string
+	risk := ""
+	for _, phrase := range highRiskClaimIndicators() {
+		if strings.Contains(lower, phrase) {
+			indicators = append(indicators, phrase)
+			risk = "high"
+		}
+	}
+	if risk == "" && containsNumericSpecificity(lower) {
+		risk = "medium"
+	}
+	return ResponseClaim{Text: text, Risk: risk, Indicators: indicators}
+}
+
+func highRiskClaimIndicators() []string {
+	return []string{
+		"within 30 days",
+		"instant replacement",
+		"guarantee",
+		"guaranteed",
+		"refund",
+		"replacement",
+		"approved",
+		"eligible",
+		"qualify",
+		"qualifies",
+	}
+}
+
+func containsNumericSpecificity(value string) bool {
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			return true
+		}
+	}
+	return strings.Contains(value, "day") || strings.Contains(value, "hour") || strings.Contains(value, "percent")
+}
+
+type evidenceText struct {
+	source string
+	ref    string
+	text   string
+}
+
+func evidenceTexts(view policyruntime.EngineResult) []evidenceText {
+	var out []evidenceText
+	for _, result := range view.RetrieverStage.Results {
+		if strings.TrimSpace(result.Data) != "" {
+			ref := result.ResultHash
+			if ref == "" {
+				ref = result.RetrieverID
+			}
+			out = append(out, evidenceText{source: "retrieved_knowledge", ref: ref, text: result.Data})
+		}
+	}
+	for _, guideline := range view.MatchFinalizeStage.MatchedGuidelines {
+		if strings.TrimSpace(guideline.Then) != "" {
+			out = append(out, evidenceText{source: "matched_guideline", ref: guideline.ID, text: guideline.Then})
+		}
+	}
+	if view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
+		out = append(out, evidenceText{source: "journey_state", ref: view.ActiveJourneyState.ID, text: view.ActiveJourneyState.Instruction})
+	}
+	for _, pref := range view.CustomerPreferences {
+		if strings.TrimSpace(pref.Key) != "" || strings.TrimSpace(pref.Value) != "" {
+			out = append(out, evidenceText{source: "customer_preference", ref: pref.ID, text: pref.Key + ": " + pref.Value})
+		}
+	}
+	return out
+}
+
+func evidenceSupportsClaim(evidence string, claim ResponseClaim) bool {
+	evidence = strings.ToLower(evidence)
+	claimText := strings.ToLower(claim.Text)
+	if strings.Contains(evidence, claimText) {
+		return true
+	}
+	matched := 0
+	for _, indicator := range claim.Indicators {
+		if strings.Contains(evidence, indicator) {
+			matched++
+		}
+	}
+	if len(claim.Indicators) > 0 {
+		return matched == len(claim.Indicators)
+	}
+	tokens := tokenSet(claimText)
+	if len(tokens) == 0 {
+		return true
+	}
+	hits := 0
+	for token := range tokens {
+		if strings.Contains(evidence, token) {
+			hits++
+		}
+	}
+	return hits >= 4 && hits*2 >= len(tokens)
+}
+
+func tokenSet(text string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, token := range strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	}) {
+		if len(token) > 2 {
+			out[token] = struct{}{}
+		}
+	}
+	return out
+}
+
+func shortStableID(value string) string {
+	value = normalize(value)
+	if len(value) > 24 {
+		value = value[:24]
+	}
+	value = strings.NewReplacer(" ", "_", "/", "_", "\\", "_", ":", "_", ",", "").Replace(value)
+	if value == "" {
+		return "empty"
+	}
+	return value
+}
+
+func ProductionReadinessScenarios() []ScenarioExpectation {
+	categories := []struct {
+		domain   string
+		category string
+		inputs   []string
+		quality  []string
+		risk     string
+		live     bool
+	}{
+		{"ecommerce", "knowledge_grounding", []string{"damaged toaster replacement eligibility", "refund timing question", "warranty article lookup", "shipping notification policy", "missing order number"}, []string{"knowledge_grounding", "policy_adherence"}, "high", true},
+		{"ecommerce", "journey_adherence", []string{"damaged item return", "wrong item received", "late delivery", "cancel order", "exchange request"}, []string{"journey_adherence", "policy_adherence"}, "medium", false},
+		{"pet_store", "topic_scope", []string{"pet food question", "human cooking question", "pet-safe ingredient question", "finance question", "Indonesian cooking request"}, []string{"topic_scope_compliance"}, "high", true},
+		{"support", "preference", []string{"call me Rina", "prefer email", "prefer SMS", "be concise", "use formal tone"}, []string{"customer_preference"}, "medium", true},
+		{"support", "multilingual", []string{"respond in Indonesian", "English fallback", "mixed Indonesian-English request", "language change mid-session", "unsupported language fallback"}, []string{"multilingual_quality"}, "medium", true},
+		{"support", "refusal_escalation", []string{"unsafe request", "operator handoff", "policy missing", "uncertain scope", "blocked topic"}, []string{"refusal_escalation_quality", "topic_scope_compliance"}, "high", true},
+		{"support", "retrieval_quality", []string{"noisy knowledge source", "empty retrieval", "irrelevant retrieval", "citation required", "overstuffed context"}, []string{"knowledge_grounding"}, "high", false},
+		{"support", "tool_and_approval", []string{"approval required", "tool denied", "tool timeout", "manual takeover", "post-approval answer"}, []string{"policy_adherence"}, "high", false},
+		{"support", "soul_persona", []string{"warm concise tone", "avoid over-apology", "brand voice", "handoff style", "tone conflict"}, []string{"tone_persona"}, "low", false},
+		{"support", "failure_modes", []string{"ambiguous input", "provider timeout", "conflicting preference", "missing required info", "learning regression"}, []string{"policy_adherence", "hallucination_risk"}, "high", false},
+	}
+	var out []ScenarioExpectation
+	for _, category := range categories {
+		for i, input := range category.inputs {
+			out = append(out, ScenarioExpectation{
+				ID:              category.domain + "_" + category.category + "_" + shortStableID(input),
+				Domain:          category.domain,
+				Category:        category.category,
+				Input:           input,
+				ExpectedQuality: append([]string(nil), category.quality...),
+				Risk:            category.risk,
+				LiveGate:        category.live && i < 2,
+			})
+		}
+	}
+	return out
 }
 
 func responseMentionsCitation(view policyruntime.EngineResult, response string) bool {

@@ -97,6 +97,31 @@ func TestGradeFlagsUnsupportedSpecificKnowledgeClaim(t *testing.T) {
 	if got := card.Dimensions["knowledge_grounding"]; got.Passed {
 		t.Fatalf("knowledge grounding dimension = %#v, want failed", got)
 	}
+	if len(card.Claims) == 0 || len(card.EvidenceMatches) == 0 {
+		t.Fatalf("scorecard = %#v, want extracted claims and evidence matches", card)
+	}
+}
+
+func TestGradeSupportsSpecificKnowledgeClaimFromRetrievedEvidence(t *testing.T) {
+	view := policyruntime.EngineResult{
+		RetrieverStage: policyruntime.RetrieverStageResult{Results: []knowledgeretriever.Result{{
+			RetrieverID: "wiki",
+			Data:        "Electronics purchased within 30 days qualify for an instant replacement before refund review.",
+			ResultHash:  "hash_1",
+			Citations:   []knowledge.Citation{{URI: "kb://electronics"}},
+		}}},
+	}
+
+	card := Grade(view, "Electronics purchased within 30 days qualify for an instant replacement before refund review.", nil)
+	if HardFailed(card) {
+		t.Fatalf("scorecard = %#v, want supported claim to pass", card)
+	}
+	if got := card.Dimensions["knowledge_grounding"]; !got.Passed {
+		t.Fatalf("knowledge grounding dimension = %#v, want passed", got)
+	}
+	if len(card.EvidenceMatches) == 0 || !card.EvidenceMatches[0].Supported {
+		t.Fatalf("evidence matches = %#v, want supported match", card.EvidenceMatches)
+	}
 }
 
 func TestGradeFlagsMissedIndonesianPreference(t *testing.T) {
@@ -114,5 +139,29 @@ func TestGradeFlagsMissedIndonesianPreference(t *testing.T) {
 	}
 	if got := card.Dimensions["multilingual_quality"]; !got.Passed || got.Score >= 1 {
 		t.Fatalf("multilingual dimension = %#v, want warning score", got)
+	}
+}
+
+func TestProductionReadinessScenariosDefinesFiftyCases(t *testing.T) {
+	scenarios := ProductionReadinessScenarios()
+	if len(scenarios) != 50 {
+		t.Fatalf("scenario count = %d, want 50", len(scenarios))
+	}
+	liveGate := 0
+	categories := map[string]struct{}{}
+	for _, scenario := range scenarios {
+		if scenario.ID == "" || scenario.Domain == "" || scenario.Category == "" || scenario.Input == "" {
+			t.Fatalf("scenario = %#v, want required fields", scenario)
+		}
+		categories[scenario.Category] = struct{}{}
+		if scenario.LiveGate {
+			liveGate++
+		}
+	}
+	if liveGate < 10 {
+		t.Fatalf("live gate scenario count = %d, want at least 10", liveGate)
+	}
+	if len(categories) < 10 {
+		t.Fatalf("categories = %#v, want broad platform coverage", categories)
 	}
 }

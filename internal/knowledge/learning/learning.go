@@ -496,11 +496,11 @@ func preferenceFindings(text string) []preferenceFinding {
 }
 
 func isKnowledgeFeedback(text string) bool {
-	return containsAny(text, "knowledge", "fact", "docs", "documentation", "product", "faq", "manual", "article")
+	return containsAny(text, "knowledge", "fact", "docs", "documentation", "product", "faq", "manual", "article", "unsupported_claim", "retrieval_miss")
 }
 
 func isPolicyFeedback(text string) bool {
-	return containsAny(text, "policy", "guideline", "journey", "scenario", "guardrail", "rule", "behavior", "approval", "escalate", "answered_out_of_scope", "out_of_scope", "hallucinated_policy")
+	return containsAny(text, "policy", "guideline", "journey", "scenario", "guardrail", "rule", "behavior", "approval", "escalate", "answered_out_of_scope", "out_of_scope", "hallucinated_policy", "premature_commitment")
 }
 
 func isSoulFeedback(text string) bool {

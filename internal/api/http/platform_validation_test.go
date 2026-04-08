@@ -203,10 +203,7 @@ retrievers:
 	if err != nil || prefSeed.Value != "email" || prefSeed.Status != customer.PreferenceStatusActive {
 		t.Fatalf("seeded preference = %#v err=%v, want active email", prefSeed, err)
 	}
-	learnedName, err := repo.GetCustomerPreference(context.Background(), "agent_storefront", "cust_1", "preferred_name")
-	if err != nil || learnedName.Value != "Alex" || learnedName.Status != customer.PreferenceStatusActive {
-		t.Fatalf("learned preferred_name = %#v err=%v, want active Alex", learnedName, err)
-	}
+	waitForCustomerPreference(t, repo, "agent_storefront", "cust_1", "preferred_name", "Alex", validationTimeout(2*time.Second))
 
 	rec = doJSONRequest(t, srv, http.MethodPost, "/v1/operator/sessions/sess_validation_1/feedback", `{
 		"id":"fb_knowledge_validation",
@@ -317,19 +314,34 @@ retrievers:
 
 	exec2 := waitForExecutionStatus(t, repo, "sess_validation_2", execution.StatusSucceeded, validationTimeout(4*time.Second))
 	assistant2 := waitForAssistantText(t, repo, "sess_validation_2", validationTimeout(2*time.Second))
-	if !strings.Contains(assistant2, "Customer preferences (soft constraints):") ||
-		!strings.Contains(assistant2, "contact_channel: email") ||
-		!strings.Contains(assistant2, "preferred_name: Alex") {
-		t.Fatalf("assistant 2 = %q, want stored customer preferences in composed prompt", assistant2)
-	}
-	if !strings.Contains(assistant2, "Agent SOUL style and brand rules:") ||
-		!strings.Contains(assistant2, "Tone: warm") ||
-		!strings.Contains(assistant2, "Verbosity: concise") {
-		t.Fatalf("assistant 2 = %q, want updated SOUL prompt", assistant2)
-	}
-	if !strings.Contains(assistant2, "Retrieved knowledge:") ||
-		!strings.Contains(assistant2, "instant replacement before refund review") {
-		t.Fatalf("assistant 2 = %q, want applied knowledge in composed prompt", assistant2)
+	if hasLiveProvider() {
+		lowerAssistant2 := strings.ToLower(assistant2)
+		if !strings.Contains(lowerAssistant2, "alex") ||
+			!strings.Contains(lowerAssistant2, "instant replacement") {
+			t.Fatalf("assistant 2 = %q, want learned preference and knowledge reflected semantically", assistant2)
+		}
+		qualityPayload, err := srv.executionQualityPayload(context.Background(), exec2, "")
+		if err != nil {
+			t.Fatalf("execution 2 quality payload: %v", err)
+		}
+		if hardFailed, _ := qualityPayload["hard_failed"].(bool); hardFailed {
+			t.Fatalf("assistant 2 failed quality gate: %#v", qualityPayload["scorecard"])
+		}
+	} else {
+		if !strings.Contains(assistant2, "Customer preferences (soft constraints):") ||
+			!strings.Contains(assistant2, "contact_channel: email") ||
+			!strings.Contains(assistant2, "preferred_name: Alex") {
+			t.Fatalf("assistant 2 = %q, want stored customer preferences in composed prompt", assistant2)
+		}
+		if !strings.Contains(assistant2, "Agent SOUL style and brand rules:") ||
+			!strings.Contains(assistant2, "Tone: warm") ||
+			!strings.Contains(assistant2, "Verbosity: concise") {
+			t.Fatalf("assistant 2 = %q, want updated SOUL prompt", assistant2)
+		}
+		if !strings.Contains(assistant2, "Retrieved knowledge:") ||
+			!strings.Contains(assistant2, "instant replacement before refund review") {
+			t.Fatalf("assistant 2 = %q, want applied knowledge in composed prompt", assistant2)
+		}
 	}
 
 	rec = doJSONRequest(t, srv, http.MethodGet, "/v1/executions/"+exec2.ID+"/resolved-policy", "")
@@ -590,14 +602,8 @@ retrievers:
 	}
 	waitForExecutionStatus(t, repo, "sess_language_1", execution.StatusSucceeded, validationTimeout(4*time.Second))
 
-	namePref, err := repo.GetCustomerPreference(context.Background(), "agent_language", "cust_lang", "preferred_name")
-	if err != nil || namePref.Value != "Rina" || namePref.Status != customer.PreferenceStatusActive {
-		t.Fatalf("preferred_name = %#v err=%v, want active Rina", namePref, err)
-	}
-	langPref, err := repo.GetCustomerPreference(context.Background(), "agent_language", "cust_lang", "preferred_language")
-	if err != nil || langPref.Value != "indonesian" || langPref.Status != customer.PreferenceStatusActive {
-		t.Fatalf("preferred_language = %#v err=%v, want active indonesian", langPref, err)
-	}
+	waitForCustomerPreference(t, repo, "agent_language", "cust_lang", "preferred_name", "Rina", validationTimeout(2*time.Second))
+	waitForCustomerPreference(t, repo, "agent_language", "cust_lang", "preferred_language", "indonesian", validationTimeout(2*time.Second))
 
 	rec = doJSONRequest(t, srv, http.MethodPost, "/v1/acp/sessions", `{
 		"id":"sess_language_2",
@@ -819,6 +825,25 @@ func waitForProposalState(t *testing.T, repo *memory.Store, proposalID string, w
 	})
 }
 
+func waitForCustomerPreference(t *testing.T, repo *memory.Store, agentID, customerID, key, value string, timeout time.Duration) customer.Preference {
+	t.Helper()
+	var pref customer.Preference
+	var lastErr error
+	waitFor(t, timeout, func() bool {
+		item, err := repo.GetCustomerPreference(context.Background(), agentID, customerID, key)
+		if err != nil {
+			lastErr = err
+			return false
+		}
+		pref = item
+		return item.Value == value && item.Status == customer.PreferenceStatusActive
+	})
+	if pref.Value != value || pref.Status != customer.PreferenceStatusActive {
+		t.Fatalf("preference %s/%s/%s = %#v err=%v, want active %q", agentID, customerID, key, pref, lastErr, value)
+	}
+	return pref
+}
+
 type platformValidationReport struct {
 	Scenario        string                      `json:"scenario"`
 	TestName        string                      `json:"test_name"`
@@ -835,10 +860,11 @@ type platformValidationReport struct {
 }
 
 type platformValidationSession struct {
-	ID         string                         `json:"id"`
-	Transcript []platformValidationTranscript `json:"transcript,omitempty"`
-	Executions []execution.TurnExecution      `json:"executions,omitempty"`
-	Scorecards map[string]quality.Scorecard   `json:"scorecards,omitempty"`
+	ID         string                                      `json:"id"`
+	Transcript []platformValidationTranscript              `json:"transcript,omitempty"`
+	Executions []execution.TurnExecution                   `json:"executions,omitempty"`
+	Scorecards map[string]quality.Scorecard                `json:"scorecards,omitempty"`
+	Quality    map[string]platformValidationQualityPayload `json:"quality,omitempty"`
 }
 
 type platformValidationTranscript struct {
@@ -849,6 +875,14 @@ type platformValidationTranscript struct {
 	TraceID     string    `json:"trace_id,omitempty"`
 	ExecutionID string    `json:"execution_id,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
+}
+
+type platformValidationQualityPayload struct {
+	Plan            quality.ResponsePlan    `json:"plan"`
+	Claims          []quality.ResponseClaim `json:"claims,omitempty"`
+	EvidenceMatches []quality.EvidenceMatch `json:"evidence_matches,omitempty"`
+	Scorecard       quality.Scorecard       `json:"scorecard"`
+	HardFailed      bool                    `json:"hard_failed"`
 }
 
 func writePlatformValidationReport(t *testing.T, repo *memory.Store, router *model.Router, testName, scenario, agentID, customerID string, sessionIDs []string) {
@@ -888,6 +922,7 @@ func writePlatformValidationReport(t *testing.T, repo *memory.Store, router *mod
 		execs, _ := repo.ListExecutions(context.Background())
 		var sessionExecs []execution.TurnExecution
 		scorecards := map[string]quality.Scorecard{}
+		qualityPayloads := map[string]platformValidationQualityPayload{}
 		for _, item := range execs {
 			if item.SessionID == sessionID {
 				sessionExecs = append(sessionExecs, item)
@@ -895,6 +930,13 @@ func writePlatformValidationReport(t *testing.T, repo *memory.Store, router *mod
 				if payload, err := srv.executionQualityPayload(context.Background(), item, ""); err == nil {
 					if card, ok := payload["scorecard"].(quality.Scorecard); ok {
 						scorecards[item.ID] = card
+					}
+					qualityPayloads[item.ID] = platformValidationQualityPayload{
+						Plan:            typedQualityPayload[quality.ResponsePlan](payload, "plan"),
+						Claims:          typedQualityPayload[[]quality.ResponseClaim](payload, "claims"),
+						EvidenceMatches: typedQualityPayload[[]quality.EvidenceMatch](payload, "evidence_matches"),
+						Scorecard:       typedQualityPayload[quality.Scorecard](payload, "scorecard"),
+						HardFailed:      boolQualityPayload(payload, "hard_failed"),
 					}
 				}
 			}
@@ -905,6 +947,7 @@ func writePlatformValidationReport(t *testing.T, repo *memory.Store, router *mod
 			Transcript: transcript,
 			Executions: sessionExecs,
 			Scorecards: scorecards,
+			Quality:    qualityPayloads,
 		})
 	}
 	if agentID != "" && customerID != "" {
@@ -954,6 +997,20 @@ func writePlatformValidationReport(t *testing.T, repo *memory.Store, router *mod
 		return
 	}
 	t.Logf("platform validation report written to %s", path)
+}
+
+func typedQualityPayload[T any](payload map[string]any, key string) T {
+	var zero T
+	value, ok := payload[key].(T)
+	if !ok {
+		return zero
+	}
+	return value
+}
+
+func boolQualityPayload(payload map[string]any, key string) bool {
+	value, _ := payload[key].(bool)
+	return value
 }
 
 func eventText(event session.Event) string {

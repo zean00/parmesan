@@ -43,6 +43,7 @@ import (
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/policyyaml"
 	"github.com/sahal/parmesan/internal/quality"
+	rolloutengine "github.com/sahal/parmesan/internal/rollout"
 	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
 	"github.com/sahal/parmesan/internal/sessionsvc"
 	"github.com/sahal/parmesan/internal/store"
@@ -1536,6 +1537,9 @@ func (s *Server) operatorCreateFeedback(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if labels, ok := record.Metadata["quality_failure_labels"].([]string); ok && len(labels) > 0 {
+		record.Metadata["regression_fixture_candidate"] = qualityRegressionFixtureCandidate(record, sess, events)
+	}
 	signals, err := s.store.ListDerivedSignals(r.Context(), sessionID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1566,6 +1570,40 @@ func (s *Server) operatorCreateFeedback(w http.ResponseWriter, r *http.Request) 
 		CreatedAt:   now,
 	})
 	writeJSON(w, http.StatusCreated, record)
+}
+
+func qualityRegressionFixtureCandidate(record feedback.Record, sess session.Session, events []session.Event) map[string]any {
+	var latestCustomer string
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Source == "customer" && strings.TrimSpace(sessionEventText(events[i])) != "" {
+			latestCustomer = sessionEventText(events[i])
+			break
+		}
+	}
+	dimensions, _ := record.Metadata["quality_dimensions"].(map[string]string)
+	return map[string]any{
+		"source":             "operator_feedback",
+		"feedback_id":        record.ID,
+		"session_id":         record.SessionID,
+		"execution_id":       record.ExecutionID,
+		"trace_id":           record.TraceID,
+		"agent_id":           sess.AgentID,
+		"customer_id":        sess.CustomerID,
+		"labels":             record.Metadata["quality_failure_labels"],
+		"quality_dimensions": dimensions,
+		"input":              latestCustomer,
+		"review_status":      "candidate",
+	}
+}
+
+func sessionEventText(event session.Event) string {
+	var parts []string
+	for _, part := range event.Content {
+		if strings.TrimSpace(part.Text) != "" {
+			parts = append(parts, strings.TrimSpace(part.Text))
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func (s *Server) operatorListFeedback(w http.ResponseWriter, r *http.Request) {
@@ -5378,6 +5416,10 @@ func (s *Server) executionQualityPayload(ctx context.Context, exec execution.Tur
 	if err != nil {
 		return nil, err
 	}
+	sess, err := s.store.GetSession(ctx, exec.SessionID)
+	if err != nil {
+		return nil, err
+	}
 	journeyInstances, err := s.store.ListJourneyInstances(ctx, exec.SessionID)
 	if err != nil {
 		return nil, err
@@ -5390,25 +5432,157 @@ func (s *Server) executionQualityPayload(ctx context.Context, exec execution.Tur
 	if err != nil {
 		return nil, err
 	}
-	selected := selectBundles(bundles, bundleID, exec.PolicyBundleID)
-	view, err := policyruntime.ResolveWithRouter(ctx, s.router, eventsForExecutionResolve(events, exec), selected, journeyInstances, catalog)
+	profile := s.qualityAgentProfile(ctx, sess.AgentID)
+	defaultBundleID := exec.PolicyBundleID
+	if defaultBundleID == "" && profile.ID != "" {
+		defaultBundleID = profile.DefaultPolicyBundleID
+	}
+	selectedBundleID := strings.TrimSpace(bundleID)
+	if selectedBundleID == "" {
+		selectedBundleID = defaultBundleID
+	}
+	if selectedBundleID == "" {
+		proposals, err := s.store.ListProposals(ctx)
+		if err != nil {
+			return nil, err
+		}
+		rollouts, err := s.store.ListRollouts(ctx)
+		if err != nil {
+			return nil, err
+		}
+		selection := rolloutengine.SelectBundle(sess, proposals, rollouts, defaultBundleID)
+		selectedBundleID = selection.BundleID
+	}
+	selected := selectBundles(bundles, selectedBundleID, defaultBundleID)
+	knowledgeSnapshot, knowledgeChunks := s.qualityKnowledgeSnapshot(ctx, sess, profile, selected)
+	view, err := policyruntime.ResolveWithOptions(ctx, eventsForExecutionResolve(events, exec), selected, journeyInstances, catalog, policyruntime.ResolveOptions{
+		Router:            s.router,
+		KnowledgeSearcher: s.store,
+		KnowledgeSnapshot: knowledgeSnapshot,
+		KnowledgeChunks:   knowledgeChunks,
+		DerivedSignals:    s.qualityDerivedSignals(ctx, exec.SessionID),
+	})
 	if err != nil {
 		return nil, err
 	}
+	view.CustomerPreferences = s.qualityCustomerPreferences(ctx, sess)
 	response := assistantTextForExecution(events, exec.ID)
 	if response == "" {
 		response = quality.ResponseFromView(view)
 	}
 	card := quality.GradeWithLLM(ctx, s.router, view, response, nil)
 	return map[string]any{
-		"execution_id": exec.ID,
-		"session_id":   exec.SessionID,
-		"bundle_id":    exec.PolicyBundleID,
-		"response":     response,
-		"plan":         quality.BuildResponsePlan(view),
-		"scorecard":    card,
-		"hard_failed":  quality.HardFailed(card),
+		"execution_id":     exec.ID,
+		"session_id":       exec.SessionID,
+		"bundle_id":        exec.PolicyBundleID,
+		"response":         response,
+		"plan":             quality.BuildResponsePlan(view),
+		"claims":           card.Claims,
+		"evidence_matches": card.EvidenceMatches,
+		"scorecard":        card,
+		"hard_failed":      quality.HardFailed(card),
 	}, nil
+}
+
+func (s *Server) qualityAgentProfile(ctx context.Context, agentID string) agent.Profile {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return agent.Profile{}
+	}
+	profile, err := s.store.GetAgentProfile(ctx, agentID)
+	if err != nil {
+		return agent.Profile{}
+	}
+	switch strings.TrimSpace(profile.Status) {
+	case "disabled", "retired":
+		return agent.Profile{}
+	default:
+		return profile
+	}
+}
+
+func (s *Server) qualityKnowledgeSnapshot(ctx context.Context, sess session.Session, profile agent.Profile, bundles []policy.Bundle) (*knowledge.Snapshot, []knowledge.Chunk) {
+	var snapshots []knowledge.Snapshot
+	var chunks []knowledge.Chunk
+	customerScopeKind, customerScopeID := qualityCustomerKnowledgeScope(sess)
+	if customerScopeID != "" {
+		customerSnapshots, err := s.store.ListKnowledgeSnapshots(ctx, knowledge.SnapshotQuery{ScopeKind: customerScopeKind, ScopeID: customerScopeID, Limit: 1})
+		if err == nil && len(customerSnapshots) > 0 {
+			snapshots = append(snapshots, customerSnapshots[0])
+			customerChunks, _ := s.store.ListKnowledgeChunks(ctx, knowledge.ChunkQuery{ScopeKind: customerScopeKind, ScopeID: customerScopeID, SnapshotID: customerSnapshots[0].ID})
+			chunks = append(chunks, customerChunks...)
+		}
+	}
+	scopeKind, scopeID := qualityKnowledgeScope(sess, bundles)
+	if scopeID != "" {
+		sharedSnapshots, err := s.store.ListKnowledgeSnapshots(ctx, knowledge.SnapshotQuery{ScopeKind: scopeKind, ScopeID: scopeID, Limit: 1})
+		if err == nil && len(sharedSnapshots) > 0 {
+			snapshots = append(snapshots, sharedSnapshots[0])
+			sharedChunks, _ := s.store.ListKnowledgeChunks(ctx, knowledge.ChunkQuery{ScopeKind: scopeKind, ScopeID: scopeID, SnapshotID: sharedSnapshots[0].ID})
+			chunks = append(chunks, sharedChunks...)
+		}
+	}
+	if len(snapshots) == 0 && strings.TrimSpace(profile.DefaultKnowledgeScopeKind) != "" && strings.TrimSpace(profile.DefaultKnowledgeScopeID) != "" {
+		profileSnapshots, err := s.store.ListKnowledgeSnapshots(ctx, knowledge.SnapshotQuery{ScopeKind: profile.DefaultKnowledgeScopeKind, ScopeID: profile.DefaultKnowledgeScopeID, Limit: 1})
+		if err == nil && len(profileSnapshots) > 0 {
+			snapshots = append(snapshots, profileSnapshots[0])
+			profileChunks, _ := s.store.ListKnowledgeChunks(ctx, knowledge.ChunkQuery{ScopeKind: profile.DefaultKnowledgeScopeKind, ScopeID: profile.DefaultKnowledgeScopeID, SnapshotID: profileSnapshots[0].ID})
+			chunks = append(chunks, profileChunks...)
+		}
+	}
+	if len(snapshots) == 0 {
+		return nil, nil
+	}
+	snapshot := snapshots[0]
+	return &snapshot, chunks
+}
+
+func qualityKnowledgeScope(sess session.Session, bundles []policy.Bundle) (string, string) {
+	if strings.TrimSpace(sess.AgentID) != "" {
+		return "agent", strings.TrimSpace(sess.AgentID)
+	}
+	if len(bundles) > 0 && strings.TrimSpace(bundles[0].ID) != "" {
+		return "bundle", strings.TrimSpace(bundles[0].ID)
+	}
+	return "", ""
+}
+
+func qualityCustomerKnowledgeScope(sess session.Session) (string, string) {
+	if strings.TrimSpace(sess.AgentID) == "" || strings.TrimSpace(sess.CustomerID) == "" {
+		return "", ""
+	}
+	return "customer_agent", strings.TrimSpace(sess.AgentID) + ":" + strings.TrimSpace(sess.CustomerID)
+}
+
+func (s *Server) qualityCustomerPreferences(ctx context.Context, sess session.Session) []customer.Preference {
+	if strings.TrimSpace(sess.AgentID) == "" || strings.TrimSpace(sess.CustomerID) == "" {
+		return nil
+	}
+	items, err := s.store.ListCustomerPreferences(ctx, customer.PreferenceQuery{
+		AgentID:       strings.TrimSpace(sess.AgentID),
+		CustomerID:    strings.TrimSpace(sess.CustomerID),
+		Status:        customer.PreferenceStatusActive,
+		MinConfidence: 0.5,
+	})
+	if err != nil {
+		return nil
+	}
+	return items
+}
+
+func (s *Server) qualityDerivedSignals(ctx context.Context, sessionID string) []string {
+	signals, err := s.store.ListDerivedSignals(ctx, sessionID)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, signal := range signals {
+		if strings.TrimSpace(signal.Value) == "" {
+			continue
+		}
+		out = append(out, signal.Kind+": "+signal.Value)
+	}
+	return out
 }
 
 func eventsForExecutionResolve(events []session.Event, exec execution.TurnExecution) []session.Event {

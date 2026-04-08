@@ -240,6 +240,34 @@ Use this as the normal guardrail for refactors and latency work. External
 Parlant parity can stay as a periodic validation step, not the default inner
 loop.
 
+Live provider platform validation:
+
+```bash
+OPENROUTER_API_KEY=... ./scripts/live_platform_validation.sh
+```
+
+This runs the canonical end-to-end platform scenarios against a live provider:
+e-commerce learning, pending preference review, Indonesian language preference,
+and pet-store topic-scope quality. Reports are written to
+`PLATFORM_VALIDATION_REPORT_DIR`, defaulting to
+`/tmp/parmesan-platform-validation-live`, and include transcripts, provider
+stats, learned preferences, proposal IDs, response-quality scorecards,
+extracted claims, and evidence matches. The quality package also carries a
+50-scenario production-readiness catalog used to track platform-wide quality
+coverage across grounding, topic scope, preferences, multilingual behavior,
+refusal/escalation, retrieval, tool/approval, SOUL, and failure-mode cases.
+Inspect the catalog directly with:
+
+```bash
+go run ./cmd/quality-catalog -summary
+go run ./cmd/quality-catalog -live-only
+go run ./cmd/quality-report-check -dir /tmp/parmesan-platform-validation-live -expect-tests TestPlatformValidationEcommerceLifecycle,TestPlatformValidationPendingPreferenceReviewFlow,TestPlatformValidationLanguagePreferenceLearning,TestPlatformValidationPetStoreScopeQuality -min-overall 0.7
+```
+
+The script defaults reasoning, structured, and embedding providers to
+OpenRouter; override `DEFAULT_REASONING_PROVIDER`,
+`DEFAULT_STRUCTURED_PROVIDER`, and `DEFAULT_EMBEDDING_PROVIDER` if needed.
+
 ## ACP v1 Contract
 
 ACP is exposed as a path-versioned public facade under `/v1/acp/...`.

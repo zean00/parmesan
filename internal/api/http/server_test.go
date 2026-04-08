@@ -546,6 +546,16 @@ func TestOperatorFeedbackQualityLabelsRouteToProposals(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID:        "evt_quality_feedback_customer",
+		SessionID: "sess_quality_feedback",
+		Source:    "customer",
+		Kind:      "message",
+		CreatedAt: now,
+		Content:   []session.ContentPart{{Type: "text", Text: "How do I cook pasta?"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_quality_feedback/feedback", strings.NewReader(`{
 		"id":"feedback_scope_quality",
@@ -567,6 +577,10 @@ func TestOperatorFeedbackQualityLabelsRouteToProposals(t *testing.T) {
 	}
 	if labels, ok := item.Metadata["quality_failure_labels"].([]any); !ok || len(labels) != 1 || labels[0] != "answered_out_of_scope" {
 		t.Fatalf("metadata = %#v, want normalized quality failure labels", item.Metadata)
+	}
+	fixture, ok := item.Metadata["regression_fixture_candidate"].(map[string]any)
+	if !ok || fixture["input"] != "How do I cook pasta?" || fixture["review_status"] != "candidate" {
+		t.Fatalf("metadata = %#v, want regression fixture candidate", item.Metadata)
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_quality_feedback/feedback", strings.NewReader(`{
@@ -1729,6 +1743,162 @@ func TestGetExecutionQualityReturnsScorecard(t *testing.T) {
 	}
 	if got := payload.Scorecard.Dimensions["topic_scope_compliance"]; !got.Passed {
 		t.Fatalf("topic scope dimension = %#v, want passed", got)
+	}
+}
+
+func TestGetExecutionQualityUsesRuntimeKnowledgeAndPreferences(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	now := time.Now().UTC()
+	if err := repo.SaveBundle(context.Background(), policy.Bundle{
+		ID:      "quality_store_bundle",
+		Version: "v1",
+		Retrievers: []policy.RetrieverBinding{{
+			ID:         "agent_wiki",
+			Kind:       "knowledge",
+			Scope:      "agent",
+			MaxResults: 2,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveAgentProfile(context.Background(), agent.Profile{
+		ID:                        "agent_quality",
+		Name:                      "Quality Store",
+		Status:                    "active",
+		DefaultPolicyBundleID:     "quality_store_bundle",
+		DefaultKnowledgeScopeKind: "agent",
+		DefaultKnowledgeScopeID:   "agent_quality",
+		CreatedAt:                 now,
+		UpdatedAt:                 now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	citation := knowledge.Citation{SourceID: "src_quality", URI: "kb://electronics", Title: "Electronics article"}
+	page := knowledge.Page{
+		ID:        "page_quality",
+		ScopeKind: "agent",
+		ScopeID:   "agent_quality",
+		Title:     "Electronics article",
+		Body:      "Electronics purchased within 30 days qualify for an instant replacement before refund review.",
+		Citations: []knowledge.Citation{citation},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	chunk := knowledge.Chunk{
+		ID:        "chunk_quality",
+		PageID:    "page_quality",
+		ScopeKind: "agent",
+		ScopeID:   "agent_quality",
+		Text:      page.Body,
+		Citations: []knowledge.Citation{citation},
+		CreatedAt: now,
+	}
+	if err := repo.SaveKnowledgePage(context.Background(), page, []knowledge.Chunk{chunk}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveKnowledgeSnapshot(context.Background(), knowledge.Snapshot{
+		ID:        "snap_quality",
+		ScopeKind: "agent",
+		ScopeID:   "agent_quality",
+		PageIDs:   []string{"page_quality"},
+		ChunkIDs:  []string{"chunk_quality"},
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lastConfirmed := now
+	if err := repo.SaveCustomerPreference(context.Background(), customer.Preference{
+		ID:              "pref_quality_name",
+		AgentID:         "agent_quality",
+		CustomerID:      "cust_quality",
+		Key:             "preferred_name",
+		Value:           "Alex",
+		Source:          "operator",
+		Confidence:      1,
+		Status:          customer.PreferenceStatusActive,
+		LastConfirmedAt: &lastConfirmed,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}, customer.PreferenceEvent{
+		ID:         "pevt_quality_name",
+		AgentID:    "agent_quality",
+		CustomerID: "cust_quality",
+		Key:        "preferred_name",
+		Value:      "Alex",
+		Action:     "set",
+		Source:     "operator",
+		CreatedAt:  now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID:         "sess_quality_context",
+		Channel:    "acp",
+		AgentID:    "agent_quality",
+		CustomerID: "cust_quality",
+		CreatedAt:  now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID:        "evt_quality_context_customer",
+		SessionID: "sess_quality_context",
+		Source:    "customer",
+		Kind:      "message",
+		CreatedAt: now,
+		Content:   []session.ContentPart{{Type: "text", Text: "Does the electronics article say purchases within 30 days qualify for an instant replacement?"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID:          "evt_quality_context_agent",
+		SessionID:   "sess_quality_context",
+		ExecutionID: "exec_quality_context",
+		Source:      "ai_agent",
+		Kind:        "message",
+		CreatedAt:   now.Add(time.Millisecond),
+		Content:     []session.ContentPart{{Type: "text", Text: "Hi Alex, yes, electronics purchased within 30 days qualify for an instant replacement before refund review."}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateExecution(context.Background(), execution.TurnExecution{
+		ID:             "exec_quality_context",
+		SessionID:      "sess_quality_context",
+		TriggerEventID: "evt_quality_context_customer",
+		Status:         execution.StatusSucceeded,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/executions/exec_quality_context/quality", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("quality status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var payload struct {
+		Plan       quality.ResponsePlan `json:"plan"`
+		Scorecard  quality.Scorecard    `json:"scorecard"`
+		HardFailed bool                 `json:"hard_failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.HardFailed || !payload.Scorecard.Passed {
+		t.Fatalf("quality payload = %#v, want passing scorecard with runtime context", payload)
+	}
+	if got := payload.Scorecard.Dimensions["knowledge_grounding"]; !got.Passed {
+		t.Fatalf("knowledge grounding = %#v, want passed from runtime snapshot", got)
+	}
+	if got := payload.Scorecard.Dimensions["customer_preference"]; !got.Passed {
+		t.Fatalf("customer preference = %#v, want passed from runtime preferences", got)
+	}
+	if len(payload.Plan.Citations) == 0 {
+		t.Fatalf("plan = %#v, want citations from runtime knowledge retriever", payload.Plan)
 	}
 }
 
