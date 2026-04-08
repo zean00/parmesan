@@ -1892,15 +1892,18 @@ func (c *Client) ListAuditRecords(ctx context.Context) ([]audit.Record, error) {
 func (c *Client) SaveResponse(ctx context.Context, record responsedomain.Response) error {
 	_, err := c.Pool.Exec(ctx, `
 		INSERT INTO responses (
-			id, session_id, execution_id, trace_id, trigger_event_ids, status, reason, iteration_count, max_iterations,
+			id, session_id, execution_id, trace_id, trigger_event_ids, trigger_source, trigger_reason, dedupe_key, status, reason, iteration_count, max_iterations,
 			stability_reached, generation_mode, preamble_event_id, message_event_ids, tool_insights, glossary_terms,
 			started_at, completed_at, canceled_at, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
 		ON CONFLICT (id) DO UPDATE
 		SET session_id = EXCLUDED.session_id,
 		    execution_id = EXCLUDED.execution_id,
 		    trace_id = EXCLUDED.trace_id,
 		    trigger_event_ids = EXCLUDED.trigger_event_ids,
+		    trigger_source = EXCLUDED.trigger_source,
+		    trigger_reason = EXCLUDED.trigger_reason,
+		    dedupe_key = EXCLUDED.dedupe_key,
 		    status = EXCLUDED.status,
 		    reason = EXCLUDED.reason,
 		    iteration_count = EXCLUDED.iteration_count,
@@ -1915,14 +1918,14 @@ func (c *Client) SaveResponse(ctx context.Context, record responsedomain.Respons
 		    completed_at = EXCLUDED.completed_at,
 		    canceled_at = EXCLUDED.canceled_at,
 		    updated_at = EXCLUDED.updated_at
-	`, record.ID, record.SessionID, record.ExecutionID, nullString(record.TraceID), mustJSONValue(record.TriggerEventIDs), record.Status, nullString(record.Reason), record.IterationCount, record.MaxIterations, record.StabilityReached, nullString(record.GenerationMode), nullString(record.PreambleEventID), mustJSONValue(record.MessageEventIDs), mustJSONValue(record.ToolInsights), mustJSONValue(record.GlossaryTerms), nullTime(record.StartedAt), nullTime(record.CompletedAt), nullTime(record.CanceledAt), record.CreatedAt, record.UpdatedAt)
+	`, record.ID, record.SessionID, record.ExecutionID, nullString(record.TraceID), mustJSONValue(record.TriggerEventIDs), nullString(record.TriggerSource), nullString(record.TriggerReason), nullString(record.DedupeKey), record.Status, nullString(record.Reason), record.IterationCount, record.MaxIterations, record.StabilityReached, nullString(record.GenerationMode), nullString(record.PreambleEventID), mustJSONValue(record.MessageEventIDs), mustJSONValue(record.ToolInsights), mustJSONValue(record.GlossaryTerms), nullTime(record.StartedAt), nullTime(record.CompletedAt), nullTime(record.CanceledAt), record.CreatedAt, record.UpdatedAt)
 	return err
 }
 
 func (c *Client) GetResponse(ctx context.Context, responseID string) (responsedomain.Response, error) {
 	row := c.Pool.QueryRow(ctx, `
 		SELECT id, session_id, execution_id, COALESCE(trace_id,''), trigger_event_ids, status, COALESCE(reason,''), iteration_count,
-		       max_iterations, stability_reached, COALESCE(generation_mode,''), COALESCE(preamble_event_id,''), message_event_ids,
+		       COALESCE(trigger_source,''), COALESCE(trigger_reason,''), COALESCE(dedupe_key,''), max_iterations, stability_reached, COALESCE(generation_mode,''), COALESCE(preamble_event_id,''), message_event_ids,
 		       tool_insights, glossary_terms, COALESCE(started_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
 		       COALESCE(completed_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
 		       COALESCE(canceled_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at
@@ -1930,7 +1933,7 @@ func (c *Client) GetResponse(ctx context.Context, responseID string) (responsedo
 	`, responseID)
 	var record responsedomain.Response
 	var triggerIDs, messageIDs, toolInsights, glossary []byte
-	if err := row.Scan(&record.ID, &record.SessionID, &record.ExecutionID, &record.TraceID, &triggerIDs, &record.Status, &record.Reason, &record.IterationCount, &record.MaxIterations, &record.StabilityReached, &record.GenerationMode, &record.PreambleEventID, &messageIDs, &toolInsights, &glossary, &record.StartedAt, &record.CompletedAt, &record.CanceledAt, &record.CreatedAt, &record.UpdatedAt); err != nil {
+	if err := row.Scan(&record.ID, &record.SessionID, &record.ExecutionID, &record.TraceID, &triggerIDs, &record.Status, &record.Reason, &record.IterationCount, &record.TriggerSource, &record.TriggerReason, &record.DedupeKey, &record.MaxIterations, &record.StabilityReached, &record.GenerationMode, &record.PreambleEventID, &messageIDs, &toolInsights, &glossary, &record.StartedAt, &record.CompletedAt, &record.CanceledAt, &record.CreatedAt, &record.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return responsedomain.Response{}, errors.New("response not found")
 		}
@@ -1946,7 +1949,7 @@ func (c *Client) GetResponse(ctx context.Context, responseID string) (responsedo
 func (c *Client) ListResponses(ctx context.Context, query responsedomain.Query) ([]responsedomain.Response, error) {
 	sql := `
 		SELECT id, session_id, execution_id, COALESCE(trace_id,''), trigger_event_ids, status, COALESCE(reason,''), iteration_count,
-		       max_iterations, stability_reached, COALESCE(generation_mode,''), COALESCE(preamble_event_id,''), message_event_ids,
+		       COALESCE(trigger_source,''), COALESCE(trigger_reason,''), COALESCE(dedupe_key,''), max_iterations, stability_reached, COALESCE(generation_mode,''), COALESCE(preamble_event_id,''), message_event_ids,
 		       tool_insights, glossary_terms, COALESCE(started_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
 		       COALESCE(completed_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
 		       COALESCE(canceled_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at
@@ -1982,7 +1985,7 @@ func (c *Client) ListResponses(ctx context.Context, query responsedomain.Query) 
 	for rows.Next() {
 		var record responsedomain.Response
 		var triggerIDs, messageIDs, toolInsights, glossary []byte
-		if err := rows.Scan(&record.ID, &record.SessionID, &record.ExecutionID, &record.TraceID, &triggerIDs, &record.Status, &record.Reason, &record.IterationCount, &record.MaxIterations, &record.StabilityReached, &record.GenerationMode, &record.PreambleEventID, &messageIDs, &toolInsights, &glossary, &record.StartedAt, &record.CompletedAt, &record.CanceledAt, &record.CreatedAt, &record.UpdatedAt); err != nil {
+		if err := rows.Scan(&record.ID, &record.SessionID, &record.ExecutionID, &record.TraceID, &triggerIDs, &record.Status, &record.Reason, &record.IterationCount, &record.TriggerSource, &record.TriggerReason, &record.DedupeKey, &record.MaxIterations, &record.StabilityReached, &record.GenerationMode, &record.PreambleEventID, &messageIDs, &toolInsights, &glossary, &record.StartedAt, &record.CompletedAt, &record.CanceledAt, &record.CreatedAt, &record.UpdatedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(triggerIDs, &record.TriggerEventIDs)

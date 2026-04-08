@@ -137,6 +137,9 @@ type responseView struct {
 	ExecutionID      string          `json:"execution_id"`
 	TraceID          string          `json:"trace_id,omitempty"`
 	TriggerEventIDs  []string        `json:"trigger_event_ids,omitempty"`
+	TriggerSource    string          `json:"trigger_source,omitempty"`
+	TriggerReason    string          `json:"trigger_reason,omitempty"`
+	DedupeKey        string          `json:"dedupe_key,omitempty"`
 	Status           string          `json:"status"`
 	Reason           string          `json:"reason,omitempty"`
 	IterationCount   int             `json:"iteration_count,omitempty"`
@@ -169,6 +172,18 @@ type traceSpanView struct {
 	Fields      map[string]any `json:"fields,omitempty"`
 	StartedAt   time.Time      `json:"started_at"`
 	FinishedAt  time.Time      `json:"finished_at,omitempty"`
+}
+
+type responseTriggerView struct {
+	ResponseID      string    `json:"response_id"`
+	SessionID       string    `json:"session_id"`
+	ExecutionID     string    `json:"execution_id"`
+	TriggerSource   string    `json:"trigger_source,omitempty"`
+	TriggerReason   string    `json:"trigger_reason,omitempty"`
+	DedupeKey       string    `json:"dedupe_key,omitempty"`
+	TriggerEventIDs []string  `json:"trigger_event_ids,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type mediaAssetView struct {
@@ -228,6 +243,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("POST /v1/sessions", s.createSession)
 	mux.HandleFunc("GET /v1/sessions/{id}", s.getSession)
 	mux.HandleFunc("GET /v1/sessions/{id}/responses", s.listSessionResponses)
+	mux.HandleFunc("POST /v1/sessions/{id}/responses/trigger", s.triggerSessionResponse)
 	mux.HandleFunc("GET /v1/sessions/{id}/events", s.listEvents)
 	mux.HandleFunc("POST /v1/sessions/{id}/events", s.appendEvent)
 	mux.HandleFunc("GET /v1/sessions/{id}/events/stream", s.streamEvents)
@@ -239,6 +255,8 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/acp/sessions/{id}/events/stream", s.acpStreamEvents)
 	mux.HandleFunc("GET /v1/acp/sessions/{id}/approvals", s.acpListApprovals)
 	mux.HandleFunc("POST /v1/acp/sessions/{id}/approvals/{approval_id}", s.acpRespondApproval)
+	mux.HandleFunc("GET /v1/responses/{id}/trigger", s.getResponseTrigger)
+	mux.HandleFunc("GET /v1/responses/{id}/explain", s.getResponseExplain)
 	mux.HandleFunc("GET /v1/operator/sessions", s.operatorListSessions)
 	mux.HandleFunc("GET /v1/operator/queue/summary", s.operatorQueueSummary)
 	mux.HandleFunc("GET /v1/operator/sessions/{id}", s.operatorGetSession)
@@ -305,6 +323,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/executions/{id}", s.getExecution)
 	mux.HandleFunc("GET /v1/executions/{id}/resolved-policy", s.getResolvedPolicy)
 	mux.HandleFunc("GET /v1/executions/{id}/quality", s.getExecutionQuality)
+	mux.HandleFunc("GET /v1/executions/{id}/explain", s.getExecutionExplain)
 	mux.HandleFunc("GET /v1/executions/{id}/tool-runs", s.listToolRuns)
 	mux.HandleFunc("GET /v1/executions/{id}/delivery-attempts", s.listDeliveryAttempts)
 	mux.HandleFunc("POST /v1/operator/executions/{id}/retry", s.operatorRetryExecution)
@@ -828,6 +847,9 @@ func responseViewFromDomain(record responsedomain.Response, spans []responsedoma
 		ExecutionID:      record.ExecutionID,
 		TraceID:          record.TraceID,
 		TriggerEventIDs:  append([]string(nil), record.TriggerEventIDs...),
+		TriggerSource:    record.TriggerSource,
+		TriggerReason:    record.TriggerReason,
+		DedupeKey:        record.DedupeKey,
 		Status:           string(record.Status),
 		Reason:           record.Reason,
 		IterationCount:   record.IterationCount,
@@ -886,6 +908,52 @@ func (s *Server) getResponse(w http.ResponseWriter, r *http.Request) {
 	}
 	spans, _ := s.store.ListResponseTraceSpans(r.Context(), responsedomain.TraceSpanQuery{ResponseID: item.ID})
 	writeJSON(w, http.StatusOK, responseViewFromDomain(item, spans))
+}
+
+func responseTriggerViewFromDomain(record responsedomain.Response) responseTriggerView {
+	return responseTriggerView{
+		ResponseID:      record.ID,
+		SessionID:       record.SessionID,
+		ExecutionID:     record.ExecutionID,
+		TriggerSource:   record.TriggerSource,
+		TriggerReason:   record.TriggerReason,
+		DedupeKey:       record.DedupeKey,
+		TriggerEventIDs: append([]string(nil), record.TriggerEventIDs...),
+		CreatedAt:       record.CreatedAt,
+		UpdatedAt:       record.UpdatedAt,
+	}
+}
+
+func (s *Server) getResponseTrigger(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetResponse(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, responseTriggerViewFromDomain(item))
+}
+
+func (s *Server) triggerSessionResponse(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Source    string `json:"source"`
+		Reason    string `json:"reason"`
+		Message   string `json:"message"`
+		DedupeKey string `json:"dedupe_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	record, created, err := s.createTriggeredResponse(r.Context(), r.PathValue("id"), req.Source, req.Reason, req.Message, req.DedupeKey)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	status := http.StatusCreated
+	if !created {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, responseTriggerViewFromDomain(record))
 }
 
 func (s *Server) cancelResponse(w http.ResponseWriter, r *http.Request) {
@@ -4518,6 +4586,34 @@ func (s *Server) getExecutionQuality(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, payload)
 }
 
+func (s *Server) getExecutionExplain(w http.ResponseWriter, r *http.Request) {
+	exec, _, err := s.store.GetExecution(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	payload, err := s.executionExplainPayload(r.Context(), exec)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) getResponseExplain(w http.ResponseWriter, r *http.Request) {
+	record, err := s.store.GetResponse(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	payload, err := s.responseExplainPayload(r.Context(), record)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
 func (s *Server) listTraces(w http.ResponseWriter, r *http.Request) {
 	records, err := s.store.ListAuditRecords(r.Context())
 	if err != nil {
@@ -5227,6 +5323,116 @@ func (s *Server) enqueueSessionTurn(ctx context.Context, sessionID, eventID, sou
 	return event, exec.ID, traceID, nil
 }
 
+func normalizeTriggerSource(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "app":
+		return "app"
+	case "approval", "tool", "execution", "system":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return ""
+	}
+}
+
+func normalizeTriggerReason(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "unspecified":
+		return "unspecified"
+	case "follow_up", "background_complete", "buy_time", "approval_result", "retry_recovered":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return ""
+	}
+}
+
+func (s *Server) createTriggeredResponse(ctx context.Context, sessionID, source, reason, message, dedupeKey string) (responsedomain.Response, bool, error) {
+	source = normalizeTriggerSource(source)
+	if source == "" {
+		return responsedomain.Response{}, false, fmt.Errorf("invalid trigger source")
+	}
+	reason = normalizeTriggerReason(reason)
+	if reason == "" {
+		return responsedomain.Response{}, false, fmt.Errorf("invalid trigger reason")
+	}
+	dedupeKey = strings.TrimSpace(dedupeKey)
+	if dedupeKey != "" {
+		items, err := s.store.ListResponses(ctx, responsedomain.Query{SessionID: sessionID})
+		if err == nil {
+			for _, item := range items {
+				if item.TriggerSource == source && item.TriggerReason == reason && item.DedupeKey == dedupeKey {
+					return item, false, nil
+				}
+			}
+		}
+	}
+	payload := map[string]any{
+		"trigger_source": source,
+		"trigger_reason": reason,
+	}
+	if strings.TrimSpace(message) != "" {
+		payload["message"] = strings.TrimSpace(message)
+	}
+	if dedupeKey != "" {
+		payload["dedupe_key"] = dedupeKey
+	}
+	metadata := map[string]any{
+		"internal_only":  true,
+		"trigger_source": source,
+		"trigger_reason": reason,
+	}
+	event, execID, traceID, err := s.enqueueSessionTurn(ctx, sessionID, "", "system", "response.trigger", nil, payload, metadata)
+	if err != nil {
+		return responsedomain.Response{}, false, err
+	}
+	items, err := s.store.ListResponses(ctx, responsedomain.Query{ExecutionID: execID, Limit: 1})
+	if err != nil || len(items) == 0 {
+		return responsedomain.Response{}, false, fmt.Errorf("triggered response not found")
+	}
+	record := items[0]
+	record.TraceID = traceID
+	record.TriggerEventIDs = appendUniqueIDs(record.TriggerEventIDs, event.ID)
+	record.TriggerSource = source
+	record.TriggerReason = reason
+	record.DedupeKey = dedupeKey
+	record.UpdatedAt = time.Now().UTC()
+	if err := s.store.SaveResponse(ctx, record); err != nil {
+		return responsedomain.Response{}, false, err
+	}
+	_ = s.store.SaveResponseTraceSpan(ctx, responsedomain.TraceSpan{
+		ID:          fmt.Sprintf("span_%d", time.Now().UnixNano()),
+		ResponseID:  record.ID,
+		SessionID:   sessionID,
+		ExecutionID: execID,
+		TraceID:     traceID,
+		Kind:        "response.trigger",
+		Name:        source,
+		Status:      reason,
+		Fields: map[string]any{
+			"message":    strings.TrimSpace(message),
+			"dedupe_key": dedupeKey,
+			"event_id":   event.ID,
+		},
+		StartedAt: time.Now().UTC(),
+	})
+	s.appendTrace(ctx, audit.Record{
+		ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+		Kind:        "response.trigger",
+		SessionID:   sessionID,
+		ExecutionID: execID,
+		TraceID:     traceID,
+		Message:     "triggered response queued",
+		Fields: map[string]any{
+			"response_id":     record.ID,
+			"trigger_source":  source,
+			"trigger_reason":  reason,
+			"trigger_event_id": event.ID,
+			"dedupe_key":      dedupeKey,
+		},
+		CreatedAt: time.Now().UTC(),
+	})
+	return record, true, nil
+}
+
 func (s *Server) createExecutionForEvent(ctx context.Context, sessionID, eventID, traceID string, now time.Time, coalesce bool, coalesceUntil time.Time) (execution.TurnExecution, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -5282,6 +5488,12 @@ func (s *Server) ensureResponseForExecution(ctx context.Context, exec execution.
 	if err == nil && len(existing) > 0 {
 		record := existing[0]
 		record.TriggerEventIDs = appendUniqueIDs(record.TriggerEventIDs, triggerEventID)
+		if record.TriggerSource == "" {
+			record.TriggerSource = "customer"
+		}
+		if record.TriggerReason == "" {
+			record.TriggerReason = "unspecified"
+		}
 		record.UpdatedAt = now
 		return s.store.SaveResponse(ctx, record)
 	}
@@ -5291,6 +5503,8 @@ func (s *Server) ensureResponseForExecution(ctx context.Context, exec execution.
 		ExecutionID:     exec.ID,
 		TraceID:         exec.TraceID,
 		TriggerEventIDs: appendUniqueIDs(exec.TriggerEventIDs, triggerEventID),
+		TriggerSource:   "customer",
+		TriggerReason:   "unspecified",
 		Status:          responsedomain.StatusPreparing,
 		MaxIterations:   4,
 		CreatedAt:       now,
@@ -5584,7 +5798,38 @@ func (s *Server) resolveSessionApproval(ctx context.Context, sessionID, approval
 		Fields:      map[string]any{"approval_id": item.ID, "decision": decision, "source": source},
 		CreatedAt:   time.Now().UTC(),
 	})
+	_ = s.maybeCreateApprovalTriggeredResponse(ctx, item)
 	return item, nil
+}
+
+func (s *Server) maybeCreateApprovalTriggeredResponse(ctx context.Context, item approval.Session) error {
+	exec, _, err := s.store.GetExecution(ctx, item.ExecutionID)
+	if err != nil {
+		return err
+	}
+	sess, err := s.store.GetSession(ctx, item.SessionID)
+	if err != nil {
+		return err
+	}
+	bundles, err := s.store.ListBundles(ctx)
+	if err != nil {
+		return err
+	}
+	profile := s.qualityAgentProfile(ctx, sess.AgentID)
+	selected := selectBundles(bundles, exec.PolicyBundleID, profile.DefaultPolicyBundleID)
+	if len(selected) == 0 {
+		return nil
+	}
+	perf := selected[0].PerceivedPerformance
+	if !strings.EqualFold(strings.TrimSpace(perf.Mode), "aggressive") {
+		return nil
+	}
+	message := "I’ve got your approval and I’m continuing now."
+	if item.Status == approval.StatusRejected {
+		message = "I’ve recorded the rejection and I’ll adjust the response."
+	}
+	_, _, err = s.createTriggeredResponse(ctx, item.SessionID, "approval", "approval_result", message, item.ID+":"+item.Decision)
+	return err
 }
 
 func (s *Server) appendTrace(ctx context.Context, record audit.Record) {
@@ -6244,6 +6489,95 @@ func (s *Server) executionQualityPayload(ctx context.Context, exec execution.Tur
 		"scorecard":        card,
 		"hard_failed":      quality.HardFailed(card),
 	}, nil
+}
+
+func (s *Server) executionExplainPayload(ctx context.Context, exec execution.TurnExecution) (map[string]any, error) {
+	responseRecord, spans := s.responseForExecution(ctx, exec.ID)
+	view, err := s.resolveExecutionView(ctx, exec, "")
+	if err != nil {
+		return nil, err
+	}
+	qualityPayload, err := s.executionQualityPayload(ctx, exec, "")
+	if err != nil {
+		return nil, err
+	}
+	grouped := groupTraceSpansByIteration(spans)
+	responsePayload := map[string]any{}
+	if responseRecord.ID != "" {
+		responsePayload = map[string]any{
+			"response":     responseViewFromDomain(responseRecord, spans),
+			"trigger":      responseTriggerViewFromDomain(responseRecord),
+			"spans_by_itr": grouped,
+		}
+	}
+	return map[string]any{
+		"execution_id":   exec.ID,
+		"session_id":     exec.SessionID,
+		"trace_id":       exec.TraceID,
+		"response_id":    responseRecord.ID,
+		"trigger":        responseTriggerViewFromDomain(responseRecord),
+		"response_state": responsePayload,
+		"resolved":       view,
+		"quality":        qualityPayload,
+	}, nil
+}
+
+func (s *Server) responseExplainPayload(ctx context.Context, record responsedomain.Response) (map[string]any, error) {
+	exec, _, err := s.store.GetExecution(ctx, record.ExecutionID)
+	if err != nil {
+		return nil, err
+	}
+	spans, _ := s.store.ListResponseTraceSpans(ctx, responsedomain.TraceSpanQuery{ResponseID: record.ID})
+	qualityPayload, err := s.executionQualityPayload(ctx, exec, "")
+	if err != nil {
+		return nil, err
+	}
+	view, err := s.resolveExecutionView(ctx, exec, "")
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"response":     responseViewFromDomain(record, spans),
+		"trigger":      responseTriggerViewFromDomain(record),
+		"spans_by_itr": groupTraceSpansByIteration(spans),
+		"resolved":     view,
+		"quality":      qualityPayload,
+	}, nil
+}
+
+func (s *Server) responseForExecution(ctx context.Context, executionID string) (responsedomain.Response, []responsedomain.TraceSpan) {
+	items, err := s.store.ListResponses(ctx, responsedomain.Query{ExecutionID: executionID, Limit: 1})
+	if err != nil || len(items) == 0 {
+		return responsedomain.Response{}, nil
+	}
+	spans, _ := s.store.ListResponseTraceSpans(ctx, responsedomain.TraceSpanQuery{ResponseID: items[0].ID})
+	return items[0], spans
+}
+
+func groupTraceSpansByIteration(spans []responsedomain.TraceSpan) map[string][]traceSpanView {
+	out := map[string][]traceSpanView{}
+	for _, span := range spans {
+		key := strconv.Itoa(span.Iteration)
+		if span.Iteration == 0 {
+			key = "lifecycle"
+		}
+		out[key] = append(out[key], traceSpanView{
+			ID:          span.ID,
+			ResponseID:  span.ResponseID,
+			SessionID:   span.SessionID,
+			ExecutionID: span.ExecutionID,
+			TraceID:     span.TraceID,
+			ParentID:    span.ParentID,
+			Kind:        span.Kind,
+			Name:        span.Name,
+			Iteration:   span.Iteration,
+			Status:      span.Status,
+			Fields:      span.Fields,
+			StartedAt:   span.StartedAt,
+			FinishedAt:  span.FinishedAt,
+		})
+	}
+	return out
 }
 
 func (s *Server) qualityAgentProfile(ctx context.Context, agentID string) agent.Profile {

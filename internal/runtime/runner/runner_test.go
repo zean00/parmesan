@@ -871,6 +871,75 @@ func TestEnsureResponseRecordUsesCachedResponseWhenAsyncWritesBuffered(t *testin
 	}
 }
 
+func TestMaybeEmitPerceivedPerformanceEmitsPreambleAndStatus(t *testing.T) {
+	repo := memory.New()
+	r := New(repo, nil, nil, nil, "test-runner")
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := repo.CreateSession(ctx, session.Session{ID: "sess_perf", Channel: "acp", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	record := responsedomain.Response{
+		ID:          "resp_perf",
+		SessionID:   "sess_perf",
+		ExecutionID: "exec_perf",
+		TraceID:     "trace_perf",
+		Status:      responsedomain.StatusProcessing,
+		StartedAt:   now.Add(-time.Second),
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := repo.SaveResponse(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	r.cacheResponse(record)
+	view := resolvedView{
+		Bundle: &policy.Bundle{
+			PerceivedPerformance: policy.PerceivedPerformancePolicy{
+				Mode:                    "smart",
+				ProcessingIndicator:     true,
+				PreambleEnabled:         true,
+				PreambleDelayMS:         0,
+				ProcessingUpdateDelayMS: 0,
+				Preambles:               []string{"Checking that now."},
+			},
+		},
+	}
+	exec := execution.TurnExecution{
+		ID:        "exec_perf",
+		SessionID: "sess_perf",
+		TraceID:   "trace_perf",
+	}
+
+	if err := r.maybeEmitPerceivedPerformance(ctx, exec, record, view); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := repo.GetResponse(ctx, "resp_perf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(updated.PreambleEventID) == "" {
+		t.Fatal("preamble_event_id is empty")
+	}
+	events, err := repo.ListEvents(ctx, "sess_perf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hasPreamble bool
+	var hasProcessingStatus bool
+	for _, event := range events {
+		if event.Source == "ai_agent" && event.ID == updated.PreambleEventID {
+			hasPreamble = true
+		}
+		if event.Kind == "status" && event.Data["code"] == "response.processing" {
+			hasProcessingStatus = true
+		}
+	}
+	if !hasPreamble || !hasProcessingStatus {
+		t.Fatalf("events = %#v, want preamble and processing status", events)
+	}
+}
+
 func step(execID, name string, recomputable bool) execution.ExecutionStep {
 	now := time.Now().UTC()
 	return execution.ExecutionStep{

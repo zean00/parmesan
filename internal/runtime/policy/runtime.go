@@ -310,6 +310,11 @@ func highRiskContractReplacement(view EngineResult, draft string) string {
 		"you will receive",
 		"youll receive",
 		"well send",
+	}) && !containsAnyNormalized(lower, []string{
+		"replacement or refund",
+		"refund or replacement",
+		"replace or refund",
+		"refund or replace",
 	}) {
 		return ""
 	}

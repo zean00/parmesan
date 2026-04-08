@@ -136,11 +136,27 @@ func TestResponseLifecycleAPI(t *testing.T) {
 	if err := repo.CreateSession(context.Background(), session.Session{ID: "sess_response", Channel: "acp", CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID:        "evt_1",
+		SessionID: "sess_response",
+		Source:    "customer",
+		Kind:      "message",
+		Content:   []session.ContentPart{{Type: "text", Text: "hello"}},
+		CreatedAt: now,
+		TraceID:   "trace_response",
+		ExecutionID: "exec_response",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveBundle(context.Background(), policy.Bundle{ID: "bundle_response", Version: "v1", ImportedAt: now}); err != nil {
+		t.Fatal(err)
+	}
 	if err := repo.CreateExecution(context.Background(), execution.TurnExecution{
 		ID:             "exec_response",
 		SessionID:      "sess_response",
 		TriggerEventID: "evt_1",
 		TraceID:        "trace_response",
+		PolicyBundleID: "bundle_response",
 		Status:         execution.StatusWaiting,
 		CreatedAt:      now,
 		UpdatedAt:      now,
@@ -160,6 +176,9 @@ func TestResponseLifecycleAPI(t *testing.T) {
 		ExecutionID:     "exec_response",
 		TraceID:         "trace_response",
 		TriggerEventIDs: []string{"evt_1"},
+		TriggerSource:   "app",
+		TriggerReason:   "follow_up",
+		DedupeKey:       "follow-up-1",
 		Status:          responsedomain.StatusPreparing,
 		MaxIterations:   4,
 		CreatedAt:       now,
@@ -204,6 +223,20 @@ func TestResponseLifecycleAPI(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/responses/resp_1/trigger", nil)
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get trigger status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/responses/resp_1/explain", nil)
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get explain status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/v1/responses/resp_1/cancel", nil)
 	srv.httpServer.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -222,6 +255,46 @@ func TestResponseLifecycleAPI(t *testing.T) {
 	}
 	if exec.Status != execution.StatusAbandoned {
 		t.Fatalf("execution status = %s, want abandoned", exec.Status)
+	}
+}
+
+func TestTriggerSessionResponseDedupesByKey(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(ctx, session.Session{ID: "sess_trigger", Channel: "acp", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	body := strings.NewReader(`{"source":"app","reason":"follow_up","message":"Please follow up.","dedupe_key":"dupe-1"}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/sess_trigger/responses/trigger", body)
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first trigger status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var first responseTriggerView
+	if err := json.NewDecoder(rec.Body).Decode(&first); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/sessions/sess_trigger/responses/trigger", strings.NewReader(`{"source":"app","reason":"follow_up","dedupe_key":"dupe-1"}`))
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second trigger status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var second responseTriggerView
+	if err := json.NewDecoder(rec.Body).Decode(&second); err != nil {
+		t.Fatal(err)
+	}
+	if first.ResponseID != second.ResponseID {
+		t.Fatalf("deduped response ids = %q and %q, want same", first.ResponseID, second.ResponseID)
 	}
 }
 

@@ -39,6 +39,9 @@ func ValidateBundle(bundle policy.Bundle) error {
 	if err := validateSoul(bundle.Soul); err != nil {
 		return err
 	}
+	if err := validatePerceivedPerformance(bundle.PerceivedPerformance); err != nil {
+		return err
+	}
 	if err := validateDomainBoundary(bundle.DomainBoundary); err != nil {
 		return err
 	}
@@ -237,6 +240,34 @@ func validateDomainBoundary(boundary policy.DomainBoundary) error {
 		return errors.New("domain_boundary.out_of_scope_reply is required when domain boundary can refuse or redirect")
 	}
 	return nil
+}
+
+func validatePerceivedPerformance(perf policy.PerceivedPerformancePolicy) error {
+	mode := strings.TrimSpace(perf.Mode)
+	if mode != "" {
+		switch mode {
+		case "off", "smart", "aggressive":
+		default:
+			return fmt.Errorf("perceived_performance.mode has unsupported value %q", perf.Mode)
+		}
+	}
+	if perf.PreambleDelayMS < 0 {
+		return errors.New("perceived_performance.preamble_delay_ms cannot be negative")
+	}
+	if perf.ProcessingUpdateDelayMS < 0 {
+		return errors.New("perceived_performance.processing_update_delay_ms cannot be negative")
+	}
+	if err := validateNonEmptyUnique("perceived_performance.preambles", perf.Preambles); err != nil {
+		return err
+	}
+	for _, tier := range perf.AllowedRiskTiers {
+		switch strings.ToLower(strings.TrimSpace(tier)) {
+		case "low", "medium", "high":
+		default:
+			return fmt.Errorf("perceived_performance.allowed_risk_tiers has unsupported value %q", tier)
+		}
+	}
+	return validateNonEmptyUnique("perceived_performance.allowed_risk_tiers", perf.AllowedRiskTiers)
 }
 
 func validateLanguageCode(field, value string) error {

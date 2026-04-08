@@ -567,6 +567,9 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 		}); err != nil {
 			return err
 		}
+		if err := r.maybeEmitPerceivedPerformance(ctx, *exec, responseRecord, view); err != nil {
+			return err
+		}
 		respMessages := renderResponseMessages(view, toolOutput)
 		if len(respMessages) == 0 {
 			prompt := composePrompt(view, events, toolOutput)
@@ -953,6 +956,99 @@ func normalizeGenerationMode(mode string) string {
 	default:
 		return "fluid"
 	}
+}
+
+func perceivedPerformancePolicy(view resolvedView) policy.PerceivedPerformancePolicy {
+	if view.Bundle == nil {
+		return policy.PerceivedPerformancePolicy{}
+	}
+	return view.Bundle.PerceivedPerformance
+}
+
+func allowsPerceivedPerformanceRisk(perf policy.PerceivedPerformancePolicy, riskTier string) bool {
+	riskTier = strings.ToLower(strings.TrimSpace(riskTier))
+	if len(perf.AllowedRiskTiers) > 0 {
+		for _, item := range perf.AllowedRiskTiers {
+			if strings.EqualFold(strings.TrimSpace(item), riskTier) {
+				return true
+			}
+		}
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(perf.Mode)) {
+	case "aggressive":
+		return riskTier == "low" || riskTier == "medium" || riskTier == "high"
+	default:
+		return riskTier == "low" || riskTier == "medium"
+	}
+}
+
+func (r *Runner) maybeEmitPerceivedPerformance(ctx context.Context, exec execution.TurnExecution, record responsedomain.Response, view resolvedView) error {
+	perf := perceivedPerformancePolicy(view)
+	if strings.EqualFold(strings.TrimSpace(perf.Mode), "off") || strings.TrimSpace(perf.Mode) == "" {
+		return nil
+	}
+	plan := quality.BuildResponsePlan(view)
+	if !allowsPerceivedPerformanceRisk(perf, plan.RiskTier) {
+		return nil
+	}
+	now := time.Now().UTC()
+	startedAt := record.StartedAt
+	if startedAt.IsZero() {
+		startedAt = now
+	}
+	elapsed := now.Sub(startedAt)
+	if perf.ProcessingIndicator && elapsed >= time.Duration(perf.ProcessingUpdateDelayMS)*time.Millisecond {
+		if _, err := r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "response.processing", "in_progress", exec.ID, exec.TraceID, map[string]any{
+			"response_id": record.ID,
+			"mode":        perf.Mode,
+		}, nil, false); err != nil {
+			return err
+		}
+		r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
+			ResponseID:  record.ID,
+			SessionID:   exec.SessionID,
+			ExecutionID: exec.ID,
+			TraceID:     exec.TraceID,
+			Kind:        "response.processing_indicator",
+			Status:      "emitted",
+			StartedAt:   now,
+			FinishedAt:  now,
+		})
+	}
+	if !perf.PreambleEnabled || strings.TrimSpace(record.PreambleEventID) != "" || elapsed < time.Duration(perf.PreambleDelayMS)*time.Millisecond {
+		return nil
+	}
+	preamble := "I’m checking that now."
+	if len(perf.Preambles) > 0 && strings.TrimSpace(perf.Preambles[0]) != "" {
+		preamble = strings.TrimSpace(perf.Preambles[0])
+	}
+	event, err := r.sessions.CreateMessageEvent(ctx, exec.SessionID, "ai_agent", preamble, exec.ID, exec.TraceID, map[string]any{
+		"step":         "compose_response",
+		"preamble":     true,
+		"response_id":  record.ID,
+		"message_index": 0,
+	}, false)
+	if err != nil {
+		return err
+	}
+	if err := r.updateResponseState(ctx, record, responsedomain.StatusProcessing, "", func(item *responsedomain.Response) {
+		item.PreambleEventID = event.ID
+	}); err != nil {
+		return err
+	}
+	r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
+		ResponseID:  record.ID,
+		SessionID:   exec.SessionID,
+		ExecutionID: exec.ID,
+		TraceID:     exec.TraceID,
+		Kind:        "response.preamble",
+		Status:      "emitted",
+		Fields:      map[string]any{"event_id": event.ID},
+		StartedAt:   now,
+		FinishedAt:  now,
+	})
+	return nil
 }
 
 func selectPolicyBundles(bundles []policy.Bundle, preferred string, fallback string) []policy.Bundle {

@@ -19,6 +19,9 @@ type Response struct {
 	ExecutionID      string    `json:"execution_id"`
 	TraceID          string    `json:"trace_id,omitempty"`
 	TriggerEventIDs  []string  `json:"trigger_event_ids,omitempty"`
+	TriggerSource    string    `json:"trigger_source,omitempty"`
+	TriggerReason    string    `json:"trigger_reason,omitempty"`
+	DedupeKey        string    `json:"dedupe_key,omitempty"`
 	Status           Status    `json:"status"`
 	Reason           string    `json:"reason,omitempty"`
 	IterationCount   int       `json:"iteration_count,omitempty"`

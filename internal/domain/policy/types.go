@@ -17,6 +17,7 @@ type Bundle struct {
 	ID                        string                     `json:"id" yaml:"id"`
 	Version                   string                     `json:"version" yaml:"version"`
 	CompositionMode           string                     `json:"composition_mode,omitempty" yaml:"composition_mode,omitempty"`
+	PerceivedPerformance      PerceivedPerformancePolicy `json:"perceived_performance,omitempty" yaml:"perceived_performance,omitempty"`
 	NoMatch                   string                     `json:"no_match,omitempty" yaml:"no_match,omitempty"`
 	DomainBoundary            DomainBoundary             `json:"domain_boundary,omitempty" yaml:"domain_boundary,omitempty"`
 	Soul                      Soul                       `json:"soul,omitempty" yaml:"soul,omitempty"`
@@ -38,6 +39,16 @@ type GlossaryTerm struct {
 	Term        string   `json:"term" yaml:"term"`
 	Aliases     []string `json:"aliases,omitempty" yaml:"aliases,omitempty"`
 	Description string   `json:"description,omitempty" yaml:"description,omitempty"`
+}
+
+type PerceivedPerformancePolicy struct {
+	Mode                     string   `json:"mode,omitempty" yaml:"mode,omitempty"`
+	ProcessingIndicator      bool     `json:"processing_indicator_enabled,omitempty" yaml:"processing_indicator_enabled,omitempty"`
+	PreambleEnabled          bool     `json:"preamble_enabled,omitempty" yaml:"preamble_enabled,omitempty"`
+	PreambleDelayMS          int      `json:"preamble_delay_ms,omitempty" yaml:"preamble_delay_ms,omitempty"`
+	ProcessingUpdateDelayMS  int      `json:"processing_update_delay_ms,omitempty" yaml:"processing_update_delay_ms,omitempty"`
+	Preambles                []string `json:"preambles,omitempty" yaml:"preambles,omitempty"`
+	AllowedRiskTiers         []string `json:"allowed_risk_tiers,omitempty" yaml:"allowed_risk_tiers,omitempty"`
 }
 
 type DomainBoundary struct {
