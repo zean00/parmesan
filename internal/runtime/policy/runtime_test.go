@@ -3648,6 +3648,25 @@ func TestVerifyDraftReplacesOutOfScopeAnswer(t *testing.T) {
 	}
 }
 
+func TestVerifyDraftReplacesPrematureHighRiskCommitment(t *testing.T) {
+	view := EngineResult{
+		ActiveJourneyState: &policy.JourneyNode{
+			ID:          "verify_state",
+			Instruction: "Please share the order number before I review refund or replacement options.",
+		},
+		MatchFinalizeStage: FinalizeStageResult{
+			MatchedGuidelines: []policy.Guideline{{
+				ID:   "verify_first",
+				Then: "Verify the order before promising a refund or replacement.",
+			}},
+		},
+	}
+	got := VerifyDraft(view, "You qualify for a replacement right away.", nil)
+	if got.Status != "revise" || got.Replacement != "Please share the order number before I review refund or replacement options." {
+		t.Fatalf("VerifyDraft() = %#v, want verification-first replacement", got)
+	}
+}
+
 func TestExtractMentionedAgeRequiresExplicitAgeContext(t *testing.T) {
 	cases := []struct {
 		text string

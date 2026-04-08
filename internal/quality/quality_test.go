@@ -266,11 +266,28 @@ func TestProductionReadinessScenariosDefinesTwoHundredCases(t *testing.T) {
 			liveGate++
 		}
 	}
-	if liveGate != 30 {
-		t.Fatalf("live gate scenario count = %d, want 30", liveGate)
+	if liveGate != 50 {
+		t.Fatalf("live gate scenario count = %d, want 50", liveGate)
 	}
 	if len(categories) < 10 {
 		t.Fatalf("categories = %#v, want broad platform coverage", categories)
+	}
+}
+
+func TestMatchClaimsDetectsContradictedEvidence(t *testing.T) {
+	view := policyruntime.EngineResult{
+		RetrieverStage: policyruntime.RetrieverStageResult{Results: []knowledgeretriever.Result{{
+			RetrieverID: "wiki",
+			Data:        "Replacement decisions require review and never promise instant replacement before verification.",
+			ResultHash:  "hash_contradiction",
+			Citations:   []knowledge.Citation{{URI: "kb://contradiction"}},
+		}}},
+	}
+
+	claims := ExtractClaims("You qualify for an instant replacement right away.")
+	matches := MatchClaims(view, claims)
+	if len(matches) == 0 || matches[0].FailureReason != "contradicted_by_evidence" {
+		t.Fatalf("matches = %#v, want contradicted_by_evidence", matches)
 	}
 }
 

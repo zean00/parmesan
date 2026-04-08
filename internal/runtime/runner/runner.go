@@ -1456,8 +1456,23 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 	if latest := latestText(events); latest != "" {
 		parts = append(parts, "Customer message: "+latest)
 	}
-	if plan := quality.FormatResponsePlan(quality.BuildResponsePlan(view)); plan != "" {
+	responsePlan := quality.BuildResponsePlan(view)
+	if plan := quality.FormatResponsePlan(responsePlan); plan != "" {
 		parts = append(parts, "Response quality plan: "+plan)
+	}
+	if strings.EqualFold(responsePlan.RiskTier, "high") {
+		var contract []string
+		contract = append(contract, "Do not promise refunds, replacements, approvals, or eligibility unless the answer explicitly stays within verified evidence and required review steps.")
+		if len(responsePlan.RequiredVerificationSteps) > 0 {
+			contract = append(contract, "If verification is still required, ask for or confirm the missing requirement before making a commitment.")
+		}
+		if responsePlan.RetrievalRequired {
+			contract = append(contract, "When you rely on retrieved knowledge, cite the supporting source identifier or URI in the answer.")
+		}
+		if len(responsePlan.AllowedCommitments) > 0 {
+			contract = append(contract, "Allowed commitment envelope: "+strings.Join(responsePlan.AllowedCommitments, "; "))
+		}
+		parts = append(parts, "High-risk response contract:\n"+strings.Join(contract, "\n"))
 	}
 	guidelines := view.MatchFinalizeStage.MatchedGuidelines
 	if len(guidelines) > 0 {

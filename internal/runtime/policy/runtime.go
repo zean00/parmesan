@@ -249,6 +249,13 @@ func VerifyDraft(view EngineResult, draft string, toolOutput map[string]any) Ver
 			}
 		}
 	}
+	if replacement := highRiskContractReplacement(view, draft); replacement != "" && normalizeText(draft) != normalizeText(replacement) {
+		return VerificationResult{
+			Status:      "revise",
+			Reasons:     []string{"high_risk_contract_enforced"},
+			Replacement: replacement,
+		}
+	}
 	return VerificationResult{Status: "pass"}
 }
 
@@ -276,6 +283,92 @@ func strictNoMatchText(configured string) string {
 		return strings.TrimSpace(configured)
 	}
 	return "Not sure I understand. Could you please say that another way?"
+}
+
+func highRiskContractReplacement(view EngineResult, draft string) string {
+	if !requiresHighRiskContract(view) {
+		return ""
+	}
+	lower := normalizeText(draft)
+	if !containsAnyNormalized(lower, []string{
+		"you qualify",
+		"you are eligible",
+		"youre eligible",
+		"approved",
+		"instant replacement",
+		"immediate replacement",
+		"instant refund",
+		"immediate refund",
+		"right away",
+		"immediately",
+		"we can refund",
+		"we can replace",
+		"i can refund",
+		"i can replace",
+		"we will refund",
+		"we will replace",
+		"you will receive",
+		"youll receive",
+		"well send",
+	}) {
+		return ""
+	}
+	if containsAnyNormalized(lower, []string{
+		"after verification",
+		"once verified",
+		"before verification",
+		"before refund review",
+		"before replacement review",
+		"requires verification",
+		"must be verified",
+		"after review",
+		"policy review",
+		"before review",
+		"pending review",
+		"after approval",
+		"once approved",
+		"need approval",
+		"requires approval",
+		"need review",
+		"before i review",
+		"before changing",
+	}) {
+		return ""
+	}
+	if view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
+		return strings.TrimSpace(view.ActiveJourneyState.Instruction)
+	}
+	for _, guideline := range view.MatchFinalizeStage.MatchedGuidelines {
+		then := strings.TrimSpace(guideline.Then)
+		if then == "" {
+			continue
+		}
+		if containsAnyNormalized(strings.ToLower(then), []string{"verify", "approval", "review"}) {
+			return then
+		}
+	}
+	return strictNoMatchText(view.NoMatch)
+}
+
+func requiresHighRiskContract(view EngineResult) bool {
+	if shouldBypassScopeBoundary(view.ScopeBoundaryStage) {
+		return false
+	}
+	hasGuidance := view.ActiveJourneyState != nil || len(view.MatchFinalizeStage.MatchedGuidelines) > 0
+	if len(view.RetrieverStage.Results) > 0 && hasGuidance {
+		return true
+	}
+	return view.ActiveJourneyState != nil && len(view.MatchFinalizeStage.MatchedGuidelines) > 0
+}
+
+func containsAnyNormalized(haystack string, needles []string) bool {
+	for _, needle := range needles {
+		needle = normalizeText(needle)
+		if needle != "" && strings.Contains(haystack, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func recordConditionArtifact(state *matchingState, key string, evidence semantics.ConditionEvidence) {
