@@ -7,6 +7,7 @@ cd "$ROOT"
 REPORT_DIR="${PLATFORM_VALIDATION_REPORT_DIR:-/tmp/parmesan-platform-validation-live}"
 PROVIDER="${DEFAULT_REASONING_PROVIDER:-openrouter}"
 SEED_FILE="${QUALITY_SCENARIO_SEEDS:-artifacts/regression-scenario-seeds.json}"
+SNAPSHOT_OUT="${QUALITY_RELEASE_SNAPSHOT_OUT:-artifacts/quality-release-snapshot.json}"
 
 if [[ "$PROVIDER" == "openrouter" && -z "${OPENROUTER_API_KEY:-}" ]]; then
   echo "OPENROUTER_API_KEY is required for OpenRouter live validation." >&2
@@ -50,6 +51,10 @@ echo "Quality gate check"
 go run ./cmd/quality-report-check -dir "$REPORT_DIR" -expect-scenarios "$EXPECTED_SCENARIOS"
 
 echo
+echo "Release snapshot"
+go run ./cmd/quality-release-snapshot -dir "$REPORT_DIR" -out "$SNAPSHOT_OUT"
+
+echo
 echo "Scorecard summary from $REPORT_DIR"
 if command -v jq >/dev/null 2>&1; then
   for report in "$REPORT_DIR"/TestPlatformValidation*.json; do
@@ -74,3 +79,6 @@ if command -v jq >/dev/null 2>&1; then
 else
   echo "jq not found; raw reports are available in $REPORT_DIR"
 fi
+
+echo
+echo "Release snapshot written to $SNAPSHOT_OUT"

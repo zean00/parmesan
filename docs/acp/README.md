@@ -96,6 +96,8 @@ Knowledge rules:
 - Setting `QUALITY_SCENARIO_SEEDS=artifacts/regression-scenario-seeds.json` causes the quality catalog and report checker to merge reviewed seed scenarios automatically.
 - `./scripts/live_platform_validation.sh` auto-detects `artifacts/regression-scenario-seeds.json`, validates it, exports `QUALITY_SCENARIO_SEEDS`, and derives the expected live-gate scenario IDs from `go run ./cmd/quality-catalog -live-only -ids`.
 - `go run ./cmd/quality-live-diff` shows the difference between built-in live-gate scenarios and the merged live-gate set after reviewed seeds are applied.
+- `go run ./cmd/quality-release-snapshot -dir /tmp/parmesan-platform-validation-live -out artifacts/quality-release-snapshot.json` freezes the latest live-gate evidence into one artifact with the merged live-gate set, live diff, report summary, and aggregated provider stats.
+- `./scripts/live_platform_validation.sh` writes that snapshot automatically to `QUALITY_RELEASE_SNAPSHOT_OUT`, defaulting to `artifacts/quality-release-snapshot.json`, after a passing report check.
 
 Core event families:
 - `message`

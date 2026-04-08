@@ -269,6 +269,7 @@ go run ./cmd/regression-seed -in artifacts/regression-fixtures.json -out artifac
 go run ./cmd/quality-seed-check -in artifacts/regression-scenario-seeds.json
 QUALITY_SCENARIO_SEEDS=artifacts/regression-scenario-seeds.json go run ./cmd/quality-catalog -summary
 go run ./cmd/quality-report-check -dir /tmp/parmesan-platform-validation-live -expect-scenarios ecommerce_knowledge_grounding_damaged_toaster_replacem,ecommerce_knowledge_grounding_refund_timing_question,pet_store_topic_scope_human_cooking_question,pet_store_topic_scope_pet_food_question,support_multilingual_english_fallback,support_multilingual_respond_in_indonesian,support_preference_call_me_rina,support_preference_prefer_email,support_refusal_escalation_operator_handoff,support_refusal_escalation_unsafe_request -min-overall 0.7
+go run ./cmd/quality-release-snapshot -dir /tmp/parmesan-platform-validation-live -out artifacts/quality-release-snapshot.json
 ```
 
 `quality-report-check` now applies stricter per-scenario minimums from the
@@ -282,6 +283,10 @@ built-in expectations.
 scenario expectation list directly from `go run ./cmd/quality-catalog -live-only -ids`.
 `go run ./cmd/quality-live-diff` shows which live-gate scenarios were added or
 removed by reviewed seed merges compared to the built-in baseline.
+After a passing gate, the script also writes a frozen release-evidence bundle to
+`QUALITY_RELEASE_SNAPSHOT_OUT`, defaulting to
+`artifacts/quality-release-snapshot.json`, with the merged live-gate set,
+live-diff summary, report summary, and provider aggregates from the latest run.
 
 The script defaults reasoning, structured, and embedding providers to
 OpenRouter; override `DEFAULT_REASONING_PROVIDER`,
