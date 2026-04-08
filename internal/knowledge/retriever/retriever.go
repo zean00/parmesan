@@ -85,10 +85,7 @@ func (r Lexical) Retrieve(_ context.Context, in Context) (Result, error) {
 		}
 		return scoredChunks[i].score > scoredChunks[j].score
 	})
-	limit := r.MaxResults
-	if limit <= 0 || limit > 3 {
-		limit = 3
-	}
+	limit := boundedLimit(r.MaxResults)
 	if limit > len(scoredChunks) {
 		limit = len(scoredChunks)
 	}
@@ -201,7 +198,7 @@ func hasVectors(chunks []knowledge.Chunk) bool {
 }
 
 func boundedLimit(limit int) int {
-	if limit <= 0 || limit > 3 {
+	if limit <= 0 {
 		return 3
 	}
 	return limit

@@ -328,6 +328,17 @@ func (l *Learner) proposeKnowledgeFromFeedback(ctx context.Context, sess session
 	}
 	now := time.Now().UTC()
 	id := stableID("kprop", scopeKind, scopeID, record.ID, record.Text)
+	pageTitle := feedbackKnowledgeTitle(record.Text)
+	pagePayload := map[string]any{
+		"title":     pageTitle,
+		"body":      record.Text,
+		"operation": "append",
+		"citations": []map[string]any{{
+			"uri":    "session:" + sess.ID,
+			"anchor": record.TraceID,
+			"title":  pageTitle,
+		}},
+	}
 	item := knowledge.UpdateProposal{
 		ID:        id,
 		ScopeKind: scopeKind,
@@ -335,7 +346,7 @@ func (l *Learner) proposeKnowledgeFromFeedback(ctx context.Context, sess session
 		Kind:      "operator_feedback",
 		State:     "draft",
 		Rationale: "Operator feedback suggested a shared knowledge update.",
-		Evidence:  []knowledge.Citation{{URI: "session:" + sess.ID, Anchor: record.TraceID, Title: "Operator feedback"}},
+		Evidence:  []knowledge.Citation{{URI: "session:" + sess.ID, Anchor: record.TraceID, Title: pageTitle}},
 		Payload: map[string]any{
 			"session_id":        sess.ID,
 			"execution_id":      record.ExecutionID,
@@ -344,14 +355,33 @@ func (l *Learner) proposeKnowledgeFromFeedback(ctx context.Context, sess session
 			"operator_id":       record.OperatorID,
 			"operator_feedback": record.Text,
 			"signals":           signalPayloads(signals),
-			"title":             "Operator feedback",
-			"body":              record.Text,
-			"operation":         "append",
+			"title":             pagePayload["title"],
+			"body":              pagePayload["body"],
+			"operation":         pagePayload["operation"],
+			"page":              pagePayload,
 		},
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
 	return id, l.repo.SaveKnowledgeUpdateProposal(ctx, item)
+}
+
+func feedbackKnowledgeTitle(text string) string {
+	text = strings.TrimSpace(text)
+	text = strings.TrimPrefix(text, "Knowledge:")
+	text = strings.TrimPrefix(text, "knowledge:")
+	text = strings.TrimSpace(text)
+	if idx := strings.IndexAny(text, ".!?\n"); idx >= 0 {
+		text = text[:idx]
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	if text == "" {
+		return "Operator feedback " + stableChecksum("empty")[:8]
+	}
+	if len(text) > 48 {
+		text = strings.TrimSpace(text[:48])
+	}
+	return text + " [" + stableChecksum(text)[:8] + "]"
 }
 
 func (l *Learner) proposePolicyChange(ctx context.Context, sess session.Session, record feedback.Record, soulOnly bool) (string, error) {
