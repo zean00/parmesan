@@ -140,6 +140,10 @@ tokens or trusted identity headers via `OPERATOR_TRUSTED_ID_HEADER` and
 - `GET /v1/executions`
 - `GET /v1/executions/{id}`
 - `GET /v1/executions/{id}/resolved-policy`
+- `GET /v1/executions/{id}/quality`
+- `POST /v1/operator/executions/{id}/retry`
+- `POST /v1/operator/executions/{id}/unblock`
+- `POST /v1/operator/executions/{id}/abandon`
 
 ## Knowledge and Retrievers
 
@@ -211,6 +215,13 @@ Operator media inspection now exposes:
 - `GET /v1/replays/{id}/diff`
 - `GET /v1/traces` with optional `trace_id`, `session_id`, `execution_id`, `kind`, and `limit` filters
 - `GET /v1/traces/{id}`
+
+Durable execution notes:
+- executions can persist as `pending`, `running`, `waiting`, `blocked`, `succeeded`, `failed`, or `abandoned`
+- recomputable steps carry persisted retry cursors (`next_attempt_at`), retry policy fields, retry reason, blocked reason, and resume signal metadata
+- approval-required tools block executions with an approval resume signal; approval resolution moves the blocked step and execution back to `pending`
+- retryable step/tool failures are scheduled with durable backoff and resume after the retry cursor; exhausted retry budgets block for operator recovery
+- independent planned tools run in parallel while preserving approval blocking and idempotent tool-run reuse
 
 ## Example Policy
 

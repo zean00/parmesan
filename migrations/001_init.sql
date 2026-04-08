@@ -91,6 +91,8 @@ CREATE TABLE IF NOT EXISTS turn_executions (
     rollout_id TEXT,
     selection_reason TEXT,
     status TEXT NOT NULL,
+    blocked_reason TEXT,
+    resume_signal TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -106,6 +108,13 @@ CREATE TABLE IF NOT EXISTS execution_steps (
     lease_expires_at TIMESTAMPTZ,
     idempotency_key TEXT NOT NULL,
     last_error TEXT,
+    next_attempt_at TIMESTAMPTZ,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    max_elapsed_seconds INTEGER NOT NULL DEFAULT 0,
+    backoff_seconds INTEGER NOT NULL DEFAULT 1,
+    retry_reason TEXT,
+    blocked_reason TEXT,
+    resume_signal TEXT,
     started_at TIMESTAMPTZ,
     finished_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -115,7 +124,9 @@ CREATE TABLE IF NOT EXISTS execution_steps (
 ALTER TABLE turn_executions
     ADD COLUMN IF NOT EXISTS trace_id TEXT,
     ADD COLUMN IF NOT EXISTS lease_owner TEXT,
-    ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
+    ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS blocked_reason TEXT,
+    ADD COLUMN IF NOT EXISTS resume_signal TEXT;
 
 CREATE TABLE IF NOT EXISTS tool_provider_bindings (
     id TEXT PRIMARY KEY,

@@ -3,8 +3,8 @@ package policyruntime
 import (
 	"context"
 	"encoding/json"
-	"sync"
 	"strings"
+	"sync"
 
 	"github.com/sahal/parmesan/internal/model"
 )
@@ -14,11 +14,24 @@ const (
 	defaultARQRetries   = 3
 )
 
+type structuredRetryAttemptsContextKey struct{}
+
+func WithStructuredRetryAttempts(ctx context.Context, attempts int) context.Context {
+	if attempts <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, structuredRetryAttemptsContextKey{}, attempts)
+}
+
 func generateStructuredWithRetry(ctx context.Context, router *model.Router, prompt string, out any) bool {
 	if router == nil {
 		return false
 	}
-	for attempt := 0; attempt < defaultARQRetries; attempt++ {
+	attempts := defaultARQRetries
+	if configured, ok := ctx.Value(structuredRetryAttemptsContextKey{}).(int); ok && configured > attempts {
+		attempts = configured
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
 		if generateStructured(ctx, router, prompt, out) {
 			return true
 		}

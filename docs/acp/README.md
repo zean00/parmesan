@@ -23,6 +23,8 @@ Conversation-edge rules:
 - Operator customer preferences are available under `/v1/operator/customers/{customer_id}/preferences?agent_id=...`; lifecycle actions use `/confirm`, `/reject`, and `/expire` on a preference key.
 - Trace listing supports `trace_id`, `session_id`, `execution_id`, `kind`, and `limit` filters; `GET /v1/traces/{id}` returns the detailed timeline.
 - `/v1/operator/...` supports single-tenant RBAC with stored operator API tokens, trusted identity headers, and `OPERATOR_API_KEY` as bootstrap admin fallback.
+- Executions can wait durably with persisted retry metadata, block on approval resume signals, and be recovered by operators with `POST /v1/operator/executions/{id}/retry`, `/unblock`, or `/abandon`.
+- Planned independent tools run in parallel; approval-required tools still block before invocation and successful tool outputs are reused by idempotency key on resume.
 
 Knowledge workspace routes:
 - `POST /v1/operator/operators`

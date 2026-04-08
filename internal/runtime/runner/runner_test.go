@@ -342,6 +342,94 @@ func TestRunnerDoesNotRetryNonRetryableToolFailure(t *testing.T) {
 	}
 }
 
+func TestRunnerSchedulesRetryableToolFailureAsDurableWait(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":"temporary upstream failure"}`))
+	}))
+	defer server.Close()
+
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	router := model.NewRouter(config.ProviderConfig{
+		DefaultReasoning:  "openrouter",
+		DefaultStructured: "openrouter",
+		OpenRouterBase:    "https://openrouter.ai/api/v1",
+	})
+	r := New(repo, writes, sse.NewBroker(), router, "test-runner")
+
+	now := time.Now().UTC()
+	_ = repo.CreateSession(ctx, session.Session{ID: "sess_retry", Channel: "web", CreatedAt: now})
+	_ = repo.RegisterProvider(ctx, tool.ProviderBinding{ID: "commerce", Kind: tool.ProviderMCP, Name: "commerce", URI: server.URL, RegisteredAt: now, Healthy: true})
+	_ = repo.SaveCatalogEntries(ctx, []tool.CatalogEntry{{ID: "commerce_get_order", ProviderID: "commerce", Name: "get_order", RuntimeProtocol: "mcp", ImportedAt: now}})
+	_ = repo.SaveBundle(ctx, policy.Bundle{
+		ID:      "bundle_1",
+		Version: "v1",
+		Guidelines: []policy.Guideline{{
+			ID:   "lookup",
+			When: "order",
+			MCP:  &policy.MCPRef{Server: "commerce", Tool: "get_order"},
+		}},
+	})
+	_ = writes.AppendEvent(ctx, session.Event{
+		ID:        "evt_retry",
+		SessionID: "sess_retry",
+		Source:    "customer",
+		Kind:      "message",
+		CreatedAt: now,
+		Content:   []session.ContentPart{{Type: "text", Text: "check my order"}},
+	})
+	_ = writes.CreateExecution(ctx, execution.TurnExecution{
+		ID:             "exec_retry",
+		SessionID:      "sess_retry",
+		TriggerEventID: "evt_retry",
+		TraceID:        "trace_retry",
+		Status:         execution.StatusPending,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}, []execution.ExecutionStep{
+		step("exec_retry", "ingest", false),
+		step("exec_retry", "resolve_policy", true),
+		step("exec_retry", "match_and_plan", true),
+		step("exec_retry", "compose_response", true),
+		step("exec_retry", "deliver_response", false),
+	})
+
+	time.Sleep(50 * time.Millisecond)
+	if err := r.processExecution(ctx, "exec_retry"); err != nil {
+		t.Fatalf("processExecution() error = %v", err)
+	}
+
+	exec, steps, err := repo.GetExecution(ctx, "exec_retry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exec.Status != execution.StatusWaiting {
+		t.Fatalf("execution status = %s, want %s", exec.Status, execution.StatusWaiting)
+	}
+	if exec.LeaseExpiresAt.IsZero() || !exec.LeaseExpiresAt.After(time.Now().UTC()) {
+		t.Fatalf("execution lease_expires_at = %s, want future retry cursor", exec.LeaseExpiresAt)
+	}
+	for _, item := range steps {
+		if item.Name != "compose_response" {
+			continue
+		}
+		if item.Status != execution.StatusWaiting || item.NextAttemptAt.IsZero() || item.RetryReason == "" {
+			t.Fatalf("compose step = %#v, want waiting retry metadata", item)
+		}
+		if item.Attempt != 1 {
+			t.Fatalf("compose attempts = %d, want 1", item.Attempt)
+		}
+		return
+	}
+	t.Fatal("compose_response step not found")
+}
+
 func TestRunnerBlocksToolInvocationWhenArgumentsMissing(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)

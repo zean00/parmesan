@@ -7,41 +7,81 @@ type Status string
 const (
 	StatusPending   Status = "pending"
 	StatusRunning   Status = "running"
+	StatusWaiting   Status = "waiting"
 	StatusSucceeded Status = "succeeded"
 	StatusFailed    Status = "failed"
 	StatusBlocked   Status = "blocked"
 	StatusAbandoned Status = "abandoned"
 )
 
+const (
+	DefaultStepMaxAttempts    = 5
+	DefaultStepBackoffSeconds = 1
+)
+
+const (
+	BlockedReasonApprovalRequired     = "approval_required"
+	BlockedReasonRetryBudgetExhausted = "retry_budget_exhausted"
+)
+
+const ResumeSignalApproval = "approval"
+
+type RetryPolicy struct {
+	MaxAttempts       int  `json:"max_attempts,omitempty"`
+	BackoffSeconds    int  `json:"backoff_seconds,omitempty"`
+	MaxElapsedSeconds int  `json:"max_elapsed_seconds,omitempty"`
+	RetryUntilValid   bool `json:"retry_until_valid,omitempty"`
+}
+
 type TurnExecution struct {
-	ID             string    `json:"id"`
-	SessionID      string    `json:"session_id"`
-	TriggerEventID string    `json:"trigger_event_id"`
-	PolicyBundleID string    `json:"policy_bundle_id,omitempty"`
-	ProposalID     string    `json:"proposal_id,omitempty"`
-	RolloutID      string    `json:"rollout_id,omitempty"`
-	SelectionReason string   `json:"selection_reason,omitempty"`
-	TraceID        string    `json:"trace_id,omitempty"`
-	Status         Status    `json:"status"`
-	LeaseOwner     string    `json:"lease_owner,omitempty"`
-	LeaseExpiresAt time.Time `json:"lease_expires_at,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID              string    `json:"id"`
+	SessionID       string    `json:"session_id"`
+	TriggerEventID  string    `json:"trigger_event_id"`
+	PolicyBundleID  string    `json:"policy_bundle_id,omitempty"`
+	ProposalID      string    `json:"proposal_id,omitempty"`
+	RolloutID       string    `json:"rollout_id,omitempty"`
+	SelectionReason string    `json:"selection_reason,omitempty"`
+	TraceID         string    `json:"trace_id,omitempty"`
+	Status          Status    `json:"status"`
+	LeaseOwner      string    `json:"lease_owner,omitempty"`
+	LeaseExpiresAt  time.Time `json:"lease_expires_at,omitempty"`
+	BlockedReason   string    `json:"blocked_reason,omitempty"`
+	ResumeSignal    string    `json:"resume_signal,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type ExecutionStep struct {
-	ID            string    `json:"id"`
-	ExecutionID   string    `json:"execution_id"`
-	Name          string    `json:"name"`
-	Status        Status    `json:"status"`
-	Attempt       int       `json:"attempt"`
-	Recomputable  bool      `json:"recomputable"`
-	LeaseOwner     string    `json:"lease_owner,omitempty"`
-	LeaseExpiresAt time.Time `json:"lease_expires_at,omitempty"`
-	IdempotencyKey string   `json:"idempotency_key"`
-	LastError     string    `json:"last_error,omitempty"`
-	StartedAt     time.Time `json:"started_at,omitempty"`
-	FinishedAt    time.Time `json:"finished_at,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID                string    `json:"id"`
+	ExecutionID       string    `json:"execution_id"`
+	Name              string    `json:"name"`
+	Status            Status    `json:"status"`
+	Attempt           int       `json:"attempt"`
+	Recomputable      bool      `json:"recomputable"`
+	LeaseOwner        string    `json:"lease_owner,omitempty"`
+	LeaseExpiresAt    time.Time `json:"lease_expires_at,omitempty"`
+	IdempotencyKey    string    `json:"idempotency_key"`
+	LastError         string    `json:"last_error,omitempty"`
+	NextAttemptAt     time.Time `json:"next_attempt_at,omitempty"`
+	MaxAttempts       int       `json:"max_attempts,omitempty"`
+	MaxElapsedSeconds int       `json:"max_elapsed_seconds,omitempty"`
+	BackoffSeconds    int       `json:"backoff_seconds,omitempty"`
+	RetryReason       string    `json:"retry_reason,omitempty"`
+	BlockedReason     string    `json:"blocked_reason,omitempty"`
+	ResumeSignal      string    `json:"resume_signal,omitempty"`
+	StartedAt         time.Time `json:"started_at,omitempty"`
+	FinishedAt        time.Time `json:"finished_at,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+func DefaultRetryPolicy(recomputable bool) RetryPolicy {
+	if !recomputable {
+		return RetryPolicy{MaxAttempts: 1, BackoffSeconds: DefaultStepBackoffSeconds}
+	}
+	return RetryPolicy{
+		MaxAttempts:     DefaultStepMaxAttempts,
+		BackoffSeconds:  DefaultStepBackoffSeconds,
+		RetryUntilValid: true,
+	}
 }

@@ -547,6 +547,12 @@ func (s *Store) ListRunnableExecutions(_ context.Context, now time.Time) ([]exec
 	defer s.mu.RUnlock()
 	var out []execution.TurnExecution
 	for _, exec := range s.execs {
+		if exec.Status == execution.StatusWaiting {
+			if exec.LeaseExpiresAt.IsZero() || exec.LeaseExpiresAt.Before(now) {
+				out = append(out, exec)
+			}
+			continue
+		}
 		if exec.Status == execution.StatusRunning || exec.Status == execution.StatusPending {
 			if exec.LeaseExpiresAt.IsZero() || exec.LeaseExpiresAt.Before(now) || exec.LeaseOwner == "" {
 				out = append(out, exec)

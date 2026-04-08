@@ -1,0 +1,12 @@
+ALTER TABLE turn_executions
+    ADD COLUMN IF NOT EXISTS blocked_reason TEXT,
+    ADD COLUMN IF NOT EXISTS resume_signal TEXT;
+
+ALTER TABLE execution_steps
+    ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 5,
+    ADD COLUMN IF NOT EXISTS max_elapsed_seconds INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS backoff_seconds INTEGER NOT NULL DEFAULT 1,
+    ADD COLUMN IF NOT EXISTS retry_reason TEXT,
+    ADD COLUMN IF NOT EXISTS blocked_reason TEXT,
+    ADD COLUMN IF NOT EXISTS resume_signal TEXT;

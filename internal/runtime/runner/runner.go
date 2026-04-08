@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sahal/parmesan/internal/api/sse"
@@ -184,7 +185,7 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 	if err != nil {
 		return err
 	}
-	if exec.Status == execution.StatusSucceeded || exec.Status == execution.StatusFailed {
+	if exec.Status == execution.StatusSucceeded || exec.Status == execution.StatusFailed || exec.Status == execution.StatusAbandoned {
 		return nil
 	}
 	events, err := r.repo.ListEvents(ctx, exec.SessionID)
@@ -195,10 +196,16 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 		return nil
 	}
 
+	now := time.Now().UTC()
+	if exec.Status == execution.StatusWaiting && exec.LeaseExpiresAt.After(now) {
+		return nil
+	}
 	exec.LeaseOwner = r.leaseOwner
-	exec.LeaseExpiresAt = time.Now().UTC().Add(r.leaseTTL)
+	exec.LeaseExpiresAt = now.Add(r.leaseTTL)
 	exec.Status = execution.StatusRunning
-	exec.UpdatedAt = time.Now().UTC()
+	exec.BlockedReason = ""
+	exec.ResumeSignal = ""
+	exec.UpdatedAt = now
 	if err := r.repo.UpdateExecution(ctx, exec); err != nil {
 		return err
 	}
@@ -206,6 +213,25 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 	for _, step := range steps {
 		if step.Status == execution.StatusSucceeded {
 			continue
+		}
+		now = time.Now().UTC()
+		if (step.Status == execution.StatusWaiting || step.Status == execution.StatusPending) && step.NextAttemptAt.After(now) {
+			exec.Status = execution.StatusWaiting
+			exec.LeaseOwner = ""
+			exec.LeaseExpiresAt = step.NextAttemptAt
+			exec.UpdatedAt = now
+			_ = r.repo.UpdateExecution(ctx, exec)
+			return nil
+		}
+		if step.Status == execution.StatusBlocked {
+			exec.Status = execution.StatusBlocked
+			exec.BlockedReason = step.BlockedReason
+			exec.ResumeSignal = step.ResumeSignal
+			exec.LeaseOwner = ""
+			exec.LeaseExpiresAt = time.Time{}
+			exec.UpdatedAt = now
+			_ = r.repo.UpdateExecution(ctx, exec)
+			return nil
 		}
 		if step.Status == execution.StatusRunning && step.LeaseExpiresAt.After(time.Now().UTC()) && step.LeaseOwner != "" && step.LeaseOwner != r.leaseOwner {
 			return nil
@@ -215,6 +241,9 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 		step.Attempt++
 		step.LeaseOwner = r.leaseOwner
 		step.LeaseExpiresAt = time.Now().UTC().Add(r.leaseTTL)
+		step.NextAttemptAt = time.Time{}
+		step.BlockedReason = ""
+		step.ResumeSignal = ""
 		if step.StartedAt.IsZero() {
 			step.StartedAt = time.Now().UTC()
 		}
@@ -224,30 +253,42 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 		}
 
 		r.publish(exec.SessionID, exec.ID, "runtime.step.started", map[string]any{"step": step.Name})
-		err := r.executeStep(ctx, &exec, &step)
+		stepCtx := policyruntime.WithStructuredRetryAttempts(ctx, stepMaxAttempts(step))
+		err := r.executeStep(stepCtx, &exec, &step)
 		if err != nil {
 			if errors.Is(err, errApprovalRequired) {
 				step.Status = execution.StatusBlocked
 				step.LastError = err.Error()
+				step.BlockedReason = execution.BlockedReasonApprovalRequired
+				step.ResumeSignal = execution.ResumeSignalApproval
+				step.LeaseOwner = ""
+				step.LeaseExpiresAt = time.Time{}
 				step.UpdatedAt = time.Now().UTC()
 				_ = r.repo.UpdateExecutionStep(ctx, step)
 				exec.Status = execution.StatusBlocked
+				exec.BlockedReason = execution.BlockedReasonApprovalRequired
+				exec.ResumeSignal = execution.ResumeSignalApproval
 				exec.LeaseOwner = ""
 				exec.LeaseExpiresAt = time.Time{}
 				exec.UpdatedAt = time.Now().UTC()
 				_ = r.repo.UpdateExecution(ctx, exec)
 				return nil
 			}
-			if step.Recomputable && step.Attempt < 3 && isRetryableExecutionError(err) {
-				step.Status = execution.StatusPending
+			if step.Recomputable && stepRetryBudgetAllows(step) && isRetryableExecutionError(err) {
+				nextAttempt := time.Now().UTC().Add(stepBackoff(step))
+				step.Status = execution.StatusWaiting
 				step.LastError = err.Error()
+				step.RetryReason = retryReason(err)
 				step.LeaseOwner = ""
-				step.LeaseExpiresAt = time.Now().UTC().Add(1 * time.Second)
+				step.LeaseExpiresAt = nextAttempt
+				step.NextAttemptAt = nextAttempt
 				step.UpdatedAt = time.Now().UTC()
 				_ = r.repo.UpdateExecutionStep(ctx, step)
-				exec.Status = execution.StatusRunning
+				exec.Status = execution.StatusWaiting
 				exec.LeaseOwner = ""
-				exec.LeaseExpiresAt = time.Now().UTC().Add(1 * time.Second)
+				exec.LeaseExpiresAt = nextAttempt
+				exec.BlockedReason = ""
+				exec.ResumeSignal = ""
 				exec.UpdatedAt = time.Now().UTC()
 				_ = r.repo.UpdateExecution(ctx, exec)
 				r.appendTrace(ctx, audit.Record{
@@ -257,17 +298,50 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 					ExecutionID: exec.ID,
 					TraceID:     exec.TraceID,
 					Message:     err.Error(),
-					Fields:      map[string]any{"step": step.Name, "attempt": step.Attempt},
+					Fields:      map[string]any{"step": step.Name, "attempt": step.Attempt, "next_attempt_at": nextAttempt, "retry_reason": step.RetryReason},
+					CreatedAt:   time.Now().UTC(),
+				})
+				return nil
+			}
+			if step.Recomputable && isRetryableExecutionError(err) {
+				step.Status = execution.StatusBlocked
+				step.LastError = err.Error()
+				step.RetryReason = retryReason(err)
+				step.BlockedReason = execution.BlockedReasonRetryBudgetExhausted
+				step.LeaseOwner = ""
+				step.LeaseExpiresAt = time.Time{}
+				step.FinishedAt = time.Now().UTC()
+				step.UpdatedAt = time.Now().UTC()
+				_ = r.repo.UpdateExecutionStep(ctx, step)
+				exec.Status = execution.StatusBlocked
+				exec.BlockedReason = execution.BlockedReasonRetryBudgetExhausted
+				exec.ResumeSignal = "operator_retry"
+				exec.LeaseOwner = ""
+				exec.LeaseExpiresAt = time.Time{}
+				exec.UpdatedAt = time.Now().UTC()
+				_ = r.repo.UpdateExecution(ctx, exec)
+				r.appendTrace(ctx, audit.Record{
+					ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+					Kind:        "execution.blocked",
+					SessionID:   exec.SessionID,
+					ExecutionID: exec.ID,
+					TraceID:     exec.TraceID,
+					Message:     err.Error(),
+					Fields:      map[string]any{"step": step.Name, "attempt": step.Attempt, "blocked_reason": exec.BlockedReason},
 					CreatedAt:   time.Now().UTC(),
 				})
 				return nil
 			}
 			step.Status = execution.StatusFailed
 			step.LastError = err.Error()
+			step.LeaseOwner = ""
+			step.LeaseExpiresAt = time.Time{}
 			step.FinishedAt = time.Now().UTC()
 			step.UpdatedAt = time.Now().UTC()
 			_ = r.repo.UpdateExecutionStep(ctx, step)
 			exec.Status = execution.StatusFailed
+			exec.LeaseOwner = ""
+			exec.LeaseExpiresAt = time.Time{}
 			exec.UpdatedAt = time.Now().UTC()
 			_ = r.repo.UpdateExecution(ctx, exec)
 			r.appendTrace(ctx, audit.Record{
@@ -284,6 +358,11 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 		}
 
 		step.Status = execution.StatusSucceeded
+		step.LastError = ""
+		step.RetryReason = ""
+		step.BlockedReason = ""
+		step.ResumeSignal = ""
+		step.NextAttemptAt = time.Time{}
 		step.FinishedAt = time.Now().UTC()
 		step.UpdatedAt = time.Now().UTC()
 		if err := r.repo.UpdateExecutionStep(ctx, step); err != nil {
@@ -293,6 +372,10 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 	}
 
 	exec.Status = execution.StatusSucceeded
+	exec.BlockedReason = ""
+	exec.ResumeSignal = ""
+	exec.LeaseOwner = ""
+	exec.LeaseExpiresAt = time.Time{}
 	exec.UpdatedAt = time.Now().UTC()
 	if err := r.repo.UpdateExecution(ctx, exec); err != nil {
 		return err
@@ -1027,24 +1110,9 @@ func (r *Runner) maybeRunTool(ctx context.Context, exec execution.TurnExecution,
 			}
 			calls = append(calls, policyruntime.ToolPlannedCall{ToolID: toolName})
 		}
-		for _, call := range calls {
-			entry, ok := findCatalogEntry(r.repo, call.ToolID)
-			if !ok {
-				continue
-			}
-			decision := decisionForPlannedCall(view, call)
-			output, err := r.runSingleTool(ctx, exec, view, entry, decision)
-			if err != nil {
-				return nil, err
-			}
-			if output != nil {
-				key := entry.ProviderID + ":" + entry.Name
-				if _, exists := outputs[key]; !exists {
-					outputs[key] = output
-				} else {
-					outputs[key+"#"+hashArguments(decision.Arguments)] = output
-				}
-			}
+		outputs, err := r.runToolCallsParallel(ctx, exec, view, calls)
+		if err != nil {
+			return nil, err
 		}
 		if len(outputs) == 0 {
 			return nil, nil
@@ -1065,19 +1133,14 @@ func (r *Runner) maybeRunTool(ctx context.Context, exec execution.TurnExecution,
 		return r.runSingleTool(ctx, exec, view, entry, toolDecision)
 	}
 	outputs := map[string]map[string]any{}
+	calls := make([]policyruntime.ToolPlannedCall, 0, len(selectedTools))
 	for _, toolName := range selectedTools {
-		entry, ok := findCatalogEntry(r.repo, toolName)
-		if !ok {
-			continue
-		}
-		decision := decisionForTool(view, entry.Name)
-		output, err := r.runSingleTool(ctx, exec, view, entry, decision)
-		if err != nil {
-			return nil, err
-		}
-		if output != nil {
-			outputs[entry.ProviderID+":"+entry.Name] = output
-		}
+		calls = append(calls, policyruntime.ToolPlannedCall{ToolID: toolName})
+	}
+	var err error
+	outputs, err = r.runToolCallsParallel(ctx, exec, view, calls)
+	if err != nil {
+		return nil, err
 	}
 	if len(outputs) == 0 {
 		return nil, nil
@@ -1088,6 +1151,93 @@ func (r *Runner) maybeRunTool(ctx context.Context, exec execution.TurnExecution,
 		}
 	}
 	return map[string]any{"tools": outputs}, nil
+}
+
+type toolBatchItem struct {
+	key    string
+	output map[string]any
+	err    error
+}
+
+func (r *Runner) runToolCallsParallel(ctx context.Context, exec execution.TurnExecution, view resolvedView, calls []policyruntime.ToolPlannedCall) (map[string]map[string]any, error) {
+	type runnable struct {
+		entry    tool.CatalogEntry
+		decision policyruntime.ToolDecision
+		key      string
+	}
+	var tasks []runnable
+	seen := map[string]struct{}{}
+	for _, call := range calls {
+		entry, ok := findCatalogEntry(r.repo, call.ToolID)
+		if !ok {
+			continue
+		}
+		decision := decisionForPlannedCall(view, call)
+		key := entry.ProviderID + ":" + entry.Name
+		if len(decision.Arguments) > 0 {
+			key += "#" + hashArguments(decision.Arguments)
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		tasks = append(tasks, runnable{entry: entry, decision: decision, key: key})
+	}
+	if len(tasks) == 0 {
+		return nil, nil
+	}
+	results := make(chan toolBatchItem, len(tasks))
+	var wg sync.WaitGroup
+	for _, task := range tasks {
+		task := task
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			output, err := r.runSingleTool(ctx, exec, view, task.entry, task.decision)
+			results <- toolBatchItem{key: task.key, output: output, err: err}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	outputs := map[string]map[string]any{}
+	var retryableErr error
+	var approvalErr error
+	var firstErr error
+	var errorsOut []map[string]any
+	for result := range results {
+		if result.err != nil {
+			if errors.Is(result.err, errApprovalRequired) {
+				approvalErr = result.err
+				continue
+			}
+			if isRetryableExecutionError(result.err) && retryableErr == nil {
+				retryableErr = result.err
+				continue
+			}
+			if firstErr == nil {
+				firstErr = result.err
+			}
+			errorsOut = append(errorsOut, map[string]any{"tool": result.key, "error": result.err.Error(), "retryable": false})
+			continue
+		}
+		if result.output != nil {
+			outputs[result.key] = result.output
+		}
+	}
+	if approvalErr != nil {
+		return nil, approvalErr
+	}
+	if retryableErr != nil {
+		return nil, retryableErr
+	}
+	if firstErr != nil && len(outputs) == 0 {
+		return nil, firstErr
+	}
+	if len(errorsOut) > 0 {
+		outputs["tool_errors"] = map[string]any{"errors": errorsOut}
+	}
+	return outputs, nil
 }
 
 func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution, view resolvedView, entry tool.CatalogEntry, decision policyruntime.ToolDecision) (map[string]any, error) {
@@ -1333,6 +1483,56 @@ func isRetryableExecutionError(err error) bool {
 		return invokeErr.Retryable
 	}
 	return true
+}
+
+func stepMaxAttempts(step execution.ExecutionStep) int {
+	if step.MaxAttempts > 0 {
+		return step.MaxAttempts
+	}
+	return execution.DefaultRetryPolicy(step.Recomputable).MaxAttempts
+}
+
+func stepRetryBudgetAllows(step execution.ExecutionStep) bool {
+	if step.Attempt >= stepMaxAttempts(step) {
+		return false
+	}
+	if step.MaxElapsedSeconds <= 0 || step.StartedAt.IsZero() {
+		return true
+	}
+	return time.Since(step.StartedAt) < time.Duration(step.MaxElapsedSeconds)*time.Second
+}
+
+func stepBackoff(step execution.ExecutionStep) time.Duration {
+	seconds := step.BackoffSeconds
+	if seconds <= 0 {
+		seconds = execution.DefaultRetryPolicy(step.Recomputable).BackoffSeconds
+	}
+	if seconds <= 0 {
+		seconds = 1
+	}
+	// Exponential backoff keeps retry-until-valid loops durable without hot-spinning.
+	delay := time.Duration(seconds) * time.Second
+	for i := 1; i < step.Attempt; i++ {
+		delay *= 2
+		if delay >= time.Minute {
+			return time.Minute
+		}
+	}
+	return delay
+}
+
+func retryReason(err error) string {
+	var invokeErr *toolruntime.InvokeError
+	if errors.As(err, &invokeErr) {
+		if invokeErr.Class != "" {
+			return string(invokeErr.Class)
+		}
+		if invokeErr.Retryable {
+			return "tool_retryable"
+		}
+		return "tool_error"
+	}
+	return "runtime_retryable"
 }
 
 func toolErrorPayload(err error) map[string]any {

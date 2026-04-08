@@ -265,6 +265,9 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/executions/{id}/quality", s.getExecutionQuality)
 	mux.HandleFunc("GET /v1/executions/{id}/tool-runs", s.listToolRuns)
 	mux.HandleFunc("GET /v1/executions/{id}/delivery-attempts", s.listDeliveryAttempts)
+	mux.HandleFunc("POST /v1/operator/executions/{id}/retry", s.operatorRetryExecution)
+	mux.HandleFunc("POST /v1/operator/executions/{id}/unblock", s.operatorUnblockExecution)
+	mux.HandleFunc("POST /v1/operator/executions/{id}/abandon", s.operatorAbandonExecution)
 	mux.HandleFunc("POST /v1/replays", s.replayExecution)
 	mux.HandleFunc("GET /v1/replays", s.listReplayExecutions)
 	mux.HandleFunc("GET /v1/replays/{id}", s.getReplayExecution)
@@ -4185,6 +4188,150 @@ func (s *Server) getExecution(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) operatorRetryExecution(w http.ResponseWriter, r *http.Request) {
+	exec, steps, err := s.store.GetExecution(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	now := time.Now().UTC()
+	exec.Status = execution.StatusPending
+	exec.LeaseOwner = ""
+	exec.LeaseExpiresAt = time.Time{}
+	exec.BlockedReason = ""
+	exec.ResumeSignal = ""
+	exec.UpdatedAt = now
+	for _, step := range steps {
+		if step.Status == execution.StatusSucceeded {
+			continue
+		}
+		step.Status = execution.StatusPending
+		step.Attempt = 0
+		step.LeaseOwner = ""
+		step.LeaseExpiresAt = time.Time{}
+		step.NextAttemptAt = time.Time{}
+		step.BlockedReason = ""
+		step.ResumeSignal = ""
+		step.RetryReason = ""
+		step.StartedAt = time.Time{}
+		step.FinishedAt = time.Time{}
+		step.UpdatedAt = now
+		if err := s.store.UpdateExecutionStep(r.Context(), step); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	if err := s.store.UpdateExecution(r.Context(), exec); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.appendTrace(r.Context(), audit.Record{
+		ID:          fmt.Sprintf("trace_%d", now.UnixNano()),
+		Kind:        "execution.operator_retry",
+		SessionID:   exec.SessionID,
+		ExecutionID: exec.ID,
+		TraceID:     exec.TraceID,
+		Message:     "execution retry requested by operator",
+		Fields:      map[string]any{"operator_id": requestOperatorID(r, "")},
+		CreatedAt:   now,
+	})
+	writeJSON(w, http.StatusOK, exec)
+}
+
+func (s *Server) operatorUnblockExecution(w http.ResponseWriter, r *http.Request) {
+	exec, steps, err := s.store.GetExecution(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	now := time.Now().UTC()
+	for _, step := range steps {
+		if step.Status != execution.StatusBlocked {
+			continue
+		}
+		step.Status = execution.StatusPending
+		step.LeaseOwner = ""
+		step.LeaseExpiresAt = time.Time{}
+		step.NextAttemptAt = time.Time{}
+		step.BlockedReason = ""
+		step.ResumeSignal = ""
+		step.UpdatedAt = now
+		if err := s.store.UpdateExecutionStep(r.Context(), step); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		break
+	}
+	exec.Status = execution.StatusPending
+	exec.LeaseOwner = ""
+	exec.LeaseExpiresAt = time.Time{}
+	exec.BlockedReason = ""
+	exec.ResumeSignal = ""
+	exec.UpdatedAt = now
+	if err := s.store.UpdateExecution(r.Context(), exec); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.appendTrace(r.Context(), audit.Record{
+		ID:          fmt.Sprintf("trace_%d", now.UnixNano()),
+		Kind:        "execution.operator_unblocked",
+		SessionID:   exec.SessionID,
+		ExecutionID: exec.ID,
+		TraceID:     exec.TraceID,
+		Message:     "execution unblocked by operator",
+		Fields:      map[string]any{"operator_id": requestOperatorID(r, "")},
+		CreatedAt:   now,
+	})
+	writeJSON(w, http.StatusOK, exec)
+}
+
+func (s *Server) operatorAbandonExecution(w http.ResponseWriter, r *http.Request) {
+	exec, steps, err := s.store.GetExecution(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	now := time.Now().UTC()
+	exec.Status = execution.StatusAbandoned
+	exec.LeaseOwner = ""
+	exec.LeaseExpiresAt = time.Time{}
+	exec.BlockedReason = "operator_abandoned"
+	exec.ResumeSignal = ""
+	exec.UpdatedAt = now
+	for _, step := range steps {
+		if step.Status == execution.StatusSucceeded {
+			continue
+		}
+		step.Status = execution.StatusAbandoned
+		step.LeaseOwner = ""
+		step.LeaseExpiresAt = time.Time{}
+		step.NextAttemptAt = time.Time{}
+		step.BlockedReason = "operator_abandoned"
+		step.ResumeSignal = ""
+		step.FinishedAt = now
+		step.UpdatedAt = now
+		if err := s.store.UpdateExecutionStep(r.Context(), step); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	if err := s.store.UpdateExecution(r.Context(), exec); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.appendTrace(r.Context(), audit.Record{
+		ID:          fmt.Sprintf("trace_%d", now.UnixNano()),
+		Kind:        "execution.operator_abandoned",
+		SessionID:   exec.SessionID,
+		ExecutionID: exec.ID,
+		TraceID:     exec.TraceID,
+		Message:     "execution abandoned by operator",
+		Fields:      map[string]any{"operator_id": requestOperatorID(r, "")},
+		CreatedAt:   now,
+	})
+	writeJSON(w, http.StatusOK, exec)
+}
+
 func (s *Server) getResolvedPolicy(w http.ResponseWriter, r *http.Request) {
 	exec, _, err := s.store.GetExecution(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -4772,6 +4919,12 @@ func operatorPermission(method, path string) string {
 		}
 		return "session.operate"
 	}
+	if strings.Contains(path, "/executions/") {
+		if method == http.MethodGet {
+			return "operator.view"
+		}
+		return "session.operate"
+	}
 	if strings.Contains(path, "/knowledge/") {
 		if method == http.MethodGet {
 			return "operator.view"
@@ -4866,16 +5019,20 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func newStep(execID, name string, recomputable bool) execution.ExecutionStep {
 	now := time.Now().UTC()
+	retry := execution.DefaultRetryPolicy(recomputable)
 	return execution.ExecutionStep{
-		ID:             fmt.Sprintf("%s_%s", execID, name),
-		ExecutionID:    execID,
-		Name:           name,
-		Status:         execution.StatusPending,
-		Attempt:        0,
-		Recomputable:   recomputable,
-		IdempotencyKey: fmt.Sprintf("%s_%s", execID, name),
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		ID:                fmt.Sprintf("%s_%s", execID, name),
+		ExecutionID:       execID,
+		Name:              name,
+		Status:            execution.StatusPending,
+		Attempt:           0,
+		Recomputable:      recomputable,
+		MaxAttempts:       retry.MaxAttempts,
+		MaxElapsedSeconds: retry.MaxElapsedSeconds,
+		BackoffSeconds:    retry.BackoffSeconds,
+		IdempotencyKey:    fmt.Sprintf("%s_%s", execID, name),
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 }
 
@@ -5147,8 +5304,33 @@ func (s *Server) resolveSessionApproval(ctx context.Context, sessionID, approval
 			traceID = exec.TraceID
 			if exec.Status == execution.StatusBlocked {
 				exec.Status = execution.StatusPending
+				exec.BlockedReason = ""
+				exec.ResumeSignal = ""
+				exec.LeaseOwner = ""
+				exec.LeaseExpiresAt = time.Time{}
 				exec.UpdatedAt = time.Now().UTC()
 				_ = s.store.UpdateExecution(ctx, exec)
+				if _, steps, err := s.store.GetExecution(ctx, exec.ID); err == nil {
+					for _, step := range steps {
+						if step.Status != execution.StatusBlocked {
+							continue
+						}
+						if step.ResumeSignal != "" && step.ResumeSignal != execution.ResumeSignalApproval {
+							continue
+						}
+						if step.BlockedReason != "" && step.BlockedReason != execution.BlockedReasonApprovalRequired {
+							continue
+						}
+						step.Status = execution.StatusPending
+						step.BlockedReason = ""
+						step.ResumeSignal = ""
+						step.LeaseOwner = ""
+						step.LeaseExpiresAt = time.Time{}
+						step.UpdatedAt = time.Now().UTC()
+						_ = s.store.UpdateExecutionStep(ctx, step)
+						break
+					}
+				}
 			}
 			break
 		}

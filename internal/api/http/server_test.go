@@ -2875,6 +2875,75 @@ func TestACPApprovalEndpointsListPendingAndResolve(t *testing.T) {
 	})
 }
 
+func TestOperatorExecutionRecoveryActions(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{ID: "sess_recovery", Channel: "web", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateExecution(context.Background(), execution.TurnExecution{
+		ID:             "exec_recovery",
+		SessionID:      "sess_recovery",
+		TriggerEventID: "evt_recovery",
+		TraceID:        "trace_recovery",
+		Status:         execution.StatusBlocked,
+		BlockedReason:  execution.BlockedReasonRetryBudgetExhausted,
+		ResumeSignal:   "operator_retry",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}, []execution.ExecutionStep{{
+		ID:                "step_recovery",
+		ExecutionID:       "exec_recovery",
+		Name:              "compose_response",
+		Status:            execution.StatusBlocked,
+		Attempt:           5,
+		Recomputable:      true,
+		IdempotencyKey:    "exec_recovery_compose_response",
+		StartedAt:         now.Add(-time.Hour),
+		FinishedAt:        now.Add(-time.Minute),
+		MaxElapsedSeconds: 60,
+		BlockedReason:     execution.BlockedReasonRetryBudgetExhausted,
+		ResumeSignal:      "operator_retry",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/executions/exec_recovery/retry", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("retry status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	exec, steps, err := repo.GetExecution(context.Background(), "exec_recovery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exec.Status != execution.StatusPending || exec.BlockedReason != "" || exec.ResumeSignal != "" {
+		t.Fatalf("execution after retry = %#v, want pending and unblocked", exec)
+	}
+	if len(steps) != 1 || steps[0].Status != execution.StatusPending || steps[0].Attempt != 0 || steps[0].BlockedReason != "" || !steps[0].StartedAt.IsZero() {
+		t.Fatalf("steps after retry = %#v, want reset pending step", steps)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/executions/exec_recovery/abandon", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("abandon status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	exec, steps, err = repo.GetExecution(context.Background(), "exec_recovery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exec.Status != execution.StatusAbandoned || steps[0].Status != execution.StatusAbandoned {
+		t.Fatalf("execution/steps after abandon = %#v %#v, want abandoned", exec, steps)
+	}
+}
+
 func TestTraceTimelineIncludesCrossArtifactEntries(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
