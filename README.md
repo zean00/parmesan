@@ -296,7 +296,7 @@ defaulting to `artifacts/quality-release-history`, and can enforce
 `go run ./cmd/quality-release-trend` compares the latest archived snapshot to
 the previous one and reports pass/fail change, minimum-score delta, and provider
 health changes.
-The catalog-driven live gate now expects 55 live scenarios, not just the
+The catalog-driven live gate now expects 60 live scenarios, not just the
 original smoke pack.
 
 The script defaults reasoning, structured, and embedding providers to

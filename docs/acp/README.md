@@ -102,7 +102,7 @@ Knowledge rules:
 - `go run ./cmd/quality-release-trend -dir artifacts/quality-release-history` compares the latest archived snapshot to the previous one and reports score, pass/fail, and provider-health deltas.
 - `./scripts/live_platform_validation.sh` now archives each passing snapshot into `QUALITY_RELEASE_HISTORY_DIR`, defaulting to `artifacts/quality-release-history`, and runs the history check with `QUALITY_RELEASE_REQUIRE_CONSECUTIVE_CLEAN`.
 - `./scripts/live_platform_validation.sh` also runs the release-trend report after archiving the latest snapshot.
-- The quality catalog now carries 200 deterministic scenarios and 55 catalog-driven live-gate scenarios for the release path.
+- The quality catalog now carries 200 deterministic scenarios and 60 catalog-driven live-gate scenarios for the release path.
 
 Core event families:
 - `message`

@@ -295,8 +295,8 @@ func TestProductionReadinessScenariosDefinesTwoHundredCases(t *testing.T) {
 			liveGate++
 		}
 	}
-	if liveGate != 55 {
-		t.Fatalf("live gate scenario count = %d, want 55", liveGate)
+	if liveGate != 60 {
+		t.Fatalf("live gate scenario count = %d, want 60", liveGate)
 	}
 	if len(categories) < 10 {
 		t.Fatalf("categories = %#v, want broad platform coverage", categories)
@@ -376,8 +376,17 @@ func TestProductionReadinessScenariosHaveDeterministicQualityCoverage(t *testing
 			if scenario.ExpectedRefusalMode != "" && scenario.ExpectedRefusalMode != view.ScopeBoundaryStage.Action && scenario.ExpectedRefusalMode != "allow" {
 				t.Fatalf("scenario %s action = %q, want %q", scenario.ID, view.ScopeBoundaryStage.Action, scenario.ExpectedRefusalMode)
 			}
-			if scenario.ExpectedLanguage != "" && scenario.Category == "multilingual" && scenario.ExpectedLanguage == "id" && !looksIndonesian(response) {
-				t.Fatalf("scenario %s response = %q, want Indonesian", scenario.ID, response)
+			if scenario.ExpectedLanguage != "" && scenario.Category == "multilingual" {
+				switch scenario.ExpectedLanguage {
+				case "id":
+					if !looksIndonesian(response) {
+						t.Fatalf("scenario %s response = %q, want Indonesian", scenario.ID, response)
+					}
+				case "en":
+					if !looksEnglish(response) {
+						t.Fatalf("scenario %s response = %q, want English", scenario.ID, response)
+					}
+				}
 			}
 			if HardFailed(card) {
 				t.Fatalf("scenario %s scorecard = %#v, want deterministic passing baseline", scenario.ID, card)
