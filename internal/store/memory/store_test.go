@@ -171,6 +171,43 @@ func TestSaveFeedbackRecordProjectsLineageEdges(t *testing.T) {
 	}
 }
 
+func TestSaveCustomerPreferenceProjectsPreferenceEventLineage(t *testing.T) {
+	store := New()
+	now := time.Now().UTC()
+	pref := customer.Preference{
+		ID:         "pref_lineage",
+		AgentID:    "agent_1",
+		CustomerID: "cust_1",
+		Key:        "language",
+		Value:      "English",
+		Source:     "operator_feedback",
+		Status:     customer.PreferenceStatusPending,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	event := customer.PreferenceEvent{
+		ID:           "pevt_lineage",
+		PreferenceID: "pref_lineage",
+		AgentID:      "agent_1",
+		CustomerID:   "cust_1",
+		Key:          "language",
+		Value:        "English",
+		Action:       "pending",
+		Source:       "operator_feedback",
+		CreatedAt:    now,
+	}
+	if err := store.SaveCustomerPreference(context.Background(), pref, event); err != nil {
+		t.Fatalf("SaveCustomerPreference() error = %v", err)
+	}
+	edges, err := store.ListPolicyEdges(context.Background(), policy.EdgeQuery{BundleID: "customer:agent_1:cust_1", TargetID: "pref_lineage"})
+	if err != nil {
+		t.Fatalf("ListPolicyEdges() error = %v", err)
+	}
+	if len(edges) != 1 || edges[0].SourceID != "pevt_lineage" || edges[0].Kind != "applies_to" {
+		t.Fatalf("edges = %#v, want preference event -> preference lineage", edges)
+	}
+}
+
 func TestSaveKnowledgeSnapshotProjectsProposalLineage(t *testing.T) {
 	store := New()
 	now := time.Now().UTC()

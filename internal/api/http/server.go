@@ -249,12 +249,14 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("POST /v1/proposals", s.createProposal)
 	mux.HandleFunc("GET /v1/proposals", s.listProposals)
 	mux.HandleFunc("GET /v1/proposals/{id}", s.getProposal)
+	mux.HandleFunc("GET /v1/proposals/{id}/lineage", s.getProposalLineage)
 	mux.HandleFunc("GET /v1/proposals/{id}/preview", s.getProposalPreview)
 	mux.HandleFunc("GET /v1/proposals/{id}/summary", s.getProposalSummary)
 	mux.HandleFunc("POST /v1/proposals/{id}/state", s.transitionProposal)
 	mux.HandleFunc("POST /v1/rollouts", s.createRollout)
 	mux.HandleFunc("GET /v1/rollouts", s.listRollouts)
 	mux.HandleFunc("GET /v1/rollouts/{id}", s.getRollout)
+	mux.HandleFunc("GET /v1/rollouts/{id}/lineage", s.getRolloutLineage)
 	mux.HandleFunc("POST /v1/rollouts/{id}/disable", s.disableRollout)
 	mux.HandleFunc("POST /v1/rollouts/{id}/rollback", s.rollbackRollout)
 	mux.HandleFunc("GET /v1/admin/events/stream", s.streamAdminEvents)
@@ -305,6 +307,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/operator/customers/{customer_id}/preferences", s.operatorListCustomerPreferences)
 	mux.HandleFunc("GET /v1/operator/customers/{customer_id}/preferences/pending", s.operatorListCustomerPreferences)
 	mux.HandleFunc("PUT /v1/operator/customers/{customer_id}/preferences/{key}", s.operatorUpsertCustomerPreference)
+	mux.HandleFunc("GET /v1/operator/customers/{customer_id}/preferences/{key}/lineage", s.operatorGetCustomerPreferenceLineage)
 	mux.HandleFunc("POST /v1/operator/customers/{customer_id}/preferences/{key}/confirm", s.operatorConfirmCustomerPreference)
 	mux.HandleFunc("POST /v1/operator/customers/{customer_id}/preferences/{key}/reject", s.operatorRejectCustomerPreference)
 	mux.HandleFunc("POST /v1/operator/customers/{customer_id}/preferences/{key}/expire", s.operatorExpireCustomerPreference)
@@ -671,6 +674,15 @@ func (s *Server) getProposal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
+func (s *Server) getProposalLineage(w http.ResponseWriter, r *http.Request) {
+	payload, err := s.graphLineagePayload(r.Context(), strings.TrimSpace(r.PathValue("id")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
 func (s *Server) getProposalPreview(w http.ResponseWriter, r *http.Request) {
 	item, err := s.store.GetProposal(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -719,6 +731,7 @@ func (s *Server) getProposalSummary(w http.ResponseWriter, r *http.Request) {
 		"rollouts":       filteredRollouts,
 		"eval_runs":      filteredRuns,
 		"latest_quality": latestProposalQuality(r.Context(), s.store, proposalID),
+		"lineage":        mustGraphLineagePayload(r.Context(), s.store, proposalID),
 	})
 }
 
@@ -892,6 +905,15 @@ func (s *Server) getRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) getRolloutLineage(w http.ResponseWriter, r *http.Request) {
+	payload, err := s.graphLineagePayload(r.Context(), strings.TrimSpace(r.PathValue("id")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) disableRollout(w http.ResponseWriter, r *http.Request) {
@@ -2444,6 +2466,58 @@ func (s *Server) graphLineagePayload(ctx context.Context, artifactID string) (ma
 	}, nil
 }
 
+func mustGraphLineagePayload(ctx context.Context, repo store.Repository, artifactID string) map[string]any {
+	artifact, err := repo.GetPolicyArtifact(ctx, artifactID)
+	if err != nil {
+		return nil
+	}
+	outgoing, err := repo.ListPolicyEdges(ctx, policy.EdgeQuery{SourceID: artifactID, Limit: 1000})
+	if err != nil {
+		return nil
+	}
+	incoming, err := repo.ListPolicyEdges(ctx, policy.EdgeQuery{TargetID: artifactID, Limit: 1000})
+	if err != nil {
+		return nil
+	}
+	related := map[string]policy.GraphArtifact{}
+	for _, edge := range outgoing {
+		if edge.TargetID == artifactID {
+			continue
+		}
+		if item, err := repo.GetPolicyArtifact(ctx, edge.TargetID); err == nil {
+			related[item.ID] = item
+		}
+	}
+	for _, edge := range incoming {
+		if edge.SourceID == artifactID {
+			continue
+		}
+		if item, err := repo.GetPolicyArtifact(ctx, edge.SourceID); err == nil {
+			related[item.ID] = item
+		}
+	}
+	relatedItems := make([]policy.GraphArtifact, 0, len(related))
+	for _, item := range related {
+		relatedItems = append(relatedItems, item)
+	}
+	slices.SortFunc(relatedItems, func(a, b policy.GraphArtifact) int {
+		switch {
+		case a.CreatedAt.Before(b.CreatedAt):
+			return -1
+		case a.CreatedAt.After(b.CreatedAt):
+			return 1
+		default:
+			return strings.Compare(a.ID, b.ID)
+		}
+	})
+	return map[string]any{
+		"artifact":          artifact,
+		"incoming_edges":    incoming,
+		"outgoing_edges":    outgoing,
+		"related_artifacts": relatedItems,
+	}
+}
+
 func uniqueSortedQualityDimensions(dimensions map[string]any) []string {
 	seen := map[string]struct{}{}
 	for _, value := range dimensions {
@@ -2738,6 +2812,27 @@ func (s *Server) operatorUpsertCustomerPreference(w http.ResponseWriter, r *http
 		return
 	}
 	writeJSON(w, http.StatusOK, pref)
+}
+
+func (s *Server) operatorGetCustomerPreferenceLineage(w http.ResponseWriter, r *http.Request) {
+	customerID := strings.TrimSpace(r.PathValue("customer_id"))
+	key := strings.TrimSpace(r.PathValue("key"))
+	agentID := strings.TrimSpace(r.URL.Query().Get("agent_id"))
+	if agentID == "" || customerID == "" || key == "" {
+		http.Error(w, "agent_id, customer_id, and key are required", http.StatusBadRequest)
+		return
+	}
+	pref, err := s.store.GetCustomerPreference(r.Context(), agentID, customerID, key)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	payload, err := s.graphLineagePayload(r.Context(), pref.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) operatorConfirmCustomerPreference(w http.ResponseWriter, r *http.Request) {

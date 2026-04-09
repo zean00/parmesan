@@ -679,6 +679,69 @@ func TestDisableRolloutMarksRecordDisabled(t *testing.T) {
 	})
 }
 
+func TestProposalAndRolloutLineageEndpoints(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	now := time.Now().UTC()
+	if err := repo.SaveProposal(context.Background(), rollout.Proposal{
+		ID:                "proposal_lineage",
+		SourceBundleID:    "bundle_a",
+		CandidateBundleID: "bundle_b",
+		State:             rollout.StateShadow,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}); err != nil {
+		t.Fatalf("SaveProposal() error = %v", err)
+	}
+	if err := repo.SaveRollout(context.Background(), rollout.Record{
+		ID:               "rollout_lineage",
+		ProposalID:       "proposal_lineage",
+		Status:           rollout.RolloutActive,
+		Channel:          "web",
+		PreviousBundleID: "bundle_a",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}); err != nil {
+		t.Fatalf("SaveRollout() error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/proposals/proposal_lineage/lineage", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("proposal lineage status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var proposalPayload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &proposalPayload); err != nil {
+		t.Fatal(err)
+	}
+	if related, _ := proposalPayload["related_artifacts"].([]any); len(related) == 0 {
+		t.Fatalf("proposal lineage = %#v, want related rollout or bundle refs", proposalPayload)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/rollouts/rollout_lineage/lineage", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rollout lineage status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var rolloutPayload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &rolloutPayload); err != nil {
+		t.Fatal(err)
+	}
+	outgoing, _ := rolloutPayload["outgoing_edges"].([]any)
+	if len(outgoing) == 0 {
+		t.Fatalf("rollout lineage = %#v, want rollout -> proposal lineage", rolloutPayload)
+	}
+}
+
 func TestOperatorAgentProfileCRUD(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
@@ -913,6 +976,53 @@ func TestCustomerPreferenceLifecycleConfirmRejectExpire(t *testing.T) {
 	}
 	if reactivated, err := repo.GetCustomerPreference(context.Background(), "agent_1", "cust_1", "inferred_preference"); err != nil || reactivated.Status != customer.PreferenceStatusActive || reactivated.ExpiresAt != nil {
 		t.Fatalf("reactivated pref = %#v err=%v, want active with cleared expiration", reactivated, err)
+	}
+}
+
+func TestCustomerPreferenceLineageEndpoint(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	pref := customer.Preference{
+		ID:         "pref_lineage",
+		AgentID:    "agent_1",
+		CustomerID: "cust_1",
+		Key:        "language",
+		Value:      "English",
+		Source:     "operator_feedback",
+		Confidence: 0.7,
+		Status:     customer.PreferenceStatusPending,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := repo.SaveCustomerPreference(context.Background(), pref, customer.PreferenceEvent{
+		ID:           "pevt_lineage",
+		PreferenceID: "pref_lineage",
+		AgentID:      "agent_1",
+		CustomerID:   "cust_1",
+		Key:          "language",
+		Value:        "English",
+		Action:       "pending",
+		Source:       "operator_feedback",
+		CreatedAt:    now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/customers/cust_1/preferences/language/lineage?agent_id=agent_1", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preference lineage status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	incoming, _ := payload["incoming_edges"].([]any)
+	if len(incoming) == 0 {
+		t.Fatalf("preference lineage = %#v, want incoming preference-event edge", payload)
 	}
 }
 

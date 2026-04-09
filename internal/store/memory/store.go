@@ -380,20 +380,20 @@ func (s *Store) SaveCustomerPreference(_ context.Context, pref customer.Preferen
 		if item.AgentID == pref.AgentID && item.CustomerID == pref.CustomerID && item.Key == pref.Key {
 			pref.CreatedAt = item.CreatedAt
 			s.customerPreferences[i] = pref
+			artifacts, edges := controlgraph.CustomerPreference(pref, event)
 			if event.ID != "" {
 				s.customerPreferenceEvents = append(s.customerPreferenceEvents, event)
 			}
-			artifacts, edges := controlgraph.CustomerPreferenceRecord(pref)
 			s.savePolicyArtifactsLocked(artifacts)
 			s.savePolicyEdgesLocked(edges)
 			return nil
 		}
 	}
 	s.customerPreferences = append(s.customerPreferences, pref)
+	artifacts, edges := controlgraph.CustomerPreference(pref, event)
 	if event.ID != "" {
 		s.customerPreferenceEvents = append(s.customerPreferenceEvents, event)
 	}
-	artifacts, edges := controlgraph.CustomerPreferenceRecord(pref)
 	s.savePolicyArtifactsLocked(artifacts)
 	s.savePolicyEdgesLocked(edges)
 	return nil
