@@ -4,6 +4,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -38,12 +39,26 @@ func KnowledgeSyncJob(job knowledge.SyncJob) ([]policy.GraphArtifact, []policy.G
 
 func KnowledgeSnapshot(snapshot knowledge.Snapshot) ([]policy.GraphArtifact, []policy.GraphEdge) {
 	groupID := knowledgeGroupID(snapshot.ScopeKind, snapshot.ScopeID)
-	return []policy.GraphArtifact{artifact(snapshot.ID, groupID, "knowledge_snapshot", versionOrTimestamp(snapshot.ArtifactMeta, snapshot.CreatedAt), map[string]any{"snapshot": snapshot}, snapshot.ArtifactMeta, snapshot.CreatedAt)}, nil
+	artifacts := []policy.GraphArtifact{
+		artifact(snapshot.ID, groupID, "knowledge_snapshot", versionOrTimestamp(snapshot.ArtifactMeta, snapshot.CreatedAt), map[string]any{"snapshot": snapshot}, snapshot.ArtifactMeta, snapshot.CreatedAt),
+	}
+	var edges []policy.GraphEdge
+	if proposalID := strings.TrimSpace(fmt.Sprint(snapshot.Metadata["proposal_id"])); proposalID != "" {
+		edges = append(edges, edge(groupID, proposalID, "applied_to_snapshot", snapshot.ID, map[string]any{"source": snapshot.Metadata["source"]}, snapshot.ArtifactMeta, snapshot.CreatedAt))
+	}
+	return artifacts, edges
 }
 
 func KnowledgeUpdateProposal(item knowledge.UpdateProposal) ([]policy.GraphArtifact, []policy.GraphEdge) {
 	groupID := knowledgeGroupID(item.ScopeKind, item.ScopeID)
-	return []policy.GraphArtifact{artifact(item.ID, groupID, "knowledge_update_proposal", versionOrTimestamp(item.ArtifactMeta, item.UpdatedAt, item.CreatedAt), map[string]any{"proposal": item}, item.ArtifactMeta, item.CreatedAt)}, nil
+	artifacts := []policy.GraphArtifact{
+		artifact(item.ID, groupID, "knowledge_update_proposal", versionOrTimestamp(item.ArtifactMeta, item.UpdatedAt, item.CreatedAt), map[string]any{"proposal": item}, item.ArtifactMeta, item.CreatedAt),
+	}
+	var edges []policy.GraphEdge
+	if feedbackID := strings.TrimSpace(fmt.Sprint(item.Payload["feedback_id"])); feedbackID != "" {
+		edges = append(edges, edge(groupID, feedbackID, "derived_from", item.ID, map[string]any{"output_kind": "knowledge_update_proposal"}, item.ArtifactMeta, item.CreatedAt))
+	}
+	return artifacts, edges
 }
 
 func KnowledgeLintFinding(item knowledge.LintFinding) ([]policy.GraphArtifact, []policy.GraphEdge) {
@@ -111,7 +126,53 @@ func FeedbackRecord(record feedback.Record) ([]policy.GraphArtifact, []policy.Gr
 	for _, targetID := range record.Outputs.PolicyProposalIDs {
 		edges = append(edges, edge(groupID, record.ID, "derived_from", targetID, map[string]any{"output_kind": "rollout_proposal"}, record.ArtifactMeta, record.CreatedAt))
 	}
+	if fixture, ok := regressionFixtureCandidate(record); ok {
+		artifacts = append(artifacts, artifact(fixture.ID, groupID, "regression_fixture", versionOrTimestamp(fixture.ArtifactMeta, fixture.CreatedAt), map[string]any{"fixture": fixture}, fixture.ArtifactMeta, fixture.CreatedAt))
+		edges = append(edges, edge(groupID, record.ID, "produced", fixture.ID, map[string]any{"output_kind": "regression_fixture"}, fixture.ArtifactMeta, fixture.CreatedAt))
+	}
 	return artifacts, edges
+}
+
+type regressionFixtureArtifact struct {
+	ID           string            `json:"id"`
+	FeedbackID   string            `json:"feedback_id"`
+	ScenarioID   string            `json:"scenario_id"`
+	ReviewStatus string            `json:"review_status"`
+	Metadata     map[string]any    `json:"metadata,omitempty"`
+	ArtifactMeta artifactmeta.Meta `json:"artifact_meta,omitempty"`
+	CreatedAt    time.Time         `json:"created_at"`
+}
+
+func regressionFixtureCandidate(record feedback.Record) (regressionFixtureArtifact, bool) {
+	if record.Metadata == nil {
+		return regressionFixtureArtifact{}, false
+	}
+	raw, ok := record.Metadata["regression_fixture_candidate"].(map[string]any)
+	if !ok {
+		return regressionFixtureArtifact{}, false
+	}
+	meta := record.ArtifactMeta
+	meta.Kind = "regression_fixture"
+	if meta.Version == "" {
+		meta.Version = versionOrTimestamp(meta, record.UpdatedAt, record.CreatedAt)
+	}
+	id := stableGraphID(feedbackGroupID(record.SessionID), "regression_fixture", record.ID)
+	if meta.LineageRootID == "" {
+		meta.LineageRootID = id
+	}
+	status := strings.TrimSpace(fmt.Sprint(raw["review_status"]))
+	if status == "" {
+		status = "candidate"
+	}
+	return regressionFixtureArtifact{
+		ID:           id,
+		FeedbackID:   record.ID,
+		ScenarioID:   strings.TrimSpace(fmt.Sprint(raw["scenario_id"])),
+		ReviewStatus: status,
+		Metadata:     raw,
+		ArtifactMeta: meta,
+		CreatedAt:    record.CreatedAt,
+	}, true
 }
 
 func RolloutProposal(item rollout.Proposal) ([]policy.GraphArtifact, []policy.GraphEdge) {

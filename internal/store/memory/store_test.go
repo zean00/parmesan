@@ -170,3 +170,60 @@ func TestSaveFeedbackRecordProjectsLineageEdges(t *testing.T) {
 		t.Fatalf("edges = %#v, want feedback -> preference lineage", edges)
 	}
 }
+
+func TestSaveKnowledgeSnapshotProjectsProposalLineage(t *testing.T) {
+	store := New()
+	now := time.Now().UTC()
+	snapshot := knowledge.Snapshot{
+		ID:        "ksnap_1",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		Metadata:  map[string]any{"proposal_id": "kprop_1", "source": "proposal_apply"},
+		CreatedAt: now,
+	}
+	if err := store.SaveKnowledgeSnapshot(context.Background(), snapshot); err != nil {
+		t.Fatalf("SaveKnowledgeSnapshot() error = %v", err)
+	}
+	edges, err := store.ListPolicyEdges(context.Background(), policy.EdgeQuery{BundleID: "knowledge:agent:agent_1", SourceID: "kprop_1"})
+	if err != nil {
+		t.Fatalf("ListPolicyEdges() error = %v", err)
+	}
+	if len(edges) != 1 || edges[0].TargetID != snapshot.ID || edges[0].Kind != "applied_to_snapshot" {
+		t.Fatalf("edges = %#v, want proposal -> snapshot lineage", edges)
+	}
+}
+
+func TestSaveFeedbackRecordProjectsRegressionFixtureArtifact(t *testing.T) {
+	store := New()
+	now := time.Now().UTC()
+	record := feedback.Record{
+		ID:        "feedback_fixture",
+		SessionID: "sess_fixture",
+		Text:      "agent missed escalation",
+		Metadata: map[string]any{
+			"regression_fixture_candidate": map[string]any{
+				"scenario_id":   "operator_feedback_escalation",
+				"review_status": "accepted",
+			},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := store.SaveFeedbackRecord(context.Background(), record); err != nil {
+		t.Fatalf("SaveFeedbackRecord() error = %v", err)
+	}
+	artifacts, err := store.ListPolicyArtifacts(context.Background(), policy.ArtifactQuery{BundleID: "feedback:sess_fixture", Kind: "regression_fixture"})
+	if err != nil {
+		t.Fatalf("ListPolicyArtifacts() error = %v", err)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("artifacts = %#v, want one regression fixture artifact", artifacts)
+	}
+	edges, err := store.ListPolicyEdges(context.Background(), policy.EdgeQuery{BundleID: "feedback:sess_fixture", SourceID: "feedback_fixture", Kind: "produced"})
+	if err != nil {
+		t.Fatalf("ListPolicyEdges() error = %v", err)
+	}
+	if len(edges) != 1 || edges[0].TargetID != artifacts[0].ID {
+		t.Fatalf("edges = %#v, want feedback -> regression fixture lineage", edges)
+	}
+}

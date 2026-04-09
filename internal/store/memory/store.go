@@ -118,12 +118,26 @@ func (s *Store) SavePolicyArtifacts(_ context.Context, items []policy.GraphArtif
 	return nil
 }
 
+func (s *Store) GetPolicyArtifact(_ context.Context, artifactID string) (policy.GraphArtifact, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.policyArtifacts {
+		if item.ID == artifactID {
+			return item, nil
+		}
+	}
+	return policy.GraphArtifact{}, errors.New("policy artifact not found")
+}
+
 func (s *Store) ListPolicyArtifacts(_ context.Context, query policy.ArtifactQuery) ([]policy.GraphArtifact, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var out []policy.GraphArtifact
 	for i := len(s.policyArtifacts) - 1; i >= 0; i-- {
 		item := s.policyArtifacts[i]
+		if query.ID != "" && item.ID != query.ID {
+			continue
+		}
 		if query.BundleID != "" && item.BundleID != query.BundleID {
 			continue
 		}
@@ -151,6 +165,9 @@ func (s *Store) ListPolicyEdges(_ context.Context, query policy.EdgeQuery) ([]po
 	var out []policy.GraphEdge
 	for i := len(s.policyEdges) - 1; i >= 0; i-- {
 		item := s.policyEdges[i]
+		if query.ID != "" && item.ID != query.ID {
+			continue
+		}
 		if query.BundleID != "" && item.BundleID != query.BundleID {
 			continue
 		}
@@ -161,6 +178,9 @@ func (s *Store) ListPolicyEdges(_ context.Context, query policy.EdgeQuery) ([]po
 			continue
 		}
 		if query.TargetID != "" && item.TargetID != query.TargetID {
+			continue
+		}
+		if query.Kind != "" && item.Kind != query.Kind {
 			continue
 		}
 		out = append(out, item)

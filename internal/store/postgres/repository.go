@@ -111,6 +111,29 @@ func (c *Client) SavePolicyArtifacts(ctx context.Context, items []policy.GraphAr
 	return tx.Commit(ctx)
 }
 
+func (c *Client) GetPolicyArtifact(ctx context.Context, artifactID string) (policy.GraphArtifact, error) {
+	row := c.Pool.QueryRow(ctx, `
+		SELECT id, bundle_id, kind, version, COALESCE(source_yaml,''), artifact_json, metadata_json, created_at
+		FROM policy_artifacts
+		WHERE id = $1
+	`, artifactID)
+	var item policy.GraphArtifact
+	var payload, metadata []byte
+	if err := row.Scan(&item.ID, &item.BundleID, &item.Kind, &item.Version, &item.SourceYAML, &payload, &metadata, &item.CreatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return policy.GraphArtifact{}, errors.New("policy artifact not found")
+		}
+		return policy.GraphArtifact{}, err
+	}
+	if len(payload) > 0 {
+		if err := json.Unmarshal(payload, &item.Payload); err != nil {
+			return policy.GraphArtifact{}, err
+		}
+	}
+	item.ArtifactMeta, _, _ = decodeMetadata(metadata)
+	return item, nil
+}
+
 func (c *Client) ListPolicyArtifacts(ctx context.Context, query policy.ArtifactQuery) ([]policy.GraphArtifact, error) {
 	sql := `
 		SELECT id, bundle_id, kind, version, COALESCE(source_yaml,''), artifact_json, metadata_json, created_at
@@ -118,6 +141,11 @@ func (c *Client) ListPolicyArtifacts(ctx context.Context, query policy.ArtifactQ
 		WHERE 1=1`
 	var args []any
 	idx := 1
+	if query.ID != "" {
+		sql += fmt.Sprintf(" AND id = $%d", idx)
+		args = append(args, query.ID)
+		idx++
+	}
 	if query.BundleID != "" {
 		sql += fmt.Sprintf(" AND bundle_id = $%d", idx)
 		args = append(args, query.BundleID)
@@ -178,6 +206,11 @@ func (c *Client) ListPolicyEdges(ctx context.Context, query policy.EdgeQuery) ([
 		WHERE 1=1`
 	var args []any
 	idx := 1
+	if query.ID != "" {
+		sql += fmt.Sprintf(" AND id = $%d", idx)
+		args = append(args, query.ID)
+		idx++
+	}
 	if query.BundleID != "" {
 		sql += fmt.Sprintf(" AND bundle_id = $%d", idx)
 		args = append(args, query.BundleID)
@@ -196,6 +229,11 @@ func (c *Client) ListPolicyEdges(ctx context.Context, query policy.EdgeQuery) ([
 	if query.TargetID != "" {
 		sql += fmt.Sprintf(" AND target_id = $%d", idx)
 		args = append(args, query.TargetID)
+		idx++
+	}
+	if query.Kind != "" {
+		sql += fmt.Sprintf(" AND kind = $%d", idx)
+		args = append(args, query.Kind)
 		idx++
 	}
 	sql += " ORDER BY created_at DESC"

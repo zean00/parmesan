@@ -210,6 +210,69 @@ func TestOperatorPolicyGraphEndpointsExposeControlGraphByGroupID(t *testing.T) {
 	}
 }
 
+func TestOperatorPolicyArtifactEndpointsExposeLineageLookup(t *testing.T) {
+	repo := memory.New()
+	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	proposal := knowledge.UpdateProposal{
+		ID:        "kprop_api",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		Kind:      "operator_feedback",
+		State:     "applied",
+		Payload:   map[string]any{"feedback_id": "feedback_api"},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := repo.SaveKnowledgeUpdateProposal(context.Background(), proposal); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveKnowledgeSnapshot(context.Background(), knowledge.Snapshot{
+		ID:        "ksnap_api",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		Metadata:  map[string]any{"proposal_id": "kprop_api", "source": "proposal_apply"},
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/policy/artifacts/kprop_api", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get artifact status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var artifact policy.GraphArtifact
+	if err := json.Unmarshal(rec.Body.Bytes(), &artifact); err != nil {
+		t.Fatal(err)
+	}
+	if artifact.ID != "kprop_api" || artifact.Kind != "knowledge_update_proposal" {
+		t.Fatalf("artifact = %#v, want knowledge proposal artifact", artifact)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/policy/artifacts/kprop_api/edges?direction=source", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("artifact edges status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var edges []policy.GraphEdge
+	if err := json.Unmarshal(rec.Body.Bytes(), &edges); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, item := range edges {
+		if item.SourceID == "kprop_api" && item.TargetID == "ksnap_api" && item.Kind == "applied_to_snapshot" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("edges = %#v, want proposal -> snapshot lineage", edges)
+	}
+}
+
 func TestSelectedPolicyBundlesUsesSnapshotOnly(t *testing.T) {
 	repo := memory.New()
 	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)

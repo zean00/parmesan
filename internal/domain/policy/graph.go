@@ -51,16 +51,19 @@ type SnapshotQuery struct {
 }
 
 type ArtifactQuery struct {
+	ID       string
 	BundleID string
 	Kind     string
 	Limit    int
 }
 
 type EdgeQuery struct {
+	ID         string
 	BundleID   string
 	SnapshotID string
 	SourceID   string
 	TargetID   string
+	Kind       string
 	Limit      int
 }
 

@@ -313,6 +313,8 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("PUT /v1/operator/agents/{id}", s.operatorUpdateAgentProfile)
 	mux.HandleFunc("GET /v1/operator/policy/snapshots", s.operatorListPolicySnapshots)
 	mux.HandleFunc("GET /v1/operator/policy/artifacts", s.operatorListPolicyArtifacts)
+	mux.HandleFunc("GET /v1/operator/policy/artifacts/{id}", s.operatorGetPolicyArtifact)
+	mux.HandleFunc("GET /v1/operator/policy/artifacts/{id}/edges", s.operatorListPolicyArtifactEdges)
 	mux.HandleFunc("GET /v1/operator/policy/edges", s.operatorListPolicyEdges)
 	mux.HandleFunc("POST /v1/operator/knowledge/sources", s.operatorCreateKnowledgeSource)
 	mux.HandleFunc("GET /v1/operator/knowledge/sources", s.operatorListKnowledgeSources)
@@ -503,6 +505,75 @@ func (s *Server) operatorListPolicyArtifacts(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, items)
 }
 
+func (s *Server) operatorGetPolicyArtifact(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetPolicyArtifact(r.Context(), strings.TrimSpace(r.PathValue("id")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) operatorListPolicyArtifactEdges(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
+	artifactID := strings.TrimSpace(r.PathValue("id"))
+	direction := strings.TrimSpace(r.URL.Query().Get("direction"))
+	if direction == "" {
+		direction = "any"
+	}
+	query := policy.EdgeQuery{
+		Kind:  strings.TrimSpace(r.URL.Query().Get("kind")),
+		Limit: limit,
+	}
+	switch direction {
+	case "source":
+		query.SourceID = artifactID
+		items, err := s.store.ListPolicyEdges(r.Context(), query)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, items)
+		return
+	case "target":
+		query.TargetID = artifactID
+		items, err := s.store.ListPolicyEdges(r.Context(), query)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, items)
+		return
+	case "any":
+	default:
+		http.Error(w, "direction must be one of any, source, target", http.StatusBadRequest)
+		return
+	}
+	sourceItems, err := s.store.ListPolicyEdges(r.Context(), policy.EdgeQuery{SourceID: artifactID, Kind: query.Kind, Limit: limit})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	targetItems, err := s.store.ListPolicyEdges(r.Context(), policy.EdgeQuery{TargetID: artifactID, Kind: query.Kind, Limit: limit})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	seen := map[string]struct{}{}
+	items := make([]policy.GraphEdge, 0, len(sourceItems)+len(targetItems))
+	for _, item := range append(sourceItems, targetItems...) {
+		if _, ok := seen[item.ID]; ok {
+			continue
+		}
+		seen[item.ID] = struct{}{}
+		items = append(items, item)
+		if limit > 0 && len(items) >= limit {
+			break
+		}
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
 func (s *Server) operatorListPolicyEdges(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
 	groupID := strings.TrimSpace(r.URL.Query().Get("group_id"))
@@ -514,6 +585,7 @@ func (s *Server) operatorListPolicyEdges(w http.ResponseWriter, r *http.Request)
 		SnapshotID: strings.TrimSpace(r.URL.Query().Get("snapshot_id")),
 		SourceID:   strings.TrimSpace(r.URL.Query().Get("source_id")),
 		TargetID:   strings.TrimSpace(r.URL.Query().Get("target_id")),
+		Kind:       strings.TrimSpace(r.URL.Query().Get("kind")),
 		Limit:      limit,
 	})
 	if err != nil {
