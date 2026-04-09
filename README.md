@@ -40,6 +40,21 @@ ACP is the primary public conversation interface. The separate `gateway`
 service remains available for legacy `/v1/web/...` clients while ACP-to-channel
 adapters migrate externally.
 
+Example live support bundle:
+
+- [examples/live_support_policy.yaml](/home/sahal/workspace/agents/parmesan/examples/live_support_policy.yaml) is the strict customer-support bundle used for the validated Nexus to Parmesan ACP run.
+
+Minimal live setup used for Nexus validation:
+
+```bash
+OPENROUTER_API_KEY=... DATABASE_URL=postgres://midas:midas@localhost:5432/parmesan?sslmode=disable OPERATOR_API_KEY=dev-operator HTTP_ADDR=127.0.0.1:8090 go run ./cmd/api
+OPENROUTER_API_KEY=... DATABASE_URL=postgres://midas:midas@localhost:5432/parmesan?sslmode=disable OPERATOR_API_KEY=dev-operator HTTP_ADDR=127.0.0.1:8091 go run ./cmd/worker
+curl -X POST -H 'Content-Type: application/x-yaml' --data-binary @examples/live_support_policy.yaml http://127.0.0.1:8090/v1/policy/import
+curl -X POST -H 'Authorization: Bearer dev-operator' -H 'Content-Type: application/json' \
+  -d '{"id":"agent_profile_live_support","name":"Live Support Agent","status":"active","default_policy_bundle_id":"bundle_live_support_v2"}' \
+  http://127.0.0.1:8090/v1/operator/agents
+```
+
 Operator endpoints support single-tenant RBAC. `OPERATOR_API_KEY` remains a
 bootstrap admin credential; production operators can use stored operator API
 tokens or trusted identity headers via `OPERATOR_TRUSTED_ID_HEADER` and
