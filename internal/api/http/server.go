@@ -323,8 +323,13 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/operator/policy/snapshots/{id}", s.operatorGetPolicySnapshot)
 	mux.HandleFunc("GET /v1/operator/policy/active-state", s.operatorGetPolicyActiveState)
 	mux.HandleFunc("GET /v1/operator/policy/composed-state", s.operatorGetPolicyComposedState)
+	mux.HandleFunc("GET /v1/operator/changes", s.operatorListChanges)
+	mux.HandleFunc("GET /v1/operator/changes/{id}", s.operatorGetChange)
+	mux.HandleFunc("GET /v1/operator/changes/{id}/lineage", s.operatorGetChangeLineage)
 	mux.HandleFunc("GET /v1/operator/control-state", s.operatorGetControlState)
 	mux.HandleFunc("GET /v1/operator/control-state/history", s.operatorGetControlStateHistory)
+	mux.HandleFunc("GET /v1/operator/control-state/pending", s.operatorGetPendingControlState)
+	mux.HandleFunc("GET /v1/operator/control-state/applied", s.operatorGetAppliedControlState)
 	mux.HandleFunc("GET /v1/operator/policy/artifacts", s.operatorListPolicyArtifacts)
 	mux.HandleFunc("GET /v1/operator/policy/artifacts/{id}", s.operatorGetPolicyArtifact)
 	mux.HandleFunc("GET /v1/operator/policy/artifacts/{id}/edges", s.operatorListPolicyArtifactEdges)
@@ -868,41 +873,68 @@ func (s *Server) transitionProposal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	operatorID := requestOperatorID(r, "")
+	groupID := "rollout:" + item.SourceBundleID
+	now := time.Now().UTC()
 	if req.State == rollout.StateActive {
 		if err := s.promoteProposalActive(r.Context(), item); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		item.State = rollout.StateActive
-		item.UpdatedAt = time.Now().UTC()
+		item.UpdatedAt = now
 		if err := s.writes.SaveProposal(r.Context(), item); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		change := controlChangeRequest(groupID, "rollout", "proposal_transition", "applied", operatorID, []string{item.ID}, map[string]any{
+			"proposal_id":         item.ID,
+			"source_bundle_id":    item.SourceBundleID,
+			"candidate_bundle_id": item.CandidateBundleID,
+			"state":               item.State,
+		}, now)
+		if err := s.saveControlChange(r.Context(), change, []policy.ChangeDecision{controlChangeDecision(change, string(req.State), operatorID, nil, now)}, []policy.ChangeApplication{controlChangeApplication(change, "applied", operatorID, []string{item.ID}, nil, now)}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		s.appendTrace(r.Context(), audit.Record{
-			ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+			ID:        fmt.Sprintf("trace_%d", now.UnixNano()),
 			Kind:      "proposal.state.changed",
-			TraceID:   fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+			TraceID:   fmt.Sprintf("trace_%d", now.UnixNano()),
 			Message:   "queued proposal state transition",
 			Fields:    map[string]any{"proposal_id": item.ID, "state": item.State},
-			CreatedAt: time.Now().UTC(),
+			CreatedAt: now,
 		})
 		writeJSON(w, http.StatusAccepted, item)
 		return
 	}
 	item.State = req.State
-	item.UpdatedAt = time.Now().UTC()
+	item.UpdatedAt = now
 	if err := s.writes.SaveProposal(r.Context(), item); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	changeStatus := "pending"
+	if req.State == rollout.StateRetired {
+		changeStatus = "rejected"
+	}
+	change := controlChangeRequest(groupID, "rollout", "proposal_transition", changeStatus, operatorID, []string{item.ID}, map[string]any{
+		"proposal_id":         item.ID,
+		"source_bundle_id":    item.SourceBundleID,
+		"candidate_bundle_id": item.CandidateBundleID,
+		"state":               item.State,
+	}, now)
+	if err := s.saveControlChange(r.Context(), change, []policy.ChangeDecision{controlChangeDecision(change, string(req.State), operatorID, nil, now)}, nil); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	s.appendTrace(r.Context(), audit.Record{
-		ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+		ID:        fmt.Sprintf("trace_%d", now.UnixNano()),
 		Kind:      "proposal.state.changed",
-		TraceID:   fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+		TraceID:   fmt.Sprintf("trace_%d", now.UnixNano()),
 		Message:   "queued proposal state transition",
 		Fields:    map[string]any{"proposal_id": item.ID, "state": item.State},
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: now,
 	})
 	writeJSON(w, http.StatusAccepted, item)
 }
@@ -953,6 +985,7 @@ func (s *Server) createRollout(w http.ResponseWriter, r *http.Request) {
 		req.ID = fmt.Sprintf("rollout_%d", time.Now().UnixNano())
 	}
 	now := time.Now().UTC()
+	operatorID := requestOperatorID(r, "")
 	record := rollout.Record{
 		ID:                req.ID,
 		ProposalID:        proposal.ID,
@@ -975,6 +1008,16 @@ func (s *Server) createRollout(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+	}
+	change := controlChangeRequest("rollout:"+proposal.SourceBundleID, "rollout", "rollout_create", "applied", operatorID, []string{proposal.ID, record.ID}, map[string]any{
+		"proposal_id": proposal.ID,
+		"rollout_id":  record.ID,
+		"channel":     record.Channel,
+		"percentage":  record.Percentage,
+	}, now)
+	if err := s.saveControlChange(r.Context(), change, []policy.ChangeDecision{controlChangeDecision(change, "active", operatorID, nil, now)}, []policy.ChangeApplication{controlChangeApplication(change, "applied", operatorID, []string{record.ID, proposal.ID}, nil, now)}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	s.appendTrace(r.Context(), audit.Record{
 		ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
@@ -1040,6 +1083,19 @@ func (s *Server) disableRollout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	operatorID := requestOperatorID(r, "")
+	groupID := "rollout:" + item.ProposalID
+	if proposal, err := s.store.GetProposal(r.Context(), item.ProposalID); err == nil && strings.TrimSpace(proposal.SourceBundleID) != "" {
+		groupID = "rollout:" + proposal.SourceBundleID
+	}
+	change := controlChangeRequest(groupID, "rollout", "rollout_disable", "disabled", operatorID, []string{item.ID}, map[string]any{
+		"rollout_id":  item.ID,
+		"proposal_id": item.ProposalID,
+	}, item.UpdatedAt)
+	if err := s.saveControlChange(r.Context(), change, nil, []policy.ChangeApplication{controlChangeApplication(change, "disabled", operatorID, []string{item.ID}, nil, item.UpdatedAt)}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	s.appendTrace(r.Context(), audit.Record{
 		ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
 		Kind:      "rollout.disabled",
@@ -1063,6 +1119,7 @@ func (s *Server) rollbackRollout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	operatorID := requestOperatorID(r, "")
 	proposal, err := s.store.GetProposal(r.Context(), item.ProposalID)
 	if err == nil && proposal.State == rollout.StateCanary {
 		proposal.State = rollout.StateShadow
@@ -1071,6 +1128,22 @@ func (s *Server) rollbackRollout(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+	}
+	groupID := "rollout:" + item.ProposalID
+	targetIDs := []string{item.ID}
+	if strings.TrimSpace(proposal.SourceBundleID) != "" {
+		groupID = "rollout:" + proposal.SourceBundleID
+	}
+	if strings.TrimSpace(proposal.ID) != "" {
+		targetIDs = append(targetIDs, proposal.ID)
+	}
+	change := controlChangeRequest(groupID, "rollout", "rollout_rollback", "rolled_back", operatorID, targetIDs, map[string]any{
+		"rollout_id":  item.ID,
+		"proposal_id": item.ProposalID,
+	}, item.UpdatedAt)
+	if err := s.saveControlChange(r.Context(), change, nil, []policy.ChangeApplication{controlChangeApplication(change, "rolled_back", operatorID, targetIDs, nil, item.UpdatedAt)}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	s.appendTrace(r.Context(), audit.Record{
 		ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
@@ -2185,6 +2258,29 @@ func (s *Server) operatorCreateFeedback(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	var targetIDs []string
+	targetIDs = append(targetIDs, record.Outputs.PreferenceIDs...)
+	targetIDs = append(targetIDs, record.Outputs.PreferenceEventIDs...)
+	targetIDs = append(targetIDs, record.Outputs.KnowledgeProposalIDs...)
+	targetIDs = append(targetIDs, record.Outputs.PolicyProposalIDs...)
+	changeStatus := "applied"
+	if deferred, _ := record.Metadata["learning_deferred"].(bool); deferred {
+		changeStatus = "pending"
+	}
+	change := controlChangeRequest("feedback:"+sessionID, "teaching", "feedback_compile", changeStatus, record.OperatorID, targetIDs, map[string]any{
+		"feedback_id":  record.ID,
+		"session_id":   record.SessionID,
+		"execution_id": record.ExecutionID,
+		"category":     record.Category,
+	}, now)
+	var applications []policy.ChangeApplication
+	if changeStatus == "applied" && len(targetIDs) > 0 {
+		applications = append(applications, controlChangeApplication(change, "applied", record.OperatorID, targetIDs, map[string]any{"feedback_id": record.ID}, now))
+	}
+	if err := s.saveControlChange(r.Context(), change, nil, applications); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	s.appendTrace(r.Context(), audit.Record{
 		ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
 		Kind:        "operator.feedback.compiled",
@@ -3018,14 +3114,17 @@ func (s *Server) graphRecentChangesForGroups(ctx context.Context, groupIDs []str
 	var entries []item
 	seen := map[string]struct{}{}
 	significantArtifactKinds := map[string]struct{}{
-		"knowledge_snapshot":      {},
+		"knowledge_snapshot":        {},
 		"knowledge_update_proposal": {},
-		"operator_feedback":       {},
-		"customer_preference":     {},
+		"operator_feedback":         {},
+		"customer_preference":       {},
 		"customer_preference_event": {},
-		"rollout_proposal":        {},
-		"rollout_record":          {},
-		"regression_fixture":      {},
+		"rollout_proposal":          {},
+		"rollout_record":            {},
+		"regression_fixture":        {},
+		"change_request":            {},
+		"change_decision":           {},
+		"change_application":        {},
 	}
 	significantEdgeKinds := map[string]struct{}{
 		"applied_to_snapshot": {},
@@ -3033,6 +3132,12 @@ func (s *Server) graphRecentChangesForGroups(ctx context.Context, groupIDs []str
 		"derived_from":        {},
 		"produced":            {},
 		"applies_to":          {},
+		"proposes":            {},
+		"reviews":             {},
+		"approves":            {},
+		"rejects":             {},
+		"applies":             {},
+		"promotes":            {},
 	}
 	for _, groupID := range groupIDs {
 		artifacts, _ := s.graphArtifactsByGroup(ctx, groupID, 200)
@@ -3112,46 +3217,64 @@ func graphArtifactSummary(artifact policy.GraphArtifact) map[string]any {
 	}
 	switch artifact.Kind {
 	case "knowledge_snapshot":
-		if snapshot, ok := artifact.Payload["snapshot"].(map[string]any); ok {
+		if snapshot := payloadMapValue(artifact.Payload, "snapshot"); snapshot != nil {
 			out["scope_kind"] = snapshot["scope_kind"]
 			out["scope_id"] = snapshot["scope_id"]
 		}
 	case "knowledge_update_proposal":
-		if proposal, ok := artifact.Payload["proposal"].(map[string]any); ok {
+		if proposal := payloadMapValue(artifact.Payload, "proposal"); proposal != nil {
 			out["state"] = proposal["state"]
 			out["scope_kind"] = proposal["scope_kind"]
 			out["scope_id"] = proposal["scope_id"]
 		}
 	case "customer_preference":
-		if pref, ok := artifact.Payload["preference"].(map[string]any); ok {
+		if pref := payloadMapValue(artifact.Payload, "preference"); pref != nil {
 			out["key"] = pref["key"]
 			out["status"] = pref["status"]
 		}
 	case "customer_preference_event":
-		if evt, ok := artifact.Payload["preference_event"].(map[string]any); ok {
+		if evt := payloadMapValue(artifact.Payload, "preference_event"); evt != nil {
 			out["key"] = evt["key"]
 			out["action"] = evt["action"]
 		}
 	case "rollout_proposal":
-		if proposal, ok := artifact.Payload["proposal"].(map[string]any); ok {
+		if proposal := payloadMapValue(artifact.Payload, "proposal"); proposal != nil {
 			out["state"] = proposal["state"]
 			out["source_bundle_id"] = proposal["source_bundle_id"]
 			out["candidate_bundle_id"] = proposal["candidate_bundle_id"]
 		}
 	case "rollout_record":
-		if rolloutRecord, ok := artifact.Payload["rollout"].(map[string]any); ok {
+		if rolloutRecord := payloadMapValue(artifact.Payload, "rollout"); rolloutRecord != nil {
 			out["status"] = rolloutRecord["status"]
 			out["channel"] = rolloutRecord["channel"]
 		}
 	case "operator_feedback":
-		if feedbackRecord, ok := artifact.Payload["feedback"].(map[string]any); ok {
+		if feedbackRecord := payloadMapValue(artifact.Payload, "feedback"); feedbackRecord != nil {
 			out["session_id"] = feedbackRecord["session_id"]
 			out["category"] = feedbackRecord["category"]
 		}
 	case "regression_fixture":
-		if fixture, ok := artifact.Payload["fixture"].(map[string]any); ok {
+		if fixture := payloadMapValue(artifact.Payload, "fixture"); fixture != nil {
 			out["scenario_id"] = fixture["scenario_id"]
 			out["review_status"] = fixture["review_status"]
+		}
+	case "change_request":
+		if request := payloadMapValue(artifact.Payload, "change_request"); request != nil {
+			out["domain"] = request["domain"]
+			out["action"] = request["action"]
+			out["status"] = request["status"]
+		}
+	case "change_decision":
+		if decision := payloadMapValue(artifact.Payload, "change_decision"); decision != nil {
+			out["domain"] = decision["domain"]
+			out["decision"] = decision["decision"]
+			out["change_id"] = decision["change_id"]
+		}
+	case "change_application":
+		if application := payloadMapValue(artifact.Payload, "change_application"); application != nil {
+			out["domain"] = application["domain"]
+			out["status"] = application["status"]
+			out["change_id"] = application["change_id"]
 		}
 	}
 	return out
@@ -3971,6 +4094,21 @@ func (s *Server) operatorTransitionCustomerPreference(w http.ResponseWriter, r *
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	changeDecision := map[string]string{
+		"confirm": "confirmed",
+		"reject":  "rejected",
+		"expire":  "expired",
+	}[action]
+	operatorID := requestOperatorID(r, req.OperatorID)
+	change := controlChangeRequest("customer:"+pref.AgentID+":"+pref.CustomerID, "preference", "preference_"+action, "applied", operatorID, []string{pref.ID, event.ID}, map[string]any{
+		"preference_id": pref.ID,
+		"key":           pref.Key,
+		"status":        pref.Status,
+	}, now)
+	if err := s.saveControlChange(r.Context(), change, []policy.ChangeDecision{controlChangeDecision(change, changeDecision, operatorID, map[string]any{"action": action}, now)}, []policy.ChangeApplication{controlChangeApplication(change, pref.Status, operatorID, []string{pref.ID, event.ID}, nil, now)}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, http.StatusOK, pref)
 }
 
@@ -4495,6 +4633,25 @@ func (s *Server) operatorTransitionKnowledgeProposal(w http.ResponseWriter, r *h
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	operatorID := requestOperatorID(r, "")
+	changeStatus := "pending"
+	if state == "rejected" {
+		changeStatus = "rejected"
+	} else if state == "applied" {
+		changeStatus = "applied"
+	}
+	change := controlChangeRequest("knowledge:"+item.ScopeKind+":"+item.ScopeID, "knowledge", "knowledge_proposal_transition", changeStatus, operatorID, []string{item.ID}, map[string]any{
+		"proposal_id": item.ID,
+		"state":       item.State,
+	}, item.UpdatedAt)
+	var applications []policy.ChangeApplication
+	if state == "applied" {
+		applications = append(applications, controlChangeApplication(change, "applied", operatorID, []string{item.ID}, nil, item.UpdatedAt))
+	}
+	if err := s.saveControlChange(r.Context(), change, []policy.ChangeDecision{controlChangeDecision(change, state, operatorID, nil, item.UpdatedAt)}, applications); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, http.StatusOK, item)
 }
 
@@ -4636,6 +4793,7 @@ func (s *Server) operatorApplyKnowledgeProposal(w http.ResponseWriter, r *http.R
 		return
 	}
 	now := time.Now().UTC()
+	var snapshotID string
 	if sections := s.proposalSectionPreviews(r.Context(), item); len(sections) > 0 {
 		for _, section := range sections {
 			currentRaw, _ := section["current"].(map[string]any)
@@ -4676,7 +4834,9 @@ func (s *Server) operatorApplyKnowledgeProposal(w http.ResponseWriter, r *http.R
 				return
 			}
 		}
-		if err := s.saveKnowledgeSnapshotForScope(r.Context(), item.ScopeKind, item.ScopeID, item.ID, now); err != nil {
+		var err error
+		snapshotID, err = s.saveKnowledgeSnapshotForScope(r.Context(), item.ScopeKind, item.ScopeID, item.ID, now)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -4725,7 +4885,9 @@ func (s *Server) operatorApplyKnowledgeProposal(w http.ResponseWriter, r *http.R
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.saveKnowledgeSnapshotForScope(r.Context(), item.ScopeKind, item.ScopeID, item.ID, now); err != nil {
+		var err error
+		snapshotID, err = s.saveKnowledgeSnapshotForScope(r.Context(), item.ScopeKind, item.ScopeID, item.ID, now)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -4733,6 +4895,19 @@ func (s *Server) operatorApplyKnowledgeProposal(w http.ResponseWriter, r *http.R
 	item.State = "applied"
 	item.UpdatedAt = now
 	if err := s.store.SaveKnowledgeUpdateProposal(r.Context(), item); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	operatorID := requestOperatorID(r, "")
+	change := controlChangeRequest("knowledge:"+item.ScopeKind+":"+item.ScopeID, "knowledge", "knowledge_proposal_apply", "applied", operatorID, []string{item.ID}, map[string]any{
+		"proposal_id": item.ID,
+		"snapshot_id": snapshotID,
+	}, now)
+	resultIDs := []string{item.ID}
+	if snapshotID != "" {
+		resultIDs = append(resultIDs, snapshotID)
+	}
+	if err := s.saveControlChange(r.Context(), change, []policy.ChangeDecision{controlChangeDecision(change, "approved", operatorID, nil, now)}, []policy.ChangeApplication{controlChangeApplication(change, "applied", operatorID, resultIDs, nil, now)}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -5096,14 +5271,14 @@ func mergeSectionBody(current, anchor, proposed, operation string) string {
 	return strings.Join(parts, "\n\n")
 }
 
-func (s *Server) saveKnowledgeSnapshotForScope(ctx context.Context, scopeKind, scopeID, proposalID string, now time.Time) error {
+func (s *Server) saveKnowledgeSnapshotForScope(ctx context.Context, scopeKind, scopeID, proposalID string, now time.Time) (string, error) {
 	pages, err := s.store.ListKnowledgePages(ctx, knowledge.PageQuery{ScopeKind: scopeKind, ScopeID: scopeID, Limit: 1000})
 	if err != nil {
-		return err
+		return "", err
 	}
 	chunks, err := s.store.ListKnowledgeChunks(ctx, knowledge.ChunkQuery{ScopeKind: scopeKind, ScopeID: scopeID, Limit: 1000})
 	if err != nil {
-		return err
+		return "", err
 	}
 	pageIDs := make([]string, 0, len(pages))
 	chunkIDs := make([]string, 0, len(chunks))
@@ -5113,15 +5288,19 @@ func (s *Server) saveKnowledgeSnapshotForScope(ctx context.Context, scopeKind, s
 	for _, chunk := range chunks {
 		chunkIDs = append(chunkIDs, chunk.ID)
 	}
-	return s.store.SaveKnowledgeSnapshot(ctx, knowledge.Snapshot{
-		ID:        fmt.Sprintf("ksnap_%d", now.UnixNano()),
+	snapshotID := fmt.Sprintf("ksnap_%d", now.UnixNano())
+	if err := s.store.SaveKnowledgeSnapshot(ctx, knowledge.Snapshot{
+		ID:        snapshotID,
 		ScopeKind: scopeKind,
 		ScopeID:   scopeID,
 		PageIDs:   pageIDs,
 		ChunkIDs:  chunkIDs,
 		Metadata:  map[string]any{"proposal_id": proposalID, "source": "proposal_apply"},
 		CreatedAt: now,
-	})
+	}); err != nil {
+		return "", err
+	}
+	return snapshotID, nil
 }
 
 func (s *Server) proposalPages(ctx context.Context, item knowledge.UpdateProposal) (*knowledge.Page, map[string]any) {

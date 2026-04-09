@@ -929,6 +929,190 @@ func TestOperatorControlStateAndHistory(t *testing.T) {
 	}
 }
 
+func TestOperatorChangesTrackDeferredFeedbackAndPendingControlState(t *testing.T) {
+	repo := memory.New()
+	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.SaveAgentProfile(context.Background(), agent.Profile{
+		ID:                    "agent_change_feedback",
+		Name:                  "Support",
+		Status:                "active",
+		DefaultPolicyBundleID: "bundle_missing",
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID:         "sess_change_feedback",
+		Channel:    "web",
+		AgentID:    "agent_change_feedback",
+		CustomerID: "cust_feedback",
+		Status:     session.StatusActive,
+		CreatedAt:  now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	body := strings.NewReader(`{"text":"teach this later","category":"quality"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_change_feedback/feedback", body)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("feedback create status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/changes?group_id=feedback:sess_change_feedback&status=pending", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list changes status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var changes []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &changes); err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) == 0 {
+		t.Fatalf("changes = %#v, want pending feedback change", changes)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/control-state/pending?agent_id=agent_change_feedback&session_id=sess_change_feedback&channel=web", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pending control-state status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	items, _ := payload["changes"].([]any)
+	if len(items) == 0 {
+		t.Fatalf("payload = %#v, want pending changes", payload)
+	}
+}
+
+func TestOperatorChangesTrackPreferenceDecisionAndAppliedControlState(t *testing.T) {
+	repo := memory.New()
+	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	pref := customer.Preference{ID: "pref_change_apply", AgentID: "agent_change_apply", CustomerID: "cust_change_apply", Key: "tone", Value: "formal", Status: customer.PreferenceStatusPending, CreatedAt: now, UpdatedAt: now}
+	event := customer.PreferenceEvent{ID: "pevt_change_apply", PreferenceID: pref.ID, AgentID: pref.AgentID, CustomerID: pref.CustomerID, Key: pref.Key, Value: pref.Value, Action: "pending", Source: "operator_feedback", CreatedAt: now}
+	if err := repo.SaveCustomerPreference(context.Background(), pref, event); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/customers/cust_change_apply/preferences/tone/confirm", strings.NewReader(`{"agent_id":"agent_change_apply"}`))
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("confirm preference status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/changes?group_id=customer:agent_change_apply:cust_change_apply&status=applied", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list applied changes status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var changes []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &changes); err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) == 0 {
+		t.Fatalf("changes = %#v, want applied preference changes", changes)
+	}
+	changeID := fmt.Sprint(changes[0]["id"])
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/changes/"+changeID, nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get change status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/control-state/applied?agent_id=agent_change_apply&customer_id=cust_change_apply&channel=web", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("applied control-state status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	items, _ := payload["changes"].([]any)
+	if len(items) == 0 {
+		t.Fatalf("payload = %#v, want applied changes", payload)
+	}
+}
+
+func TestOperatorChangesTrackKnowledgeProposalApply(t *testing.T) {
+	repo := memory.New()
+	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.SaveKnowledgeSource(context.Background(), knowledge.Source{
+		ID:        "src_change_knowledge",
+		ScopeKind: "agent",
+		ScopeID:   "agent_change_knowledge",
+		Kind:      "folder",
+		URI:       "/docs",
+		Status:    "active",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveKnowledgeUpdateProposal(context.Background(), knowledge.UpdateProposal{
+		ID:        "kprop_change_apply",
+		ScopeKind: "agent",
+		ScopeID:   "agent_change_knowledge",
+		Kind:      "edit",
+		State:     "approved",
+		Payload: map[string]any{
+			"page": map[string]any{
+				"title": "Shipping",
+				"body":  "Updated shipping article.",
+			},
+		},
+		Evidence:  []knowledge.Citation{{URI: "session:sess", Anchor: "trace"}},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/knowledge/proposals/kprop_change_apply/apply", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply knowledge proposal status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/changes?group_id=knowledge:agent:agent_change_knowledge&status=applied", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list knowledge changes status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var changes []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &changes); err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) == 0 {
+		t.Fatalf("changes = %#v, want applied knowledge change", changes)
+	}
+	foundApplication := false
+	for _, item := range changes {
+		if item["kind"] == "change_application" {
+			foundApplication = true
+			break
+		}
+	}
+	if !foundApplication {
+		t.Fatalf("changes = %#v, want change_application artifact", changes)
+	}
+}
+
 func TestSelectedPolicyBundlesUsesSnapshotOnly(t *testing.T) {
 	repo := memory.New()
 	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
