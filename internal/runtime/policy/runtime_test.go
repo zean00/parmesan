@@ -139,6 +139,58 @@ func TestResolveBuildsARQDrivenView(t *testing.T) {
 	}
 }
 
+func TestResolveEmitsUpdateIntentArtifacts(t *testing.T) {
+	now := time.Date(2026, 4, 9, 10, 0, 0, 0, time.UTC)
+	view, err := Resolve(
+		[]session.Event{{
+			ID:        "evt_1",
+			SessionID: "sess_1",
+			Source:    "customer",
+			Kind:      "message",
+			CreatedAt: now,
+			Content:   []session.ContentPart{{Type: "text", Text: "Please schedule an appointment tomorrow at 6pm and remind me about it."}},
+		}},
+		[]policy.Bundle{{
+			ID:      "bundle_1",
+			Version: "v1",
+			Guidelines: []policy.Guideline{
+				{ID: "schedule_visit", When: "appointment", Then: "schedule the appointment"},
+				{ID: "send_reminder", When: "remind me", Then: "set a reminder"},
+			},
+			GuidelineToolAssociations: []policy.GuidelineToolAssociation{
+				{GuidelineID: "schedule_visit", ToolID: "commerce.schedule_appointment"},
+			},
+		}},
+		nil,
+		[]tool.CatalogEntry{
+			{ID: "commerce_schedule_appointment", ProviderID: "commerce", Name: "schedule_appointment"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if len(view.UpdateIntents) != 1 {
+		t.Fatalf("update intents = %#v, want one appointment reminder artifact", view.UpdateIntents)
+	}
+	item := view.UpdateIntents[0]
+	if item.Kind != "appointment_reminder" || item.Source != "runtime" {
+		t.Fatalf("update intent = %#v, want runtime appointment reminder", item)
+	}
+	if item.SubjectRef == "" || item.RemindAt == "" {
+		t.Fatalf("update intent = %#v, want subject ref and remind_at", item)
+	}
+	foundARQ := false
+	for _, arq := range view.ARQResults {
+		if arq.Name == "update_intents" {
+			foundARQ = true
+			break
+		}
+	}
+	if !foundARQ {
+		t.Fatalf("ARQ results = %#v, want update_intents artifact", view.ARQResults)
+	}
+}
+
 func TestResolveWithCustomMatcherUsesCustomStrategy(t *testing.T) {
 	view, err := Resolve(
 		[]session.Event{{

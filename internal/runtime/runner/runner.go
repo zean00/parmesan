@@ -1074,6 +1074,9 @@ func (r *Runner) maybeEnsureRuntimeUpdateWatch(ctx context.Context, exec executi
 }
 
 func (r *Runner) runtimeUpdateIntent(ctx context.Context, exec execution.TurnExecution, view resolvedView, events []session.Event, toolOutput map[string]any) (sessionwatch.UpdateIntent, bool) {
+	if intent, ok := runtimeUpdateIntentFromArtifacts(view, time.Now().UTC()); ok {
+		return intent, true
+	}
 	customerText := latestCustomerText(events)
 	lowerCustomerText := strings.ToLower(customerText)
 	now := time.Now().UTC()
@@ -1097,6 +1100,35 @@ func (r *Runner) runtimeUpdateIntent(ctx context.Context, exec execution.TurnExe
 		}
 	}
 	_ = view
+	return sessionwatch.UpdateIntent{}, false
+}
+
+func runtimeUpdateIntentFromArtifacts(view resolvedView, now time.Time) (sessionwatch.UpdateIntent, bool) {
+	for _, item := range view.UpdateIntents {
+		switch strings.TrimSpace(item.Kind) {
+		case sessionwatch.KindDeliveryStatus:
+			intent, ok := sessionwatch.BuildDeliveryIntent(firstNonEmptyString(item.Source, sessionwatch.SourceRuntime), item.ToolID, item.SubjectRef, cloneAnyMap(item.Arguments), now)
+			if ok {
+				if item.StopCondition != "" {
+					intent.StopCondition = item.StopCondition
+				}
+				if item.PollIntervalSeconds > 0 {
+					intent.PollInterval = time.Duration(item.PollIntervalSeconds) * time.Second
+					intent.NextRunAt = now.Add(intent.PollInterval)
+				}
+				return intent, true
+			}
+		case sessionwatch.KindAppointmentReminder:
+			remindAt, _ := time.Parse(time.RFC3339, strings.TrimSpace(item.RemindAt))
+			intent, ok := sessionwatch.BuildAppointmentReminderIntent(firstNonEmptyString(item.Source, sessionwatch.SourceRuntime), item.SubjectRef, remindAt, cloneAnyMap(item.Arguments), now)
+			if ok {
+				if item.ToolID != "" {
+					intent.ToolID = item.ToolID
+				}
+				return intent, true
+			}
+		}
+	}
 	return sessionwatch.UpdateIntent{}, false
 }
 

@@ -353,6 +353,18 @@ type BatchResult struct {
 	Output        map[string]any `json:"output,omitempty"`
 }
 
+type UpdateIntentArtifact struct {
+	Kind                string         `json:"kind,omitempty"`
+	Source              string         `json:"source,omitempty"`
+	SubjectRef          string         `json:"subject_ref,omitempty"`
+	ToolID              string         `json:"tool_id,omitempty"`
+	Arguments           map[string]any `json:"arguments,omitempty"`
+	PollIntervalSeconds int            `json:"poll_interval_seconds,omitempty"`
+	StopCondition       string         `json:"stop_condition,omitempty"`
+	RemindAt            string         `json:"remind_at,omitempty"`
+	Rationale           string         `json:"rationale,omitempty"`
+}
+
 type EngineResult struct {
 	Bundle                      *policy.Bundle
 	Context                     MatchingContext
@@ -378,6 +390,7 @@ type EngineResult struct {
 	ToolExposureStage           ToolExposureStageResult
 	ToolPlanStage               ToolPlanStageResult
 	ToolDecisionStage           ToolDecisionStageResult
+	UpdateIntents               []UpdateIntentArtifact
 	CompositionMode             string
 	CustomerPreferences         []customer.Preference
 	NoMatch                     string

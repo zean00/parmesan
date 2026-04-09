@@ -15,6 +15,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/model"
 	semantics "github.com/sahal/parmesan/internal/runtime/semantics"
+	"github.com/sahal/parmesan/internal/sessionwatch"
 )
 
 func Resolve(events []session.Event, bundles []policy.Bundle, journeyInstances []journey.Instance, catalog []tool.CatalogEntry) (EngineResult, error) {
@@ -57,7 +58,7 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 		if mode == "" {
 			mode = inferCompositionMode(state.responseAnalysisStage.CandidateTemplates)
 		}
-		return resolvedViewFromState(bundle, state, mode, arqsFromState(state)), nil
+		return resolvedViewFromState(bundle, state, mode, arqsFromState(state), nil), nil
 	}
 	agentRetrieverTasks := startAgentRetrieverTasks(ctx, options, bundle.Retrievers, matchCtx)
 	if len(bundle.Retrievers) > 0 {
@@ -75,6 +76,7 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	toolDecisionResult.Apply(state)
 	toolPlanOutput := toolPlanResult.BatchOutput()
 	toolDecisionOutput := toolDecisionResult.BatchOutput()
+	updateIntents := buildUpdateIntentArtifacts(state.context, toolPlanResult.Plan)
 
 	mode := strings.ToLower(strings.TrimSpace(bundle.CompositionMode))
 	if mode == "" {
@@ -88,6 +90,7 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	arqs = append(arqs,
 		ARQResult{Name: "tool_plan", Version: promptVersion("tool_plan"), Output: toolPlanOutput},
 		ARQResult{Name: "tool_decision", Version: promptVersion("tool_decision"), Output: toolDecisionOutput},
+		ARQResult{Name: "update_intents", Version: promptVersion("tool_plan"), Output: map[string]any{"update_intents": updateIntents}},
 	)
 	state.batchResults = append(state.batchResults, BatchResult{
 		Name:          "tool_plan",
@@ -99,14 +102,19 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 		Strategy:      "generic",
 		PromptVersion: promptVersion("tool_decision"),
 		Output:        toolDecisionOutput,
+	}, BatchResult{
+		Name:          "update_intents",
+		Strategy:      "generic",
+		PromptVersion: promptVersion("tool_plan"),
+		Output:        map[string]any{"update_intents": updateIntents},
 	})
 	state.promptSetVersions["tool_plan"] = promptVersion("tool_plan")
 	state.promptSetVersions["tool_decision"] = promptVersion("tool_decision")
 
-	return resolvedViewFromState(bundle, state, mode, arqs), nil
+	return resolvedViewFromState(bundle, state, mode, arqs, updateIntents), nil
 }
 
-func resolvedViewFromState(bundle policy.Bundle, state *matchingState, mode string, arqs []ARQResult) EngineResult {
+func resolvedViewFromState(bundle policy.Bundle, state *matchingState, mode string, arqs []ARQResult, updateIntents []UpdateIntentArtifact) EngineResult {
 	suppressed := effectiveSuppressedGuidelines(state.relationshipResolutionStage, state.disambiguationStage)
 	suppressed = filterSuppressedAgainstMatched(suppressed, state.matchFinalizeStage.MatchedGuidelines)
 	resolutions := effectiveResolutionRecords(state.relationshipResolutionStage, state.disambiguationStage)
@@ -136,6 +144,7 @@ func resolvedViewFromState(bundle policy.Bundle, state *matchingState, mode stri
 		ToolExposureStage:           state.toolExposureStage,
 		ToolPlanStage:               state.toolPlanStage,
 		ToolDecisionStage:           state.toolDecisionStage,
+		UpdateIntents:               append([]UpdateIntentArtifact(nil), updateIntents...),
 		CompositionMode:             mode,
 		NoMatch:                     bundle.NoMatch,
 		DisambiguationPrompt:        prompt,
@@ -143,6 +152,102 @@ func resolvedViewFromState(bundle policy.Bundle, state *matchingState, mode stri
 		PromptSetVersions:           state.promptSetVersions,
 		ARQResults:                  arqs,
 	}
+}
+
+func buildUpdateIntentArtifacts(ctx MatchingContext, plan ToolCallPlan) []UpdateIntentArtifact {
+	var out []UpdateIntentArtifact
+	customerText := strings.ToLower(strings.TrimSpace(ctx.LatestCustomerText))
+	now := ctx.OccurredAt.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if wantsAppointmentReminder(customerText) {
+		if item, ok := buildAppointmentReminderArtifact(ctx, plan, now); ok {
+			out = append(out, item)
+		}
+	}
+	if wantsDeliveryUpdates(customerText) {
+		if item, ok := buildDeliveryUpdateArtifact(plan); ok {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func buildAppointmentReminderArtifact(ctx MatchingContext, plan ToolCallPlan, now time.Time) (UpdateIntentArtifact, bool) {
+	for _, candidate := range plan.Candidates {
+		toolID := strings.TrimSpace(candidate.ToolID)
+		if !containsAnyLower(strings.ToLower(toolID), "appointment", "schedule", "calendar", "booking") {
+			continue
+		}
+		appointmentAt, ok := sessionwatch.ParseAppointmentTime(candidate.Arguments, now)
+		if !ok {
+			appointmentAt, ok = sessionwatch.ParseAppointmentTimeFromText(ctx.LatestCustomerText, now)
+			if !ok {
+				continue
+			}
+		}
+		args := cloneMap(candidate.Arguments)
+		if args == nil {
+			args = map[string]any{}
+		}
+		args["appointment_at"] = appointmentAt.UTC().Format(time.RFC3339)
+		return UpdateIntentArtifact{
+			Kind:       sessionwatch.KindAppointmentReminder,
+			Source:     sessionwatch.SourceRuntime,
+			SubjectRef: firstNonEmpty(sessionwatch.ExtractSubjectRef(args, "appointment_id", "booking_id", "id"), appointmentAt.UTC().Format(time.RFC3339)),
+			ToolID:     toolID,
+			Arguments:  args,
+			RemindAt:   sessionwatch.ReminderTimeFromAppointment(appointmentAt, now).UTC().Format(time.RFC3339),
+			Rationale:  "runtime_resolved_appointment_reminder",
+		}, true
+	}
+	return UpdateIntentArtifact{}, false
+}
+
+func buildDeliveryUpdateArtifact(plan ToolCallPlan) (UpdateIntentArtifact, bool) {
+	for _, candidate := range plan.Candidates {
+		toolID := strings.TrimSpace(candidate.ToolID)
+		if !containsAnyLower(strings.ToLower(toolID), "order", "delivery", "shipping", "tracking") {
+			continue
+		}
+		subjectRef := sessionwatch.ExtractSubjectRef(candidate.Arguments, "order_id", "tracking_id", "shipment_id", "package_id", "id")
+		if subjectRef == "" {
+			continue
+		}
+		return UpdateIntentArtifact{
+			Kind:                sessionwatch.KindDeliveryStatus,
+			Source:              sessionwatch.SourceRuntime,
+			SubjectRef:          subjectRef,
+			ToolID:              toolID,
+			Arguments:           cloneMap(candidate.Arguments),
+			PollIntervalSeconds: int((15 * time.Minute) / time.Second),
+			StopCondition:       "delivered",
+			Rationale:           "runtime_resolved_delivery_updates",
+		}, true
+	}
+	return UpdateIntentArtifact{}, false
+}
+
+func containsAnyLower(text string, parts ...string) bool {
+	for _, part := range parts {
+		if strings.Contains(text, strings.ToLower(strings.TrimSpace(part))) {
+			return true
+		}
+	}
+	return false
+}
+
+func wantsDeliveryUpdates(text string) bool {
+	text = strings.ToLower(strings.TrimSpace(text))
+	return text != "" &&
+		containsAnyLower(text, "update me", "keep me updated", "notify me", "let me know") &&
+		containsAnyLower(text, "delivery", "shipping", "order status", "package")
+}
+
+func wantsAppointmentReminder(text string) bool {
+	text = strings.ToLower(strings.TrimSpace(text))
+	return text != "" && containsAnyLower(text, "remind me", "appointment reminder", "reminder for my appointment", "notify me about my appointment")
 }
 
 func VerifyDraft(view EngineResult, draft string, toolOutput map[string]any) VerificationResult {
@@ -3353,6 +3458,17 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func cloneMap(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func matchingSource(ctx MatchingContext) string {
