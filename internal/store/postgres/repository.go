@@ -614,12 +614,14 @@ func (c *Client) SaveSessionWatch(ctx context.Context, watch session.Watch) erro
 		return err
 	}
 	_, err = c.sessionQuery().Exec(ctx, `
-		INSERT INTO session_watches (id, session_id, kind, status, tool_id, arguments_json, poll_interval_seconds, next_run_at, stop_condition, dedupe_key, last_result_hash, last_checked_at, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8, TIMESTAMPTZ '0001-01-01 00:00:00+00'),$9,$10,$11,NULLIF($12, TIMESTAMPTZ '0001-01-01 00:00:00+00'),$13,$14)
+		INSERT INTO session_watches (id, session_id, kind, status, source, subject_ref, tool_id, arguments_json, poll_interval_seconds, next_run_at, stop_condition, dedupe_key, last_result_hash, last_checked_at, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10, TIMESTAMPTZ '0001-01-01 00:00:00+00'),$11,$12,$13,NULLIF($14, TIMESTAMPTZ '0001-01-01 00:00:00+00'),$15,$16)
 		ON CONFLICT (id) DO UPDATE SET
 		    session_id = EXCLUDED.session_id,
 		    kind = EXCLUDED.kind,
 		    status = EXCLUDED.status,
+		    source = EXCLUDED.source,
+		    subject_ref = EXCLUDED.subject_ref,
 		    tool_id = EXCLUDED.tool_id,
 		    arguments_json = EXCLUDED.arguments_json,
 		    poll_interval_seconds = EXCLUDED.poll_interval_seconds,
@@ -629,17 +631,17 @@ func (c *Client) SaveSessionWatch(ctx context.Context, watch session.Watch) erro
 		    last_result_hash = EXCLUDED.last_result_hash,
 		    last_checked_at = EXCLUDED.last_checked_at,
 		    updated_at = EXCLUDED.updated_at
-	`, watch.ID, watch.SessionID, watch.Kind, string(watch.Status), nullString(watch.ToolID), arguments, int(watch.PollInterval/time.Second), watch.NextRunAt, nullString(watch.StopCondition), nullString(watch.DedupeKey), nullString(watch.LastResultHash), watch.LastCheckedAt, watch.CreatedAt, watch.UpdatedAt)
+	`, watch.ID, watch.SessionID, watch.Kind, string(watch.Status), nullString(watch.Source), nullString(watch.SubjectRef), nullString(watch.ToolID), arguments, int(watch.PollInterval/time.Second), watch.NextRunAt, nullString(watch.StopCondition), nullString(watch.DedupeKey), nullString(watch.LastResultHash), watch.LastCheckedAt, watch.CreatedAt, watch.UpdatedAt)
 	return err
 }
 
 func (c *Client) GetSessionWatch(ctx context.Context, watchID string) (session.Watch, error) {
-	row := c.sessionQuery().QueryRow(ctx, `SELECT id, session_id, kind, status, COALESCE(tool_id,''), arguments_json, poll_interval_seconds, COALESCE(next_run_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(stop_condition,''), COALESCE(dedupe_key,''), COALESCE(last_result_hash,''), COALESCE(last_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at FROM session_watches WHERE id = $1`, watchID)
+	row := c.sessionQuery().QueryRow(ctx, `SELECT id, session_id, kind, status, COALESCE(source,''), COALESCE(subject_ref,''), COALESCE(tool_id,''), arguments_json, poll_interval_seconds, COALESCE(next_run_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(stop_condition,''), COALESCE(dedupe_key,''), COALESCE(last_result_hash,''), COALESCE(last_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at FROM session_watches WHERE id = $1`, watchID)
 	var item session.Watch
 	var status string
 	var arguments []byte
 	var pollSeconds int
-	if err := row.Scan(&item.ID, &item.SessionID, &item.Kind, &status, &item.ToolID, &arguments, &pollSeconds, &item.NextRunAt, &item.StopCondition, &item.DedupeKey, &item.LastResultHash, &item.LastCheckedAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	if err := row.Scan(&item.ID, &item.SessionID, &item.Kind, &status, &item.Source, &item.SubjectRef, &item.ToolID, &arguments, &pollSeconds, &item.NextRunAt, &item.StopCondition, &item.DedupeKey, &item.LastResultHash, &item.LastCheckedAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return session.Watch{}, errors.New("session watch not found")
 		}
@@ -654,7 +656,7 @@ func (c *Client) GetSessionWatch(ctx context.Context, watchID string) (session.W
 }
 
 func (c *Client) ListSessionWatches(ctx context.Context, query session.WatchQuery) ([]session.Watch, error) {
-	sql := `SELECT id, session_id, kind, status, COALESCE(tool_id,''), arguments_json, poll_interval_seconds, COALESCE(next_run_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(stop_condition,''), COALESCE(dedupe_key,''), COALESCE(last_result_hash,''), COALESCE(last_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at FROM session_watches WHERE ($1 = '' OR session_id = $1) AND ($2 = '' OR status = $2) ORDER BY created_at DESC`
+	sql := `SELECT id, session_id, kind, status, COALESCE(source,''), COALESCE(subject_ref,''), COALESCE(tool_id,''), arguments_json, poll_interval_seconds, COALESCE(next_run_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(stop_condition,''), COALESCE(dedupe_key,''), COALESCE(last_result_hash,''), COALESCE(last_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at FROM session_watches WHERE ($1 = '' OR session_id = $1) AND ($2 = '' OR status = $2) ORDER BY created_at DESC`
 	rows, err := c.sessionQuery().Query(ctx, sql, query.SessionID, query.Status)
 	if err != nil {
 		return nil, err
@@ -666,7 +668,7 @@ func (c *Client) ListSessionWatches(ctx context.Context, query session.WatchQuer
 		var status string
 		var arguments []byte
 		var pollSeconds int
-		if err := rows.Scan(&item.ID, &item.SessionID, &item.Kind, &status, &item.ToolID, &arguments, &pollSeconds, &item.NextRunAt, &item.StopCondition, &item.DedupeKey, &item.LastResultHash, &item.LastCheckedAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.Kind, &status, &item.Source, &item.SubjectRef, &item.ToolID, &arguments, &pollSeconds, &item.NextRunAt, &item.StopCondition, &item.DedupeKey, &item.LastResultHash, &item.LastCheckedAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		item.Status = session.WatchStatus(status)
@@ -680,7 +682,7 @@ func (c *Client) ListSessionWatches(ctx context.Context, query session.WatchQuer
 }
 
 func (c *Client) ListRunnableSessionWatches(ctx context.Context, now time.Time) ([]session.Watch, error) {
-	rows, err := c.sessionQuery().Query(ctx, `SELECT id, session_id, kind, status, COALESCE(tool_id,''), arguments_json, poll_interval_seconds, COALESCE(next_run_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(stop_condition,''), COALESCE(dedupe_key,''), COALESCE(last_result_hash,''), COALESCE(last_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at FROM session_watches WHERE status = 'active' AND (next_run_at IS NULL OR next_run_at <= $1) ORDER BY next_run_at ASC, created_at ASC`, now)
+	rows, err := c.sessionQuery().Query(ctx, `SELECT id, session_id, kind, status, COALESCE(source,''), COALESCE(subject_ref,''), COALESCE(tool_id,''), arguments_json, poll_interval_seconds, COALESCE(next_run_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(stop_condition,''), COALESCE(dedupe_key,''), COALESCE(last_result_hash,''), COALESCE(last_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at FROM session_watches WHERE status = 'active' AND (next_run_at IS NULL OR next_run_at <= $1) ORDER BY next_run_at ASC, created_at ASC`, now)
 	if err != nil {
 		return nil, err
 	}
@@ -691,7 +693,7 @@ func (c *Client) ListRunnableSessionWatches(ctx context.Context, now time.Time) 
 		var status string
 		var arguments []byte
 		var pollSeconds int
-		if err := rows.Scan(&item.ID, &item.SessionID, &item.Kind, &status, &item.ToolID, &arguments, &pollSeconds, &item.NextRunAt, &item.StopCondition, &item.DedupeKey, &item.LastResultHash, &item.LastCheckedAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.Kind, &status, &item.Source, &item.SubjectRef, &item.ToolID, &arguments, &pollSeconds, &item.NextRunAt, &item.StopCondition, &item.DedupeKey, &item.LastResultHash, &item.LastCheckedAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		item.Status = session.WatchStatus(status)

@@ -77,6 +77,8 @@ type Watch struct {
 	SessionID      string         `json:"session_id"`
 	Kind           string         `json:"kind"`
 	Status         WatchStatus    `json:"status"`
+	Source         string         `json:"source,omitempty"`
+	SubjectRef     string         `json:"subject_ref,omitempty"`
 	ToolID         string         `json:"tool_id,omitempty"`
 	Arguments      map[string]any `json:"arguments,omitempty"`
 	PollInterval   time.Duration  `json:"poll_interval,omitempty"`

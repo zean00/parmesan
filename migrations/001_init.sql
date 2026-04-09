@@ -78,6 +78,8 @@ CREATE TABLE IF NOT EXISTS session_watches (
     session_id TEXT NOT NULL REFERENCES sessions(id),
     kind TEXT NOT NULL,
     status TEXT NOT NULL,
+    source TEXT,
+    subject_ref TEXT,
     tool_id TEXT,
     arguments_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     poll_interval_seconds INTEGER NOT NULL DEFAULT 0,

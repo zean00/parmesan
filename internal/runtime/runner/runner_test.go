@@ -637,6 +637,92 @@ func TestDecisionForPlannedCallPreservesFinalizedArguments(t *testing.T) {
 	}
 }
 
+func TestProcessExecutionCreatesRuntimeAppointmentReminderWatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	r := New(repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), "test-runner")
+
+	now := time.Now().UTC()
+	_ = repo.CreateSession(ctx, session.Session{ID: "sess_watch", Channel: "web", Status: session.StatusActive, CreatedAt: now, LastActivityAt: now})
+	_ = repo.RegisterProvider(ctx, tool.ProviderBinding{ID: "commerce", Kind: tool.ProviderMCP, Name: "commerce", URI: server.URL, RegisteredAt: now, Healthy: true})
+	_ = repo.SaveCatalogEntries(ctx, []tool.CatalogEntry{
+		{ID: "commerce_schedule_appointment", ProviderID: "commerce", Name: "schedule_appointment", RuntimeProtocol: "mcp", Schema: `{"type":"object","properties":{"date":{"type":"string"}}}`, ImportedAt: now},
+	})
+	_ = repo.SaveBundle(ctx, policy.Bundle{
+		ID:      "bundle_watch",
+		Version: "v1",
+		Templates: []policy.Template{{
+			ID:   "watch_reply",
+			Mode: "strict",
+			Text: "I can remind you before the appointment.",
+		}},
+		Guidelines: []policy.Guideline{
+			{ID: "schedule_visit", When: "appointment", Then: "schedule the appointment"},
+			{ID: "send_reminder", When: "remind me", Then: "set a reminder"},
+		},
+		GuidelineToolAssociations: []policy.GuidelineToolAssociation{
+			{GuidelineID: "schedule_visit", ToolID: "commerce.schedule_appointment"},
+		},
+	})
+	_ = writes.AppendEvent(ctx, session.Event{
+		ID:        "evt_watch",
+		SessionID: "sess_watch",
+		Source:    "customer",
+		Kind:      "message",
+		CreatedAt: now,
+		Content:   []session.ContentPart{{Type: "text", Text: "Please schedule an appointment tomorrow at 6pm and remind me about it."}},
+	})
+	_ = writes.CreateExecution(ctx, execution.TurnExecution{
+		ID:             "exec_watch",
+		SessionID:      "sess_watch",
+		TriggerEventID: "evt_watch",
+		TraceID:        "trace_watch",
+		Status:         execution.StatusPending,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}, []execution.ExecutionStep{
+		step("exec_watch", "ingest", false),
+		step("exec_watch", "resolve_policy", true),
+		step("exec_watch", "match_and_plan", true),
+		step("exec_watch", "compose_response", true),
+		step("exec_watch", "deliver_response", false),
+	})
+
+	time.Sleep(50 * time.Millisecond)
+	if err := r.processExecution(ctx, "exec_watch"); err != nil {
+		t.Fatalf("processExecution() error = %v", err)
+	}
+
+	watches, err := repo.ListSessionWatches(ctx, session.WatchQuery{SessionID: "sess_watch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(watches) != 1 {
+		t.Fatalf("watches = %#v, want one runtime-created watch", watches)
+	}
+	if watches[0].Kind != "appointment_reminder" || watches[0].Source != "runtime" {
+		t.Fatalf("watch = %#v, want runtime appointment reminder watch", watches[0])
+	}
+	sess, err := repo.GetSession(ctx, "sess_watch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Status != session.StatusSessionKeep {
+		t.Fatalf("session status = %s, want session_keep", sess.Status)
+	}
+}
+
 func TestResolveViewUsesAgentProfileDefaultBundle(t *testing.T) {
 	repo := memory.New()
 	r := New(repo, nil, nil, nil, "test-runner")

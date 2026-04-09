@@ -26,9 +26,11 @@ import (
 	"github.com/sahal/parmesan/internal/domain/rollout"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
+	"github.com/sahal/parmesan/internal/lifecycle"
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/quality"
 	"github.com/sahal/parmesan/internal/runtime/runner"
+	"github.com/sahal/parmesan/internal/sessionwatch"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/store/memory"
 )
@@ -177,6 +179,143 @@ func TestPlatformValidationDurableApprovalResumeFlow(t *testing.T) {
 	}
 	if !hasApprovalResolved || !hasToolCompleted {
 		t.Fatalf("events = %#v, want approval.resolved and tool.completed", events)
+	}
+}
+
+func TestPlatformValidationRuntimeWatchBeatsLifecycleFallback(t *testing.T) {
+	t.Setenv("SESSION_IDLE_CANDIDATE_AFTER", "100ms")
+	t.Setenv("SESSION_KEEP_RECHECK_AFTER", "100ms")
+
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 128)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	lr := lifecycle.New(repo, writes, nil)
+
+	now := time.Now().UTC().Add(-2 * time.Second)
+	if err := repo.CreateSession(ctx, session.Session{
+		ID:             "sess_runtime_watch",
+		Channel:        "acp",
+		CustomerID:     "cust_watch",
+		Status:         session.StatusActive,
+		CreatedAt:      now,
+		LastActivityAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendEvent(ctx, session.Event{
+		ID:        "evt_runtime_watch",
+		SessionID: "sess_runtime_watch",
+		Source:    "customer",
+		Kind:      "message",
+		CreatedAt: now,
+		Content: []session.ContentPart{{
+			Type: "text",
+			Text: "Please remind me about my appointment tomorrow at 6pm.",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := repo.GetSession(ctx, "sess_runtime_watch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	appointmentAt := time.Date(now.Year(), now.Month(), now.Day()+1, 18, 0, 0, 0, time.UTC)
+	intent, ok := sessionwatch.BuildAppointmentReminderIntent(sessionwatch.SourceRuntime, appointmentAt.Format(time.RFC3339), sessionwatch.ReminderTimeFromAppointment(appointmentAt, now), map[string]any{
+		"appointment_at": appointmentAt.Format(time.RFC3339),
+	}, now)
+	if !ok {
+		t.Fatal("expected runtime appointment reminder intent")
+	}
+	if _, created, err := sessionwatch.EnsureSessionWatch(ctx, repo, sess, intent, now); err != nil {
+		t.Fatal(err)
+	} else if !created {
+		t.Fatal("expected runtime watch creation")
+	}
+	sess.Status = session.StatusSessionKeep
+	sess.KeepReason = "appointment_reminder"
+	sess.LastActivityAt = now
+	if err := repo.UpdateSession(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	lr.Start(ctx)
+
+	waitFor(t, validationTimeout(2*time.Second), func() bool {
+		items, err := repo.ListSessionWatches(ctx, session.WatchQuery{SessionID: "sess_runtime_watch"})
+		if err != nil || len(items) != 1 {
+			return false
+		}
+		return items[0].Source == "runtime"
+	})
+	watches, err := repo.ListSessionWatches(ctx, session.WatchQuery{SessionID: "sess_runtime_watch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(watches) != 1 {
+		t.Fatalf("watches = %#v, want lifecycle fallback to avoid duplicate runtime watch", watches)
+	}
+}
+
+func TestPlatformValidationLifecycleCreatesFallbackWatchWhenRuntimeDidNot(t *testing.T) {
+	t.Setenv("SESSION_IDLE_CANDIDATE_AFTER", "100ms")
+	t.Setenv("SESSION_KEEP_RECHECK_AFTER", "100ms")
+
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 64)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	lr := lifecycle.New(repo, writes, nil)
+	lr.Start(ctx)
+
+	now := time.Now().UTC().Add(-2 * time.Second)
+	if err := repo.CreateSession(ctx, session.Session{
+		ID:             "sess_lifecycle_watch",
+		Channel:        "acp",
+		CustomerID:     "cust_watch_2",
+		Status:         session.StatusActive,
+		CreatedAt:      now,
+		LastActivityAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendEvent(ctx, session.Event{
+		ID:        "evt_lifecycle_watch",
+		SessionID: "sess_lifecycle_watch",
+		Source:    "customer",
+		Kind:      "message",
+		CreatedAt: now,
+		Content: []session.ContentPart{{
+			Type: "text",
+			Text: "Please remind me about my appointment tomorrow at 6pm.",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	watches := waitForSessionWatchCount(t, repo, "sess_lifecycle_watch", 1, validationTimeout(2*time.Second))
+	if watches[0].Kind != "appointment_reminder" || watches[0].Source != "lifecycle" {
+		t.Fatalf("watch = %#v, want lifecycle-created appointment reminder watch", watches[0])
+	}
+	sess, err := repo.GetSession(ctx, "sess_lifecycle_watch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Status != session.StatusSessionKeep {
+		t.Fatalf("session status = %s, want session_keep", sess.Status)
+	}
+	time.Sleep(1200 * time.Millisecond)
+	watches, err = repo.ListSessionWatches(ctx, session.WatchQuery{SessionID: "sess_lifecycle_watch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(watches) != 1 {
+		t.Fatalf("watches = %#v, want lifecycle fallback to dedupe appointment reminder watch", watches)
 	}
 }
 
@@ -1080,6 +1219,23 @@ func waitForAssistantText(t *testing.T, repo *memory.Store, sessionID string, ti
 		return false
 	})
 	return text
+}
+
+func waitForSessionWatchCount(t *testing.T, repo *memory.Store, sessionID string, want int, timeout time.Duration) []session.Watch {
+	t.Helper()
+	var watches []session.Watch
+	waitFor(t, timeout, func() bool {
+		items, err := repo.ListSessionWatches(context.Background(), session.WatchQuery{SessionID: sessionID})
+		if err != nil {
+			return false
+		}
+		watches = items
+		return len(items) == want
+	})
+	if len(watches) != want {
+		t.Fatalf("session %s watches = %#v, want %d", sessionID, watches, want)
+	}
+	return watches
 }
 
 func waitForProposalState(t *testing.T, repo *memory.Store, proposalID string, want rollout.ProposalState, timeout time.Duration) {

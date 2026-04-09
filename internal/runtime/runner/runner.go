@@ -36,6 +36,7 @@ import (
 	rolloutengine "github.com/sahal/parmesan/internal/rollout"
 	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
 	"github.com/sahal/parmesan/internal/sessionsvc"
+	"github.com/sahal/parmesan/internal/sessionwatch"
 	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/toolruntime"
@@ -570,6 +571,9 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 		if err := r.maybeEmitPerceivedPerformance(ctx, *exec, responseRecord, view); err != nil {
 			return err
 		}
+		if err := r.maybeEnsureRuntimeUpdateWatch(ctx, *exec, view, events, toolOutput); err != nil {
+			return err
+		}
 		respMessages := renderResponseMessages(view, toolOutput)
 		if len(respMessages) == 0 {
 			prompt := composePrompt(view, events, toolOutput)
@@ -1049,6 +1053,180 @@ func (r *Runner) maybeEmitPerceivedPerformance(ctx context.Context, exec executi
 		FinishedAt:  now,
 	})
 	return nil
+}
+
+func (r *Runner) maybeEnsureRuntimeUpdateWatch(ctx context.Context, exec execution.TurnExecution, view resolvedView, events []session.Event, toolOutput map[string]any) error {
+	intent, ok := r.runtimeUpdateIntent(ctx, exec, view, events, toolOutput)
+	if !ok {
+		return nil
+	}
+	sess, err := r.repo.GetSession(ctx, exec.SessionID)
+	if err != nil {
+		return err
+	}
+	if sess.Status == session.StatusClosed {
+		return nil
+	}
+	if _, _, err := sessionwatch.EnsureSessionWatch(ctx, r.repo, sess, intent, time.Now().UTC()); err != nil {
+		return err
+	}
+	return r.markSessionKeepForWatch(ctx, sess, intent.Kind)
+}
+
+func (r *Runner) runtimeUpdateIntent(ctx context.Context, exec execution.TurnExecution, view resolvedView, events []session.Event, toolOutput map[string]any) (sessionwatch.UpdateIntent, bool) {
+	customerText := latestCustomerText(events)
+	lowerCustomerText := strings.ToLower(customerText)
+	now := time.Now().UTC()
+	if wantsAppointmentReminder(lowerCustomerText) {
+		if intent, ok := runtimeAppointmentReminderIntentFromText(view, customerText, now); ok {
+			return intent, true
+		}
+		if intent, ok := runtimeAppointmentReminderIntentFromView(view, now); ok {
+			return intent, true
+		}
+		if intent, ok := r.runtimeAppointmentReminderIntent(ctx, exec, now); ok {
+			return intent, true
+		}
+	}
+	if wantsDeliveryUpdates(lowerCustomerText) {
+		if intent, ok := runtimeDeliveryWatchIntentFromView(view, now); ok {
+			return intent, true
+		}
+		if intent, ok := r.runtimeDeliveryWatchIntent(ctx, exec, toolOutput, now); ok {
+			return intent, true
+		}
+	}
+	_ = view
+	return sessionwatch.UpdateIntent{}, false
+}
+
+func runtimeDeliveryWatchIntentFromView(view resolvedView, now time.Time) (sessionwatch.UpdateIntent, bool) {
+	for _, candidate := range view.ToolPlanStage.Plan.Candidates {
+		lowerToolID := strings.ToLower(strings.TrimSpace(candidate.ToolID))
+		if !stringContainsAny(lowerToolID, "order", "delivery", "shipping", "tracking") {
+			continue
+		}
+		subjectRef := sessionwatch.ExtractSubjectRef(candidate.Arguments, "order_id", "tracking_id", "shipment_id", "package_id", "id")
+		if subjectRef == "" {
+			continue
+		}
+		return sessionwatch.BuildDeliveryIntent(sessionwatch.SourceRuntime, candidate.ToolID, subjectRef, candidate.Arguments, now)
+	}
+	return sessionwatch.UpdateIntent{}, false
+}
+
+func (r *Runner) runtimeDeliveryWatchIntent(ctx context.Context, exec execution.TurnExecution, toolOutput map[string]any, now time.Time) (sessionwatch.UpdateIntent, bool) {
+	runs, err := r.repo.ListToolRuns(ctx, exec.ID)
+	if err != nil {
+		return sessionwatch.UpdateIntent{}, false
+	}
+	for i := len(runs) - 1; i >= 0; i-- {
+		run := runs[i]
+		toolID := strings.TrimSpace(run.ToolID)
+		lowerToolID := strings.ToLower(toolID)
+		if !stringContainsAny(lowerToolID, "order", "delivery", "shipping", "tracking") {
+			continue
+		}
+		args := parseJSONMap(run.InputJSON)
+		if subjectRef := sessionwatch.ExtractSubjectRef(args, "order_id", "tracking_id", "shipment_id", "package_id", "id"); subjectRef != "" {
+			return sessionwatch.BuildDeliveryIntent(sessionwatch.SourceRuntime, toolID, subjectRef, args, now)
+		}
+	}
+	if tools, ok := toolOutput["tools"].(map[string]any); ok {
+		for key, raw := range tools {
+			if !stringContainsAny(strings.ToLower(key), "order", "delivery", "shipping", "tracking") {
+				continue
+			}
+			output, _ := raw.(map[string]any)
+			subjectRef := sessionwatch.ExtractSubjectRef(output, "order_id", "tracking_id", "shipment_id", "package_id", "id")
+			if subjectRef != "" {
+				return sessionwatch.BuildDeliveryIntent(sessionwatch.SourceRuntime, key, subjectRef, output, now)
+			}
+		}
+	}
+	return sessionwatch.UpdateIntent{}, false
+}
+
+func runtimeAppointmentReminderIntentFromView(view resolvedView, now time.Time) (sessionwatch.UpdateIntent, bool) {
+	for _, candidate := range view.ToolPlanStage.Plan.Candidates {
+		lowerToolID := strings.ToLower(strings.TrimSpace(candidate.ToolID))
+		if !stringContainsAny(lowerToolID, "appointment", "schedule", "calendar", "booking") {
+			continue
+		}
+		appointmentAt, ok := sessionwatch.ParseAppointmentTime(candidate.Arguments, now)
+		if !ok {
+			continue
+		}
+		args := cloneAnyMap(candidate.Arguments)
+		args["appointment_at"] = appointmentAt.UTC().Format(time.RFC3339)
+		subjectRef := firstNonEmptyString(sessionwatch.ExtractSubjectRef(args, "appointment_id", "booking_id", "id"), appointmentAt.UTC().Format(time.RFC3339))
+		return sessionwatch.BuildAppointmentReminderIntent(sessionwatch.SourceRuntime, subjectRef, sessionwatch.ReminderTimeFromAppointment(appointmentAt, now), args, now)
+	}
+	return sessionwatch.UpdateIntent{}, false
+}
+
+func runtimeAppointmentReminderIntentFromText(view resolvedView, customerText string, now time.Time) (sessionwatch.UpdateIntent, bool) {
+	if !runtimeSupportsAppointmentTool(view) {
+		return sessionwatch.UpdateIntent{}, false
+	}
+	appointmentAt, ok := sessionwatch.ParseAppointmentTimeFromText(customerText, now)
+	if !ok {
+		return sessionwatch.UpdateIntent{}, false
+	}
+	args := map[string]any{"appointment_at": appointmentAt.UTC().Format(time.RFC3339)}
+	subjectRef := appointmentAt.UTC().Format(time.RFC3339)
+	return sessionwatch.BuildAppointmentReminderIntent(sessionwatch.SourceRuntime, subjectRef, sessionwatch.ReminderTimeFromAppointment(appointmentAt, now), args, now)
+}
+
+func runtimeSupportsAppointmentTool(view resolvedView) bool {
+	for _, candidate := range view.ToolPlanStage.Plan.Candidates {
+		if stringContainsAny(strings.ToLower(strings.TrimSpace(candidate.ToolID)), "appointment", "schedule", "calendar", "booking") {
+			return true
+		}
+	}
+	for _, toolID := range view.ToolPlanStage.Plan.SelectedTools {
+		if stringContainsAny(strings.ToLower(strings.TrimSpace(toolID)), "appointment", "schedule", "calendar", "booking") {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Runner) runtimeAppointmentReminderIntent(ctx context.Context, exec execution.TurnExecution, now time.Time) (sessionwatch.UpdateIntent, bool) {
+	runs, err := r.repo.ListToolRuns(ctx, exec.ID)
+	if err != nil {
+		return sessionwatch.UpdateIntent{}, false
+	}
+	for i := len(runs) - 1; i >= 0; i-- {
+		run := runs[i]
+		lowerToolID := strings.ToLower(strings.TrimSpace(run.ToolID))
+		if !stringContainsAny(lowerToolID, "appointment", "schedule", "calendar", "booking") {
+			continue
+		}
+		args := parseJSONMap(run.InputJSON)
+		appointmentAt, ok := sessionwatch.ParseAppointmentTime(args, now)
+		if !ok {
+			continue
+		}
+		args["appointment_at"] = appointmentAt.UTC().Format(time.RFC3339)
+		subjectRef := firstNonEmptyString(sessionwatch.ExtractSubjectRef(args, "appointment_id", "booking_id", "id"), appointmentAt.UTC().Format(time.RFC3339))
+		return sessionwatch.BuildAppointmentReminderIntent(sessionwatch.SourceRuntime, subjectRef, sessionwatch.ReminderTimeFromAppointment(appointmentAt, now), args, now)
+	}
+	return sessionwatch.UpdateIntent{}, false
+}
+
+func (r *Runner) markSessionKeepForWatch(ctx context.Context, sess session.Session, reason string) error {
+	sess.Status = session.StatusSessionKeep
+	sess.KeepReason = firstNonEmptyString(reason, "background_watch")
+	sess.LastActivityAt = time.Now().UTC()
+	sess.IdleCheckedAt = sess.LastActivityAt
+	sess.AwaitingCustomerSince = time.Time{}
+	sess.ClosedAt = time.Time{}
+	sess.CloseReason = ""
+	if err := r.repo.UpdateSession(ctx, sess); err != nil {
+		return err
+	}
+	return knowledgelearning.New(r.repo).CompileDeferredFeedbackRecords(ctx, sess)
 }
 
 func selectPolicyBundles(bundles []policy.Bundle, preferred string, fallback string) []policy.Bundle {
@@ -2319,6 +2497,18 @@ func mustJSON(v any) string {
 	return string(raw)
 }
 
+func parseJSONMap(raw string) map[string]any {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
 func (r *Runner) publish(sessionID, executionID, typ string, payload any) {
 	if r.broker == nil {
 		return
@@ -2518,6 +2708,31 @@ func latestText(events []session.Event) string {
 		}
 	}
 	return "hello"
+}
+
+func latestCustomerText(events []session.Event) string {
+	return latestText(events)
+}
+
+func wantsDeliveryUpdates(text string) bool {
+	text = strings.ToLower(strings.TrimSpace(text))
+	return text != "" &&
+		stringContainsAny(text, "update me", "keep me updated", "notify me", "let me know") &&
+		stringContainsAny(text, "delivery", "shipping", "order status", "package")
+}
+
+func wantsAppointmentReminder(text string) bool {
+	text = strings.ToLower(strings.TrimSpace(text))
+	return text != "" && stringContainsAny(text, "remind me", "appointment reminder", "reminder for my appointment", "notify me about my appointment")
+}
+
+func stringContainsAny(text string, parts ...string) bool {
+	for _, part := range parts {
+		if strings.Contains(text, strings.ToLower(strings.TrimSpace(part))) {
+			return true
+		}
+	}
+	return false
 }
 
 func latestAssistant(events []session.Event) session.Event {

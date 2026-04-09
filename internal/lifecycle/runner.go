@@ -18,6 +18,7 @@ import (
 	knowledgelearning "github.com/sahal/parmesan/internal/knowledge/learning"
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/sessionsvc"
+	"github.com/sahal/parmesan/internal/sessionwatch"
 	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/toolruntime"
@@ -92,7 +93,7 @@ func (r *Runner) processIdleSessions(ctx context.Context, now time.Time) {
 		case "close_session":
 			_ = r.closeSession(ctx, &sess, reason, now)
 		case "schedule_watch":
-			if ok := r.ensureDeliveryWatch(ctx, &sess, now); ok {
+			if ok := r.ensureInferredWatch(ctx, &sess, eventsForSession(ctx, r.repo, sess.ID), now); ok {
 				_ = r.markKeep(ctx, &sess, reason, now)
 			} else {
 				_ = r.askFollowup(ctx, &sess, "watch_requested_without_tool_context", now)
@@ -172,7 +173,7 @@ func (r *Runner) decideLifecycleAction(ctx context.Context, sess session.Session
 	if sess.Status == session.StatusAwaitingCustomer && sess.FollowupCount > 0 {
 		return "close_session", "no_customer_reply_after_followup"
 	}
-	if shouldScheduleDeliveryWatch(events) {
+	if shouldScheduleWatch(events) {
 		return "schedule_watch", "customer_requested_delivery_updates"
 	}
 	if latestCustomerLooksResolved(events) {
@@ -215,13 +216,16 @@ func latestAgentAskedFollowup(events []session.Event) bool {
 	return false
 }
 
-func shouldScheduleDeliveryWatch(events []session.Event) bool {
+func shouldScheduleWatch(events []session.Event) bool {
 	for i := len(events) - 1; i >= 0; i-- {
 		text := strings.ToLower(strings.TrimSpace(sessionEventText(events[i])))
 		if text == "" {
 			continue
 		}
 		if containsAny(text, "update me", "keep me updated", "notify me", "let me know") && containsAny(text, "delivery", "shipping", "order status", "package") {
+			return true
+		}
+		if containsAny(text, "remind me", "appointment reminder", "reminder for my appointment", "notify me about my appointment") {
 			return true
 		}
 	}
@@ -351,13 +355,32 @@ func (r *Runner) markKeep(ctx context.Context, sess *session.Session, reason str
 	return nil
 }
 
-func (r *Runner) ensureDeliveryWatch(ctx context.Context, sess *session.Session, now time.Time) bool {
+func (r *Runner) ensureInferredWatch(ctx context.Context, sess *session.Session, events []session.Event, now time.Time) bool {
 	if sess == nil {
 		return false
 	}
+	if intent, ok := r.inferLifecycleWatchIntent(ctx, *sess, events, now); ok {
+		_, _, err := sessionwatch.EnsureSessionWatch(ctx, r.repo, *sess, intent, now)
+		return err == nil
+	}
+	return false
+}
+
+func (r *Runner) inferLifecycleWatchIntent(ctx context.Context, sess session.Session, events []session.Event, now time.Time) (sessionwatch.UpdateIntent, bool) {
+	if latestCustomerRequestsAppointmentReminder(events) {
+		if appointmentAt, ok := latestAppointmentTime(events, now); ok {
+			args := map[string]any{"appointment_at": appointmentAt.UTC().Format(time.RFC3339)}
+			subjectRef := appointmentAt.UTC().Format(time.RFC3339)
+			return sessionwatch.BuildAppointmentReminderIntent(sessionwatch.SourceLifecycle, subjectRef, sessionwatch.ReminderTimeFromAppointment(appointmentAt, now), args, now)
+		}
+	}
+	return r.deliveryWatchIntentFromLatestExecution(ctx, sess, now)
+}
+
+func (r *Runner) deliveryWatchIntentFromLatestExecution(ctx context.Context, sess session.Session, now time.Time) (sessionwatch.UpdateIntent, bool) {
 	execs, err := r.repo.ListExecutions(ctx)
 	if err != nil {
-		return false
+		return sessionwatch.UpdateIntent{}, false
 	}
 	var latestExec execution.TurnExecution
 	for _, exec := range execs {
@@ -369,11 +392,11 @@ func (r *Runner) ensureDeliveryWatch(ctx context.Context, sess *session.Session,
 		}
 	}
 	if latestExec.ID == "" {
-		return false
+		return sessionwatch.UpdateIntent{}, false
 	}
 	runs, err := r.repo.ListToolRuns(ctx, latestExec.ID)
 	if err != nil {
-		return false
+		return sessionwatch.UpdateIntent{}, false
 	}
 	var chosen toolRunSeed
 	for _, run := range runs {
@@ -383,35 +406,41 @@ func (r *Runner) ensureDeliveryWatch(ctx context.Context, sess *session.Session,
 		}
 	}
 	if chosen.ToolID == "" {
-		return false
+		return sessionwatch.UpdateIntent{}, false
 	}
-	existing, _ := r.repo.ListSessionWatches(ctx, session.WatchQuery{SessionID: sess.ID, Status: string(session.WatchStatusActive)})
-	for _, item := range existing {
-		if item.Kind == "delivery_status" {
-			return true
-		}
-	}
-	watch := session.Watch{
-		ID:            fmt.Sprintf("swatch_%d", now.UnixNano()),
-		SessionID:     sess.ID,
-		Kind:          "delivery_status",
-		Status:        session.WatchStatusActive,
-		ToolID:        chosen.ToolID,
-		Arguments:     chosen.Arguments,
-		PollInterval:  watchPollInterval(),
-		NextRunAt:     now.Add(watchPollInterval()),
-		StopCondition: "delivered",
-		DedupeKey:     stableHash(chosen.ToolID, mustJSONMap(chosen.Arguments)),
-		CreatedAt:     now,
-		UpdatedAt:     now,
-	}
-	_ = r.repo.SaveSessionWatch(ctx, watch)
-	return true
+	subjectRef := sessionwatch.ExtractSubjectRef(chosen.Arguments, "order_id", "tracking_id", "shipment_id", "package_id", "id")
+	return sessionwatch.BuildDeliveryIntent(sessionwatch.SourceLifecycle, chosen.ToolID, subjectRef, chosen.Arguments, now)
 }
 
 type toolRunSeed struct {
 	ToolID    string
 	Arguments map[string]any
+}
+
+func latestCustomerRequestsAppointmentReminder(events []session.Event) bool {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Source != "customer" {
+			continue
+		}
+		text := strings.ToLower(strings.TrimSpace(sessionEventText(events[i])))
+		if containsAny(text, "remind me", "appointment reminder", "reminder for my appointment", "notify me about my appointment") {
+			return true
+		}
+		return false
+	}
+	return false
+}
+
+func latestAppointmentTime(events []session.Event, now time.Time) (time.Time, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Source != "customer" {
+			continue
+		}
+		if parsed, ok := sessionwatch.ParseAppointmentTimeFromText(sessionEventText(events[i]), now); ok {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func (r *Runner) processWatch(ctx context.Context, watch session.Watch, now time.Time) error {
@@ -422,6 +451,27 @@ func (r *Runner) processWatch(ctx context.Context, watch session.Watch, now time
 	if sess.Status == session.StatusClosed {
 		watch.Status = session.WatchStatusStopped
 		watch.UpdatedAt = now
+		return r.repo.SaveSessionWatch(ctx, watch)
+	}
+	if watch.Kind == sessionwatch.KindAppointmentReminder {
+		message := formatWatchUpdateMessage(watch.Kind, watch.Arguments)
+		if _, err := r.sessions.CreateMessageEvent(ctx, watch.SessionID, "ai_agent", message, "", traceIDForSession(watch.SessionID, watch.ID), map[string]any{
+			"lifecycle_kind": "watch_update",
+			"watch_id":       watch.ID,
+			"watch_kind":     watch.Kind,
+		}, false); err != nil {
+			return err
+		}
+		sess.Status = session.StatusSessionKeep
+		sess.KeepReason = "background_watch_update"
+		sess.LastActivityAt = now
+		if err := r.repo.UpdateSession(ctx, sess); err != nil {
+			return err
+		}
+		watch.Status = session.WatchStatusStopped
+		watch.LastCheckedAt = now
+		watch.UpdatedAt = now
+		watch.LastResultHash = stableHash(message)
 		return r.repo.SaveSessionWatch(ctx, watch)
 	}
 	entry, ok := findCatalogEntryByID(ctx, r.repo, watch.ToolID)
@@ -478,11 +528,17 @@ func (r *Runner) processWatch(ctx context.Context, watch session.Watch, now time
 
 func formatWatchUpdateMessage(kind string, output map[string]any) string {
 	switch kind {
-	case "delivery_status":
+	case sessionwatch.KindDeliveryStatus:
 		status := firstNonEmpty(stringify(output["delivery_status"]), stringify(output["status"]), stringify(output["state"]), stringify(output["tracking_status"]))
 		if status != "" {
 			return "I have an update on your delivery status: " + status + "."
 		}
+	case sessionwatch.KindAppointmentReminder:
+		when := firstNonEmpty(stringify(output["appointment_at"]), stringify(output["scheduled_for"]), stringify(output["time"]), stringify(output["date"]))
+		if when != "" {
+			return "This is your reminder about the appointment scheduled for " + when + "."
+		}
+		return "This is your reminder about the upcoming appointment."
 	}
 	raw, _ := json.Marshal(output)
 	return "I have an update on your request: " + string(raw)
@@ -549,6 +605,14 @@ func formatRecentTranscript(events []session.Event, limit int) string {
 		lines = append(lines, event.Source+": "+text)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func eventsForSession(ctx context.Context, repo store.Repository, sessionID string) []session.Event {
+	items, err := repo.ListEvents(ctx, sessionID)
+	if err != nil {
+		return nil
+	}
+	return items
 }
 
 func findCatalogEntryByID(ctx context.Context, repo store.Repository, toolID string) (tool.CatalogEntry, bool) {
