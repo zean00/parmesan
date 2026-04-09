@@ -2383,7 +2383,7 @@ func TestProposalSummaryIncludesRolloutsAndEvalRuns(t *testing.T) {
 func TestProposalPreviewShowsSoulAndGuidelineChanges(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
-	now := time.Now().UTC()
+	now := time.Now().UTC().Add(-time.Minute)
 	base := policy.Bundle{ID: "bundle_a", Version: "v1", ImportedAt: now, Soul: policy.Soul{Tone: "calm"}, Guidelines: []policy.Guideline{{ID: "greet", When: "customer says hi", Then: "greet"}}}
 	candidate := base
 	candidate.ID = "bundle_b"
@@ -4158,6 +4158,109 @@ func TestOperatorQueueSummary(t *testing.T) {
 	}
 	if summary["mine"] != 1 || summary["pending_approval"] != 1 || summary["pending_preference_review"] != 1 {
 		t.Fatalf("summary = %#v, want mine/pending counts", summary)
+	}
+}
+
+func TestOperatorGetAgentStats(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	now := time.Now().UTC()
+	if err := repo.SaveAgentProfile(context.Background(), agent.Profile{
+		ID:   "agent_1",
+		Name: "Support",
+		Status: "active",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_stats", Channel: "acp", AgentID: "agent_1", CustomerID: "cust_1", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID: "evt_customer", SessionID: "sess_stats", Source: "customer", Kind: acp.EventKindMessage, Offset: 1, TraceID: "trace_stats", CreatedAt: now,
+		Content: []session.ContentPart{{Type: "text", Text: "hello"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID: "evt_operator", SessionID: "sess_stats", Source: "human_agent", Kind: acp.EventKindMessage, Offset: 2, TraceID: "trace_stats", CreatedAt: now.Add(2 * time.Second),
+		Content: []session.ContentPart{{Type: "text", Text: "hi there"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveApprovalSession(context.Background(), approval.Session{
+		ID: "approval_stats", SessionID: "sess_stats", Status: approval.StatusPending, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateExecution(context.Background(), execution.TurnExecution{
+		ID: "exec_stats", SessionID: "sess_stats", TraceID: "trace_stats", Status: execution.StatusFailed, CreatedAt: now, UpdatedAt: now,
+	}, []execution.ExecutionStep{{ID: "step_stats", ExecutionID: "exec_stats", Name: "deliver_response", Status: execution.StatusFailed, CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendAuditRecord(context.Background(), audit.Record{
+		ID: "audit_takeover", Kind: "operator.takeover.started", SessionID: "sess_stats", TraceID: "trace_stats", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/agents/agent_1/stats?window=24h", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stats status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var stats agentStats
+	if err := json.Unmarshal(rec.Body.Bytes(), &stats); err != nil {
+		t.Fatal(err)
+	}
+	if stats.AgentID != "agent_1" || stats.SessionsCreated != 1 || stats.FailedExecutions != 1 || stats.PendingApprovals != 1 || stats.Takeovers != 1 {
+		t.Fatalf("stats = %#v, want populated counts", stats)
+	}
+	if stats.OperatorReplies < 0 || stats.AverageFirstResponseSec < 0 {
+		t.Fatalf("stats = %#v, want non-negative reply metrics", stats)
+	}
+}
+
+func TestOperatorListNotifications(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_notify", Channel: "acp", AgentID: "agent_1", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range []audit.Record{
+		{ID: "audit_approval", Kind: "approval.requested", SessionID: "sess_notify", ExecutionID: "exec_1", TraceID: "trace_1", CreatedAt: now},
+		{ID: "audit_failed", Kind: "execution.failed", SessionID: "sess_notify", ExecutionID: "exec_2", TraceID: "trace_2", CreatedAt: now.Add(time.Second)},
+		{ID: "audit_ignore", Kind: "session.event", SessionID: "sess_notify", TraceID: "trace_3", CreatedAt: now.Add(2 * time.Second)},
+	} {
+		if err := repo.AppendAuditRecord(context.Background(), record); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/notifications?agent_id=agent_1", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("notifications status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var items []operatorNotification
+	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("notifications = %#v, want 2 actionable items", items)
+	}
+	if items[0].Kind != "execution_failed" || items[1].Kind != "approval_requested" {
+		t.Fatalf("notification kinds = %#v, want execution_failed then approval_requested", items)
 	}
 }
 
