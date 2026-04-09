@@ -49,3 +49,50 @@ func TestListRunnableExecutionsHonorsWaitingRetryCursor(t *testing.T) {
 		t.Fatalf("runnable ids = %#v, want pending and due waiting only", seen)
 	}
 }
+
+func TestSaveBundleMaterializesGraphSnapshot(t *testing.T) {
+	store := New()
+	now := time.Now().UTC()
+	bundle := policy.Bundle{
+		ID:         "bundle_graph",
+		Version:    "v1",
+		ImportedAt: now,
+		Soul:       policy.Soul{Identity: "Graph Agent"},
+		Guidelines: []policy.Guideline{{ID: "greet", When: "customer says hi", Then: "say hello"}},
+		WatchCapabilities: []policy.WatchCapability{{
+			ID:               "delivery_watch",
+			Kind:             "delivery_status",
+			ScheduleStrategy: "poll",
+		}},
+	}
+	if err := store.SaveBundle(context.Background(), bundle); err != nil {
+		t.Fatalf("SaveBundle() error = %v", err)
+	}
+	snapshots, err := store.ListPolicySnapshots(context.Background(), policy.SnapshotQuery{BundleID: bundle.ID})
+	if err != nil {
+		t.Fatalf("ListPolicySnapshots() error = %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("snapshot count = %d, want 1", len(snapshots))
+	}
+	if snapshots[0].BundleID != bundle.ID || snapshots[0].Bundle.ID != bundle.ID {
+		t.Fatalf("snapshot = %#v, want materialized bundle %q", snapshots[0], bundle.ID)
+	}
+	artifacts, err := store.ListPolicyArtifacts(context.Background(), policy.ArtifactQuery{BundleID: bundle.ID})
+	if err != nil {
+		t.Fatalf("ListPolicyArtifacts() error = %v", err)
+	}
+	if len(artifacts) == 0 {
+		t.Fatal("expected policy artifacts to be materialized")
+	}
+	var foundWatch bool
+	for _, item := range artifacts {
+		if item.Kind == "watch_capability" {
+			foundWatch = true
+			break
+		}
+	}
+	if !foundWatch {
+		t.Fatalf("artifacts = %#v, want watch_capability", artifacts)
+	}
+}

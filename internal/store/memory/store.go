@@ -32,6 +32,9 @@ import (
 type Store struct {
 	mu                       sync.RWMutex
 	bundles                  []policy.Bundle
+	policyArtifacts          []policy.GraphArtifact
+	policyEdges              []policy.GraphEdge
+	policySnapshots          []policy.Snapshot
 	agentProfiles            []agent.Profile
 	operators                []operator.Operator
 	operatorTokens           []operator.APIToken
@@ -79,7 +82,21 @@ func New() *Store {
 func (s *Store) SaveBundle(_ context.Context, bundle policy.Bundle) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.bundles = append(s.bundles, bundle)
+	replaced := false
+	for i, item := range s.bundles {
+		if item.ID == bundle.ID {
+			s.bundles[i] = bundle
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		s.bundles = append(s.bundles, bundle)
+	}
+	artifacts, edges, snapshot := policy.MaterializeGraph(bundle)
+	s.savePolicyArtifactsLocked(artifacts)
+	s.savePolicyEdgesLocked(edges)
+	s.savePolicySnapshotLocked(snapshot)
 	return nil
 }
 
@@ -91,6 +108,143 @@ func (s *Store) ListBundles(_ context.Context) ([]policy.Bundle, error) {
 		out = append(out, s.bundles[i])
 	}
 	return out, nil
+}
+
+func (s *Store) SavePolicyArtifacts(_ context.Context, items []policy.GraphArtifact) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.savePolicyArtifactsLocked(items)
+	return nil
+}
+
+func (s *Store) ListPolicyArtifacts(_ context.Context, query policy.ArtifactQuery) ([]policy.GraphArtifact, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []policy.GraphArtifact
+	for i := len(s.policyArtifacts) - 1; i >= 0; i-- {
+		item := s.policyArtifacts[i]
+		if query.BundleID != "" && item.BundleID != query.BundleID {
+			continue
+		}
+		if query.Kind != "" && item.Kind != query.Kind {
+			continue
+		}
+		out = append(out, item)
+		if query.Limit > 0 && len(out) >= query.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) SavePolicyEdges(_ context.Context, items []policy.GraphEdge) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.savePolicyEdgesLocked(items)
+	return nil
+}
+
+func (s *Store) ListPolicyEdges(_ context.Context, query policy.EdgeQuery) ([]policy.GraphEdge, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []policy.GraphEdge
+	for i := len(s.policyEdges) - 1; i >= 0; i-- {
+		item := s.policyEdges[i]
+		if query.BundleID != "" && item.BundleID != query.BundleID {
+			continue
+		}
+		if query.SnapshotID != "" && item.SnapshotID != query.SnapshotID {
+			continue
+		}
+		if query.SourceID != "" && item.SourceID != query.SourceID {
+			continue
+		}
+		if query.TargetID != "" && item.TargetID != query.TargetID {
+			continue
+		}
+		out = append(out, item)
+		if query.Limit > 0 && len(out) >= query.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) SavePolicySnapshot(_ context.Context, snapshot policy.Snapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.savePolicySnapshotLocked(snapshot)
+	return nil
+}
+
+func (s *Store) GetPolicySnapshot(_ context.Context, snapshotID string) (policy.Snapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.policySnapshots {
+		if item.ID == snapshotID {
+			return item, nil
+		}
+	}
+	return policy.Snapshot{}, errors.New("policy snapshot not found")
+}
+
+func (s *Store) ListPolicySnapshots(_ context.Context, query policy.SnapshotQuery) ([]policy.Snapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []policy.Snapshot
+	for i := len(s.policySnapshots) - 1; i >= 0; i-- {
+		item := s.policySnapshots[i]
+		if query.BundleID != "" && item.BundleID != query.BundleID {
+			continue
+		}
+		out = append(out, item)
+		if query.Limit > 0 && len(out) >= query.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) savePolicyArtifactsLocked(items []policy.GraphArtifact) {
+	for _, item := range items {
+		replaced := false
+		for i, existing := range s.policyArtifacts {
+			if existing.ID == item.ID {
+				s.policyArtifacts[i] = item
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			s.policyArtifacts = append(s.policyArtifacts, item)
+		}
+	}
+}
+
+func (s *Store) savePolicyEdgesLocked(items []policy.GraphEdge) {
+	for _, item := range items {
+		replaced := false
+		for i, existing := range s.policyEdges {
+			if existing.ID == item.ID {
+				s.policyEdges[i] = item
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			s.policyEdges = append(s.policyEdges, item)
+		}
+	}
+}
+
+func (s *Store) savePolicySnapshotLocked(snapshot policy.Snapshot) {
+	for i, item := range s.policySnapshots {
+		if item.ID == snapshot.ID {
+			s.policySnapshots[i] = snapshot
+			return
+		}
+	}
+	s.policySnapshots = append(s.policySnapshots, snapshot)
 }
 
 func (s *Store) SaveAgentProfile(_ context.Context, profile agent.Profile) error {

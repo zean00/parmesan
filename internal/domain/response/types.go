@@ -22,6 +22,7 @@ type Response struct {
 	ArtifactMeta     artifactmeta.Meta `json:"artifact_meta,omitempty"`
 	SessionID        string            `json:"session_id"`
 	ExecutionID      string            `json:"execution_id"`
+	PolicySnapshotID string            `json:"policy_snapshot_id,omitempty"`
 	TraceID          string            `json:"trace_id,omitempty"`
 	TriggerEventIDs  []string          `json:"trigger_event_ids,omitempty"`
 	TriggerSource    string            `json:"trigger_source,omitempty"`

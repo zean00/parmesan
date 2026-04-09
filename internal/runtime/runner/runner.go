@@ -718,7 +718,7 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 	if err != nil {
 		return resolvedView{}, nil, err
 	}
-	bundles, err := r.repo.ListBundles(ctx)
+	snapshots, err := r.repo.ListPolicySnapshots(ctx, policy.SnapshotQuery{})
 	if err != nil {
 		return resolvedView{}, nil, err
 	}
@@ -748,7 +748,14 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 		defaultBundleID = profile.DefaultPolicyBundleID
 	}
 	selection := rolloutengine.SelectBundle(sess, proposals, rollouts, defaultBundleID)
-	selectedBundles := selectPolicyBundles(bundles, selection.BundleID, defaultBundleID)
+	selectedSnapshot, selectedBundles, resolvedSnapshotID := selectPolicySnapshotBundle(snapshots, selection.BundleID, defaultBundleID)
+	if len(selectedBundles) == 0 {
+		bundles, err := r.repo.ListBundles(ctx)
+		if err != nil {
+			return resolvedView{}, nil, err
+		}
+		selectedBundles = selectPolicyBundles(bundles, selection.BundleID, defaultBundleID)
+	}
 	knowledgeSnapshot, knowledgeChunks := r.resolveKnowledgeSnapshot(ctx, sess, profile, selectedBundles)
 	derivedSignals := r.derivedSignalText(ctx, exec.SessionID)
 	view, err := policyruntime.ResolveWithOptions(ctx, events, selectedBundles, journeys, catalog, policyruntime.ResolveOptions{
@@ -766,8 +773,12 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 	if resolvedBundleID == "" && len(selectedBundles) > 0 {
 		resolvedBundleID = selectedBundles[0].ID
 	}
-	if resolvedBundleID != "" && (exec.PolicyBundleID != resolvedBundleID || exec.SelectionReason != selection.Reason || exec.ProposalID != selection.ProposalID || exec.RolloutID != selection.RolloutID) {
+	if selectedSnapshot.ID != "" && resolvedSnapshotID == "" {
+		resolvedSnapshotID = selectedSnapshot.ID
+	}
+	if resolvedBundleID != "" && (exec.PolicyBundleID != resolvedBundleID || exec.PolicySnapshotID != resolvedSnapshotID || exec.SelectionReason != selection.Reason || exec.ProposalID != selection.ProposalID || exec.RolloutID != selection.RolloutID) {
 		exec.PolicyBundleID = resolvedBundleID
+		exec.PolicySnapshotID = resolvedSnapshotID
 		exec.ProposalID = selection.ProposalID
 		exec.RolloutID = selection.RolloutID
 		exec.SelectionReason = selection.Reason
@@ -1263,6 +1274,18 @@ func selectPolicyBundles(bundles []policy.Bundle, preferred string, fallback str
 		return nil
 	}
 	return []policy.Bundle{bundles[0]}
+}
+
+func selectPolicySnapshotBundle(snapshots []policy.Snapshot, preferred string, fallback string) (policy.Snapshot, []policy.Bundle, string) {
+	snapshot, ok := policy.SelectSnapshot(snapshots, preferred, fallback)
+	if !ok {
+		return policy.Snapshot{}, nil, ""
+	}
+	bundle := policy.SnapshotBundle(snapshot)
+	if strings.TrimSpace(bundle.ID) == "" {
+		return snapshot, nil, snapshot.ID
+	}
+	return snapshot, []policy.Bundle{bundle}, snapshot.ID
 }
 
 func (r *Runner) agentProfile(ctx context.Context, agentID string) agent.Profile {
@@ -2575,10 +2598,20 @@ func (r *Runner) cacheResponse(record responsedomain.Response) {
 
 func (r *Runner) ensureResponseRecord(ctx context.Context, exec execution.TurnExecution) (responsedomain.Response, error) {
 	if record, ok := r.cachedResponse(exec.ID); ok {
+		if record.PolicySnapshotID == "" && exec.PolicySnapshotID != "" {
+			record.PolicySnapshotID = exec.PolicySnapshotID
+			r.cacheResponse(record)
+		}
 		return record, nil
 	}
 	items, err := r.repo.ListResponses(ctx, responsedomain.Query{ExecutionID: exec.ID, Limit: 1})
 	if err == nil && len(items) > 0 {
+		if items[0].PolicySnapshotID == "" && exec.PolicySnapshotID != "" {
+			items[0].PolicySnapshotID = exec.PolicySnapshotID
+			if saveErr := r.repo.SaveResponse(ctx, items[0]); saveErr != nil {
+				return responsedomain.Response{}, saveErr
+			}
+		}
 		r.cacheResponse(items[0])
 		return items[0], nil
 	}
@@ -2587,6 +2620,7 @@ func (r *Runner) ensureResponseRecord(ctx context.Context, exec execution.TurnEx
 		ID:              fmt.Sprintf("resp_%d", now.UnixNano()),
 		SessionID:       exec.SessionID,
 		ExecutionID:     exec.ID,
+		PolicySnapshotID: exec.PolicySnapshotID,
 		TraceID:         exec.TraceID,
 		TriggerEventIDs: append([]string(nil), exec.TriggerEventIDs...),
 		Status:          responsedomain.StatusPreparing,

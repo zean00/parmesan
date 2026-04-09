@@ -82,6 +82,7 @@ type Watch struct {
 	ArtifactMeta   artifactmeta.Meta `json:"artifact_meta,omitempty"`
 	SessionID      string            `json:"session_id"`
 	Kind           string            `json:"kind"`
+	CapabilityID   string            `json:"capability_id,omitempty"`
 	Status         WatchStatus       `json:"status"`
 	Source         string            `json:"source,omitempty"`
 	SubjectRef     string            `json:"subject_ref,omitempty"`

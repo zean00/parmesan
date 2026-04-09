@@ -28,6 +28,13 @@ import (
 type Repository interface {
 	SaveBundle(ctx context.Context, bundle policy.Bundle) error
 	ListBundles(ctx context.Context) ([]policy.Bundle, error)
+	SavePolicyArtifacts(ctx context.Context, items []policy.GraphArtifact) error
+	ListPolicyArtifacts(ctx context.Context, query policy.ArtifactQuery) ([]policy.GraphArtifact, error)
+	SavePolicyEdges(ctx context.Context, items []policy.GraphEdge) error
+	ListPolicyEdges(ctx context.Context, query policy.EdgeQuery) ([]policy.GraphEdge, error)
+	SavePolicySnapshot(ctx context.Context, snapshot policy.Snapshot) error
+	GetPolicySnapshot(ctx context.Context, snapshotID string) (policy.Snapshot, error)
+	ListPolicySnapshots(ctx context.Context, query policy.SnapshotQuery) ([]policy.Snapshot, error)
 	SaveAgentProfile(ctx context.Context, profile agent.Profile) error
 	GetAgentProfile(ctx context.Context, profileID string) (agent.Profile, error)
 	ListAgentProfiles(ctx context.Context) ([]agent.Profile, error)

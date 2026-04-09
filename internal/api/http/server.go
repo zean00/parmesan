@@ -148,6 +148,7 @@ type responseView struct {
 	ArtifactMeta     artifactmeta.Meta `json:"artifact_meta,omitempty"`
 	SessionID        string            `json:"session_id"`
 	ExecutionID      string            `json:"execution_id"`
+	PolicySnapshotID string            `json:"policy_snapshot_id,omitempty"`
 	TraceID          string            `json:"trace_id,omitempty"`
 	TriggerEventIDs  []string          `json:"trigger_event_ids,omitempty"`
 	TriggerSource    string            `json:"trigger_source,omitempty"`
@@ -310,6 +311,9 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/operator/agents", s.operatorListAgentProfiles)
 	mux.HandleFunc("GET /v1/operator/agents/{id}", s.operatorGetAgentProfile)
 	mux.HandleFunc("PUT /v1/operator/agents/{id}", s.operatorUpdateAgentProfile)
+	mux.HandleFunc("GET /v1/operator/policy/snapshots", s.operatorListPolicySnapshots)
+	mux.HandleFunc("GET /v1/operator/policy/artifacts", s.operatorListPolicyArtifacts)
+	mux.HandleFunc("GET /v1/operator/policy/edges", s.operatorListPolicyEdges)
 	mux.HandleFunc("POST /v1/operator/knowledge/sources", s.operatorCreateKnowledgeSource)
 	mux.HandleFunc("GET /v1/operator/knowledge/sources", s.operatorListKnowledgeSources)
 	mux.HandleFunc("GET /v1/operator/knowledge/sources/{id}", s.operatorGetKnowledgeSource)
@@ -466,6 +470,49 @@ func (s *Server) listBundles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, bundles)
+}
+
+func (s *Server) operatorListPolicySnapshots(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
+	items, err := s.store.ListPolicySnapshots(r.Context(), policy.SnapshotQuery{
+		BundleID: strings.TrimSpace(r.URL.Query().Get("bundle_id")),
+		Limit:    limit,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) operatorListPolicyArtifacts(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
+	items, err := s.store.ListPolicyArtifacts(r.Context(), policy.ArtifactQuery{
+		BundleID: strings.TrimSpace(r.URL.Query().Get("bundle_id")),
+		Kind:     strings.TrimSpace(r.URL.Query().Get("kind")),
+		Limit:    limit,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) operatorListPolicyEdges(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
+	items, err := s.store.ListPolicyEdges(r.Context(), policy.EdgeQuery{
+		BundleID:   strings.TrimSpace(r.URL.Query().Get("bundle_id")),
+		SnapshotID: strings.TrimSpace(r.URL.Query().Get("snapshot_id")),
+		SourceID:   strings.TrimSpace(r.URL.Query().Get("source_id")),
+		TargetID:   strings.TrimSpace(r.URL.Query().Get("target_id")),
+		Limit:      limit,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) createProposal(w http.ResponseWriter, r *http.Request) {
@@ -865,6 +912,7 @@ func responseViewFromDomain(record responsedomain.Response, spans []responsedoma
 		ArtifactMeta:     record.ArtifactMeta,
 		SessionID:        record.SessionID,
 		ExecutionID:      record.ExecutionID,
+		PolicySnapshotID: record.PolicySnapshotID,
 		TraceID:          record.TraceID,
 		TriggerEventIDs:  append([]string(nil), record.TriggerEventIDs...),
 		TriggerSource:    record.TriggerSource,
@@ -2811,6 +2859,10 @@ func (s *Server) activeSessionCount(ctx context.Context, agentID string) int {
 func (s *Server) policyBundleSoulHash(ctx context.Context, bundleID string) string {
 	if strings.TrimSpace(bundleID) == "" {
 		return ""
+	}
+	snapshots, err := s.store.ListPolicySnapshots(ctx, policy.SnapshotQuery{BundleID: bundleID, Limit: 1})
+	if err == nil && len(snapshots) > 0 {
+		return serverSoulHash(policy.SnapshotBundle(snapshots[0]).Soul)
 	}
 	bundles, err := s.store.ListBundles(ctx)
 	if err != nil {
@@ -5619,6 +5671,9 @@ func (s *Server) ensureResponseForExecution(ctx context.Context, exec execution.
 	existing, err := s.store.ListResponses(ctx, responsedomain.Query{ExecutionID: exec.ID, Limit: 1})
 	if err == nil && len(existing) > 0 {
 		record := existing[0]
+		if record.PolicySnapshotID == "" && exec.PolicySnapshotID != "" {
+			record.PolicySnapshotID = exec.PolicySnapshotID
+		}
 		record.TriggerEventIDs = appendUniqueIDs(record.TriggerEventIDs, triggerEventID)
 		if record.TriggerSource == "" {
 			record.TriggerSource = "customer"
@@ -5633,6 +5688,7 @@ func (s *Server) ensureResponseForExecution(ctx context.Context, exec execution.
 		ID:              fmt.Sprintf("resp_%d", now.UnixNano()),
 		SessionID:       exec.SessionID,
 		ExecutionID:     exec.ID,
+		PolicySnapshotID: exec.PolicySnapshotID,
 		TraceID:         exec.TraceID,
 		TriggerEventIDs: appendUniqueIDs(exec.TriggerEventIDs, triggerEventID),
 		TriggerSource:   "customer",
@@ -6069,12 +6125,11 @@ func (s *Server) maybeCreateApprovalTriggeredResponse(ctx context.Context, item 
 	if err != nil {
 		return err
 	}
-	bundles, err := s.store.ListBundles(ctx)
+	profile := s.qualityAgentProfile(ctx, sess.AgentID)
+	selected, _, err := s.selectedPolicyBundles(ctx, exec.PolicyBundleID, profile.DefaultPolicyBundleID)
 	if err != nil {
 		return err
 	}
-	profile := s.qualityAgentProfile(ctx, sess.AgentID)
-	selected := selectBundles(bundles, exec.PolicyBundleID, profile.DefaultPolicyBundleID)
 	if len(selected) == 0 {
 		return nil
 	}
@@ -6629,6 +6684,7 @@ func (s *Server) mediaAuditTimelinePayload(ctx context.Context, record audit.Rec
 
 type resolvedPolicyResponse struct {
 	BundleID             string                            `json:"bundle_id,omitempty"`
+	PolicySnapshotID     string                            `json:"policy_snapshot_id,omitempty"`
 	ProposalID           string                            `json:"proposal_id,omitempty"`
 	RolloutID            string                            `json:"rollout_id,omitempty"`
 	SelectionReason      string                            `json:"selection_reason,omitempty"`
@@ -6674,14 +6730,16 @@ func (s *Server) resolveExecutionView(ctx context.Context, exec execution.TurnEx
 	if err != nil {
 		return resolvedPolicyResponse{}, err
 	}
-	bundles, err := s.store.ListBundles(ctx)
+	selected, snapshotID, err := s.selectedPolicyBundles(ctx, bundleID, exec.PolicyBundleID)
 	if err != nil {
 		return resolvedPolicyResponse{}, err
 	}
-	selected := selectBundles(bundles, bundleID, exec.PolicyBundleID)
 	view, err := policyruntime.ResolveWithRouter(ctx, s.router, events, selected, journeyInstances, catalog)
 	if err != nil {
 		return resolvedPolicyResponse{}, err
+	}
+	if snapshotID != "" {
+		exec.PolicySnapshotID = snapshotID
 	}
 	return toResolvedPolicyResponse(exec, view), nil
 }
@@ -6700,10 +6758,6 @@ func (s *Server) executionQualityPayload(ctx context.Context, exec execution.Tur
 		return nil, err
 	}
 	catalog, err := s.store.ListCatalogEntries(ctx)
-	if err != nil {
-		return nil, err
-	}
-	bundles, err := s.store.ListBundles(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -6728,7 +6782,13 @@ func (s *Server) executionQualityPayload(ctx context.Context, exec execution.Tur
 		selection := rolloutengine.SelectBundle(sess, proposals, rollouts, defaultBundleID)
 		selectedBundleID = selection.BundleID
 	}
-	selected := selectBundles(bundles, selectedBundleID, defaultBundleID)
+	selected, snapshotID, err := s.selectedPolicyBundles(ctx, selectedBundleID, defaultBundleID)
+	if err != nil {
+		return nil, err
+	}
+	if snapshotID != "" {
+		exec.PolicySnapshotID = snapshotID
+	}
 	knowledgeSnapshot, knowledgeChunks := s.qualityKnowledgeSnapshot(ctx, sess, profile, selected)
 	view, err := policyruntime.ResolveWithOptions(ctx, eventsForExecutionResolve(events, exec), selected, journeyInstances, catalog, policyruntime.ResolveOptions{
 		Router:            s.router,
@@ -7017,12 +7077,28 @@ func selectBundles(bundles []policy.Bundle, explicitID string, executionBundleID
 	return []policy.Bundle{bundles[0]}
 }
 
+func (s *Server) selectedPolicyBundles(ctx context.Context, explicitID string, fallbackBundleID string) ([]policy.Bundle, string, error) {
+	snapshots, err := s.store.ListPolicySnapshots(ctx, policy.SnapshotQuery{})
+	if err == nil {
+		snapshot, ok := policy.SelectSnapshot(snapshots, explicitID, fallbackBundleID)
+		if ok {
+			return []policy.Bundle{policy.SnapshotBundle(snapshot)}, snapshot.ID, nil
+		}
+	}
+	bundles, err := s.store.ListBundles(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	return selectBundles(bundles, explicitID, fallbackBundleID), "", nil
+}
+
 func toResolvedPolicyResponse(exec execution.TurnExecution, view policyruntime.EngineResult) resolvedPolicyResponse {
 	journeyDecision := view.JourneyProgressStage.Decision
 	toolDecision := view.ToolDecisionStage.Decision
 	matchedObservations := view.ObservationStage.Observations
 	matchedGuidelines := view.MatchFinalizeStage.MatchedGuidelines
 	resp := resolvedPolicyResponse{
+		PolicySnapshotID:     exec.PolicySnapshotID,
 		ProposalID:           exec.ProposalID,
 		RolloutID:            exec.RolloutID,
 		SelectionReason:      exec.SelectionReason,

@@ -135,6 +135,49 @@ func TestEnqueueSessionTurnDoesNotCoalesceRunningExecution(t *testing.T) {
 	}
 }
 
+func TestOperatorPolicyGraphEndpointsExposeMaterializedSnapshot(t *testing.T) {
+	repo := memory.New()
+	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.SaveBundle(context.Background(), policy.Bundle{
+		ID:         "bundle_graph_api",
+		Version:    "v1",
+		ImportedAt: now,
+		Soul:       policy.Soul{Identity: "Graph API Agent"},
+		Guidelines: []policy.Guideline{{ID: "guideline_graph_api", When: "customer says hi", Then: "say hello"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/policy/snapshots?bundle_id=bundle_graph_api", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("snapshots status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var snapshots []policy.Snapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &snapshots); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 1 || snapshots[0].BundleID != "bundle_graph_api" {
+		t.Fatalf("snapshots = %#v, want one snapshot for bundle_graph_api", snapshots)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/policy/artifacts?bundle_id=bundle_graph_api&kind=guideline", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("artifacts status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var artifacts []policy.GraphArtifact
+	if err := json.Unmarshal(rec.Body.Bytes(), &artifacts); err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 1 || artifacts[0].Kind != "guideline" {
+		t.Fatalf("artifacts = %#v, want one guideline artifact", artifacts)
+	}
+}
+
 func TestResponseLifecycleAPI(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)

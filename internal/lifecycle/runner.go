@@ -183,13 +183,16 @@ func (r *Runner) sessionBundle(ctx context.Context, sess session.Session) (polic
 	if err != nil || strings.TrimSpace(profile.DefaultPolicyBundleID) == "" {
 		return defaultLifecycleBundle(), true
 	}
-	bundles, err := r.repo.ListBundles(ctx)
-	if err != nil {
-		return defaultLifecycleBundle(), true
+	snapshots, err := r.repo.ListPolicySnapshots(ctx, policy.SnapshotQuery{BundleID: profile.DefaultPolicyBundleID, Limit: 1})
+	if err == nil && len(snapshots) > 0 {
+		return policy.SnapshotBundle(snapshots[0]), true
 	}
-	for _, item := range bundles {
-		if item.ID == profile.DefaultPolicyBundleID {
-			return item, true
+	bundles, err := r.repo.ListBundles(ctx)
+	if err == nil {
+		for _, item := range bundles {
+			if item.ID == profile.DefaultPolicyBundleID {
+				return item, true
+			}
 		}
 	}
 	return defaultLifecycleBundle(), true

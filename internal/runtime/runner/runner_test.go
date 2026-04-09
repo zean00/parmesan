@@ -116,6 +116,84 @@ func TestRunnerCompletesExecution(t *testing.T) {
 	}
 }
 
+func TestResolveViewUsesPolicySnapshot(t *testing.T) {
+	repo := memory.New()
+	router := model.NewRouter(config.ProviderConfig{})
+	r := New(repo, nil, sse.NewBroker(), router, "test-runner")
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if err := repo.SaveBundle(ctx, policy.Bundle{
+		ID:         "bundle_snapshot_runtime",
+		Version:    "v1",
+		ImportedAt: now,
+		Soul:       policy.Soul{Identity: "Snapshot Agent"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveAgentProfile(ctx, agent.Profile{
+		ID:                    "agent_snapshot_runtime",
+		Name:                  "Snapshot Agent",
+		Status:                "active",
+		DefaultPolicyBundleID: "bundle_snapshot_runtime",
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateSession(ctx, session.Session{
+		ID:        "sess_snapshot_runtime",
+		Channel:   "web",
+		AgentID:   "agent_snapshot_runtime",
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendEvent(ctx, session.Event{
+		ID:        "evt_snapshot_runtime",
+		SessionID: "sess_snapshot_runtime",
+		Source:    "customer",
+		Kind:      "message",
+		CreatedAt: now,
+		Content:   []session.ContentPart{{Type: "text", Text: "hello"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateExecution(ctx, execution.TurnExecution{
+		ID:             "exec_snapshot_runtime",
+		SessionID:      "sess_snapshot_runtime",
+		TriggerEventID: "evt_snapshot_runtime",
+		TraceID:        "trace_snapshot_runtime",
+		Status:         execution.StatusPending,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	exec, _, err := repo.GetExecution(ctx, "exec_snapshot_runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.resolveView(ctx, exec); err != nil {
+		t.Fatalf("resolveView() error = %v", err)
+	}
+	updated, _, err := repo.GetExecution(ctx, "exec_snapshot_runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots, err := repo.ListPolicySnapshots(ctx, policy.SnapshotQuery{BundleID: "bundle_snapshot_runtime", Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("snapshot count = %d, want 1", len(snapshots))
+	}
+	if updated.PolicySnapshotID != snapshots[0].ID {
+		t.Fatalf("execution policy snapshot = %q, want %q", updated.PolicySnapshotID, snapshots[0].ID)
+	}
+}
+
 func TestRunnerBlocksForApprovalRequiredTool(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)

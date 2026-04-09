@@ -24,6 +24,7 @@ const (
 )
 
 type UpdateIntent struct {
+	CapabilityID  string
 	Kind          string
 	Source        string
 	SubjectRef    string
@@ -56,6 +57,7 @@ func EnsureSessionWatch(ctx context.Context, repo store.Repository, sess session
 		ID:            fmt.Sprintf("swatch_%d", now.UnixNano()),
 		SessionID:     sess.ID,
 		Kind:          intent.Kind,
+		CapabilityID:  intent.CapabilityID,
 		Status:        session.WatchStatusActive,
 		Source:        intent.Source,
 		SubjectRef:    intent.SubjectRef,
@@ -75,6 +77,7 @@ func EnsureSessionWatch(ctx context.Context, repo store.Repository, sess session
 }
 
 func NormalizeIntent(intent UpdateIntent, now time.Time) UpdateIntent {
+	intent.CapabilityID = strings.TrimSpace(intent.CapabilityID)
 	intent.Kind = strings.TrimSpace(intent.Kind)
 	intent.Source = firstNonEmpty(intent.Source, SourceLifecycle)
 	intent.SubjectRef = strings.TrimSpace(intent.SubjectRef)
@@ -102,13 +105,14 @@ func EquivalentWatch(item session.Watch, intent UpdateIntent) bool {
 		return strings.TrimSpace(item.DedupeKey) == strings.TrimSpace(intent.DedupeKey)
 	}
 	return strings.TrimSpace(item.Kind) == strings.TrimSpace(intent.Kind) &&
+		strings.TrimSpace(item.CapabilityID) == strings.TrimSpace(intent.CapabilityID) &&
 		strings.TrimSpace(item.SubjectRef) == strings.TrimSpace(intent.SubjectRef) &&
 		strings.TrimSpace(item.ToolID) == strings.TrimSpace(intent.ToolID)
 }
 
 func BuildDedupeKey(intent UpdateIntent) string {
 	sum := sha1.Sum([]byte(strings.Join([]string{
-		strings.ToLower(strings.TrimSpace(intent.Kind)),
+		strings.ToLower(strings.TrimSpace(firstNonEmpty(intent.CapabilityID, intent.Kind))),
 		strings.ToLower(strings.TrimSpace(intent.SubjectRef)),
 		strings.ToLower(strings.TrimSpace(intent.ToolID)),
 	}, "\x00")))
@@ -153,6 +157,7 @@ func BuildIntentFromCapability(capability policy.WatchCapability, source, toolID
 		subjectRef = ExtractSubjectRef(args, capability.SubjectKeys...)
 	}
 	intent := UpdateIntent{
+		CapabilityID:  strings.TrimSpace(capability.ID),
 		Kind:          strings.TrimSpace(capability.Kind),
 		Source:        firstNonEmpty(source, SourceLifecycle),
 		SubjectRef:    strings.TrimSpace(subjectRef),
