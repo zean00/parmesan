@@ -23,6 +23,7 @@ import (
 	gatewaydomain "github.com/sahal/parmesan/internal/domain/gateway"
 	"github.com/sahal/parmesan/internal/domain/journey"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
+	"github.com/sahal/parmesan/internal/domain/maintainer"
 	"github.com/sahal/parmesan/internal/domain/media"
 	"github.com/sahal/parmesan/internal/domain/operator"
 	"github.com/sahal/parmesan/internal/domain/policy"
@@ -1238,6 +1239,281 @@ func (c *Client) ListKnowledgeSources(ctx context.Context, scopeKind string, sco
 		if err := rows.Scan(&item.ID, &item.ScopeKind, &item.ScopeID, &item.Kind, &item.URI, &item.Checksum, &item.Status, &metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) SaveMaintainerWorkspace(ctx context.Context, item maintainer.Workspace) error {
+	schema, err := json.Marshal(item.Schema)
+	if err != nil {
+		return err
+	}
+	metadata := metadataJSON(item.Metadata, item.ArtifactMeta)
+	_, err = c.sessionQuery().Exec(ctx, `
+		INSERT INTO knowledge_workspaces (id, scope_kind, scope_id, mode, status, schema_json, index_page_id, log_page_id, metadata_json, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		ON CONFLICT (id) DO UPDATE
+		SET scope_kind = EXCLUDED.scope_kind,
+		    scope_id = EXCLUDED.scope_id,
+		    mode = EXCLUDED.mode,
+		    status = EXCLUDED.status,
+		    schema_json = EXCLUDED.schema_json,
+		    index_page_id = EXCLUDED.index_page_id,
+		    log_page_id = EXCLUDED.log_page_id,
+		    metadata_json = EXCLUDED.metadata_json,
+		    updated_at = EXCLUDED.updated_at
+	`, item.ID, item.ScopeKind, item.ScopeID, item.Mode, item.Status, schema, nullString(item.IndexPageID), nullString(item.LogPageID), metadata, item.CreatedAt, item.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	artifacts, edges := controlgraph.MaintainerWorkspace(item)
+	if err := c.savePolicyArtifactsQuery(ctx, c.sessionQuery(), artifacts); err != nil {
+		return err
+	}
+	return c.savePolicyEdgesQuery(ctx, c.sessionQuery(), edges)
+}
+
+func (c *Client) GetMaintainerWorkspace(ctx context.Context, workspaceID string) (maintainer.Workspace, error) {
+	row := c.sessionQuery().QueryRow(ctx, `
+		SELECT id, scope_kind, scope_id, mode, status, schema_json, COALESCE(index_page_id,''), COALESCE(log_page_id,''), metadata_json, created_at, updated_at
+		FROM knowledge_workspaces WHERE id = $1
+	`, workspaceID)
+	var item maintainer.Workspace
+	var schema []byte
+	var metadata []byte
+	if err := row.Scan(&item.ID, &item.ScopeKind, &item.ScopeID, &item.Mode, &item.Status, &schema, &item.IndexPageID, &item.LogPageID, &metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return maintainer.Workspace{}, errors.New("maintainer workspace not found")
+		}
+		return maintainer.Workspace{}, err
+	}
+	_ = json.Unmarshal(schema, &item.Schema)
+	item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
+	return item, nil
+}
+
+func (c *Client) ListMaintainerWorkspaces(ctx context.Context, query maintainer.WorkspaceQuery) ([]maintainer.Workspace, error) {
+	limit := query.Limit
+	if limit <= 0 {
+		limit = 1000
+	}
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT id, scope_kind, scope_id, mode, status, schema_json, COALESCE(index_page_id,''), COALESCE(log_page_id,''), metadata_json, created_at, updated_at
+		FROM knowledge_workspaces
+		WHERE ($1 = '' OR scope_kind = $1)
+		  AND ($2 = '' OR scope_id = $2)
+		  AND ($3 = '' OR mode = $3)
+		ORDER BY updated_at DESC
+		LIMIT $4
+	`, query.ScopeKind, query.ScopeID, query.Mode, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []maintainer.Workspace
+	for rows.Next() {
+		var item maintainer.Workspace
+		var schema []byte
+		var metadata []byte
+		if err := rows.Scan(&item.ID, &item.ScopeKind, &item.ScopeID, &item.Mode, &item.Status, &schema, &item.IndexPageID, &item.LogPageID, &metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(schema, &item.Schema)
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) SaveMaintainerJob(ctx context.Context, item maintainer.Job) error {
+	metadata := metadataJSON(item.Metadata, item.ArtifactMeta)
+	_, err := c.sessionQuery().Exec(ctx, `
+		INSERT INTO knowledge_maintainer_jobs (id, workspace_id, scope_kind, scope_id, agent_id, customer_id, mode, trigger, status, requested_by, source_id, session_id, feedback_id, run_id, error, metadata_json, created_at, started_at, finished_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+		ON CONFLICT (id) DO UPDATE
+		SET workspace_id = EXCLUDED.workspace_id,
+		    status = EXCLUDED.status,
+		    requested_by = EXCLUDED.requested_by,
+		    run_id = EXCLUDED.run_id,
+		    error = EXCLUDED.error,
+		    metadata_json = EXCLUDED.metadata_json,
+		    started_at = EXCLUDED.started_at,
+		    finished_at = EXCLUDED.finished_at
+	`, item.ID, nullString(item.WorkspaceID), item.ScopeKind, item.ScopeID, nullString(item.AgentID), nullString(item.CustomerID), item.Mode, item.Trigger, item.Status, nullString(item.RequestedBy), nullString(item.SourceID), nullString(item.SessionID), nullString(item.FeedbackID), nullString(item.RunID), nullString(item.Error), metadata, item.CreatedAt, item.StartedAt, item.FinishedAt)
+	if err != nil {
+		return err
+	}
+	artifacts, edges := controlgraph.MaintainerJob(item)
+	if err := c.savePolicyArtifactsQuery(ctx, c.sessionQuery(), artifacts); err != nil {
+		return err
+	}
+	return c.savePolicyEdgesQuery(ctx, c.sessionQuery(), edges)
+}
+
+func (c *Client) GetMaintainerJob(ctx context.Context, jobID string) (maintainer.Job, error) {
+	row := c.sessionQuery().QueryRow(ctx, `
+		SELECT id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(requested_by,''), COALESCE(source_id,''), COALESCE(session_id,''), COALESCE(feedback_id,''), COALESCE(run_id,''), COALESCE(error,''), metadata_json, created_at, started_at, finished_at
+		FROM knowledge_maintainer_jobs WHERE id = $1
+	`, jobID)
+	var item maintainer.Job
+	var metadata []byte
+	if err := row.Scan(&item.ID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.RequestedBy, &item.SourceID, &item.SessionID, &item.FeedbackID, &item.RunID, &item.Error, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return maintainer.Job{}, errors.New("maintainer job not found")
+		}
+		return maintainer.Job{}, err
+	}
+	item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
+	return item, nil
+}
+
+func (c *Client) ListMaintainerJobs(ctx context.Context, query maintainer.JobQuery) ([]maintainer.Job, error) {
+	limit := query.Limit
+	if limit <= 0 {
+		limit = 1000
+	}
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(requested_by,''), COALESCE(source_id,''), COALESCE(session_id,''), COALESCE(feedback_id,''), COALESCE(run_id,''), COALESCE(error,''), metadata_json, created_at, started_at, finished_at
+		FROM knowledge_maintainer_jobs
+		WHERE ($1 = '' OR scope_kind = $1)
+		  AND ($2 = '' OR scope_id = $2)
+		  AND ($3 = '' OR mode = $3)
+		  AND ($4 = '' OR status = $4)
+		  AND ($5 = '' OR source_id = $5)
+		  AND ($6 = '' OR session_id = $6)
+		  AND ($7 = '' OR feedback_id = $7)
+		ORDER BY created_at DESC
+		LIMIT $8
+	`, query.ScopeKind, query.ScopeID, query.Mode, query.Status, query.SourceID, query.SessionID, query.FeedbackID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []maintainer.Job
+	for rows.Next() {
+		var item maintainer.Job
+		var metadata []byte
+		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.RequestedBy, &item.SourceID, &item.SessionID, &item.FeedbackID, &item.RunID, &item.Error, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+			return nil, err
+		}
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) ListRunnableMaintainerJobs(ctx context.Context) ([]maintainer.Job, error) {
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(requested_by,''), COALESCE(source_id,''), COALESCE(session_id,''), COALESCE(feedback_id,''), COALESCE(run_id,''), COALESCE(error,''), metadata_json, created_at, started_at, finished_at
+		FROM knowledge_maintainer_jobs
+		WHERE status IN ('queued','running')
+		ORDER BY created_at ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []maintainer.Job
+	for rows.Next() {
+		var item maintainer.Job
+		var metadata []byte
+		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.RequestedBy, &item.SourceID, &item.SessionID, &item.FeedbackID, &item.RunID, &item.Error, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+			return nil, err
+		}
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) SaveMaintainerRun(ctx context.Context, item maintainer.Run) error {
+	inputSummary, err := json.Marshal(item.InputSummary)
+	if err != nil {
+		return err
+	}
+	outputSummary, err := json.Marshal(item.OutputSummary)
+	if err != nil {
+		return err
+	}
+	metadata := metadataJSON(item.Metadata, item.ArtifactMeta)
+	_, err = c.sessionQuery().Exec(ctx, `
+		INSERT INTO knowledge_maintainer_runs (id, job_id, workspace_id, scope_kind, scope_id, agent_id, customer_id, mode, trigger, status, provider, trace_id, input_summary_json, output_summary_json, metadata_json, created_at, started_at, finished_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+		ON CONFLICT (id) DO UPDATE
+		SET workspace_id = EXCLUDED.workspace_id,
+		    status = EXCLUDED.status,
+		    provider = EXCLUDED.provider,
+		    trace_id = EXCLUDED.trace_id,
+		    input_summary_json = EXCLUDED.input_summary_json,
+		    output_summary_json = EXCLUDED.output_summary_json,
+		    metadata_json = EXCLUDED.metadata_json,
+		    started_at = EXCLUDED.started_at,
+		    finished_at = EXCLUDED.finished_at
+	`, item.ID, item.JobID, nullString(item.WorkspaceID), item.ScopeKind, item.ScopeID, nullString(item.AgentID), nullString(item.CustomerID), item.Mode, item.Trigger, item.Status, nullString(item.Provider), nullString(item.TraceID), inputSummary, outputSummary, metadata, item.CreatedAt, item.StartedAt, item.FinishedAt)
+	if err != nil {
+		return err
+	}
+	artifacts, edges := controlgraph.MaintainerRun(item)
+	if err := c.savePolicyArtifactsQuery(ctx, c.sessionQuery(), artifacts); err != nil {
+		return err
+	}
+	return c.savePolicyEdgesQuery(ctx, c.sessionQuery(), edges)
+}
+
+func (c *Client) GetMaintainerRun(ctx context.Context, runID string) (maintainer.Run, error) {
+	row := c.sessionQuery().QueryRow(ctx, `
+		SELECT id, job_id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(provider,''), COALESCE(trace_id,''), input_summary_json, output_summary_json, metadata_json, created_at, started_at, finished_at
+		FROM knowledge_maintainer_runs WHERE id = $1
+	`, runID)
+	var item maintainer.Run
+	var inputSummary []byte
+	var outputSummary []byte
+	var metadata []byte
+	if err := row.Scan(&item.ID, &item.JobID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.Provider, &item.TraceID, &inputSummary, &outputSummary, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return maintainer.Run{}, errors.New("maintainer run not found")
+		}
+		return maintainer.Run{}, err
+	}
+	_ = json.Unmarshal(inputSummary, &item.InputSummary)
+	_ = json.Unmarshal(outputSummary, &item.OutputSummary)
+	item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
+	return item, nil
+}
+
+func (c *Client) ListMaintainerRuns(ctx context.Context, query maintainer.RunQuery) ([]maintainer.Run, error) {
+	limit := query.Limit
+	if limit <= 0 {
+		limit = 1000
+	}
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT id, job_id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(provider,''), COALESCE(trace_id,''), input_summary_json, output_summary_json, metadata_json, created_at, started_at, finished_at
+		FROM knowledge_maintainer_runs
+		WHERE ($1 = '' OR job_id = $1)
+		  AND ($2 = '' OR workspace_id = $2)
+		  AND ($3 = '' OR scope_kind = $3)
+		  AND ($4 = '' OR scope_id = $4)
+		  AND ($5 = '' OR status = $5)
+		ORDER BY created_at DESC
+		LIMIT $6
+	`, query.JobID, query.WorkspaceID, query.ScopeKind, query.ScopeID, query.Status, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []maintainer.Run
+	for rows.Next() {
+		var item maintainer.Run
+		var inputSummary []byte
+		var outputSummary []byte
+		var metadata []byte
+		if err := rows.Scan(&item.ID, &item.JobID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.Provider, &item.TraceID, &inputSummary, &outputSummary, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(inputSummary, &item.InputSummary)
+		_ = json.Unmarshal(outputSummary, &item.OutputSummary)
 		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
 		out = append(out, item)
 	}

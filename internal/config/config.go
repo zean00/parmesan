@@ -12,12 +12,15 @@ type HTTPConfig struct {
 }
 
 type ProviderConfig struct {
-	OpenAIAPIKey      string
-	OpenRouterAPIKey  string
-	OpenRouterBase    string
-	DefaultReasoning  string
-	DefaultStructured string
-	DefaultEmbedding  string
+	OpenAIAPIKey         string
+	OpenRouterAPIKey     string
+	OpenRouterBase       string
+	DefaultReasoning     string
+	DefaultStructured    string
+	DefaultEmbedding     string
+	MaintainerReasoning  string
+	MaintainerStructured string
+	MaintainerEmbedding  string
 }
 
 type ObservabilityConfig struct {
@@ -55,12 +58,15 @@ func Load(service string) Config {
 		DatabaseURL:      env("DATABASE_URL", ""),
 		SecretsMasterKey: env("SECRETS_MASTER_KEY", ""),
 		Provider: ProviderConfig{
-			OpenAIAPIKey:      env("OPENAI_API_KEY", ""),
-			OpenRouterAPIKey:  env("OPENROUTER_API_KEY", ""),
-			OpenRouterBase:    env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-			DefaultReasoning:  env("DEFAULT_REASONING_PROVIDER", "openrouter"),
-			DefaultStructured: env("DEFAULT_STRUCTURED_PROVIDER", "openrouter"),
-			DefaultEmbedding:  env("DEFAULT_EMBEDDING_PROVIDER", "openrouter"),
+			OpenAIAPIKey:         env("OPENAI_API_KEY", ""),
+			OpenRouterAPIKey:     env("OPENROUTER_API_KEY", ""),
+			OpenRouterBase:       env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+			DefaultReasoning:     env("DEFAULT_REASONING_PROVIDER", "openrouter"),
+			DefaultStructured:    env("DEFAULT_STRUCTURED_PROVIDER", "openrouter"),
+			DefaultEmbedding:     env("DEFAULT_EMBEDDING_PROVIDER", "openrouter"),
+			MaintainerReasoning:  env("DEFAULT_MAINTAINER_REASONING_PROVIDER", env("DEFAULT_REASONING_PROVIDER", "openrouter")),
+			MaintainerStructured: env("DEFAULT_MAINTAINER_STRUCTURED_PROVIDER", env("DEFAULT_STRUCTURED_PROVIDER", "openrouter")),
+			MaintainerEmbedding:  env("DEFAULT_MAINTAINER_EMBEDDING_PROVIDER", env("DEFAULT_EMBEDDING_PROVIDER", "openrouter")),
 		},
 		AsyncWriteQueueSize: intEnv("ASYNC_WRITE_QUEUE_SIZE", 256),
 		RequestTimeout:      durationEnv("REQUEST_TIMEOUT_SECONDS", 15),

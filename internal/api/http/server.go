@@ -33,6 +33,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/execution"
 	"github.com/sahal/parmesan/internal/domain/feedback"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
+	maintainerdomain "github.com/sahal/parmesan/internal/domain/maintainer"
 	"github.com/sahal/parmesan/internal/domain/media"
 	operatordomain "github.com/sahal/parmesan/internal/domain/operator"
 	"github.com/sahal/parmesan/internal/domain/policy"
@@ -44,6 +45,7 @@ import (
 	knowledgecompiler "github.com/sahal/parmesan/internal/knowledge/compiler"
 	knowledgeenrichment "github.com/sahal/parmesan/internal/knowledge/enrichment"
 	knowledgelearning "github.com/sahal/parmesan/internal/knowledge/learning"
+	maintainerworker "github.com/sahal/parmesan/internal/maintainer"
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/moderation"
 	"github.com/sahal/parmesan/internal/observability"
@@ -344,6 +346,11 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("POST /v1/operator/knowledge/sources/{id}/resync", s.operatorResyncKnowledgeSource)
 	mux.HandleFunc("GET /v1/operator/knowledge/sources/{id}/jobs", s.operatorListKnowledgeSourceJobs)
 	mux.HandleFunc("GET /v1/operator/knowledge/jobs/{id}", s.operatorGetKnowledgeSyncJob)
+	mux.HandleFunc("GET /v1/operator/knowledge/workspaces", s.operatorListMaintainerWorkspaces)
+	mux.HandleFunc("GET /v1/operator/knowledge/workspaces/{id}", s.operatorGetMaintainerWorkspace)
+	mux.HandleFunc("GET /v1/operator/knowledge/maintainer/jobs", s.operatorListMaintainerJobs)
+	mux.HandleFunc("GET /v1/operator/knowledge/maintainer/jobs/{id}", s.operatorGetMaintainerJob)
+	mux.HandleFunc("GET /v1/operator/knowledge/maintainer/runs/{id}", s.operatorGetMaintainerRun)
 	mux.HandleFunc("GET /v1/operator/knowledge/snapshots/{id}", s.operatorGetKnowledgeSnapshot)
 	mux.HandleFunc("GET /v1/operator/knowledge/snapshots/{id}/diff", s.operatorGetKnowledgeSnapshotDiff)
 	mux.HandleFunc("GET /v1/operator/knowledge/active-state", s.operatorGetKnowledgeActiveState)
@@ -1989,6 +1996,7 @@ func (s *Server) operatorCloseSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	_, _ = maintainerworker.NewService(s.store).QueueSessionLearning(r.Context(), sess, requestOperatorID(r, ""))
 	writeJSON(w, http.StatusOK, sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess)))
 }
 
@@ -2018,6 +2026,7 @@ func (s *Server) operatorKeepSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	_, _ = maintainerworker.NewService(s.store).QueueSessionLearning(r.Context(), sess, requestOperatorID(r, ""))
 	writeJSON(w, http.StatusOK, sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess)))
 }
 
@@ -2283,6 +2292,9 @@ func (s *Server) operatorCreateFeedback(w http.ResponseWriter, r *http.Request) 
 	if err := s.saveControlChange(r.Context(), change, nil, applications); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if sess.Status == session.StatusClosed || sess.Status == session.StatusSessionKeep {
+		_, _ = maintainerworker.NewService(s.store).QueueFeedback(r.Context(), sess, record)
 	}
 	s.appendTrace(r.Context(), audit.Record{
 		ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
@@ -2965,12 +2977,12 @@ func (s *Server) operatorControlStatePayload(ctx context.Context, query url.Valu
 	controlGroups := map[string]string{}
 	payload := map[string]any{
 		"scope": map[string]any{
-			"agent_id":   agentID,
-			"scope_kind": scopeKind,
-			"scope_id":   scopeID,
-			"channel":    channel,
+			"agent_id":    agentID,
+			"scope_kind":  scopeKind,
+			"scope_id":    scopeID,
+			"channel":     channel,
 			"customer_id": customerID,
-			"session_id": sessionID,
+			"session_id":  sessionID,
 			"session_key": sessionKey,
 		},
 	}
@@ -3340,11 +3352,11 @@ func policySnapshotChanges(previous, current policy.Snapshot) map[string]any {
 	}
 	slices.Sort(removed)
 	return map[string]any{
-		"added_artifacts":    added,
-		"changed_artifacts":  changed,
+		"added_artifacts":      added,
+		"changed_artifacts":    changed,
 		"removed_artifact_ids": removed,
-		"artifact_count":     len(current.Artifacts),
-		"edge_count":         len(current.Edges),
+		"artifact_count":       len(current.Artifacts),
+		"edge_count":           len(current.Edges),
 	}
 }
 
@@ -3710,10 +3722,10 @@ func (s *Server) rolloutSummaryPayload(ctx context.Context, item rollout.Record)
 		controlGroups["rollout"] = "rollout:" + bundleID
 	}
 	payload := map[string]any{
-		"rollout":      item,
-		"proposal":     proposal,
-		"lineage":      mustGraphLineagePayload(ctx, s.store, item.ID),
-		"active_state": s.proposalActiveStateSummary(ctx, proposal, []rollout.Record{item}),
+		"rollout":        item,
+		"proposal":       proposal,
+		"lineage":        mustGraphLineagePayload(ctx, s.store, item.ID),
+		"active_state":   s.proposalActiveStateSummary(ctx, proposal, []rollout.Record{item}),
 		"control_groups": controlGroups,
 	}
 	if history, err := s.graphRecentChangesForGroups(ctx, orderedControlGroups(controlGroups), 20); err == nil {
@@ -4238,6 +4250,7 @@ func (s *Server) operatorCreateAgentProfile(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	_, _ = maintainerworker.NewService(s.store).QueueBootstrap(r.Context(), profile, requestOperatorID(r, ""))
 	writeJSON(w, http.StatusCreated, s.agentProfileView(r.Context(), profile))
 }
 
@@ -4291,6 +4304,7 @@ func (s *Server) operatorUpdateAgentProfile(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	_, _ = maintainerworker.NewService(s.store).QueueBootstrap(r.Context(), profile, requestOperatorID(r, ""))
 	writeJSON(w, http.StatusOK, s.agentProfileView(r.Context(), profile))
 }
 
@@ -4461,6 +4475,75 @@ func (s *Server) operatorListKnowledgeSourceJobs(w http.ResponseWriter, r *http.
 
 func (s *Server) operatorGetKnowledgeSyncJob(w http.ResponseWriter, r *http.Request) {
 	item, err := s.store.GetKnowledgeSyncJob(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) operatorListMaintainerWorkspaces(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListMaintainerWorkspaces(r.Context(), maintainerdomain.WorkspaceQuery{
+		ScopeKind: strings.TrimSpace(r.URL.Query().Get("scope_kind")),
+		ScopeID:   strings.TrimSpace(r.URL.Query().Get("scope_id")),
+		Mode:      strings.TrimSpace(r.URL.Query().Get("mode")),
+		Limit:     1000,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) operatorGetMaintainerWorkspace(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetMaintainerWorkspace(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	pages, _ := s.store.ListKnowledgePages(r.Context(), knowledge.PageQuery{ScopeKind: item.ScopeKind, ScopeID: item.ScopeID, Limit: 1000})
+	runs, _ := s.store.ListMaintainerRuns(r.Context(), maintainerdomain.RunQuery{WorkspaceID: item.ID, Limit: 20})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"workspace": item,
+		"pages":     pages,
+		"runs":      runs,
+	})
+}
+
+func (s *Server) operatorListMaintainerJobs(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListMaintainerJobs(r.Context(), maintainerdomain.JobQuery{
+		ScopeKind:  strings.TrimSpace(r.URL.Query().Get("scope_kind")),
+		ScopeID:    strings.TrimSpace(r.URL.Query().Get("scope_id")),
+		Mode:       strings.TrimSpace(r.URL.Query().Get("mode")),
+		Status:     strings.TrimSpace(r.URL.Query().Get("status")),
+		SourceID:   strings.TrimSpace(r.URL.Query().Get("source_id")),
+		SessionID:  strings.TrimSpace(r.URL.Query().Get("session_id")),
+		FeedbackID: strings.TrimSpace(r.URL.Query().Get("feedback_id")),
+		Limit:      1000,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) operatorGetMaintainerJob(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetMaintainerJob(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	var run any
+	if strings.TrimSpace(item.RunID) != "" {
+		run, _ = s.store.GetMaintainerRun(r.Context(), item.RunID)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"job": item, "run": run})
+}
+
+func (s *Server) operatorGetMaintainerRun(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetMaintainerRun(r.Context(), r.PathValue("id"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -8309,16 +8392,16 @@ func (s *Server) executionQualityPayload(ctx context.Context, exec execution.Tur
 	}
 	card := quality.GradeWithLLM(ctx, s.router, view, response, nil)
 	return map[string]any{
-		"execution_id":     exec.ID,
-		"session_id":       exec.SessionID,
-		"bundle_id":        exec.PolicyBundleID,
+		"execution_id":         exec.ID,
+		"session_id":           exec.SessionID,
+		"bundle_id":            exec.PolicyBundleID,
 		"capability_isolation": capabilityIsolationPayload(view.CapabilityIsolation),
-		"response":         response,
-		"plan":             quality.BuildResponsePlan(view),
-		"claims":           card.Claims,
-		"evidence_matches": card.EvidenceMatches,
-		"scorecard":        card,
-		"hard_failed":      quality.HardFailed(card),
+		"response":             response,
+		"plan":                 quality.BuildResponsePlan(view),
+		"claims":               card.Claims,
+		"evidence_matches":     card.EvidenceMatches,
+		"scorecard":            card,
+		"hard_failed":          quality.HardFailed(card),
 	}, nil
 }
 

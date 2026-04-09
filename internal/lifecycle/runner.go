@@ -17,6 +17,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	knowledgelearning "github.com/sahal/parmesan/internal/knowledge/learning"
+	maintainerworker "github.com/sahal/parmesan/internal/maintainer"
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/observability"
 	"github.com/sahal/parmesan/internal/sessionsvc"
@@ -384,6 +385,10 @@ func (r *Runner) closeSession(ctx context.Context, sess *session.Session, reason
 	if err := r.repo.UpdateSession(ctx, *sess); err != nil {
 		return err
 	}
+	if err := knowledgelearning.New(r.repo).CompileDeferredFeedbackRecords(ctx, *sess); err != nil {
+		return err
+	}
+	_, _ = maintainerworker.NewService(r.repo).QueueSessionLearning(ctx, *sess, "lifecycle")
 	r.appendTrace(ctx, audit.Record{
 		ID:        fmt.Sprintf("trace_%d", now.UnixNano()),
 		Kind:      "session.lifecycle.closed",
@@ -413,6 +418,7 @@ func (r *Runner) markKeep(ctx context.Context, sess *session.Session, reason str
 	if err := knowledgelearning.New(r.repo).CompileDeferredFeedbackRecords(ctx, *sess); err != nil {
 		return err
 	}
+	_, _ = maintainerworker.NewService(r.repo).QueueSessionLearning(ctx, *sess, "lifecycle")
 	r.appendTrace(ctx, audit.Record{
 		ID:        fmt.Sprintf("trace_%d", now.UnixNano()),
 		Kind:      "session.lifecycle.keep",

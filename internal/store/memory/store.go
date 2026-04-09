@@ -19,6 +19,7 @@ import (
 	gatewaydomain "github.com/sahal/parmesan/internal/domain/gateway"
 	"github.com/sahal/parmesan/internal/domain/journey"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
+	"github.com/sahal/parmesan/internal/domain/maintainer"
 	"github.com/sahal/parmesan/internal/domain/media"
 	"github.com/sahal/parmesan/internal/domain/operator"
 	"github.com/sahal/parmesan/internal/domain/policy"
@@ -62,6 +63,9 @@ type Store struct {
 	proposals                []rollout.Proposal
 	rollouts                 []rollout.Record
 	knowledgeSources         []knowledge.Source
+	maintainerWorkspaces     []maintainer.Workspace
+	maintainerJobs           []maintainer.Job
+	maintainerRuns           []maintainer.Run
 	knowledgeSyncJobs        []knowledge.SyncJob
 	knowledgePages           []knowledge.Page
 	knowledgeChunks          []knowledge.Chunk
@@ -1352,6 +1356,196 @@ func (s *Store) ListKnowledgeSources(_ context.Context, scopeKind string, scopeI
 			continue
 		}
 		out = append(out, item)
+	}
+	return out, nil
+}
+
+func (s *Store) SaveMaintainerWorkspace(_ context.Context, item maintainer.Workspace) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, existing := range s.maintainerWorkspaces {
+		if existing.ID == item.ID {
+			s.maintainerWorkspaces[i] = item
+			artifacts, edges := controlgraph.MaintainerWorkspace(item)
+			s.savePolicyArtifactsLocked(artifacts)
+			s.savePolicyEdgesLocked(edges)
+			return nil
+		}
+	}
+	s.maintainerWorkspaces = append(s.maintainerWorkspaces, item)
+	artifacts, edges := controlgraph.MaintainerWorkspace(item)
+	s.savePolicyArtifactsLocked(artifacts)
+	s.savePolicyEdgesLocked(edges)
+	return nil
+}
+
+func (s *Store) GetMaintainerWorkspace(_ context.Context, workspaceID string) (maintainer.Workspace, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.maintainerWorkspaces {
+		if item.ID == workspaceID {
+			return item, nil
+		}
+	}
+	return maintainer.Workspace{}, errors.New("maintainer workspace not found")
+}
+
+func (s *Store) ListMaintainerWorkspaces(_ context.Context, query maintainer.WorkspaceQuery) ([]maintainer.Workspace, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []maintainer.Workspace
+	for _, item := range s.maintainerWorkspaces {
+		if query.ScopeKind != "" && item.ScopeKind != query.ScopeKind {
+			continue
+		}
+		if query.ScopeID != "" && item.ScopeID != query.ScopeID {
+			continue
+		}
+		if query.Mode != "" && item.Mode != query.Mode {
+			continue
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	if query.Limit > 0 && len(out) > query.Limit {
+		out = out[:query.Limit]
+	}
+	return out, nil
+}
+
+func (s *Store) SaveMaintainerJob(_ context.Context, item maintainer.Job) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, existing := range s.maintainerJobs {
+		if existing.ID == item.ID {
+			s.maintainerJobs[i] = item
+			artifacts, edges := controlgraph.MaintainerJob(item)
+			s.savePolicyArtifactsLocked(artifacts)
+			s.savePolicyEdgesLocked(edges)
+			return nil
+		}
+	}
+	s.maintainerJobs = append(s.maintainerJobs, item)
+	artifacts, edges := controlgraph.MaintainerJob(item)
+	s.savePolicyArtifactsLocked(artifacts)
+	s.savePolicyEdgesLocked(edges)
+	return nil
+}
+
+func (s *Store) GetMaintainerJob(_ context.Context, jobID string) (maintainer.Job, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.maintainerJobs {
+		if item.ID == jobID {
+			return item, nil
+		}
+	}
+	return maintainer.Job{}, errors.New("maintainer job not found")
+}
+
+func (s *Store) ListMaintainerJobs(_ context.Context, query maintainer.JobQuery) ([]maintainer.Job, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []maintainer.Job
+	for _, item := range s.maintainerJobs {
+		if query.ScopeKind != "" && item.ScopeKind != query.ScopeKind {
+			continue
+		}
+		if query.ScopeID != "" && item.ScopeID != query.ScopeID {
+			continue
+		}
+		if query.Mode != "" && item.Mode != query.Mode {
+			continue
+		}
+		if query.Status != "" && item.Status != query.Status {
+			continue
+		}
+		if query.SourceID != "" && item.SourceID != query.SourceID {
+			continue
+		}
+		if query.SessionID != "" && item.SessionID != query.SessionID {
+			continue
+		}
+		if query.FeedbackID != "" && item.FeedbackID != query.FeedbackID {
+			continue
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if query.Limit > 0 && len(out) > query.Limit {
+		out = out[:query.Limit]
+	}
+	return out, nil
+}
+
+func (s *Store) ListRunnableMaintainerJobs(_ context.Context) ([]maintainer.Job, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []maintainer.Job
+	for _, item := range s.maintainerJobs {
+		if item.Status == maintainer.StatusQueued || item.Status == maintainer.StatusRunning {
+			out = append(out, item)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (s *Store) SaveMaintainerRun(_ context.Context, item maintainer.Run) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, existing := range s.maintainerRuns {
+		if existing.ID == item.ID {
+			s.maintainerRuns[i] = item
+			artifacts, edges := controlgraph.MaintainerRun(item)
+			s.savePolicyArtifactsLocked(artifacts)
+			s.savePolicyEdgesLocked(edges)
+			return nil
+		}
+	}
+	s.maintainerRuns = append(s.maintainerRuns, item)
+	artifacts, edges := controlgraph.MaintainerRun(item)
+	s.savePolicyArtifactsLocked(artifacts)
+	s.savePolicyEdgesLocked(edges)
+	return nil
+}
+
+func (s *Store) GetMaintainerRun(_ context.Context, runID string) (maintainer.Run, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.maintainerRuns {
+		if item.ID == runID {
+			return item, nil
+		}
+	}
+	return maintainer.Run{}, errors.New("maintainer run not found")
+}
+
+func (s *Store) ListMaintainerRuns(_ context.Context, query maintainer.RunQuery) ([]maintainer.Run, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []maintainer.Run
+	for _, item := range s.maintainerRuns {
+		if query.JobID != "" && item.JobID != query.JobID {
+			continue
+		}
+		if query.WorkspaceID != "" && item.WorkspaceID != query.WorkspaceID {
+			continue
+		}
+		if query.ScopeKind != "" && item.ScopeKind != query.ScopeKind {
+			continue
+		}
+		if query.ScopeID != "" && item.ScopeID != query.ScopeID {
+			continue
+		}
+		if query.Status != "" && item.Status != query.Status {
+			continue
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if query.Limit > 0 && len(out) > query.Limit {
+		out = out[:query.Limit]
 	}
 	return out, nil
 }

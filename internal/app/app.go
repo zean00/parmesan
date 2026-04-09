@@ -11,6 +11,7 @@ import (
 	"github.com/sahal/parmesan/internal/config"
 	"github.com/sahal/parmesan/internal/gateway"
 	"github.com/sahal/parmesan/internal/lifecycle"
+	maintainerworker "github.com/sahal/parmesan/internal/maintainer"
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/observability"
 	replayrunner "github.com/sahal/parmesan/internal/replay"
@@ -101,12 +102,14 @@ func RunWorker(ctx context.Context) error {
 	repo := store.Repository(client)
 	writes := asyncwrite.New(repo, cfg.AsyncWriteQueueSize)
 	router := model.NewRouter(cfg.Provider)
+	maintainerRouter := model.NewRouterWithDefaults(cfg.Provider, cfg.Provider.MaintainerReasoning, cfg.Provider.MaintainerStructured, cfg.Provider.MaintainerEmbedding)
 	broker := sse.NewBroker()
 	defer client.Close()
 	slog.Info("worker postgres connected", "service", cfg.ServiceName)
 	writes.Start(ctx, 1)
 	defer writes.Stop()
 	runner.New(repo, writes, broker, router, "worker-"+hostname()).Start(ctx)
+	maintainerworker.New(repo, maintainerRouter).Start(ctx)
 	lifecycle.New(repo, writes, router).Start(ctx)
 	replayrunner.New(repo, writes).Start(ctx)
 	return worker.New(cfg.HTTP.Address).Run(ctx)

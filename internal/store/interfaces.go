@@ -14,6 +14,7 @@ import (
 	gatewaydomain "github.com/sahal/parmesan/internal/domain/gateway"
 	"github.com/sahal/parmesan/internal/domain/journey"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
+	"github.com/sahal/parmesan/internal/domain/maintainer"
 	"github.com/sahal/parmesan/internal/domain/media"
 	"github.com/sahal/parmesan/internal/domain/operator"
 	"github.com/sahal/parmesan/internal/domain/policy"
@@ -113,6 +114,16 @@ type Repository interface {
 	SaveKnowledgeSource(ctx context.Context, source knowledge.Source) error
 	GetKnowledgeSource(ctx context.Context, sourceID string) (knowledge.Source, error)
 	ListKnowledgeSources(ctx context.Context, scopeKind string, scopeID string) ([]knowledge.Source, error)
+	SaveMaintainerWorkspace(ctx context.Context, item maintainer.Workspace) error
+	GetMaintainerWorkspace(ctx context.Context, workspaceID string) (maintainer.Workspace, error)
+	ListMaintainerWorkspaces(ctx context.Context, query maintainer.WorkspaceQuery) ([]maintainer.Workspace, error)
+	SaveMaintainerJob(ctx context.Context, item maintainer.Job) error
+	GetMaintainerJob(ctx context.Context, jobID string) (maintainer.Job, error)
+	ListMaintainerJobs(ctx context.Context, query maintainer.JobQuery) ([]maintainer.Job, error)
+	ListRunnableMaintainerJobs(ctx context.Context) ([]maintainer.Job, error)
+	SaveMaintainerRun(ctx context.Context, item maintainer.Run) error
+	GetMaintainerRun(ctx context.Context, runID string) (maintainer.Run, error)
+	ListMaintainerRuns(ctx context.Context, query maintainer.RunQuery) ([]maintainer.Run, error)
 	SaveKnowledgeSyncJob(ctx context.Context, job knowledge.SyncJob) error
 	GetKnowledgeSyncJob(ctx context.Context, jobID string) (knowledge.SyncJob, error)
 	ListKnowledgeSyncJobs(ctx context.Context, query knowledge.SyncJobQuery) ([]knowledge.SyncJob, error)

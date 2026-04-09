@@ -23,6 +23,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/execution"
 	"github.com/sahal/parmesan/internal/domain/feedback"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
+	maintainerdomain "github.com/sahal/parmesan/internal/domain/maintainer"
 	"github.com/sahal/parmesan/internal/domain/media"
 	operatordomain "github.com/sahal/parmesan/internal/domain/operator"
 	"github.com/sahal/parmesan/internal/domain/policy"
@@ -591,11 +592,11 @@ func TestOperatorKnowledgeSnapshotDiffAndActiveState(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := repo.SaveKnowledgeSyncJob(context.Background(), knowledge.SyncJob{
-		ID:        "job_1",
-		SourceID:  "src_knowledge",
-		Status:    "succeeded",
-		SnapshotID:"ksnap_2",
-		CreatedAt: now,
+		ID:         "job_1",
+		SourceID:   "src_knowledge",
+		Status:     "succeeded",
+		SnapshotID: "ksnap_2",
+		CreatedAt:  now,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -4166,9 +4167,9 @@ func TestOperatorGetAgentStats(t *testing.T) {
 	writes := asyncwrite.New(repo, 32)
 	now := time.Now().UTC()
 	if err := repo.SaveAgentProfile(context.Background(), agent.Profile{
-		ID:   "agent_1",
-		Name: "Support",
-		Status: "active",
+		ID:        "agent_1",
+		Name:      "Support",
+		Status:    "active",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}); err != nil {
@@ -5586,5 +5587,54 @@ func TestStaleKnowledgeProposalConflictsOnApply(t *testing.T) {
 	srv.httpServer.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("apply stale proposal status = %d, want %d body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+}
+
+func TestCreateAgentQueuesMaintainerBootstrap(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 16)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/agents", strings.NewReader(`{
+		"id":"agent_maintainer",
+		"name":"Support",
+		"status":"active",
+		"default_knowledge_scope_kind":"agent",
+		"default_knowledge_scope_id":"agent_maintainer"
+	}`))
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create agent status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	items, err := repo.ListMaintainerJobs(context.Background(), maintainerdomain.JobQuery{ScopeKind: "agent", ScopeID: "agent_maintainer", Mode: maintainerdomain.ModeSharedWiki, Limit: 10})
+	if err != nil || len(items) == 0 {
+		t.Fatalf("ListMaintainerJobs() = %v, %v; want bootstrap job", items, err)
+	}
+}
+
+func TestGetMaintainerWorkspaceEndpoint(t *testing.T) {
+	repo := memory.New()
+	now := time.Now().UTC()
+	if err := repo.SaveMaintainerWorkspace(context.Background(), maintainerdomain.Workspace{
+		ID:        "kwork_1",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		Mode:      maintainerdomain.ModeSharedWiki,
+		Status:    "active",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveMaintainerWorkspace() error = %v", err)
+	}
+	srv := New(":0", repo, asyncwrite.New(repo, 16), sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/knowledge/workspaces/kwork_1", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get maintainer workspace status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 }

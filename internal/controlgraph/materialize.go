@@ -12,6 +12,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/customer"
 	"github.com/sahal/parmesan/internal/domain/feedback"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
+	"github.com/sahal/parmesan/internal/domain/maintainer"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/rollout"
 )
@@ -19,6 +20,63 @@ import (
 func KnowledgeSource(source knowledge.Source) ([]policy.GraphArtifact, []policy.GraphEdge) {
 	groupID := knowledgeGroupID(source.ScopeKind, source.ScopeID)
 	return []policy.GraphArtifact{artifact(source.ID, groupID, "knowledge_source", versionOrTimestamp(source.ArtifactMeta, source.UpdatedAt, source.CreatedAt), map[string]any{"source": source}, source.ArtifactMeta, source.CreatedAt)}, nil
+}
+
+func MaintainerWorkspace(item maintainer.Workspace) ([]policy.GraphArtifact, []policy.GraphEdge) {
+	groupID := knowledgeGroupID(item.ScopeKind, item.ScopeID)
+	artifacts := []policy.GraphArtifact{
+		artifact(item.ID, groupID, "knowledge_workspace", versionOrTimestamp(item.ArtifactMeta, item.UpdatedAt, item.CreatedAt), map[string]any{"workspace": item}, item.ArtifactMeta, item.CreatedAt),
+	}
+	var edges []policy.GraphEdge
+	if item.IndexPageID != "" {
+		edges = append(edges, edge(groupID, item.ID, "contains_page", item.IndexPageID, map[string]any{"role": "index"}, item.ArtifactMeta, item.UpdatedAt))
+	}
+	if item.LogPageID != "" {
+		edges = append(edges, edge(groupID, item.ID, "contains_page", item.LogPageID, map[string]any{"role": "log"}, item.ArtifactMeta, item.UpdatedAt))
+	}
+	return artifacts, edges
+}
+
+func MaintainerJob(item maintainer.Job) ([]policy.GraphArtifact, []policy.GraphEdge) {
+	groupID := knowledgeGroupID(item.ScopeKind, item.ScopeID)
+	artifacts := []policy.GraphArtifact{
+		artifact(item.ID, groupID, "knowledge_maintainer_job", versionOrTimestamp(item.ArtifactMeta, derefTime(item.FinishedAt), derefTime(item.StartedAt), item.CreatedAt), map[string]any{"maintainer_job": item}, item.ArtifactMeta, item.CreatedAt),
+	}
+	var edges []policy.GraphEdge
+	if item.WorkspaceID != "" {
+		edges = append(edges, edge(groupID, item.WorkspaceID, "maintains", item.ID, map[string]any{"trigger": item.Trigger}, item.ArtifactMeta, item.CreatedAt))
+	}
+	if item.SourceID != "" {
+		edges = append(edges, edge(groupID, item.SourceID, "derived_from", item.ID, map[string]any{"trigger": item.Trigger}, item.ArtifactMeta, item.CreatedAt))
+	}
+	if item.SessionID != "" {
+		edges = append(edges, edge(groupID, item.SessionID, "derived_from", item.ID, map[string]any{"trigger": item.Trigger}, item.ArtifactMeta, item.CreatedAt))
+	}
+	if item.FeedbackID != "" {
+		edges = append(edges, edge(groupID, item.FeedbackID, "derived_from", item.ID, map[string]any{"trigger": item.Trigger}, item.ArtifactMeta, item.CreatedAt))
+	}
+	if item.RunID != "" {
+		edges = append(edges, edge(groupID, item.ID, "produced", item.RunID, nil, item.ArtifactMeta, item.CreatedAt))
+	}
+	return artifacts, edges
+}
+
+func MaintainerRun(item maintainer.Run) ([]policy.GraphArtifact, []policy.GraphEdge) {
+	groupID := knowledgeGroupID(item.ScopeKind, item.ScopeID)
+	artifacts := []policy.GraphArtifact{
+		artifact(item.ID, groupID, "knowledge_maintainer_run", versionOrTimestamp(item.ArtifactMeta, derefTime(item.FinishedAt), derefTime(item.StartedAt), item.CreatedAt), map[string]any{"maintainer_run": item}, item.ArtifactMeta, item.CreatedAt),
+	}
+	var edges []policy.GraphEdge
+	if item.JobID != "" {
+		edges = append(edges, edge(groupID, item.ID, "derived_from", item.JobID, nil, item.ArtifactMeta, item.CreatedAt))
+	}
+	if item.WorkspaceID != "" {
+		edges = append(edges, edge(groupID, item.ID, "maintains", item.WorkspaceID, map[string]any{"mode": item.Mode}, item.ArtifactMeta, item.CreatedAt))
+	}
+	for _, producedID := range stringsSlice(item.OutputSummary["produced_ids"]) {
+		edges = append(edges, edge(groupID, item.ID, "produced", producedID, nil, item.ArtifactMeta, item.CreatedAt))
+	}
+	return artifacts, edges
 }
 
 func KnowledgeSyncJob(job knowledge.SyncJob) ([]policy.GraphArtifact, []policy.GraphEdge) {
@@ -316,6 +374,23 @@ func stableGraphID(parts ...string) string {
 	key := strings.Join(parts, "\x00")
 	sum := sha1.Sum([]byte(key))
 	return "pgraph_" + hex.EncodeToString(sum[:8])
+}
+
+func stringsSlice(value any) []string {
+	switch raw := value.(type) {
+	case []string:
+		return append([]string(nil), raw...)
+	case []any:
+		out := make([]string, 0, len(raw))
+		for _, item := range raw {
+			if text := strings.TrimSpace(fmt.Sprint(item)); text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func mustJSON(v any) string {

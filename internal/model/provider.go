@@ -69,12 +69,16 @@ type Router struct {
 }
 
 func NewRouter(cfg config.ProviderConfig) *Router {
+	return NewRouterWithDefaults(cfg, cfg.DefaultReasoning, cfg.DefaultStructured, cfg.DefaultEmbedding)
+}
+
+func NewRouterWithDefaults(cfg config.ProviderConfig, reasoning, structured, embedding string) *Router {
 	router := &Router{
 		providers: map[string]Provider{},
 		defaults: map[Capability]string{
-			CapabilityReasoning:  capabilityDefault(cfg.DefaultReasoning),
-			CapabilityStructured: capabilityDefault(cfg.DefaultStructured),
-			CapabilityEmbedding:  capabilityDefault(cfg.DefaultEmbedding),
+			CapabilityReasoning:  capabilityDefault(reasoning),
+			CapabilityStructured: capabilityDefault(structured),
+			CapabilityEmbedding:  capabilityDefault(embedding),
 		},
 		health: map[string]bool{},
 		stats:  map[string]ProviderStats{},

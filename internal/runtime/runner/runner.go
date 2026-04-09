@@ -98,12 +98,6 @@ func (r *Runner) loop(ctx context.Context) {
 
 func (r *Runner) runOnce(ctx context.Context) {
 	r.retryFailedMediaAssets(ctx, time.Now().UTC())
-	jobs, err := r.repo.ListRunnableKnowledgeSyncJobs(ctx)
-	if err == nil {
-		for _, job := range jobs {
-			_ = r.processKnowledgeSyncJob(ctx, job.ID)
-		}
-	}
 	executions, err := r.repo.ListRunnableExecutions(ctx, time.Now().UTC())
 	if err != nil {
 		return
@@ -111,82 +105,6 @@ func (r *Runner) runOnce(ctx context.Context) {
 	for _, exec := range executions {
 		_ = r.processExecution(ctx, exec.ID)
 	}
-}
-
-func (r *Runner) processKnowledgeSyncJob(ctx context.Context, jobID string) error {
-	job, err := r.repo.GetKnowledgeSyncJob(ctx, jobID)
-	if err != nil {
-		return err
-	}
-	if job.Status == "succeeded" || job.Status == "failed" || job.Status == "skipped" {
-		return nil
-	}
-	source, err := r.repo.GetKnowledgeSource(ctx, job.SourceID)
-	if err != nil {
-		job.Status = "failed"
-		job.Error = err.Error()
-		now := time.Now().UTC()
-		job.FinishedAt = &now
-		return r.repo.SaveKnowledgeSyncJob(ctx, job)
-	}
-	now := time.Now().UTC()
-	job.Status = "running"
-	job.StartedAt = &now
-	job.OldChecksum = source.Checksum
-	if err := r.repo.SaveKnowledgeSyncJob(ctx, job); err != nil {
-		return err
-	}
-	checksum, err := knowledgeSourceChecksum(source)
-	if err != nil {
-		job.Status = "failed"
-		job.Error = err.Error()
-		done := time.Now().UTC()
-		job.FinishedAt = &done
-		_ = r.repo.SaveKnowledgeSyncJob(ctx, job)
-		return err
-	}
-	job.NewChecksum = checksum
-	if !job.Force && source.Checksum != "" && checksum == source.Checksum {
-		job.Status = "skipped"
-		job.Changed = false
-		done := time.Now().UTC()
-		job.FinishedAt = &done
-		if job.Metadata == nil {
-			job.Metadata = map[string]any{}
-		}
-		job.Metadata["reason"] = "unchanged_checksum"
-		return r.repo.SaveKnowledgeSyncJob(ctx, job)
-	}
-	snapshot, err := r.compileKnowledgeSource(ctx, source, true)
-	if err != nil {
-		job.Status = "failed"
-		job.Error = err.Error()
-		done := time.Now().UTC()
-		job.FinishedAt = &done
-		_ = r.repo.SaveKnowledgeSyncJob(ctx, job)
-		source.Status = "failed"
-		source.UpdatedAt = done
-		source.Metadata = mergeMaps(source.Metadata, map[string]any{"error": err.Error()})
-		_ = r.repo.SaveKnowledgeSource(ctx, source)
-		return err
-	}
-	done := time.Now().UTC()
-	job.Status = "succeeded"
-	job.Changed = true
-	job.SnapshotID = snapshot.ID
-	job.Error = ""
-	job.FinishedAt = &done
-	if err := r.repo.SaveKnowledgeSyncJob(ctx, job); err != nil {
-		return err
-	}
-	r.appendTrace(ctx, audit.Record{
-		ID:        fmt.Sprintf("trace_%d", time.Now().UnixNano()),
-		Kind:      "knowledge.source.resynced",
-		Message:   "knowledge source resynced",
-		Fields:    map[string]any{"source_id": source.ID, "snapshot_id": snapshot.ID, "job_id": job.ID, "force": job.Force},
-		CreatedAt: done,
-	})
-	return nil
 }
 
 func (r *Runner) processExecution(ctx context.Context, executionID string) error {
