@@ -318,6 +318,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("PUT /v1/operator/agents/{id}", s.operatorUpdateAgentProfile)
 	mux.HandleFunc("GET /v1/operator/policy/snapshots", s.operatorListPolicySnapshots)
 	mux.HandleFunc("GET /v1/operator/policy/snapshots/{id}", s.operatorGetPolicySnapshot)
+	mux.HandleFunc("GET /v1/operator/policy/active-state", s.operatorGetPolicyActiveState)
 	mux.HandleFunc("GET /v1/operator/policy/artifacts", s.operatorListPolicyArtifacts)
 	mux.HandleFunc("GET /v1/operator/policy/artifacts/{id}", s.operatorGetPolicyArtifact)
 	mux.HandleFunc("GET /v1/operator/policy/artifacts/{id}/edges", s.operatorListPolicyArtifactEdges)
@@ -501,6 +502,25 @@ func (s *Server) operatorGetPolicySnapshot(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, s.policySnapshotView(r.Context(), item))
+}
+
+func (s *Server) operatorGetPolicyActiveState(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	if sessionID == "" {
+		http.Error(w, "session_id is required", http.StatusBadRequest)
+		return
+	}
+	sess, err := s.store.GetSession(r.Context(), sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	payload, err := s.policyActiveStateView(r.Context(), sess)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) operatorListPolicyArtifacts(w http.ResponseWriter, r *http.Request) {
@@ -2553,6 +2573,83 @@ func (s *Server) policySnapshotView(ctx context.Context, snapshot policy.Snapsho
 		out["changes"] = policySnapshotChanges(policy.Snapshot{}, snapshot)
 	}
 	return out
+}
+
+func (s *Server) policyActiveStateView(ctx context.Context, sess session.Session) (map[string]any, error) {
+	profile := s.qualityAgentProfile(ctx, sess.AgentID)
+	defaultBundleID := strings.TrimSpace(profile.DefaultPolicyBundleID)
+	proposals, err := s.store.ListProposals(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rollouts, err := s.store.ListRollouts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	selection := rolloutengine.SelectBundle(sess, proposals, rollouts, defaultBundleID)
+	selected, snapshotID, err := s.selectedPolicyBundles(ctx, selection.BundleID, defaultBundleID)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{
+		"session": map[string]any{
+			"id":          sess.ID,
+			"channel":     sess.Channel,
+			"customer_id": sess.CustomerID,
+			"agent_id":    sess.AgentID,
+			"status":      sess.Status,
+		},
+		"agent_profile": profile,
+		"selection": map[string]any{
+			"bundle_id":   selection.BundleID,
+			"proposal_id": selection.ProposalID,
+			"rollout_id":  selection.RolloutID,
+			"reason":      selection.Reason,
+		},
+	}
+	if len(selected) > 0 {
+		payload["bundle"] = selected[0]
+	}
+	if snapshotID != "" {
+		snapshot, err := s.store.GetPolicySnapshot(ctx, snapshotID)
+		if err == nil {
+			payload["active_snapshot"] = s.policySnapshotView(ctx, snapshot)
+		}
+	}
+	if strings.TrimSpace(selection.ProposalID) != "" {
+		proposal, err := s.store.GetProposal(ctx, selection.ProposalID)
+		if err == nil {
+			payload["proposal"] = proposal
+			if preview, err := s.policyProposalPreview(ctx, proposal); err == nil {
+				payload["proposal_preview"] = preview
+			}
+			if sourceSnapshot, ok := s.latestPolicySnapshotForBundle(ctx, proposal.SourceBundleID); ok {
+				payload["source_snapshot"] = s.policySnapshotView(ctx, sourceSnapshot)
+			}
+			if candidateSnapshot, ok := s.latestPolicySnapshotForBundle(ctx, proposal.CandidateBundleID); ok {
+				payload["candidate_snapshot"] = s.policySnapshotView(ctx, candidateSnapshot)
+			}
+		}
+	}
+	if strings.TrimSpace(selection.RolloutID) != "" {
+		item, err := s.store.GetRollout(ctx, selection.RolloutID)
+		if err == nil {
+			payload["rollout"] = item
+		}
+	}
+	return payload, nil
+}
+
+func (s *Server) latestPolicySnapshotForBundle(ctx context.Context, bundleID string) (policy.Snapshot, bool) {
+	bundleID = strings.TrimSpace(bundleID)
+	if bundleID == "" {
+		return policy.Snapshot{}, false
+	}
+	items, err := s.store.ListPolicySnapshots(ctx, policy.SnapshotQuery{BundleID: bundleID, Limit: 100})
+	if err != nil {
+		return policy.Snapshot{}, false
+	}
+	return policy.LatestSnapshotForBundle(items, bundleID)
 }
 
 func policySnapshotChanges(previous, current policy.Snapshot) map[string]any {

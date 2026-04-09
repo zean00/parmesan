@@ -227,6 +227,107 @@ func TestOperatorGetPolicySnapshotIncludesChangeSummary(t *testing.T) {
 	}
 }
 
+func TestOperatorGetPolicyActiveStateIncludesSelectedSnapshotAndRollout(t *testing.T) {
+	repo := memory.New()
+	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	base := policy.Bundle{
+		ID:         "bundle_active_base",
+		Version:    "v1",
+		ImportedAt: now,
+		Soul:       policy.Soul{Identity: "base"},
+		Guidelines: []policy.Guideline{{ID: "greet_base", When: "hi", Then: "hello"}},
+	}
+	candidate := policy.Bundle{
+		ID:         "bundle_active_candidate",
+		Version:    "v2",
+		ImportedAt: now.Add(time.Second),
+		Soul:       policy.Soul{Identity: "candidate"},
+		Guidelines: []policy.Guideline{
+			{ID: "greet_base", When: "hi", Then: "hello warmly"},
+			{ID: "handoff_candidate", When: "needs human", Then: "handoff"},
+		},
+	}
+	if err := repo.SaveBundle(context.Background(), base); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveBundle(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveAgentProfile(context.Background(), agent.Profile{
+		ID:                    "agent_1",
+		Name:                  "Support",
+		Status:                "active",
+		DefaultPolicyBundleID: base.ID,
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID:             "sess_active_state",
+		Channel:        "web",
+		AgentID:        "agent_1",
+		CustomerID:     "cust_1",
+		Status:         session.StatusActive,
+		LastActivityAt: now,
+		CreatedAt:      now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveProposal(context.Background(), rollout.Proposal{
+		ID:                "proposal_active_state",
+		SourceBundleID:    base.ID,
+		CandidateBundleID: candidate.ID,
+		State:             rollout.StateShadow,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveRollout(context.Background(), rollout.Record{
+		ID:         "rollout_active_state",
+		ProposalID: "proposal_active_state",
+		Status:     rollout.RolloutActive,
+		Channel:    "web",
+		Percentage: 100,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/policy/active-state?session_id=sess_active_state", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("active state status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	selection, _ := payload["selection"].(map[string]any)
+	if selection["bundle_id"] != candidate.ID || selection["proposal_id"] != "proposal_active_state" || selection["rollout_id"] != "rollout_active_state" {
+		t.Fatalf("selection = %#v, want candidate bundle and rollout/proposal ids", selection)
+	}
+	if _, ok := payload["active_snapshot"].(map[string]any); !ok {
+		t.Fatalf("payload = %#v, want active_snapshot", payload)
+	}
+	if _, ok := payload["proposal"].(map[string]any); !ok {
+		t.Fatalf("payload = %#v, want proposal", payload)
+	}
+	if _, ok := payload["rollout"].(map[string]any); !ok {
+		t.Fatalf("payload = %#v, want rollout", payload)
+	}
+	if _, ok := payload["source_snapshot"].(map[string]any); !ok {
+		t.Fatalf("payload = %#v, want source_snapshot", payload)
+	}
+	if _, ok := payload["candidate_snapshot"].(map[string]any); !ok {
+		t.Fatalf("payload = %#v, want candidate_snapshot", payload)
+	}
+}
+
 func TestOperatorPolicyGraphEndpointsExposeControlGraphByGroupID(t *testing.T) {
 	repo := memory.New()
 	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
