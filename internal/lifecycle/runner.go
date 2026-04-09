@@ -205,33 +205,33 @@ func defaultLifecycleBundle() policy.Bundle {
 		},
 		WatchCapabilities: []policy.WatchCapability{
 			{
-				ID:                    "delivery_status_watch",
-				Kind:                  sessionwatch.KindDeliveryStatus,
-				ScheduleStrategy:      "poll",
-				TriggerSignals:        []string{"delivery", "tracking", "order status", "package", "update me", "keep me updated", "notify me", "let me know"},
-				ToolMatchTerms:        []string{"order", "delivery", "shipping", "tracking"},
-				SubjectKeys:           []string{"order_id", "tracking_id", "shipment_id", "package_id", "id"},
-				PollIntervalSeconds:   int((15 * time.Minute) / time.Second),
-				StopCondition:         "delivered",
+				ID:                     "delivery_status_watch",
+				Kind:                   sessionwatch.KindDeliveryStatus,
+				ScheduleStrategy:       "poll",
+				TriggerSignals:         []string{"delivery", "tracking", "order status", "package", "update me", "keep me updated", "notify me", "let me know"},
+				ToolMatchTerms:         []string{"order", "delivery", "shipping", "tracking"},
+				SubjectKeys:            []string{"order_id", "tracking_id", "shipment_id", "package_id", "id"},
+				PollIntervalSeconds:    int((15 * time.Minute) / time.Second),
+				StopCondition:          "delivered",
 				AllowLifecycleFallback: true,
 			},
 			{
-				ID:                    "appointment_reminder_watch",
-				Kind:                  sessionwatch.KindAppointmentReminder,
-				ScheduleStrategy:      "reminder",
-				TriggerSignals:        []string{"appointment_reminder", "remind me", "appointment reminder", "reminder for my appointment", "notify me about my appointment"},
-				ToolMatchTerms:        []string{"appointment", "schedule", "calendar", "booking"},
-				SubjectKeys:           []string{"appointment_id", "booking_id", "id"},
-				RequiredFields:        []string{"appointment_at"},
-				ReminderLeadSeconds:   3600,
+				ID:                     "appointment_reminder_watch",
+				Kind:                   sessionwatch.KindAppointmentReminder,
+				ScheduleStrategy:       "reminder",
+				TriggerSignals:         []string{"appointment_reminder", "remind me", "appointment reminder", "reminder for my appointment", "notify me about my appointment"},
+				ToolMatchTerms:         []string{"appointment", "schedule", "calendar", "booking"},
+				SubjectKeys:            []string{"appointment_id", "booking_id", "id"},
+				RequiredFields:         []string{"appointment_at"},
+				ReminderLeadSeconds:    3600,
 				AllowLifecycleFallback: true,
 			},
 		},
 		LifecyclePolicy: policy.LifecyclePolicy{
-			ID:                        "default_lifecycle_policy",
-			FollowupMessage:           "Do you need any more help with this?",
-			ResolutionSignals:         []string{"thanks", "thank you", "that helps", "all good", "solved", "ok got it"},
-			DeliveryUpdateSignals:     []string{"update me", "keep me updated", "notify me", "let me know", "delivery", "shipping", "order status", "package"},
+			ID:                         "default_lifecycle_policy",
+			FollowupMessage:            "Do you need any more help with this?",
+			ResolutionSignals:          []string{"thanks", "thank you", "that helps", "all good", "solved", "ok got it"},
+			DeliveryUpdateSignals:      []string{"update me", "keep me updated", "notify me", "let me know", "delivery", "shipping", "order status", "package"},
 			AppointmentReminderSignals: []string{"remind me", "appointment reminder", "reminder for my appointment", "notify me about my appointment"},
 		},
 	}
@@ -578,8 +578,10 @@ func (r *Runner) processWatch(ctx context.Context, watch session.Watch, now time
 		watch.UpdatedAt = now
 		return r.repo.SaveSessionWatch(ctx, watch)
 	}
-	if watch.Kind == sessionwatch.KindAppointmentReminder {
-		message := formatWatchUpdateMessage(watch.Kind, watch.Arguments)
+	bundle, _ := r.sessionBundle(ctx, sess)
+	capability, _ := lifecycleWatchCapability(bundle, watch)
+	if strings.EqualFold(strings.TrimSpace(capability.ScheduleStrategy), "reminder") {
+		message := formatWatchUpdateMessage(capability, watch, watch.Arguments)
 		if _, err := r.sessions.CreateMessageEvent(ctx, watch.SessionID, "ai_agent", message, "", traceIDForSession(watch.SessionID, watch.ID), map[string]any{
 			"lifecycle_kind": "watch_update",
 			"watch_id":       watch.ID,
@@ -628,7 +630,7 @@ func (r *Runner) processWatch(ctx context.Context, watch session.Watch, now time
 		return err
 	}
 	if hash != "" && hash != previousHash {
-		message := formatWatchUpdateMessage(watch.Kind, output)
+		message := formatWatchUpdateMessage(capability, watch, output)
 		if _, err := r.sessions.CreateMessageEvent(ctx, watch.SessionID, "ai_agent", message, "", traceIDForSession(watch.SessionID, watch.ID), map[string]any{
 			"lifecycle_kind": "watch_update",
 			"watch_id":       watch.ID,
@@ -643,7 +645,7 @@ func (r *Runner) processWatch(ctx context.Context, watch session.Watch, now time
 			return err
 		}
 	}
-	if shouldStopWatch(watch, output) {
+	if shouldStopWatch(capability, watch, output) {
 		watch.Status = session.WatchStatusStopped
 		watch.UpdatedAt = now
 		return r.repo.SaveSessionWatch(ctx, watch)
@@ -651,31 +653,75 @@ func (r *Runner) processWatch(ctx context.Context, watch session.Watch, now time
 	return nil
 }
 
-func formatWatchUpdateMessage(kind string, output map[string]any) string {
-	switch kind {
-	case sessionwatch.KindDeliveryStatus:
-		status := firstNonEmpty(stringify(output["delivery_status"]), stringify(output["status"]), stringify(output["state"]), stringify(output["tracking_status"]))
-		if status != "" {
-			return "I have an update on your delivery status: " + status + "."
+func lifecycleWatchCapability(bundle policy.Bundle, watch session.Watch) (policy.WatchCapability, bool) {
+	for _, item := range bundle.WatchCapabilities {
+		if item.Kind == watch.Kind {
+			return item, true
 		}
-	case sessionwatch.KindAppointmentReminder:
-		when := firstNonEmpty(stringify(output["appointment_at"]), stringify(output["scheduled_for"]), stringify(output["time"]), stringify(output["date"]))
-		if when != "" {
-			return "This is your reminder about the appointment scheduled for " + when + "."
+	}
+	return policy.WatchCapability{}, false
+}
+
+func formatWatchUpdateMessage(capability policy.WatchCapability, watch session.Watch, output map[string]any) string {
+	if template := strings.TrimSpace(capability.DeliveryTemplate); template != "" {
+		message := renderWatchTemplate(template, watch, output, capability)
+		if strings.TrimSpace(message) != "" {
+			return message
 		}
-		return "This is your reminder about the upcoming appointment."
 	}
 	raw, _ := json.Marshal(output)
 	return "I have an update on your request: " + string(raw)
 }
 
-func shouldStopWatch(watch session.Watch, output map[string]any) bool {
-	target := strings.ToLower(strings.TrimSpace(watch.StopCondition))
-	if target == "" {
+func renderWatchTemplate(template string, watch session.Watch, output map[string]any, capability policy.WatchCapability) string {
+	replacements := map[string]string{
+		"subject_ref": watch.SubjectRef,
+		"status":      firstNonEmpty(extractWatchValue(output, capability.StatusKeys...), extractWatchValue(output, "status", "state")),
+	}
+	for key, value := range output {
+		replacements[key] = stringify(value)
+	}
+	for key, value := range watch.Arguments {
+		if _, ok := replacements[key]; !ok {
+			replacements[key] = stringify(value)
+		}
+	}
+	message := template
+	for key, value := range replacements {
+		message = strings.ReplaceAll(message, "{{"+key+"}}", value)
+	}
+	return strings.TrimSpace(message)
+}
+
+func extractWatchValue(values map[string]any, keys ...string) string {
+	for _, key := range keys {
+		value := stringify(values[key])
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func shouldStopWatch(capability policy.WatchCapability, watch session.Watch, output map[string]any) bool {
+	targets := append([]string(nil), capability.StopValues...)
+	if len(targets) == 0 && strings.TrimSpace(watch.StopCondition) != "" {
+		targets = append(targets, watch.StopCondition)
+	}
+	if len(targets) == 0 {
 		return false
 	}
-	status := strings.ToLower(firstNonEmpty(stringify(output["delivery_status"]), stringify(output["status"]), stringify(output["state"]), stringify(output["tracking_status"])))
-	return status == target
+	statusKeys := append([]string(nil), capability.StatusKeys...)
+	if len(statusKeys) == 0 {
+		statusKeys = []string{"status", "state", "delivery_status", "tracking_status"}
+	}
+	status := strings.ToLower(strings.TrimSpace(extractWatchValue(output, statusKeys...)))
+	for _, target := range targets {
+		if status == strings.ToLower(strings.TrimSpace(target)) {
+			return true
+		}
+	}
+	return false
 }
 
 func watchPollInterval() time.Duration {

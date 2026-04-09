@@ -1083,29 +1083,16 @@ func (r *Runner) runtimeUpdateIntent(ctx context.Context, exec execution.TurnExe
 	if intent, ok := runtimeUpdateIntentFromArtifacts(view, time.Now().UTC()); ok {
 		return intent, true
 	}
-	customerText := latestCustomerText(events)
-	lowerCustomerText := strings.ToLower(customerText)
 	now := time.Now().UTC()
-	if wantsAppointmentReminder(lowerCustomerText) {
-		if intent, ok := runtimeAppointmentReminderIntentFromText(view, customerText, now); ok {
+	customerText := latestCustomerText(events)
+	for _, capability := range view.WatchCapabilities {
+		if intent, ok := runtimeCapabilityIntentFromView(capability, view, customerText, now); ok {
 			return intent, true
 		}
-		if intent, ok := runtimeAppointmentReminderIntentFromView(view, now); ok {
-			return intent, true
-		}
-		if intent, ok := r.runtimeAppointmentReminderIntent(ctx, exec, now); ok {
-			return intent, true
-		}
-	}
-	if wantsDeliveryUpdates(lowerCustomerText) {
-		if intent, ok := runtimeDeliveryWatchIntentFromView(view, now); ok {
-			return intent, true
-		}
-		if intent, ok := r.runtimeDeliveryWatchIntent(ctx, exec, toolOutput, now); ok {
+		if intent, ok := r.runtimeCapabilityIntent(ctx, exec, capability, toolOutput, customerText, now); ok {
 			return intent, true
 		}
 	}
-	_ = view
 	return sessionwatch.UpdateIntent{}, false
 }
 
@@ -1151,119 +1138,96 @@ func watchScheduleFromArtifact(item policyruntime.UpdateIntentArtifact) string {
 	return "poll"
 }
 
-func runtimeDeliveryWatchIntentFromView(view resolvedView, now time.Time) (sessionwatch.UpdateIntent, bool) {
-	for _, candidate := range view.ToolPlanStage.Plan.Candidates {
-		lowerToolID := strings.ToLower(strings.TrimSpace(candidate.ToolID))
-		if !stringContainsAny(lowerToolID, "order", "delivery", "shipping", "tracking") {
-			continue
-		}
-		subjectRef := sessionwatch.ExtractSubjectRef(candidate.Arguments, "order_id", "tracking_id", "shipment_id", "package_id", "id")
-		if subjectRef == "" {
-			continue
-		}
-		return sessionwatch.BuildDeliveryIntent(sessionwatch.SourceRuntime, candidate.ToolID, subjectRef, candidate.Arguments, now)
+func watchCapabilityToolMatches(capability policy.WatchCapability, toolID string) bool {
+	lowerToolID := strings.ToLower(strings.TrimSpace(toolID))
+	if lowerToolID == "" {
+		return false
 	}
-	return sessionwatch.UpdateIntent{}, false
-}
-
-func (r *Runner) runtimeDeliveryWatchIntent(ctx context.Context, exec execution.TurnExecution, toolOutput map[string]any, now time.Time) (sessionwatch.UpdateIntent, bool) {
-	runs, err := r.repo.ListToolRuns(ctx, exec.ID)
-	if err != nil {
-		return sessionwatch.UpdateIntent{}, false
+	if strings.EqualFold(strings.TrimSpace(capability.ID), toolID) || strings.EqualFold(strings.TrimSpace(capability.Kind), toolID) {
+		return true
 	}
-	for i := len(runs) - 1; i >= 0; i-- {
-		run := runs[i]
-		toolID := strings.TrimSpace(run.ToolID)
-		lowerToolID := strings.ToLower(toolID)
-		if !stringContainsAny(lowerToolID, "order", "delivery", "shipping", "tracking") {
-			continue
-		}
-		args := parseJSONMap(run.InputJSON)
-		if subjectRef := sessionwatch.ExtractSubjectRef(args, "order_id", "tracking_id", "shipment_id", "package_id", "id"); subjectRef != "" {
-			return sessionwatch.BuildDeliveryIntent(sessionwatch.SourceRuntime, toolID, subjectRef, args, now)
-		}
-	}
-	if tools, ok := toolOutput["tools"].(map[string]any); ok {
-		for key, raw := range tools {
-			if !stringContainsAny(strings.ToLower(key), "order", "delivery", "shipping", "tracking") {
-				continue
-			}
-			output, _ := raw.(map[string]any)
-			subjectRef := sessionwatch.ExtractSubjectRef(output, "order_id", "tracking_id", "shipment_id", "package_id", "id")
-			if subjectRef != "" {
-				return sessionwatch.BuildDeliveryIntent(sessionwatch.SourceRuntime, key, subjectRef, output, now)
-			}
-		}
-	}
-	return sessionwatch.UpdateIntent{}, false
-}
-
-func runtimeAppointmentReminderIntentFromView(view resolvedView, now time.Time) (sessionwatch.UpdateIntent, bool) {
-	for _, candidate := range view.ToolPlanStage.Plan.Candidates {
-		lowerToolID := strings.ToLower(strings.TrimSpace(candidate.ToolID))
-		if !stringContainsAny(lowerToolID, "appointment", "schedule", "calendar", "booking") {
-			continue
-		}
-		appointmentAt, ok := sessionwatch.ParseAppointmentTime(candidate.Arguments, now)
-		if !ok {
-			continue
-		}
-		args := cloneAnyMap(candidate.Arguments)
-		args["appointment_at"] = appointmentAt.UTC().Format(time.RFC3339)
-		subjectRef := firstNonEmptyString(sessionwatch.ExtractSubjectRef(args, "appointment_id", "booking_id", "id"), appointmentAt.UTC().Format(time.RFC3339))
-		return sessionwatch.BuildAppointmentReminderIntent(sessionwatch.SourceRuntime, subjectRef, sessionwatch.ReminderTimeFromAppointment(appointmentAt, now), args, now)
-	}
-	return sessionwatch.UpdateIntent{}, false
-}
-
-func runtimeAppointmentReminderIntentFromText(view resolvedView, customerText string, now time.Time) (sessionwatch.UpdateIntent, bool) {
-	if !runtimeSupportsAppointmentTool(view) {
-		return sessionwatch.UpdateIntent{}, false
-	}
-	appointmentAt, ok := sessionwatch.ParseAppointmentTimeFromText(customerText, now)
-	if !ok {
-		return sessionwatch.UpdateIntent{}, false
-	}
-	args := map[string]any{"appointment_at": appointmentAt.UTC().Format(time.RFC3339)}
-	subjectRef := appointmentAt.UTC().Format(time.RFC3339)
-	return sessionwatch.BuildAppointmentReminderIntent(sessionwatch.SourceRuntime, subjectRef, sessionwatch.ReminderTimeFromAppointment(appointmentAt, now), args, now)
-}
-
-func runtimeSupportsAppointmentTool(view resolvedView) bool {
-	for _, candidate := range view.ToolPlanStage.Plan.Candidates {
-		if stringContainsAny(strings.ToLower(strings.TrimSpace(candidate.ToolID)), "appointment", "schedule", "calendar", "booking") {
-			return true
-		}
-	}
-	for _, toolID := range view.ToolPlanStage.Plan.SelectedTools {
-		if stringContainsAny(strings.ToLower(strings.TrimSpace(toolID)), "appointment", "schedule", "calendar", "booking") {
+	for _, term := range capability.ToolMatchTerms {
+		term = strings.ToLower(strings.TrimSpace(term))
+		if term != "" && strings.Contains(lowerToolID, term) {
 			return true
 		}
 	}
 	return false
 }
 
-func (r *Runner) runtimeAppointmentReminderIntent(ctx context.Context, exec execution.TurnExecution, now time.Time) (sessionwatch.UpdateIntent, bool) {
+func runtimeCapabilityIntentFromView(capability policy.WatchCapability, view resolvedView, customerText string, now time.Time) (sessionwatch.UpdateIntent, bool) {
+	for _, candidate := range view.ToolPlanStage.Plan.Candidates {
+		if !watchCapabilityToolMatches(capability, candidate.ToolID) {
+			continue
+		}
+		subjectRef := sessionwatch.ExtractSubjectRef(candidate.Arguments, capability.SubjectKeys...)
+		if intent, ok := sessionwatch.BuildIntentFromCapability(capability, sessionwatch.SourceRuntime, candidate.ToolID, subjectRef, candidate.Arguments, now); ok {
+			return intent, true
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(capability.ScheduleStrategy), "reminder") {
+		if !runtimeSupportsCapability(view, capability) {
+			return sessionwatch.UpdateIntent{}, false
+		}
+		if appointmentAt, ok := sessionwatch.ParseAppointmentTimeFromText(customerText, now); ok {
+			args := map[string]any{"appointment_at": appointmentAt.UTC().Format(time.RFC3339)}
+			subjectRef := firstNonEmptyString(sessionwatch.ExtractSubjectRef(args, capability.SubjectKeys...), appointmentAt.UTC().Format(time.RFC3339))
+			return sessionwatch.BuildIntentFromCapability(capability, sessionwatch.SourceRuntime, capability.ID, subjectRef, args, now)
+		}
+	}
+	return sessionwatch.UpdateIntent{}, false
+}
+
+func (r *Runner) runtimeCapabilityIntent(ctx context.Context, exec execution.TurnExecution, capability policy.WatchCapability, toolOutput map[string]any, customerText string, now time.Time) (sessionwatch.UpdateIntent, bool) {
 	runs, err := r.repo.ListToolRuns(ctx, exec.ID)
 	if err != nil {
 		return sessionwatch.UpdateIntent{}, false
 	}
 	for i := len(runs) - 1; i >= 0; i-- {
 		run := runs[i]
-		lowerToolID := strings.ToLower(strings.TrimSpace(run.ToolID))
-		if !stringContainsAny(lowerToolID, "appointment", "schedule", "calendar", "booking") {
+		if !watchCapabilityToolMatches(capability, run.ToolID) {
 			continue
 		}
 		args := parseJSONMap(run.InputJSON)
-		appointmentAt, ok := sessionwatch.ParseAppointmentTime(args, now)
-		if !ok {
-			continue
+		subjectRef := sessionwatch.ExtractSubjectRef(args, capability.SubjectKeys...)
+		if intent, ok := sessionwatch.BuildIntentFromCapability(capability, sessionwatch.SourceRuntime, run.ToolID, subjectRef, args, now); ok {
+			return intent, true
 		}
-		args["appointment_at"] = appointmentAt.UTC().Format(time.RFC3339)
-		subjectRef := firstNonEmptyString(sessionwatch.ExtractSubjectRef(args, "appointment_id", "booking_id", "id"), appointmentAt.UTC().Format(time.RFC3339))
-		return sessionwatch.BuildAppointmentReminderIntent(sessionwatch.SourceRuntime, subjectRef, sessionwatch.ReminderTimeFromAppointment(appointmentAt, now), args, now)
+	}
+	if tools, ok := toolOutput["tools"].(map[string]any); ok {
+		for key, raw := range tools {
+			if !watchCapabilityToolMatches(capability, key) {
+				continue
+			}
+			output, _ := raw.(map[string]any)
+			subjectRef := sessionwatch.ExtractSubjectRef(output, capability.SubjectKeys...)
+			if intent, ok := sessionwatch.BuildIntentFromCapability(capability, sessionwatch.SourceRuntime, key, subjectRef, output, now); ok {
+				return intent, true
+			}
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(capability.ScheduleStrategy), "reminder") {
+		if appointmentAt, ok := sessionwatch.ParseAppointmentTimeFromText(customerText, now); ok {
+			args := map[string]any{"appointment_at": appointmentAt.UTC().Format(time.RFC3339)}
+			subjectRef := firstNonEmptyString(sessionwatch.ExtractSubjectRef(args, capability.SubjectKeys...), appointmentAt.UTC().Format(time.RFC3339))
+			return sessionwatch.BuildIntentFromCapability(capability, sessionwatch.SourceRuntime, capability.ID, subjectRef, args, now)
+		}
 	}
 	return sessionwatch.UpdateIntent{}, false
+}
+
+func runtimeSupportsCapability(view resolvedView, capability policy.WatchCapability) bool {
+	for _, candidate := range view.ToolPlanStage.Plan.Candidates {
+		if watchCapabilityToolMatches(capability, candidate.ToolID) {
+			return true
+		}
+	}
+	for _, toolID := range view.ToolPlanStage.Plan.SelectedTools {
+		if watchCapabilityToolMatches(capability, toolID) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Runner) markSessionKeepForWatch(ctx context.Context, sess session.Session, reason string) error {

@@ -1,6 +1,10 @@
 package semantics
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/sahal/parmesan/internal/domain/policy"
+)
 
 type phraseFamilyDef struct {
 	Kind    Signal
@@ -81,7 +85,7 @@ var DefaultSignalRegistry = SignalRegistry{
 		"saying":    "say",
 	},
 	relativeDates: []string{"today", "tomorrow", "next week", "next month", "return in"},
-	phraseIndex:   buildPhraseFamilyIndex([]phraseFamilyDef{
+	phraseIndex: buildPhraseFamilyIndex([]phraseFamilyDef{
 		{Kind: SignalReservation, Phrases: []string{"reserve a table", "book a table", "reservation"}},
 		{Kind: SignalReturnStatus, Phrases: []string{"return status", "tracking"}},
 		{Kind: SignalOrderStatus, Phrases: []string{"order status", "status is"}},
@@ -120,6 +124,82 @@ var (
 	normalizationReplacer = strings.NewReplacer("_", " ", "/", " ", "-", " ")
 	keywordSignalIndex    = buildKeywordSignalIndex(DefaultSignalRegistry.keywordFamilies)
 )
+
+func signalRegistryFromPolicy(sem policy.SemanticsPolicy) SignalRegistry {
+	if len(sem.Signals) == 0 && len(sem.RelativeDates) == 0 {
+		return DefaultSignalRegistry
+	}
+	registry := SignalRegistry{
+		stopwords:     DefaultSignalRegistry.stopwords,
+		aliases:       DefaultSignalRegistry.aliases,
+		relativeDates: append([]string(nil), DefaultSignalRegistry.relativeDates...),
+	}
+	if len(sem.RelativeDates) > 0 {
+		registry.relativeDates = append([]string(nil), sem.RelativeDates...)
+	}
+	for _, item := range sem.Signals {
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			continue
+		}
+		if len(item.Phrases) > 0 {
+			registry.phraseFamilies = append(registry.phraseFamilies, phraseFamilyDef{Kind: Signal(id), Phrases: append([]string(nil), item.Phrases...)})
+		}
+		tokens := append([]string(nil), item.Tokens...)
+		tokens = append(tokens, item.Aliases...)
+		if len(tokens) > 0 {
+			registry.keywordFamilies = append(registry.keywordFamilies, keywordFamilyDef{Signal: Signal(id), Parent: Signal(strings.TrimSpace(item.Parent)), Tokens: tokens})
+		}
+	}
+	registry.phraseIndex = buildPhraseFamilyIndex(registry.phraseFamilies)
+	return registry
+}
+
+func categoryRegistryFromPolicy(sem policy.SemanticsPolicy) CategoryRegistry {
+	if len(sem.Categories) == 0 {
+		return DefaultCategoryRegistry
+	}
+	registry := CategoryRegistry{}
+	for _, item := range sem.Categories {
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			continue
+		}
+		family := categoryFamilyDef{Category: Category(id)}
+		for _, signal := range item.Signals {
+			signal = strings.TrimSpace(signal)
+			if signal != "" {
+				family.Terms = append(family.Terms, Signal(signal))
+			}
+		}
+		registry.families = append(registry.families, family)
+	}
+	return registry
+}
+
+func slotRegistryFromPolicy(sem policy.SemanticsPolicy) SlotRegistry {
+	if len(sem.Slots) == 0 {
+		return DefaultSlotRegistry
+	}
+	registry := SlotRegistry{
+		fieldKinds: map[string]SlotKind{},
+		extractors: map[SlotKind]SlotExtractorDef{},
+	}
+	for _, item := range sem.Slots {
+		field := strings.ToLower(strings.TrimSpace(item.Field))
+		kind := SlotKind(strings.TrimSpace(item.Kind))
+		if field == "" || kind == SlotUnknown {
+			continue
+		}
+		registry.fieldKinds[field] = kind
+		registry.extractors[kind] = SlotExtractorDef{
+			Kind:       kind,
+			Markers:    append([]string(nil), item.Markers...),
+			StopTokens: append([]string(nil), item.StopTokens...),
+		}
+	}
+	return registry
+}
 
 func buildPhraseFamilyIndex(families []phraseFamilyDef) map[Signal][]string {
 	out := make(map[Signal][]string, len(families))
@@ -165,15 +245,24 @@ func NormalizedTokens(input string) []string {
 	return normalizedTokensLowered(strings.ToLower(input))
 }
 
+func SignalsForPolicy(sem policy.SemanticsPolicy, input string) []string {
+	return signalsWithRegistry(signalRegistryFromPolicy(sem), input)
+}
+
 func Signals(input string) []string {
+	return signalsWithRegistry(DefaultSignalRegistry, input)
+}
+
+func signalsWithRegistry(registry SignalRegistry, input string) []string {
 	input = strings.ToLower(strings.TrimSpace(input))
 	if input == "" {
 		return nil
 	}
+	index := buildKeywordSignalIndex(registry.keywordFamilies)
 	var out []string
 	for _, token := range normalizedTokensLowered(input) {
 		out = append(out, token)
-		for _, mapping := range keywordSignalIndex[token] {
+		for _, mapping := range index[token] {
 			if mapping.Signal != SignalUnknown {
 				out = append(out, string(mapping.Signal))
 			}
@@ -183,13 +272,13 @@ func Signals(input string) []string {
 		}
 	}
 	base := SignalSet(out)
-	if DefaultSignalRegistry.HasPhraseFamily(input, SignalReservation) {
+	if registry.HasPhraseFamily(input, SignalReservation) {
 		out = append(out, string(SignalReservation))
 	}
-	if kind := statusSignal(input, base); kind != SignalUnknown {
+	if kind := statusSignalWithRegistry(registry, input, base); kind != SignalUnknown {
 		out = append(out, string(kind))
 	}
-	if kind := deliverySignal(input); kind != SignalUnknown {
+	if kind := deliverySignalWithRegistry(registry, input); kind != SignalUnknown {
 		out = append(out, string(kind))
 	}
 	if kind := choiceSignal(input); kind != SignalUnknown {
@@ -229,9 +318,14 @@ func SignalSet(items []string) map[string]struct{} {
 }
 
 func Categories(terms []string) map[string]struct{} {
+	return CategoriesForPolicy(policy.SemanticsPolicy{}, terms)
+}
+
+func CategoriesForPolicy(sem policy.SemanticsPolicy, terms []string) map[string]struct{} {
+	registry := categoryRegistryFromPolicy(sem)
 	out := map[string]struct{}{}
 	for _, term := range terms {
-		for _, family := range DefaultCategoryRegistry.families {
+		for _, family := range registry.families {
 			for _, candidate := range family.Terms {
 				if term == string(candidate) {
 					out[string(family.Category)] = struct{}{}
@@ -244,14 +338,24 @@ func Categories(terms []string) map[string]struct{} {
 }
 
 func SlotKindForField(field string) SlotKind {
-	if kind, ok := DefaultSlotRegistry.fieldKinds[strings.ToLower(strings.TrimSpace(field))]; ok {
+	return SlotKindForFieldPolicy(policy.SemanticsPolicy{}, field)
+}
+
+func SlotKindForFieldPolicy(sem policy.SemanticsPolicy, field string) SlotKind {
+	registry := slotRegistryFromPolicy(sem)
+	if kind, ok := registry.fieldKinds[strings.ToLower(strings.TrimSpace(field))]; ok {
 		return kind
 	}
 	return SlotUnknown
 }
 
 func RelativeDateTerm(text string) string {
-	for _, marker := range DefaultSignalRegistry.relativeDates {
+	return RelativeDateTermPolicy(policy.SemanticsPolicy{}, text)
+}
+
+func RelativeDateTermPolicy(sem policy.SemanticsPolicy, text string) string {
+	registry := signalRegistryFromPolicy(sem)
+	for _, marker := range registry.relativeDates {
 		if strings.Contains(strings.ToLower(text), marker) {
 			return marker
 		}
@@ -291,10 +395,14 @@ func hasAnySignal(set map[string]struct{}, signals ...Signal) bool {
 }
 
 func statusSignal(text string, signals map[string]struct{}) Signal {
+	return statusSignalWithRegistry(DefaultSignalRegistry, text, signals)
+}
+
+func statusSignalWithRegistry(registry SignalRegistry, text string, signals map[string]struct{}) Signal {
 	switch {
-	case hasAnySignal(signals, SignalReturnStatus, SignalTracking) || DefaultSignalRegistry.HasPhraseFamily(text, SignalReturnStatus):
+	case hasAnySignal(signals, SignalReturnStatus, SignalTracking) || registry.HasPhraseFamily(text, SignalReturnStatus):
 		return SignalReturnStatus
-	case hasAnySignal(signals, SignalOrderStatus) || DefaultSignalRegistry.HasPhraseFamily(text, SignalOrderStatus):
+	case hasAnySignal(signals, SignalOrderStatus) || registry.HasPhraseFamily(text, SignalOrderStatus):
 		return SignalOrderStatus
 	default:
 		return SignalUnknown
@@ -302,8 +410,12 @@ func statusSignal(text string, signals map[string]struct{}) Signal {
 }
 
 func deliverySignal(text string) Signal {
+	return deliverySignalWithRegistry(DefaultSignalRegistry, text)
+}
+
+func deliverySignalWithRegistry(registry SignalRegistry, text string) Signal {
 	switch {
-	case DefaultSignalRegistry.HasPhraseFamily(text, SignalPickup):
+	case registry.HasPhraseFamily(text, SignalPickup):
 		return SignalPickup
 	case strings.Contains(text, "delivery"):
 		return SignalDelivery

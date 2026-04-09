@@ -206,7 +206,7 @@ func Grade(view policyruntime.EngineResult, response string, toolOutput map[stri
 		Overall:    1,
 		Dimensions: map[string]DimensionScore{},
 	}
-	card.Claims = ExtractClaims(response)
+	card.Claims = ExtractClaims(response, view.QualityProfile)
 	card.EvidenceMatches = MatchClaims(view, card.Claims)
 	addDimension := func(name string, score float64, findings []Finding) {
 		passed := true
@@ -332,7 +332,7 @@ func groundingFindings(view policyruntime.EngineResult, response string) []Findi
 	if strings.Contains(lower, "according to") && len(view.RetrieverStage.Results) == 0 {
 		findings = append(findings, Finding{Kind: "unsupported_grounding_phrase", Severity: "medium", Message: "Response uses grounding language without retrieved knowledge."})
 	}
-	for _, match := range MatchClaims(view, ExtractClaims(response)) {
+	for _, match := range MatchClaims(view, ExtractClaims(response, view.QualityProfile)) {
 		if match.Supported || match.Severity == "" {
 			continue
 		}
@@ -421,11 +421,19 @@ func refusalFindings(view policyruntime.EngineResult, response string) []Finding
 	lower := strings.ToLower(response)
 	switch view.ScopeBoundaryStage.Action {
 	case "escalate":
-		if !containsAny(lower, []string{"human", "operator", "escalat", "handoff", "review"}) {
+		signals := append([]string(nil), view.QualityProfile.EscalationSignals...)
+		if len(signals) == 0 {
+			signals = []string{"human", "operator", "escalat", "handoff", "review"}
+		}
+		if !containsAny(lower, signals) {
 			return []Finding{{Kind: "bad_escalation_reply", Severity: "hard", Message: "Escalation response did not clearly describe human/operator review or handoff."}}
 		}
 	case "refuse", "redirect":
-		if !containsAny(lower, []string{"cannot", "can't", "not", "unable", "safe", "instead", "but i can", "can help"}) {
+		signals := append([]string(nil), view.QualityProfile.RefusalSignals...)
+		if len(signals) == 0 {
+			signals = []string{"cannot", "can't", "not", "unable", "safe", "instead", "but i can", "can help"}
+		}
+		if !containsAny(lower, signals) {
 			return []Finding{{Kind: "bad_refusal_reply", Severity: "hard", Message: "Refusal or redirect response did not clearly refuse or redirect to a safe supported next step."}}
 		}
 	}
@@ -564,11 +572,11 @@ func containsText(view policyruntime.EngineResult, needle string) bool {
 	return false
 }
 
-func ExtractClaims(response string) []ResponseClaim {
+func ExtractClaims(response string, profile policy.QualityProfile) []ResponseClaim {
 	var claims []ResponseClaim
 	seen := map[string]struct{}{}
 	for _, sentence := range splitSentences(response) {
-		claim := claimFromSentence(sentence)
+		claim := claimFromSentence(sentence, profile)
 		if strings.TrimSpace(claim.Text) == "" {
 			continue
 		}
@@ -601,7 +609,7 @@ func MatchClaims(view policyruntime.EngineResult, claims []ResponseClaim) []Evid
 			if len(claim.RequiredEvidenceKinds) > 0 && !containsString(item.supports, claim.RequiredEvidenceKinds) {
 				continue
 			}
-			if evidenceSupportsClaim(item.text, claim) {
+			if evidenceSupportsClaim(view.QualityProfile, item.text, claim) {
 				match.Supported = true
 				match.Source = item.source
 				match.MatchedSourceType = item.source
@@ -618,7 +626,7 @@ func MatchClaims(view policyruntime.EngineResult, claims []ResponseClaim) []Evid
 				if len(claim.RequiredEvidenceKinds) > 0 && !containsString(item.supports, claim.RequiredEvidenceKinds) {
 					continue
 				}
-				if evidenceContradictsClaim(strings.ToLower(item.text), claim) {
+				if evidenceContradictsClaim(view.QualityProfile, strings.ToLower(item.text), claim) {
 					match.FailureReason = "contradicted_by_evidence"
 					match.Source = item.source
 					match.MatchedSourceType = item.source
@@ -639,33 +647,28 @@ func splitSentences(response string) []string {
 	})
 }
 
-func claimFromSentence(sentence string) ResponseClaim {
+func claimFromSentence(sentence string, profile policy.QualityProfile) ResponseClaim {
 	text := strings.TrimSpace(sentence)
 	lower := strings.ToLower(text)
 	var indicators []string
 	risk := ""
 	claimType := "factual"
-	for _, phrase := range highRiskClaimIndicators() {
+	for _, phrase := range highRiskClaimIndicators(profile) {
 		if strings.Contains(lower, phrase) {
 			indicators = append(indicators, phrase)
 			risk = "high"
 		}
 	}
-	switch {
-	case strings.Contains(lower, "refund"):
-		claimType = "refund_commitment"
-	case strings.Contains(lower, "replacement"):
-		claimType = "replacement_commitment"
-	case strings.Contains(lower, "approved") || strings.Contains(lower, "approval"):
-		claimType = "approval_commitment"
-	case strings.Contains(lower, "escalat") || strings.Contains(lower, "human operator") || strings.Contains(lower, "handoff"):
-		claimType = "escalation_commitment"
-	case strings.Contains(lower, "qualif") || strings.Contains(lower, "eligib"):
-		claimType = "eligibility"
-	case strings.Contains(lower, "within ") || strings.Contains(lower, " day") || strings.Contains(lower, "hour"):
-		claimType = "timeline"
-	case strings.Contains(lower, "call me") || strings.Contains(lower, "prefer") || strings.Contains(lower, "preferred"):
-		claimType = "preference"
+	if selected, ok := selectClaimProfile(profile, lower); ok {
+		claimType = selected.ID
+		if strings.TrimSpace(selected.Risk) != "" {
+			risk = strings.TrimSpace(selected.Risk)
+		}
+		for _, term := range selected.MatchTerms {
+			if strings.Contains(lower, strings.ToLower(strings.TrimSpace(term))) {
+				indicators = append(indicators, strings.ToLower(strings.TrimSpace(term)))
+			}
+		}
 	}
 	if risk == "" && containsNumericSpecificity(lower) {
 		risk = "medium"
@@ -675,13 +678,16 @@ func claimFromSentence(sentence string) ResponseClaim {
 		Type:                  claimType,
 		Risk:                  risk,
 		Indicators:            indicators,
-		RequiredEvidenceKinds: requiredEvidenceKindsForClaim(claimType),
-		RequiredVerification:  requiredVerificationForClaim(claimType),
-		AllowedCommitments:    allowedCommitmentsForClaim(claimType),
+		RequiredEvidenceKinds: requiredEvidenceKindsForClaim(profile, claimType),
+		RequiredVerification:  requiredVerificationForClaim(profile, claimType),
+		AllowedCommitments:    allowedCommitmentsForClaim(profile, claimType),
 	}
 }
 
-func highRiskClaimIndicators() []string {
+func highRiskClaimIndicators(profile policy.QualityProfile) []string {
+	if len(profile.HighRiskIndicators) > 0 {
+		return append([]string(nil), profile.HighRiskIndicators...)
+	}
 	return []string{
 		"within 30 days",
 		"instant replacement",
@@ -694,6 +700,25 @@ func highRiskClaimIndicators() []string {
 		"qualify",
 		"qualifies",
 	}
+}
+
+func selectClaimProfile(profile policy.QualityProfile, lower string) (policy.QualityClaimProfile, bool) {
+	best := policy.QualityClaimProfile{}
+	bestScore := 0
+	for _, item := range profile.ClaimProfiles {
+		score := 0
+		for _, term := range item.MatchTerms {
+			term = strings.ToLower(strings.TrimSpace(term))
+			if term != "" && strings.Contains(lower, term) {
+				score++
+			}
+		}
+		if score > bestScore {
+			best = item
+			bestScore = score
+		}
+	}
+	return best, bestScore > 0
 }
 
 func containsNumericSpecificity(value string) bool {
@@ -739,10 +764,10 @@ func evidenceTexts(view policyruntime.EngineResult) []evidenceText {
 	return out
 }
 
-func evidenceSupportsClaim(evidence string, claim ResponseClaim) bool {
+func evidenceSupportsClaim(profile policy.QualityProfile, evidence string, claim ResponseClaim) bool {
 	evidence = strings.ToLower(evidence)
 	claimText := strings.ToLower(claim.Text)
-	if evidenceContradictsClaim(evidence, claim) {
+	if evidenceContradictsClaim(profile, evidence, claim) {
 		return false
 	}
 	if strings.Contains(evidence, claimText) {
@@ -757,8 +782,8 @@ func evidenceSupportsClaim(evidence string, claim ResponseClaim) bool {
 	if len(claim.Indicators) > 0 && matched == len(claim.Indicators) {
 		return true
 	}
-	evidenceConcepts := conceptSet(evidence)
-	claimConcepts := conceptSet(claimText)
+	evidenceConcepts := conceptSet(profile, evidence)
+	claimConcepts := conceptSet(profile, claimText)
 	if len(claimConcepts) > 0 {
 		hits := 0
 		for concept := range claimConcepts {
@@ -783,7 +808,7 @@ func evidenceSupportsClaim(evidence string, claim ResponseClaim) bool {
 	return hits >= 4 && hits*2 >= len(tokens)
 }
 
-func evidenceContradictsClaim(evidence string, claim ResponseClaim) bool {
+func evidenceContradictsClaim(profile policy.QualityProfile, evidence string, claim ResponseClaim) bool {
 	claimText := strings.ToLower(claim.Text)
 	indicatorHit := false
 	if strings.Contains(evidence, claimText) {
@@ -795,7 +820,7 @@ func evidenceContradictsClaim(evidence string, claim ResponseClaim) bool {
 			break
 		}
 	}
-	if !indicatorHit && conceptOverlap(evidence, claim.Text, 2) {
+	if !indicatorHit && conceptOverlap(profile, evidence, claim.Text, 2) {
 		indicatorHit = true
 	}
 	if !indicatorHit {
@@ -816,7 +841,7 @@ func evidenceContradictsClaim(evidence string, claim ResponseClaim) bool {
 			return true
 		}
 	}
-	if claimHasVerificationQualifier(claimText) {
+	if claimHasVerificationQualifier(claimText, viewClaimProfile(profile, claim.Type)) {
 		return false
 	}
 	conditionalNegations := []string{
@@ -838,8 +863,8 @@ func evidenceContradictsClaim(evidence string, claim ResponseClaim) bool {
 	return false
 }
 
-func claimHasVerificationQualifier(claimText string) bool {
-	for _, marker := range []string{
+func claimHasVerificationQualifier(claimText string, profile policy.QualityClaimProfile) bool {
+	markers := []string{
 		"after verification",
 		"once verified",
 		"after review",
@@ -848,7 +873,11 @@ func claimHasVerificationQualifier(claimText string) bool {
 		"requires review",
 		"before refund review",
 		"before replacement review",
-	} {
+	}
+	if len(profile.VerificationQualifiers) > 0 {
+		markers = append(markers, profile.VerificationQualifiers...)
+	}
+	for _, marker := range markers {
 		if strings.Contains(claimText, marker) {
 			return true
 		}
@@ -856,9 +885,9 @@ func claimHasVerificationQualifier(claimText string) bool {
 	return false
 }
 
-func conceptOverlap(a, b string, minHits int) bool {
-	left := conceptSet(a)
-	right := conceptSet(b)
+func conceptOverlap(profile policy.QualityProfile, a, b string, minHits int) bool {
+	left := conceptSet(profile, a)
+	right := conceptSet(profile, b)
 	if len(left) == 0 || len(right) == 0 {
 		return false
 	}
@@ -871,18 +900,28 @@ func conceptOverlap(a, b string, minHits int) bool {
 	return hits >= minHits
 }
 
-func conceptSet(text string) map[string]struct{} {
+func conceptSet(profile policy.QualityProfile, text string) map[string]struct{} {
 	out := map[string]struct{}{}
 	for token := range tokenSet(text) {
-		if concept := canonicalConcept(token); concept != "" {
+		if concept := canonicalConcept(profile, token); concept != "" {
 			out[concept] = struct{}{}
 		}
 	}
 	return out
 }
 
-func canonicalConcept(token string) string {
+func canonicalConcept(profile policy.QualityProfile, token string) string {
 	token = strings.ToLower(strings.TrimSpace(token))
+	for concept, aliases := range profile.SemanticConcepts {
+		if token == strings.ToLower(strings.TrimSpace(concept)) {
+			return concept
+		}
+		for _, alias := range aliases {
+			if token == strings.ToLower(strings.TrimSpace(alias)) {
+				return concept
+			}
+		}
+	}
 	switch token {
 	case "refund", "refunds", "refunded", "reimbursement", "reimburse", "reimbursed", "credit", "credited":
 		return "refund"
@@ -1540,7 +1579,19 @@ func applyQualityProfile(plan *ResponsePlan, profile policy.QualityProfile) {
 	}
 }
 
-func requiredEvidenceKindsForClaim(claimType string) []string {
+func viewClaimProfile(profile policy.QualityProfile, claimType string) policy.QualityClaimProfile {
+	for _, item := range profile.ClaimProfiles {
+		if item.ID == claimType {
+			return item
+		}
+	}
+	return policy.QualityClaimProfile{}
+}
+
+func requiredEvidenceKindsForClaim(profile policy.QualityProfile, claimType string) []string {
+	if item := viewClaimProfile(profile, claimType); len(item.RequiredEvidence) > 0 {
+		return append([]string(nil), item.RequiredEvidence...)
+	}
 	switch claimType {
 	case "refund_commitment", "replacement_commitment", "eligibility", "timeline":
 		return []string{"retrieved_knowledge", "matched_guideline", "journey_state"}
@@ -1553,7 +1604,10 @@ func requiredEvidenceKindsForClaim(claimType string) []string {
 	}
 }
 
-func requiredVerificationForClaim(claimType string) []string {
+func requiredVerificationForClaim(profile policy.QualityProfile, claimType string) []string {
+	if item := viewClaimProfile(profile, claimType); len(item.RequiredVerification) > 0 {
+		return append([]string(nil), item.RequiredVerification...)
+	}
 	switch claimType {
 	case "refund_commitment", "replacement_commitment", "eligibility", "timeline", "approval_commitment":
 		return []string{"verification_required"}
@@ -1562,7 +1616,10 @@ func requiredVerificationForClaim(claimType string) []string {
 	}
 }
 
-func allowedCommitmentsForClaim(claimType string) []string {
+func allowedCommitmentsForClaim(profile policy.QualityProfile, claimType string) []string {
+	if item := viewClaimProfile(profile, claimType); len(item.AllowedCommitments) > 0 {
+		return append([]string(nil), item.AllowedCommitments...)
+	}
 	switch claimType {
 	case "refund_commitment", "replacement_commitment", "approval_commitment", "eligibility", "timeline":
 		return []string{"only after verification or review"}

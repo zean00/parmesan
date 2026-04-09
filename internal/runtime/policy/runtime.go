@@ -33,7 +33,9 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	bundle := applyRuntimeBundleDefaults(bundles[0])
 	matchCtx := buildMatchingContext(events)
 	matchCtx.DerivedSignals = append([]string(nil), options.DerivedSignals...)
+	matchCtx.DerivedSignals = append(matchCtx.DerivedSignals, semantics.SignalsForPolicy(bundle.Semantics, matchCtx.LatestCustomerText)...)
 	if len(matchCtx.DerivedSignals) > 0 {
+		matchCtx.DerivedSignals = signalKeys(signalSet(matchCtx.DerivedSignals))
 		matchCtx.ConversationText = strings.TrimSpace(matchCtx.ConversationText + " " + strings.Join(matchCtx.DerivedSignals, " "))
 	}
 	scopeBoundary := evaluateScopeBoundary(ctx, options.Router, bundle.DomainBoundary, matchCtx)
@@ -114,6 +116,17 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	return resolvedViewFromState(bundle, state, mode, arqs, updateIntents), nil
 }
 
+func signalKeys(values map[string]struct{}) []string {
+	out := make([]string, 0, len(values))
+	for key := range values {
+		if strings.TrimSpace(key) != "" {
+			out = append(out, key)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func applyRuntimeBundleDefaults(bundle policy.Bundle) policy.Bundle {
 	if len(bundle.Semantics.Signals) == 0 && len(bundle.Semantics.Categories) == 0 && len(bundle.Semantics.Slots) == 0 {
 		bundle.Semantics = policy.SemanticsPolicy{
@@ -128,25 +141,28 @@ func applyRuntimeBundleDefaults(bundle policy.Bundle) policy.Bundle {
 	if len(bundle.WatchCapabilities) == 0 {
 		bundle.WatchCapabilities = []policy.WatchCapability{
 			{
-				ID:                    "delivery_status_watch",
-				Kind:                  sessionwatch.KindDeliveryStatus,
-				ScheduleStrategy:      "poll",
-				TriggerSignals:        []string{"delivery", "tracking", "order_status", "return_status"},
-				ToolMatchTerms:        []string{"order", "delivery", "shipping", "tracking"},
-				SubjectKeys:           []string{"order_id", "tracking_id", "shipment_id", "package_id", "id"},
-				PollIntervalSeconds:   int((15 * time.Minute) / time.Second),
-				StopCondition:         "delivered",
+				ID:                     "delivery_status_watch",
+				Kind:                   sessionwatch.KindDeliveryStatus,
+				ScheduleStrategy:       "poll",
+				TriggerSignals:         []string{"delivery", "tracking", "order_status", "return_status"},
+				ToolMatchTerms:         []string{"order", "delivery", "shipping", "tracking"},
+				SubjectKeys:            []string{"order_id", "tracking_id", "shipment_id", "package_id", "id"},
+				StatusKeys:             []string{"delivery_status", "status", "state", "tracking_status"},
+				PollIntervalSeconds:    int((15 * time.Minute) / time.Second),
+				StopCondition:          "delivered",
+				StopValues:             []string{"delivered"},
 				AllowLifecycleFallback: true,
 			},
 			{
-				ID:                    "appointment_reminder_watch",
-				Kind:                  sessionwatch.KindAppointmentReminder,
-				ScheduleStrategy:      "reminder",
-				TriggerSignals:        []string{"scheduling", "remind me", "appointment reminder"},
-				ToolMatchTerms:        []string{"appointment", "schedule", "calendar", "booking"},
-				SubjectKeys:           []string{"appointment_id", "booking_id", "id"},
-				RequiredFields:        []string{"appointment_at"},
-				ReminderLeadSeconds:   3600,
+				ID:                     "appointment_reminder_watch",
+				Kind:                   sessionwatch.KindAppointmentReminder,
+				ScheduleStrategy:       "reminder",
+				TriggerSignals:         []string{"scheduling", "remind me", "appointment reminder"},
+				ToolMatchTerms:         []string{"appointment", "schedule", "calendar", "booking"},
+				SubjectKeys:            []string{"appointment_id", "booking_id", "id"},
+				RequiredFields:         []string{"appointment_at"},
+				RemindAtKeys:           []string{"appointment_at", "scheduled_for", "starts_at", "remind_at", "time", "date"},
+				ReminderLeadSeconds:    3600,
 				AllowLifecycleFallback: true,
 			},
 		}
@@ -157,6 +173,29 @@ func applyRuntimeBundleDefaults(bundle policy.Bundle) policy.Bundle {
 			RiskTier:           "",
 			AllowedCommitments: []string{"cautious policy-backed guidance"},
 			RequiredEvidence:   []string{"matched_guideline"},
+			HighRiskIndicators: []string{"within 30 days", "instant replacement", "guarantee", "guaranteed", "refund", "replacement", "approved", "eligible", "qualify", "qualifies"},
+			ClaimProfiles: []policy.QualityClaimProfile{
+				{ID: "refund_commitment", MatchTerms: []string{"refund", "reimbursement", "credit"}, Risk: "high", RequiredEvidence: []string{"policy_or_knowledge", "approval"}, RequiredVerification: []string{"review", "verification"}, AllowedCommitments: []string{"verification_first"}, VerificationQualifiers: []string{"after verification", "after review", "pending review", "requires review"}, ContradictionMarkers: []string{"not eligible", "requires review", "after review", "before review"}},
+				{ID: "replacement_commitment", MatchTerms: []string{"replacement", "replace", "exchange", "swap"}, Risk: "high", RequiredEvidence: []string{"policy_or_knowledge", "approval"}, RequiredVerification: []string{"review", "verification"}, AllowedCommitments: []string{"verification_first"}, VerificationQualifiers: []string{"after verification", "after review", "pending review", "requires review"}, ContradictionMarkers: []string{"not eligible", "requires review", "after review", "before review"}},
+				{ID: "approval_commitment", MatchTerms: []string{"approved", "approval", "authorized", "authorization"}, Risk: "high", RequiredEvidence: []string{"approval", "matched_guideline"}, RequiredVerification: []string{"approval", "review"}, AllowedCommitments: []string{"approval_required"}, VerificationQualifiers: []string{"after approval", "pending approval", "requires approval"}, ContradictionMarkers: []string{"requires approval", "pending approval", "not approved"}},
+				{ID: "escalation_commitment", MatchTerms: []string{"escalat", "handoff", "human operator", "operator review"}, Risk: "medium", RequiredEvidence: []string{"escalation", "matched_guideline"}, RequiredVerification: []string{"handoff"}, AllowedCommitments: []string{"safe_escalation"}, VerificationQualifiers: []string{"for review", "to a human", "to an operator"}, ContradictionMarkers: []string{"cannot escalate", "no escalation"}},
+				{ID: "eligibility", MatchTerms: []string{"eligible", "eligibility", "qualify", "qualifies"}, Risk: "high", RequiredEvidence: []string{"eligibility", "policy_or_knowledge"}, RequiredVerification: []string{"review", "verification"}, AllowedCommitments: []string{"verification_first"}, VerificationQualifiers: []string{"after verification", "after review", "pending review"}, ContradictionMarkers: []string{"not eligible", "requires review", "after review"}},
+				{ID: "timeline", MatchTerms: []string{"within ", " day", " days", "hour", "hours", "timeline", "window"}, Risk: "medium", RequiredEvidence: []string{"timeline", "policy_or_knowledge"}, RequiredVerification: []string{"review"}, AllowedCommitments: []string{"cautious policy-backed guidance"}, VerificationQualifiers: []string{"after verification", "after review", "once approved"}, ContradictionMarkers: []string{"after verification", "after review", "timeline may vary"}},
+				{ID: "preference", MatchTerms: []string{"call me", "prefer", "preferred", "instead"}, Risk: "medium", RequiredEvidence: []string{"customer_preference"}, AllowedCommitments: []string{"preference_following"}},
+			},
+			SemanticConcepts: map[string][]string{
+				"refund":       {"refund", "refunds", "refunded", "reimbursement", "reimburse", "reimbursed", "credit", "credited"},
+				"replacement":  {"replacement", "replacements", "replace", "replaced", "exchange", "exchanges", "swap", "swapped"},
+				"eligibility":  {"eligible", "eligibility", "qualify", "qualifies", "qualified", "qualifying"},
+				"approval":     {"approval", "approve", "approved", "authorization", "authorize", "authorized"},
+				"verification": {"review", "reviewed", "verification", "verify", "verified", "confirm", "confirmed", "validation", "validate", "validated"},
+				"immediate":    {"instant", "immediate", "immediately", "right", "away"},
+				"promise":      {"guarantee", "guaranteed", "promise", "promised", "commit", "committed"},
+				"timeline":     {"timeline", "deadline", "window", "days", "day", "hours", "hour"},
+				"escalation":   {"escalate", "escalation", "handoff", "operator", "human"},
+			},
+			RefusalSignals:    []string{"cannot", "can't", "not", "unable", "safe", "instead", "but i can", "can help"},
+			EscalationSignals: []string{"human", "operator", "escalat", "handoff", "review"},
 			BlueprintRules: map[string][]string{
 				"refund_replacement": {
 					"Start by stating what still must be verified before any refund or replacement decision.",
@@ -169,13 +208,13 @@ func applyRuntimeBundleDefaults(bundle policy.Bundle) policy.Bundle {
 	}
 	if strings.TrimSpace(bundle.LifecyclePolicy.ID) == "" {
 		bundle.LifecyclePolicy = policy.LifecyclePolicy{
-			ID:                     "default_lifecycle_policy",
-			IdleCandidateAfterMS:   int((30 * time.Minute) / time.Millisecond),
-			AwaitingCloseAfterMS:   int((12 * time.Hour) / time.Millisecond),
-			KeepRecheckAfterMS:     int((30 * time.Minute) / time.Millisecond),
-			FollowupMessage:        "Do you need any more help with this?",
-			ResolutionSignals:      []string{"thanks", "thank you", "that helps", "all good", "solved", "ok got it"},
-			DeliveryUpdateSignals:  []string{"update me", "keep me updated", "notify me", "let me know", "delivery", "shipping", "order status", "package"},
+			ID:                         "default_lifecycle_policy",
+			IdleCandidateAfterMS:       int((30 * time.Minute) / time.Millisecond),
+			AwaitingCloseAfterMS:       int((12 * time.Hour) / time.Millisecond),
+			KeepRecheckAfterMS:         int((30 * time.Minute) / time.Millisecond),
+			FollowupMessage:            "Do you need any more help with this?",
+			ResolutionSignals:          []string{"thanks", "thank you", "that helps", "all good", "solved", "ok got it"},
+			DeliveryUpdateSignals:      []string{"update me", "keep me updated", "notify me", "let me know", "delivery", "shipping", "order status", "package"},
 			AppointmentReminderSignals: []string{"remind me", "appointment reminder", "reminder for my appointment", "notify me about my appointment"},
 		}
 	}
@@ -272,13 +311,13 @@ func buildReminderArtifact(capability policy.WatchCapability, ctx MatchingContex
 		args["appointment_at"] = appointmentAt.UTC().Format(time.RFC3339)
 		return UpdateIntentArtifact{
 			CapabilityID: capability.ID,
-			Kind:       sessionwatch.KindAppointmentReminder,
-			Source:     sessionwatch.SourceRuntime,
-			SubjectRef: firstNonEmpty(sessionwatch.ExtractSubjectRef(args, "appointment_id", "booking_id", "id"), appointmentAt.UTC().Format(time.RFC3339)),
-			ToolID:     toolID,
-			Arguments:  args,
-			RemindAt:   sessionwatch.ReminderTimeFromAppointment(appointmentAt, now).UTC().Format(time.RFC3339),
-			Rationale:  "runtime_resolved_" + capability.ID,
+			Kind:         sessionwatch.KindAppointmentReminder,
+			Source:       sessionwatch.SourceRuntime,
+			SubjectRef:   firstNonEmpty(sessionwatch.ExtractSubjectRef(args, "appointment_id", "booking_id", "id"), appointmentAt.UTC().Format(time.RFC3339)),
+			ToolID:       toolID,
+			Arguments:    args,
+			RemindAt:     sessionwatch.ReminderTimeFromAppointment(appointmentAt, now).UTC().Format(time.RFC3339),
+			Rationale:    "runtime_resolved_" + capability.ID,
 		}, true
 	}
 	return UpdateIntentArtifact{}, false

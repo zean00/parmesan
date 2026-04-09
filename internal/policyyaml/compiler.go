@@ -371,6 +371,18 @@ func validateWatchCapabilities(items []policy.WatchCapability) error {
 		if err := validateNonEmptyUnique("watch_capability.subject_keys", item.SubjectKeys); err != nil {
 			return err
 		}
+		if err := validateNonEmptyUnique("watch_capability.required_fields", item.RequiredFields); err != nil {
+			return err
+		}
+		if err := validateNonEmptyUnique("watch_capability.remind_at_keys", item.RemindAtKeys); err != nil {
+			return err
+		}
+		if err := validateNonEmptyUnique("watch_capability.status_keys", item.StatusKeys); err != nil {
+			return err
+		}
+		if err := validateNonEmptyUnique("watch_capability.stop_values", item.StopValues); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -385,7 +397,51 @@ func validateQualityProfile(profile policy.QualityProfile) error {
 	if err := validateNonEmptyUnique("quality_profile.required_evidence", profile.RequiredEvidence); err != nil {
 		return err
 	}
-	return validateNonEmptyUnique("quality_profile.required_verification_steps", profile.RequiredVerificationSteps)
+	if err := validateNonEmptyUnique("quality_profile.required_verification_steps", profile.RequiredVerificationSteps); err != nil {
+		return err
+	}
+	if err := validateNonEmptyUnique("quality_profile.high_risk_indicators", profile.HighRiskIndicators); err != nil {
+		return err
+	}
+	if err := validateNonEmptyUnique("quality_profile.refusal_signals", profile.RefusalSignals); err != nil {
+		return err
+	}
+	if err := validateNonEmptyUnique("quality_profile.escalation_signals", profile.EscalationSignals); err != nil {
+		return err
+	}
+	seen := map[string]struct{}{}
+	for _, item := range profile.ClaimProfiles {
+		if err := validateID("quality_profile.claim_profile", item.ID, seen); err != nil {
+			return err
+		}
+		if err := validateNonEmptyUnique("quality_profile.claim_profile.match_terms", item.MatchTerms); err != nil {
+			return err
+		}
+		if err := validateNonEmptyUnique("quality_profile.claim_profile.required_evidence", item.RequiredEvidence); err != nil {
+			return err
+		}
+		if err := validateNonEmptyUnique("quality_profile.claim_profile.required_verification", item.RequiredVerification); err != nil {
+			return err
+		}
+		if err := validateNonEmptyUnique("quality_profile.claim_profile.allowed_commitments", item.AllowedCommitments); err != nil {
+			return err
+		}
+		if err := validateNonEmptyUnique("quality_profile.claim_profile.verification_qualifiers", item.VerificationQualifiers); err != nil {
+			return err
+		}
+		if err := validateNonEmptyUnique("quality_profile.claim_profile.contradiction_markers", item.ContradictionMarkers); err != nil {
+			return err
+		}
+	}
+	for concept, aliases := range profile.SemanticConcepts {
+		if strings.TrimSpace(concept) == "" {
+			return errors.New("quality_profile.semantic_concepts requires non-empty concept keys")
+		}
+		if err := validateNonEmptyUnique("quality_profile.semantic_concepts."+concept, aliases); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateLifecyclePolicy(policyDef policy.LifecyclePolicy) error {
@@ -425,28 +481,31 @@ func defaultSemanticsPolicy() policy.SemanticsPolicy {
 func defaultWatchCapabilities() []policy.WatchCapability {
 	return []policy.WatchCapability{
 		{
-			ID:                    "delivery_status_watch",
-			Kind:                  "delivery_status",
-			ScheduleStrategy:      "poll",
-			TriggerSignals:        []string{"delivery", "tracking", "order_status", "return_status"},
-			ToolMatchTerms:        []string{"order", "delivery", "shipping", "tracking"},
-			SubjectKeys:           []string{"order_id", "tracking_id", "shipment_id", "package_id", "id"},
-			PollIntervalSeconds:   int((15 * time.Minute) / time.Second),
-			StopCondition:         "delivered",
+			ID:                     "delivery_status_watch",
+			Kind:                   "delivery_status",
+			ScheduleStrategy:       "poll",
+			TriggerSignals:         []string{"delivery", "tracking", "order_status", "return_status"},
+			ToolMatchTerms:         []string{"order", "delivery", "shipping", "tracking"},
+			SubjectKeys:            []string{"order_id", "tracking_id", "shipment_id", "package_id", "id"},
+			StatusKeys:             []string{"delivery_status", "status", "state", "tracking_status"},
+			PollIntervalSeconds:    int((15 * time.Minute) / time.Second),
+			StopCondition:          "delivered",
+			StopValues:             []string{"delivered"},
 			AllowLifecycleFallback: true,
-			DeliveryTemplate:      "I have an update on your delivery status: {{status}}.",
+			DeliveryTemplate:       "I have an update on your delivery status: {{status}}.",
 		},
 		{
-			ID:                    "appointment_reminder_watch",
-			Kind:                  "appointment_reminder",
-			ScheduleStrategy:      "reminder",
-			TriggerSignals:        []string{"scheduling", "appointment_reminder"},
-			ToolMatchTerms:        []string{"appointment", "schedule", "calendar", "booking"},
-			SubjectKeys:           []string{"appointment_id", "booking_id", "id"},
-			RequiredFields:        []string{"appointment_at"},
-			ReminderLeadSeconds:   3600,
+			ID:                     "appointment_reminder_watch",
+			Kind:                   "appointment_reminder",
+			ScheduleStrategy:       "reminder",
+			TriggerSignals:         []string{"scheduling", "appointment_reminder"},
+			ToolMatchTerms:         []string{"appointment", "schedule", "calendar", "booking"},
+			SubjectKeys:            []string{"appointment_id", "booking_id", "id"},
+			RequiredFields:         []string{"appointment_at"},
+			RemindAtKeys:           []string{"appointment_at", "scheduled_for", "starts_at", "remind_at", "time", "date"},
+			ReminderLeadSeconds:    3600,
 			AllowLifecycleFallback: true,
-			DeliveryTemplate:      "This is your reminder about the appointment scheduled for {{appointment_at}}.",
+			DeliveryTemplate:       "This is your reminder about the appointment scheduled for {{appointment_at}}.",
 		},
 	}
 }
@@ -463,6 +522,50 @@ func defaultQualityProfile(existing policy.QualityProfile) policy.QualityProfile
 	}
 	if len(existing.RequiredEvidence) == 0 {
 		existing.RequiredEvidence = []string{"matched_guideline"}
+	}
+	if len(existing.HighRiskIndicators) == 0 {
+		existing.HighRiskIndicators = []string{
+			"within 30 days",
+			"instant replacement",
+			"guarantee",
+			"guaranteed",
+			"refund",
+			"replacement",
+			"approved",
+			"eligible",
+			"qualify",
+			"qualifies",
+		}
+	}
+	if len(existing.ClaimProfiles) == 0 {
+		existing.ClaimProfiles = []policy.QualityClaimProfile{
+			{ID: "refund_commitment", MatchTerms: []string{"refund", "reimbursement", "credit"}, Risk: "high", RequiredEvidence: []string{"policy_or_knowledge", "approval"}, RequiredVerification: []string{"review", "verification"}, AllowedCommitments: []string{"verification_first"}, VerificationQualifiers: []string{"after verification", "after review", "pending review", "requires review"}, ContradictionMarkers: []string{"not eligible", "requires review", "after review", "before review"}},
+			{ID: "replacement_commitment", MatchTerms: []string{"replacement", "replace", "exchange", "swap"}, Risk: "high", RequiredEvidence: []string{"policy_or_knowledge", "approval"}, RequiredVerification: []string{"review", "verification"}, AllowedCommitments: []string{"verification_first"}, VerificationQualifiers: []string{"after verification", "after review", "pending review", "requires review"}, ContradictionMarkers: []string{"not eligible", "requires review", "after review", "before review"}},
+			{ID: "approval_commitment", MatchTerms: []string{"approved", "approval", "authorized", "authorization"}, Risk: "high", RequiredEvidence: []string{"approval", "matched_guideline"}, RequiredVerification: []string{"approval", "review"}, AllowedCommitments: []string{"approval_required"}, VerificationQualifiers: []string{"after approval", "pending approval", "requires approval"}, ContradictionMarkers: []string{"requires approval", "pending approval", "not approved"}},
+			{ID: "escalation_commitment", MatchTerms: []string{"escalat", "handoff", "human operator", "operator review"}, Risk: "medium", RequiredEvidence: []string{"escalation", "matched_guideline"}, RequiredVerification: []string{"handoff"}, AllowedCommitments: []string{"safe_escalation"}, VerificationQualifiers: []string{"for review", "to a human", "to an operator"}, ContradictionMarkers: []string{"cannot escalate", "no escalation"}},
+			{ID: "eligibility", MatchTerms: []string{"eligible", "eligibility", "qualify", "qualifies"}, Risk: "high", RequiredEvidence: []string{"eligibility", "policy_or_knowledge"}, RequiredVerification: []string{"review", "verification"}, AllowedCommitments: []string{"verification_first"}, VerificationQualifiers: []string{"after verification", "after review", "pending review"}, ContradictionMarkers: []string{"not eligible", "requires review", "after review"}},
+			{ID: "timeline", MatchTerms: []string{"within ", " day", " days", "hour", "hours", "timeline", "window"}, Risk: "medium", RequiredEvidence: []string{"timeline", "policy_or_knowledge"}, RequiredVerification: []string{"review"}, AllowedCommitments: []string{"cautious policy-backed guidance"}, VerificationQualifiers: []string{"after verification", "after review", "once approved"}, ContradictionMarkers: []string{"after verification", "after review", "timeline may vary"}},
+			{ID: "preference", MatchTerms: []string{"call me", "prefer", "preferred", "instead"}, Risk: "medium", RequiredEvidence: []string{"customer_preference"}, AllowedCommitments: []string{"preference_following"}},
+		}
+	}
+	if existing.SemanticConcepts == nil {
+		existing.SemanticConcepts = map[string][]string{
+			"refund":       {"refund", "refunds", "refunded", "reimbursement", "reimburse", "reimbursed", "credit", "credited"},
+			"replacement":  {"replacement", "replacements", "replace", "replaced", "exchange", "exchanges", "swap", "swapped"},
+			"eligibility":  {"eligible", "eligibility", "qualify", "qualifies", "qualified", "qualifying"},
+			"approval":     {"approval", "approve", "approved", "authorization", "authorize", "authorized"},
+			"verification": {"review", "reviewed", "verification", "verify", "verified", "confirm", "confirmed", "validation", "validate", "validated"},
+			"immediate":    {"instant", "immediate", "immediately", "right", "away"},
+			"promise":      {"guarantee", "guaranteed", "promise", "promised", "commit", "committed"},
+			"timeline":     {"timeline", "deadline", "window", "days", "day", "hours", "hour"},
+			"escalation":   {"escalate", "escalation", "handoff", "operator", "human"},
+		}
+	}
+	if len(existing.RefusalSignals) == 0 {
+		existing.RefusalSignals = []string{"cannot", "can't", "not", "unable", "safe", "instead", "but i can", "can help"}
+	}
+	if len(existing.EscalationSignals) == 0 {
+		existing.EscalationSignals = []string{"human", "operator", "escalat", "handoff", "review"}
 	}
 	if existing.BlueprintRules == nil {
 		existing.BlueprintRules = map[string][]string{

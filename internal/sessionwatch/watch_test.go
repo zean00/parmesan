@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/store/memory"
 )
@@ -49,5 +50,38 @@ func TestParseAppointmentTimeFromText(t *testing.T) {
 	want := time.Date(2026, 4, 10, 18, 0, 0, 0, time.UTC)
 	if !parsed.Equal(want) {
 		t.Fatalf("parsed = %v, want %v", parsed, want)
+	}
+}
+
+func TestBuildIntentFromCapabilitySupportsGenericPollingAndReminder(t *testing.T) {
+	now := time.Date(2026, 4, 9, 10, 0, 0, 0, time.UTC)
+	polling, ok := BuildIntentFromCapability(policy.WatchCapability{
+		ID:                  "shipment_watch",
+		Kind:                "shipment_progress",
+		ScheduleStrategy:    "poll",
+		SubjectKeys:         []string{"shipment_id"},
+		PollIntervalSeconds: 600,
+		StopCondition:       "completed",
+	}, SourceRuntime, "shipping.track", "", map[string]any{"shipment_id": "ship_123"}, now)
+	if !ok {
+		t.Fatal("expected generic polling watch intent")
+	}
+	if polling.Kind != "shipment_progress" || polling.SubjectRef != "ship_123" || polling.PollInterval != 10*time.Minute {
+		t.Fatalf("polling = %#v", polling)
+	}
+
+	reminder, ok := BuildIntentFromCapability(policy.WatchCapability{
+		ID:                  "followup_reminder",
+		Kind:                "followup_reminder",
+		ScheduleStrategy:    "reminder",
+		RemindAtKeys:        []string{"follow_up_at"},
+		ReminderLeadSeconds: 1800,
+	}, SourceRuntime, "", "", map[string]any{"follow_up_at": "2026-04-09T12:00:00Z"}, now)
+	if !ok {
+		t.Fatal("expected generic reminder watch intent")
+	}
+	want := time.Date(2026, 4, 9, 11, 30, 0, 0, time.UTC)
+	if !reminder.NextRunAt.Equal(want) {
+		t.Fatalf("reminder.NextRunAt = %v, want %v", reminder.NextRunAt, want)
 	}
 }

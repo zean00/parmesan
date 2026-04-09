@@ -1,6 +1,10 @@
 package semantics
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/sahal/parmesan/internal/domain/policy"
+)
 
 func TestSignalsAliasAndPhraseFamilies(t *testing.T) {
 	t.Parallel()
@@ -63,6 +67,36 @@ func TestCategories(t *testing.T) {
 	}
 	if _, ok := got[string(CategoryConfirmation)]; !ok {
 		t.Fatalf("Categories() = %#v, want confirmation", got)
+	}
+}
+
+func TestSignalsForPolicyUsesAuthoredSemanticPack(t *testing.T) {
+	t.Parallel()
+
+	sem := policy.SemanticsPolicy{
+		Signals: []policy.SemanticSignal{
+			{ID: "parcel_update", Tokens: []string{"parcel", "courier"}},
+		},
+		RelativeDates: []string{"next friday"},
+		Categories: []policy.SemanticCategory{
+			{ID: "logistics", Signals: []string{"parcel_update"}},
+		},
+		Slots: []policy.SemanticSlot{
+			{Field: "tracking_code", Kind: "product_like"},
+		},
+	}
+	got := SignalsForPolicy(sem, "Please ask the courier for my parcel update next Friday")
+	if !containsString(got, "parcel_update") {
+		t.Fatalf("SignalsForPolicy() = %#v, want parcel_update", got)
+	}
+	if got := RelativeDateTermPolicy(sem, "check again next friday"); got != "next friday" {
+		t.Fatalf("RelativeDateTermPolicy() = %q, want next friday", got)
+	}
+	if got := SlotKindForFieldPolicy(sem, "tracking_code"); got != SlotProductLike {
+		t.Fatalf("SlotKindForFieldPolicy() = %q, want product_like", got)
+	}
+	if cats := CategoriesForPolicy(sem, []string{"parcel_update"}); len(cats) != 1 {
+		t.Fatalf("CategoriesForPolicy() = %#v, want logistics category", cats)
 	}
 }
 

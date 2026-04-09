@@ -397,7 +397,7 @@ func TestMatchClaimsDetectsContradictedEvidence(t *testing.T) {
 		}}},
 	}
 
-	claims := ExtractClaims("You qualify for an instant replacement right away.")
+	claims := ExtractClaims("You qualify for an instant replacement right away.", policy.QualityProfile{})
 	matches := MatchClaims(view, claims)
 	if len(matches) == 0 || matches[0].FailureReason != "contradicted_by_evidence" {
 		t.Fatalf("matches = %#v, want contradicted_by_evidence", matches)
@@ -414,7 +414,7 @@ func TestMatchClaimsUsesSemanticEvidenceConcepts(t *testing.T) {
 		}}},
 	}
 
-	claims := ExtractClaims("Refund and replacement eligibility can be reviewed after verification.")
+	claims := ExtractClaims("Refund and replacement eligibility can be reviewed after verification.", policy.QualityProfile{})
 	matches := MatchClaims(view, claims)
 	if len(matches) == 0 || !matches[0].Supported {
 		t.Fatalf("matches = %#v, want semantic support", matches)
@@ -434,10 +434,51 @@ func TestMatchClaimsDetectsSemanticContradiction(t *testing.T) {
 		}}},
 	}
 
-	claims := ExtractClaims("You qualify for an instant replacement right away.")
+	claims := ExtractClaims("You qualify for an instant replacement right away.", policy.QualityProfile{})
 	matches := MatchClaims(view, claims)
 	if len(matches) == 0 || matches[0].FailureReason != "contradicted_by_evidence" {
 		t.Fatalf("matches = %#v, want semantic contradiction", matches)
+	}
+}
+
+func TestExtractClaimsUsesQualityProfileClaimProfiles(t *testing.T) {
+	profile := policy.QualityProfile{
+		ClaimProfiles: []policy.QualityClaimProfile{
+			{
+				ID:                   "tracking_update",
+				MatchTerms:           []string{"tracking update", "shipping status"},
+				Risk:                 "medium",
+				RequiredEvidence:     []string{"retrieved_knowledge"},
+				RequiredVerification: []string{"tracking_check"},
+				AllowedCommitments:   []string{"status_only"},
+			},
+		},
+	}
+	claims := ExtractClaims("I can share a tracking update once the shipping status is checked.", profile)
+	if len(claims) == 0 {
+		t.Fatal("expected extracted claim")
+	}
+	if claims[0].Type != "tracking_update" || claims[0].Risk != "medium" {
+		t.Fatalf("claims = %#v", claims)
+	}
+	if len(claims[0].RequiredEvidenceKinds) == 0 || claims[0].RequiredEvidenceKinds[0] != "retrieved_knowledge" {
+		t.Fatalf("claims = %#v", claims)
+	}
+}
+
+func TestRefusalFindingsUsesQualityProfileSignals(t *testing.T) {
+	view := policyruntime.EngineResult{
+		QualityProfile: policy.QualityProfile{
+			RefusalSignals: []string{"unsupported", "safe alternative"},
+		},
+		ScopeBoundaryStage: policyruntime.ScopeBoundaryStageResult{
+			Action: "redirect",
+			Reply:  "That request is unsupported. I can offer a safe alternative.",
+		},
+	}
+	findings := refusalFindings(view, "That request is unsupported. I can offer a safe alternative.")
+	if len(findings) != 0 {
+		t.Fatalf("findings = %#v, want no refusal failures", findings)
 	}
 }
 

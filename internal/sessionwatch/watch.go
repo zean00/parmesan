@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/policy"
+	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/store"
 )
 
@@ -82,18 +82,15 @@ func NormalizeIntent(intent UpdateIntent, now time.Time) UpdateIntent {
 	if intent.PollInterval < 0 {
 		intent.PollInterval = 0
 	}
-	if intent.Kind == KindDeliveryStatus && intent.PollInterval <= 0 {
-		intent.PollInterval = 15 * time.Minute
-	}
 	if intent.DedupeKey == "" {
 		intent.DedupeKey = BuildDedupeKey(intent)
 	}
 	if intent.NextRunAt.IsZero() {
-		if intent.Kind == KindDeliveryStatus && intent.PollInterval > 0 {
+		if intent.PollInterval > 0 {
 			intent.NextRunAt = now.Add(intent.PollInterval)
 		}
 	}
-	if intent.Kind == KindAppointmentReminder && intent.NextRunAt.Before(now.Add(5*time.Second)) {
+	if intent.PollInterval == 0 && intent.NextRunAt.Before(now.Add(5*time.Second)) {
 		intent.NextRunAt = now.Add(5 * time.Second)
 	}
 	return intent
@@ -152,41 +149,59 @@ func BuildAppointmentReminderIntent(source, subjectRef string, remindAt time.Tim
 }
 
 func BuildIntentFromCapability(capability policy.WatchCapability, source, toolID, subjectRef string, args map[string]any, now time.Time) (UpdateIntent, bool) {
+	if len(capability.SubjectKeys) > 0 && strings.TrimSpace(subjectRef) == "" {
+		subjectRef = ExtractSubjectRef(args, capability.SubjectKeys...)
+	}
+	intent := UpdateIntent{
+		Kind:          strings.TrimSpace(capability.Kind),
+		Source:        firstNonEmpty(source, SourceLifecycle),
+		SubjectRef:    strings.TrimSpace(subjectRef),
+		ToolID:        strings.TrimSpace(firstNonEmpty(toolID, capability.ID)),
+		Arguments:     cloneMap(args),
+		StopCondition: strings.TrimSpace(capability.StopCondition),
+	}
 	switch strings.ToLower(strings.TrimSpace(capability.ScheduleStrategy)) {
 	case "reminder":
-		appointmentAt, ok := ParseAppointmentTime(args, now)
+		remindAt, ok := reminderTimeForCapability(capability, args, now)
 		if !ok {
 			return UpdateIntent{}, false
 		}
+		if intent.SubjectRef == "" {
+			intent.SubjectRef = remindAt.UTC().Format(time.RFC3339)
+		}
+		intent.NextRunAt = remindAt.UTC()
+	default:
+		if intent.SubjectRef == "" || intent.ToolID == "" {
+			return UpdateIntent{}, false
+		}
+		if capability.PollIntervalSeconds > 0 {
+			intent.PollInterval = time.Duration(capability.PollIntervalSeconds) * time.Second
+		} else {
+			intent.PollInterval = 15 * time.Minute
+		}
+	}
+	return NormalizeIntent(intent, now), true
+}
+
+func reminderTimeForCapability(capability policy.WatchCapability, args map[string]any, now time.Time) (time.Time, bool) {
+	if parsed, ok := parseReminderBaseTime(capability, args, now); ok {
 		lead := time.Duration(capability.ReminderLeadSeconds) * time.Second
-		remindAt := appointmentAt.Add(-lead)
+		remindAt := parsed.Add(-lead)
 		if remindAt.Before(now.Add(5 * time.Second)) {
 			remindAt = now.Add(5 * time.Second)
 		}
-		intent, ok := BuildAppointmentReminderIntent(source, firstNonEmpty(subjectRef, appointmentAt.UTC().Format(time.RFC3339)), remindAt, args, now)
-		if ok && strings.TrimSpace(toolID) != "" {
-			intent.ToolID = strings.TrimSpace(toolID)
-		}
-		return intent, ok
-	default:
-		if len(capability.SubjectKeys) > 0 && strings.TrimSpace(subjectRef) == "" {
-			subjectRef = ExtractSubjectRef(args, capability.SubjectKeys...)
-		}
-		intent, ok := BuildDeliveryIntent(source, firstNonEmpty(toolID, capability.ID), subjectRef, args, now)
-		if !ok {
-			return UpdateIntent{}, false
-		}
-		intent.Kind = capability.Kind
-		intent.StopCondition = firstNonEmpty(strings.TrimSpace(capability.StopCondition), intent.StopCondition)
-		if capability.PollIntervalSeconds > 0 {
-			intent.PollInterval = time.Duration(capability.PollIntervalSeconds) * time.Second
-			intent.NextRunAt = now.Add(intent.PollInterval)
-		}
-		if strings.TrimSpace(toolID) != "" {
-			intent.ToolID = strings.TrimSpace(toolID)
-		}
-		return NormalizeIntent(intent, now), true
+		return remindAt.UTC(), true
 	}
+	return time.Time{}, false
+}
+
+func parseReminderBaseTime(capability policy.WatchCapability, args map[string]any, now time.Time) (time.Time, bool) {
+	for _, key := range capability.RemindAtKeys {
+		if parsed, ok := parseTimeValue(args[key], now); ok {
+			return parsed, true
+		}
+	}
+	return ParseAppointmentTime(args, now)
 }
 
 func ReminderTimeFromAppointment(appointmentAt, now time.Time) time.Time {
