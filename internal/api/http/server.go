@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -322,6 +323,8 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/operator/policy/snapshots/{id}", s.operatorGetPolicySnapshot)
 	mux.HandleFunc("GET /v1/operator/policy/active-state", s.operatorGetPolicyActiveState)
 	mux.HandleFunc("GET /v1/operator/policy/composed-state", s.operatorGetPolicyComposedState)
+	mux.HandleFunc("GET /v1/operator/control-state", s.operatorGetControlState)
+	mux.HandleFunc("GET /v1/operator/control-state/history", s.operatorGetControlStateHistory)
 	mux.HandleFunc("GET /v1/operator/policy/artifacts", s.operatorListPolicyArtifacts)
 	mux.HandleFunc("GET /v1/operator/policy/artifacts/{id}", s.operatorGetPolicyArtifact)
 	mux.HandleFunc("GET /v1/operator/policy/artifacts/{id}/edges", s.operatorListPolicyArtifactEdges)
@@ -547,6 +550,32 @@ func (s *Server) operatorGetPolicyComposedState(w http.ResponseWriter, r *http.R
 	payload, err := s.policyComposedStateView(r.Context(), sess)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) operatorGetControlState(w http.ResponseWriter, r *http.Request) {
+	payload, err := s.operatorControlStatePayload(r.Context(), r.URL.Query(), false)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "not found") {
+			status = http.StatusBadRequest
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) operatorGetControlStateHistory(w http.ResponseWriter, r *http.Request) {
+	payload, err := s.operatorControlStatePayload(r.Context(), r.URL.Query(), true)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "not found") {
+			status = http.StatusBadRequest
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 	writeJSON(w, http.StatusOK, payload)
@@ -785,14 +814,23 @@ func (s *Server) getProposalSummary(w http.ResponseWriter, r *http.Request) {
 			filteredRuns = append(filteredRuns, run)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	controlGroups := map[string]string{}
+	if bundleID := strings.TrimSpace(item.SourceBundleID); bundleID != "" {
+		controlGroups["rollout"] = "rollout:" + bundleID
+	}
+	payload := map[string]any{
 		"proposal":       item,
 		"rollouts":       filteredRollouts,
 		"eval_runs":      filteredRuns,
 		"latest_quality": latestProposalQuality(r.Context(), s.store, proposalID),
 		"lineage":        mustGraphLineagePayload(r.Context(), s.store, proposalID),
 		"active_state":   s.proposalActiveStateSummary(r.Context(), item, filteredRollouts),
-	})
+		"control_groups": controlGroups,
+	}
+	if history, err := s.graphRecentChangesForGroups(r.Context(), orderedControlGroups(controlGroups), 20); err == nil {
+		payload["recent_changes"] = history
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) transitionProposal(w http.ResponseWriter, r *http.Request) {
@@ -2270,6 +2308,14 @@ func (s *Server) operatorGetFeedback(w http.ResponseWriter, r *http.Request) {
 	if lineage, err := s.graphLineagePayload(r.Context(), item.ID); err == nil {
 		payload["lineage"] = lineage
 	}
+	controlGroups := map[string]string{}
+	if sessionID := strings.TrimSpace(item.SessionID); sessionID != "" {
+		controlGroups["feedback"] = "feedback:" + sessionID
+	}
+	payload["control_groups"] = controlGroups
+	if history, err := s.graphRecentChangesForGroups(r.Context(), orderedControlGroups(controlGroups), 20); err == nil {
+		payload["recent_changes"] = history
+	}
 	writeJSON(w, http.StatusOK, payload)
 }
 
@@ -2284,15 +2330,26 @@ func (s *Server) operatorGetFeedbackLineage(w http.ResponseWriter, r *http.Reque
 
 func (s *Server) operatorGetSessionTeachingState(w http.ResponseWriter, r *http.Request) {
 	sessionID := strings.TrimSpace(r.PathValue("id"))
-	sess, err := s.store.GetSession(r.Context(), sessionID)
+	payload, err := s.sessionTeachingStatePayload(r.Context(), sessionID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "not found") {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
-	items, err := s.store.ListFeedbackRecords(r.Context(), feedback.Query{SessionID: sessionID, Limit: 1000})
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) sessionTeachingStatePayload(ctx context.Context, sessionID string) (map[string]any, error) {
+	sess, err := s.store.GetSession(ctx, sessionID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return nil, err
+	}
+	items, err := s.store.ListFeedbackRecords(ctx, feedback.Query{SessionID: sessionID, Limit: 1000})
+	if err != nil {
+		return nil, err
 	}
 	grouped := map[string][]any{
 		"preferences":         {},
@@ -2304,22 +2361,33 @@ func (s *Server) operatorGetSessionTeachingState(w http.ResponseWriter, r *http.
 	perFeedback := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		entry := map[string]any{"feedback": item}
-		if outputs, err := s.feedbackOutputsSummary(r.Context(), item); err == nil {
+		if outputs, err := s.feedbackOutputsSummary(ctx, item); err == nil {
 			entry["outputs_summary"] = outputs
 			for key, list := range outputs {
 				grouped[key] = append(grouped[key], list...)
 			}
 		}
-		if lineage, err := s.graphLineagePayload(r.Context(), item.ID); err == nil {
+		if lineage, err := s.graphLineagePayload(ctx, item.ID); err == nil {
 			entry["lineage"] = lineage
 		}
 		perFeedback = append(perFeedback, entry)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	controlGroups := map[string]string{"feedback": "feedback:" + sessionID}
+	if history, err := s.graphRecentChangesForGroups(ctx, orderedControlGroups(controlGroups), 20); err == nil {
+		return map[string]any{
+			"session":            sess,
+			"feedback_records":   perFeedback,
+			"aggregated_outputs": grouped,
+			"control_groups":     controlGroups,
+			"recent_changes":     history,
+		}, nil
+	}
+	return map[string]any{
 		"session":            sess,
 		"feedback_records":   perFeedback,
 		"aggregated_outputs": grouped,
-	})
+		"control_groups":     controlGroups,
+	}, nil
 }
 
 type regressionFixtureView struct {
@@ -2728,6 +2796,15 @@ func (s *Server) policyActiveStateView(ctx context.Context, sess session.Session
 			payload["rollout"] = item
 		}
 	}
+	controlGroups := map[string]string{}
+	if bundleID := strings.TrimSpace(selection.BundleID); bundleID != "" {
+		controlGroups["policy"] = bundleID
+		controlGroups["rollout"] = "rollout:" + bundleID
+	}
+	payload["control_groups"] = controlGroups
+	if history, err := s.graphRecentChangesForGroups(ctx, orderedControlGroups(controlGroups), 20); err == nil {
+		payload["recent_changes"] = history
+	}
 	return payload, nil
 }
 
@@ -2761,6 +2838,323 @@ func (s *Server) policyComposedStateView(ctx context.Context, sess session.Sessi
 		payload["knowledge_active_state"] = knowledgeState
 	}
 	return payload, nil
+}
+
+func (s *Server) operatorControlStatePayload(ctx context.Context, query url.Values, historyOnly bool) (map[string]any, error) {
+	agentID := strings.TrimSpace(query.Get("agent_id"))
+	scopeKind := strings.TrimSpace(query.Get("scope_kind"))
+	scopeID := strings.TrimSpace(query.Get("scope_id"))
+	if agentID == "" && (scopeKind == "" || scopeID == "") {
+		return nil, errors.New("agent_id or scope_kind/scope_id is required")
+	}
+	channel := strings.TrimSpace(query.Get("channel"))
+	if channel == "" {
+		channel = "web"
+	}
+	customerID := strings.TrimSpace(query.Get("customer_id"))
+	sessionID := strings.TrimSpace(query.Get("session_id"))
+	sessionKey := strings.TrimSpace(query.Get("session_key"))
+	limit, _ := strconv.Atoi(strings.TrimSpace(query.Get("limit")))
+	if limit <= 0 {
+		limit = 50
+	}
+	controlGroups := map[string]string{}
+	payload := map[string]any{
+		"scope": map[string]any{
+			"agent_id":   agentID,
+			"scope_kind": scopeKind,
+			"scope_id":   scopeID,
+			"channel":    channel,
+			"customer_id": customerID,
+			"session_id": sessionID,
+			"session_key": sessionKey,
+		},
+	}
+	var sessionStub session.Session
+	if agentID != "" {
+		sessionStub = session.Session{
+			ID:         firstNonEmpty(sessionID, sessionKey),
+			AgentID:    agentID,
+			CustomerID: customerID,
+			Channel:    channel,
+			Status:     session.StatusActive,
+		}
+		if policyState, err := s.policyComposedStateView(ctx, sessionStub); err == nil {
+			payload["policy"] = policyState
+			if selection, ok := policyState["selection"].(map[string]any); ok {
+				if bundleID := strings.TrimSpace(fmt.Sprint(selection["bundle_id"])); bundleID != "" {
+					controlGroups["policy"] = bundleID
+					controlGroups["rollout"] = "rollout:" + bundleID
+				}
+			}
+		}
+	}
+	if scopeKind == "" || scopeID == "" {
+		scopeKind, scopeID = qualityKnowledgeScope(sessionStub, nil)
+	}
+	if scopeKind != "" && scopeID != "" {
+		if knowledgeState, err := s.knowledgeActiveStatePayload(ctx, scopeKind, scopeID); err == nil {
+			payload["knowledge"] = knowledgeState
+			controlGroups["knowledge"] = "knowledge:" + scopeKind + ":" + scopeID
+		}
+	}
+	if agentID != "" && customerID != "" {
+		prefs, err := s.store.ListCustomerPreferences(ctx, customer.PreferenceQuery{AgentID: agentID, CustomerID: customerID})
+		if err == nil {
+			payload["preferences"] = prefs
+			controlGroups["customer"] = "customer:" + agentID + ":" + customerID
+		}
+	}
+	if sessionID != "" {
+		if teaching, err := s.sessionTeachingStatePayload(ctx, sessionID); err == nil {
+			payload["teaching"] = teaching
+			controlGroups["feedback"] = "feedback:" + sessionID
+		}
+	} else if sessionKey != "" {
+		if _, err := s.store.GetSession(ctx, sessionKey); err == nil {
+			if teaching, err := s.sessionTeachingStatePayload(ctx, sessionKey); err == nil {
+				payload["teaching"] = teaching
+				controlGroups["feedback"] = "feedback:" + sessionKey
+			}
+		}
+	}
+	groupIDs := orderedControlGroups(controlGroups)
+	payload["control_groups"] = controlGroups
+	if history, err := s.graphRecentChangesForGroups(ctx, groupIDs, limit); err == nil {
+		if historyOnly {
+			return map[string]any{
+				"scope":          payload["scope"],
+				"control_groups": controlGroups,
+				"recent_changes": history,
+			}, nil
+		}
+		payload["recent_changes"] = history
+	}
+	return payload, nil
+}
+
+func orderedControlGroups(groups map[string]string) []string {
+	keys := make([]string, 0, len(groups))
+	for _, groupID := range groups {
+		if groupID != "" {
+			keys = append(keys, groupID)
+		}
+	}
+	slices.Sort(keys)
+	return slices.Compact(keys)
+}
+
+func (s *Server) graphArtifactsByGroup(ctx context.Context, groupID string, limit int) ([]policy.GraphArtifact, error) {
+	if strings.TrimSpace(groupID) == "" {
+		return nil, nil
+	}
+	return s.store.ListPolicyArtifacts(ctx, policy.ArtifactQuery{BundleID: groupID, Limit: limit})
+}
+
+func (s *Server) graphEdgesByGroup(ctx context.Context, groupID string, limit int) ([]policy.GraphEdge, error) {
+	if strings.TrimSpace(groupID) == "" {
+		return nil, nil
+	}
+	return s.store.ListPolicyEdges(ctx, policy.EdgeQuery{BundleID: groupID, Limit: limit})
+}
+
+func (s *Server) graphAdjacentArtifacts(ctx context.Context, artifactIDs []string, depth int) ([]policy.GraphArtifact, error) {
+	if depth <= 0 || len(artifactIDs) == 0 {
+		return nil, nil
+	}
+	seen := map[string]policy.GraphArtifact{}
+	frontier := append([]string(nil), artifactIDs...)
+	for level := 0; level < depth; level++ {
+		var next []string
+		for _, id := range frontier {
+			outgoing, _ := s.store.ListPolicyEdges(ctx, policy.EdgeQuery{SourceID: id, Limit: 100})
+			incoming, _ := s.store.ListPolicyEdges(ctx, policy.EdgeQuery{TargetID: id, Limit: 100})
+			for _, edge := range append(outgoing, incoming...) {
+				for _, candidateID := range []string{edge.SourceID, edge.TargetID} {
+					if candidateID == id {
+						continue
+					}
+					if _, ok := seen[candidateID]; ok {
+						continue
+					}
+					if artifact, err := s.store.GetPolicyArtifact(ctx, candidateID); err == nil {
+						seen[candidateID] = artifact
+						next = append(next, candidateID)
+					}
+				}
+			}
+		}
+		frontier = next
+		if len(frontier) == 0 {
+			break
+		}
+	}
+	out := make([]policy.GraphArtifact, 0, len(seen))
+	for _, item := range seen {
+		out = append(out, item)
+	}
+	slices.SortFunc(out, func(a, b policy.GraphArtifact) int {
+		switch {
+		case a.CreatedAt.After(b.CreatedAt):
+			return -1
+		case a.CreatedAt.Before(b.CreatedAt):
+			return 1
+		default:
+			return strings.Compare(a.ID, b.ID)
+		}
+	})
+	return out, nil
+}
+
+func (s *Server) graphRecentChangesForGroups(ctx context.Context, groupIDs []string, limit int) ([]map[string]any, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	type item struct {
+		timestamp time.Time
+		payload   map[string]any
+		id        string
+	}
+	var entries []item
+	seen := map[string]struct{}{}
+	significantArtifactKinds := map[string]struct{}{
+		"knowledge_snapshot":      {},
+		"knowledge_update_proposal": {},
+		"operator_feedback":       {},
+		"customer_preference":     {},
+		"customer_preference_event": {},
+		"rollout_proposal":        {},
+		"rollout_record":          {},
+		"regression_fixture":      {},
+	}
+	significantEdgeKinds := map[string]struct{}{
+		"applied_to_snapshot": {},
+		"supersedes":          {},
+		"derived_from":        {},
+		"produced":            {},
+		"applies_to":          {},
+	}
+	for _, groupID := range groupIDs {
+		artifacts, _ := s.graphArtifactsByGroup(ctx, groupID, 200)
+		for _, artifact := range artifacts {
+			if _, ok := significantArtifactKinds[artifact.Kind]; !ok {
+				continue
+			}
+			key := "artifact:" + artifact.ID
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			entries = append(entries, item{
+				timestamp: artifact.CreatedAt,
+				id:        key,
+				payload: map[string]any{
+					"type":          "artifact",
+					"group_id":      groupID,
+					"artifact_id":   artifact.ID,
+					"artifact_kind": artifact.Kind,
+					"created_at":    artifact.CreatedAt,
+					"summary":       graphArtifactSummary(artifact),
+				},
+			})
+		}
+		edges, _ := s.graphEdgesByGroup(ctx, groupID, 400)
+		for _, edge := range edges {
+			if _, ok := significantEdgeKinds[edge.Kind]; !ok {
+				continue
+			}
+			key := "edge:" + edge.ID
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			entries = append(entries, item{
+				timestamp: edge.CreatedAt,
+				id:        key,
+				payload: map[string]any{
+					"type":       "edge",
+					"group_id":   groupID,
+					"edge_id":    edge.ID,
+					"edge_kind":  edge.Kind,
+					"source_id":  edge.SourceID,
+					"target_id":  edge.TargetID,
+					"created_at": edge.CreatedAt,
+				},
+			})
+		}
+	}
+	slices.SortFunc(entries, func(a, b item) int {
+		switch {
+		case a.timestamp.After(b.timestamp):
+			return -1
+		case a.timestamp.Before(b.timestamp):
+			return 1
+		default:
+			return strings.Compare(a.id, b.id)
+		}
+	})
+	if len(entries) > limit {
+		entries = entries[:limit]
+	}
+	out := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, entry.payload)
+	}
+	return out, nil
+}
+
+func graphArtifactSummary(artifact policy.GraphArtifact) map[string]any {
+	out := map[string]any{
+		"id":         artifact.ID,
+		"kind":       artifact.Kind,
+		"version":    artifact.Version,
+		"created_at": artifact.CreatedAt,
+	}
+	switch artifact.Kind {
+	case "knowledge_snapshot":
+		if snapshot, ok := artifact.Payload["snapshot"].(map[string]any); ok {
+			out["scope_kind"] = snapshot["scope_kind"]
+			out["scope_id"] = snapshot["scope_id"]
+		}
+	case "knowledge_update_proposal":
+		if proposal, ok := artifact.Payload["proposal"].(map[string]any); ok {
+			out["state"] = proposal["state"]
+			out["scope_kind"] = proposal["scope_kind"]
+			out["scope_id"] = proposal["scope_id"]
+		}
+	case "customer_preference":
+		if pref, ok := artifact.Payload["preference"].(map[string]any); ok {
+			out["key"] = pref["key"]
+			out["status"] = pref["status"]
+		}
+	case "customer_preference_event":
+		if evt, ok := artifact.Payload["preference_event"].(map[string]any); ok {
+			out["key"] = evt["key"]
+			out["action"] = evt["action"]
+		}
+	case "rollout_proposal":
+		if proposal, ok := artifact.Payload["proposal"].(map[string]any); ok {
+			out["state"] = proposal["state"]
+			out["source_bundle_id"] = proposal["source_bundle_id"]
+			out["candidate_bundle_id"] = proposal["candidate_bundle_id"]
+		}
+	case "rollout_record":
+		if rolloutRecord, ok := artifact.Payload["rollout"].(map[string]any); ok {
+			out["status"] = rolloutRecord["status"]
+			out["channel"] = rolloutRecord["channel"]
+		}
+	case "operator_feedback":
+		if feedbackRecord, ok := artifact.Payload["feedback"].(map[string]any); ok {
+			out["session_id"] = feedbackRecord["session_id"]
+			out["category"] = feedbackRecord["category"]
+		}
+	case "regression_fixture":
+		if fixture, ok := artifact.Payload["fixture"].(map[string]any); ok {
+			out["scenario_id"] = fixture["scenario_id"]
+			out["review_status"] = fixture["review_status"]
+		}
+	}
+	return out
 }
 
 func (s *Server) latestPolicySnapshotForBundle(ctx context.Context, bundleID string) (policy.Snapshot, bool) {
@@ -3031,6 +3425,9 @@ func (s *Server) knowledgeActiveStatePayload(ctx context.Context, scopeKind stri
 		"proposals":     proposals,
 		"lint_findings": findings,
 		"sync_jobs":     scopedJobs,
+		"control_groups": map[string]string{
+			"knowledge": "knowledge:" + scopeKind + ":" + scopeID,
+		},
 	}
 	if len(snapshots) > 0 {
 		payload["latest_snapshot"] = snapshots[0]
@@ -3041,6 +3438,9 @@ func (s *Server) knowledgeActiveStatePayload(ctx context.Context, scopeKind stri
 		if lineage, err := s.graphLineagePayload(ctx, snapshots[0].ID); err == nil {
 			payload["lineage"] = lineage
 		}
+	}
+	if history, err := s.graphRecentChangesForGroups(ctx, orderedControlGroups(payload["control_groups"].(map[string]string)), 20); err == nil {
+		payload["recent_changes"] = history
 	}
 	return payload, nil
 }
@@ -3168,12 +3568,21 @@ func (s *Server) rolloutSummaryPayload(ctx context.Context, item rollout.Record)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{
+	controlGroups := map[string]string{}
+	if bundleID := strings.TrimSpace(proposal.SourceBundleID); bundleID != "" {
+		controlGroups["rollout"] = "rollout:" + bundleID
+	}
+	payload := map[string]any{
 		"rollout":      item,
 		"proposal":     proposal,
 		"lineage":      mustGraphLineagePayload(ctx, s.store, item.ID),
 		"active_state": s.proposalActiveStateSummary(ctx, proposal, []rollout.Record{item}),
-	}, nil
+		"control_groups": controlGroups,
+	}
+	if history, err := s.graphRecentChangesForGroups(ctx, orderedControlGroups(controlGroups), 20); err == nil {
+		payload["recent_changes"] = history
+	}
+	return payload, nil
 }
 
 func uniqueSortedQualityDimensions(dimensions map[string]any) []string {

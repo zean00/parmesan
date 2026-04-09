@@ -621,6 +621,12 @@ func TestOperatorKnowledgeSnapshotDiffAndActiveState(t *testing.T) {
 	if _, ok := activePayload["diff"].(map[string]any); !ok {
 		t.Fatalf("active payload = %#v, want diff", activePayload)
 	}
+	if _, ok := activePayload["control_groups"].(map[string]any); !ok {
+		t.Fatalf("active payload = %#v, want control_groups", activePayload)
+	}
+	if _, ok := activePayload["recent_changes"].([]any); !ok {
+		t.Fatalf("active payload = %#v, want recent_changes", activePayload)
+	}
 }
 
 func TestOperatorFeedbackAndTeachingStateIncludeOutputsSummary(t *testing.T) {
@@ -676,6 +682,12 @@ func TestOperatorFeedbackAndTeachingStateIncludeOutputsSummary(t *testing.T) {
 	if len(outputs) == 0 {
 		t.Fatalf("feedback payload = %#v, want outputs_summary", feedbackPayload)
 	}
+	if _, ok := feedbackPayload["control_groups"].(map[string]any); !ok {
+		t.Fatalf("feedback payload = %#v, want control_groups", feedbackPayload)
+	}
+	if _, ok := feedbackPayload["recent_changes"].([]any); !ok {
+		t.Fatalf("feedback payload = %#v, want recent_changes", feedbackPayload)
+	}
 
 	req = httptest.NewRequest(http.MethodGet, "/v1/operator/sessions/sess_teaching/teaching-state", nil)
 	rec = httptest.NewRecorder()
@@ -690,6 +702,12 @@ func TestOperatorFeedbackAndTeachingStateIncludeOutputsSummary(t *testing.T) {
 	aggregated, _ := teachingPayload["aggregated_outputs"].(map[string]any)
 	if len(aggregated) == 0 {
 		t.Fatalf("teaching payload = %#v, want aggregated outputs", teachingPayload)
+	}
+	if _, ok := teachingPayload["control_groups"].(map[string]any); !ok {
+		t.Fatalf("teaching payload = %#v, want control_groups", teachingPayload)
+	}
+	if _, ok := teachingPayload["recent_changes"].([]any); !ok {
+		t.Fatalf("teaching payload = %#v, want recent_changes", teachingPayload)
 	}
 }
 
@@ -728,6 +746,12 @@ func TestRolloutSummaryAndPolicyComposedState(t *testing.T) {
 	if _, ok := rolloutPayload["active_state"].(map[string]any); !ok {
 		t.Fatalf("rollout payload = %#v, want active_state", rolloutPayload)
 	}
+	if _, ok := rolloutPayload["control_groups"].(map[string]any); !ok {
+		t.Fatalf("rollout payload = %#v, want control_groups", rolloutPayload)
+	}
+	if _, ok := rolloutPayload["recent_changes"].([]any); !ok {
+		t.Fatalf("rollout payload = %#v, want recent_changes", rolloutPayload)
+	}
 
 	req = httptest.NewRequest(http.MethodGet, "/v1/operator/policy/composed-state?agent_id=agent_rollout&channel=web", nil)
 	rec = httptest.NewRecorder()
@@ -742,6 +766,166 @@ func TestRolloutSummaryAndPolicyComposedState(t *testing.T) {
 	selection, _ := composedPayload["selection"].(map[string]any)
 	if selection["bundle_id"] != candidate.ID {
 		t.Fatalf("selection = %#v, want candidate bundle", selection)
+	}
+	if _, ok := composedPayload["control_groups"].(map[string]any); !ok {
+		t.Fatalf("composed payload = %#v, want control_groups", composedPayload)
+	}
+	if _, ok := composedPayload["recent_changes"].([]any); !ok {
+		t.Fatalf("composed payload = %#v, want recent_changes", composedPayload)
+	}
+}
+
+func TestOperatorControlStateAndHistory(t *testing.T) {
+	repo := memory.New()
+	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	base := policy.Bundle{ID: "bundle_control_state", Version: "v1", ImportedAt: now, Soul: policy.Soul{Identity: "base"}}
+	if err := repo.SaveBundle(context.Background(), base); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveAgentProfile(context.Background(), agent.Profile{
+		ID:                    "agent_control_state",
+		Name:                  "Support",
+		Status:                "active",
+		DefaultPolicyBundleID: base.ID,
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID:             "sess_control_state",
+		Channel:        "web",
+		AgentID:        "agent_control_state",
+		CustomerID:     "cust_control_state",
+		Status:         session.StatusActive,
+		LastActivityAt: now,
+		CreatedAt:      now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveKnowledgeSource(context.Background(), knowledge.Source{
+		ID:        "src_control_state",
+		ScopeKind: "agent",
+		ScopeID:   "agent_control_state",
+		Kind:      "folder",
+		URI:       "/docs/control",
+		Status:    "active",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveKnowledgePage(context.Background(), knowledge.Page{
+		ID:        "page_control_state",
+		ScopeKind: "agent",
+		ScopeID:   "agent_control_state",
+		SourceID:  "src_control_state",
+		Title:     "Shipping",
+		Body:      "Track orders from your account page.",
+		Checksum:  "sum-control",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveKnowledgeSnapshot(context.Background(), knowledge.Snapshot{
+		ID:        "ksnap_control_state",
+		ScopeKind: "agent",
+		ScopeID:   "agent_control_state",
+		PageIDs:   []string{"page_control_state"},
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pref := customer.Preference{
+		ID:         "pref_control_state",
+		AgentID:    "agent_control_state",
+		CustomerID: "cust_control_state",
+		Key:        "tone",
+		Value:      "formal",
+		Status:     customer.PreferenceStatusPending,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	event := customer.PreferenceEvent{
+		ID:           "pevt_control_state",
+		PreferenceID: "pref_control_state",
+		AgentID:      "agent_control_state",
+		CustomerID:   "cust_control_state",
+		Key:          "tone",
+		Value:        "formal",
+		Action:       "pending",
+		Source:       "operator_feedback",
+		CreatedAt:    now,
+	}
+	if err := repo.SaveCustomerPreference(context.Background(), pref, event); err != nil {
+		t.Fatal(err)
+	}
+	record := feedback.Record{
+		ID:        "feedback_control_state",
+		SessionID: "sess_control_state",
+		Text:      "remember formal tone",
+		Outputs: feedback.Outputs{
+			PreferenceIDs:      []string{"pref_control_state"},
+			PreferenceEventIDs: []string{"pevt_control_state"},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := repo.SaveFeedbackRecord(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/control-state?agent_id=agent_control_state&customer_id=cust_control_state&session_id=sess_control_state&channel=web", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("control-state status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := payload["policy"].(map[string]any); !ok {
+		t.Fatalf("payload = %#v, want policy", payload)
+	}
+	if _, ok := payload["knowledge"].(map[string]any); !ok {
+		t.Fatalf("payload = %#v, want knowledge", payload)
+	}
+	if _, ok := payload["teaching"].(map[string]any); !ok {
+		t.Fatalf("payload = %#v, want teaching", payload)
+	}
+	if prefs, ok := payload["preferences"].([]any); !ok || len(prefs) == 0 {
+		t.Fatalf("payload = %#v, want preferences", payload)
+	}
+	controlGroups, ok := payload["control_groups"].(map[string]any)
+	if !ok || len(controlGroups) == 0 {
+		t.Fatalf("payload = %#v, want control_groups", payload)
+	}
+	recentChanges, ok := payload["recent_changes"].([]any)
+	if !ok || len(recentChanges) == 0 {
+		t.Fatalf("payload = %#v, want recent_changes", payload)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/control-state/history?agent_id=agent_control_state&customer_id=cust_control_state&session_id=sess_control_state&channel=web", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("control-state history status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var historyPayload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &historyPayload); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := historyPayload["scope"].(map[string]any); !ok {
+		t.Fatalf("history payload = %#v, want scope", historyPayload)
+	}
+	if _, ok := historyPayload["control_groups"].(map[string]any); !ok {
+		t.Fatalf("history payload = %#v, want control_groups", historyPayload)
+	}
+	if changes, ok := historyPayload["recent_changes"].([]any); !ok || len(changes) == 0 {
+		t.Fatalf("history payload = %#v, want recent_changes", historyPayload)
 	}
 }
 
