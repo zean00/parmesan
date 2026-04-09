@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -291,6 +292,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/feedback", s.operatorCreateFeedback)
 	mux.HandleFunc("GET /v1/operator/feedback", s.operatorListFeedback)
 	mux.HandleFunc("GET /v1/operator/feedback/{id}", s.operatorGetFeedback)
+	mux.HandleFunc("GET /v1/operator/feedback/{id}/lineage", s.operatorGetFeedbackLineage)
 	mux.HandleFunc("GET /v1/operator/quality/regressions", s.operatorListRegressionFixtures)
 	mux.HandleFunc("POST /v1/operator/quality/regressions/{id}/state", s.operatorTransitionRegressionFixture)
 	mux.HandleFunc("GET /v1/operator/quality/regressions/export", s.operatorExportRegressionFixtures)
@@ -327,6 +329,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/operator/knowledge/pages", s.operatorListKnowledgePages)
 	mux.HandleFunc("GET /v1/operator/knowledge/proposals", s.operatorListKnowledgeProposals)
 	mux.HandleFunc("GET /v1/operator/knowledge/proposals/{id}", s.operatorGetKnowledgeProposal)
+	mux.HandleFunc("GET /v1/operator/knowledge/proposals/{id}/lineage", s.operatorGetKnowledgeProposalLineage)
 	mux.HandleFunc("GET /v1/operator/knowledge/proposals/{id}/preview", s.operatorPreviewKnowledgeProposal)
 	mux.HandleFunc("POST /v1/operator/knowledge/proposals/{id}/state", s.operatorTransitionKnowledgeProposal)
 	mux.HandleFunc("POST /v1/operator/knowledge/proposals/{id}/apply", s.operatorApplyKnowledgeProposal)
@@ -2167,6 +2170,15 @@ func (s *Server) operatorGetFeedback(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
+func (s *Server) operatorGetFeedbackLineage(w http.ResponseWriter, r *http.Request) {
+	payload, err := s.graphLineagePayload(r.Context(), strings.TrimSpace(r.PathValue("id")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
 type regressionFixtureView struct {
 	FeedbackID        string         `json:"feedback_id"`
 	SessionID         string         `json:"session_id"`
@@ -2378,6 +2390,58 @@ func regressionFixtureExportFromView(view regressionFixtureView) regressionFixtu
 		ReviewedBy:        view.ReviewedBy,
 		ReviewedAt:        view.ReviewedAt,
 	}
+}
+
+func (s *Server) graphLineagePayload(ctx context.Context, artifactID string) (map[string]any, error) {
+	artifact, err := s.store.GetPolicyArtifact(ctx, artifactID)
+	if err != nil {
+		return nil, err
+	}
+	outgoing, err := s.store.ListPolicyEdges(ctx, policy.EdgeQuery{SourceID: artifactID, Limit: 1000})
+	if err != nil {
+		return nil, err
+	}
+	incoming, err := s.store.ListPolicyEdges(ctx, policy.EdgeQuery{TargetID: artifactID, Limit: 1000})
+	if err != nil {
+		return nil, err
+	}
+	related := map[string]policy.GraphArtifact{}
+	for _, edge := range outgoing {
+		if edge.TargetID == artifactID {
+			continue
+		}
+		if item, err := s.store.GetPolicyArtifact(ctx, edge.TargetID); err == nil {
+			related[item.ID] = item
+		}
+	}
+	for _, edge := range incoming {
+		if edge.SourceID == artifactID {
+			continue
+		}
+		if item, err := s.store.GetPolicyArtifact(ctx, edge.SourceID); err == nil {
+			related[item.ID] = item
+		}
+	}
+	relatedItems := make([]policy.GraphArtifact, 0, len(related))
+	for _, item := range related {
+		relatedItems = append(relatedItems, item)
+	}
+	slices.SortFunc(relatedItems, func(a, b policy.GraphArtifact) int {
+		switch {
+		case a.CreatedAt.Before(b.CreatedAt):
+			return -1
+		case a.CreatedAt.After(b.CreatedAt):
+			return 1
+		default:
+			return strings.Compare(a.ID, b.ID)
+		}
+	})
+	return map[string]any{
+		"artifact":          artifact,
+		"incoming_edges":    incoming,
+		"outgoing_edges":    outgoing,
+		"related_artifacts": relatedItems,
+	}, nil
 }
 
 func uniqueSortedQualityDimensions(dimensions map[string]any) []string {
@@ -3177,6 +3241,15 @@ func (s *Server) operatorGetKnowledgeProposal(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, item)
 }
 
+func (s *Server) operatorGetKnowledgeProposalLineage(w http.ResponseWriter, r *http.Request) {
+	payload, err := s.graphLineagePayload(r.Context(), strings.TrimSpace(r.PathValue("id")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
 func (s *Server) operatorPreviewKnowledgeProposal(w http.ResponseWriter, r *http.Request) {
 	item, err := s.store.GetKnowledgeUpdateProposal(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -3219,6 +3292,9 @@ func (s *Server) operatorPreviewKnowledgeProposal(w http.ResponseWriter, r *http
 	}
 	if sections := s.proposalSectionPreviews(r.Context(), item); len(sections) > 0 {
 		payload["sections"] = sections
+	}
+	if lineage, err := s.graphLineagePayload(r.Context(), item.ID); err == nil {
+		payload["lineage"] = lineage
 	}
 	writeJSON(w, http.StatusOK, payload)
 }

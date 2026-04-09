@@ -273,6 +273,80 @@ func TestOperatorPolicyArtifactEndpointsExposeLineageLookup(t *testing.T) {
 	}
 }
 
+func TestOperatorKnowledgeProposalPreviewIncludesLineage(t *testing.T) {
+	repo := memory.New()
+	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	proposal := knowledge.UpdateProposal{
+		ID:        "kprop_preview",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		Kind:      "operator_feedback",
+		State:     "draft",
+		Payload:   map[string]any{"feedback_id": "feedback_preview", "page": map[string]any{"title": "Help", "body": "Text", "operation": "append"}},
+		Evidence:  []knowledge.Citation{{URI: "session:sess_1", Anchor: "trace_1"}},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := repo.SaveKnowledgeUpdateProposal(context.Background(), proposal); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/knowledge/proposals/kprop_preview/preview", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	lineage, ok := payload["lineage"].(map[string]any)
+	if !ok {
+		t.Fatalf("preview payload = %#v, want lineage block", payload)
+	}
+	incoming, _ := lineage["incoming_edges"].([]any)
+	if len(incoming) == 0 {
+		t.Fatalf("lineage = %#v, want incoming feedback edge", lineage)
+	}
+}
+
+func TestOperatorFeedbackLineageEndpointExposesRegressionFixture(t *testing.T) {
+	repo := memory.New()
+	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	record := feedback.Record{
+		ID:        "feedback_lineage",
+		SessionID: "sess_lineage",
+		Text:      "agent missed escalation",
+		Metadata: map[string]any{
+			"regression_fixture_candidate": map[string]any{
+				"scenario_id":   "operator_feedback_escalation",
+				"review_status": "accepted",
+			},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := repo.SaveFeedbackRecord(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/feedback/feedback_lineage/lineage", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("lineage status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	related, _ := payload["related_artifacts"].([]any)
+	if len(related) == 0 {
+		t.Fatalf("payload = %#v, want related regression fixture artifact", payload)
+	}
+}
+
 func TestSelectedPolicyBundlesUsesSnapshotOnly(t *testing.T) {
 	repo := memory.New()
 	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
