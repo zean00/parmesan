@@ -5443,7 +5443,10 @@ func (s *Server) enqueueSessionTurn(ctx context.Context, sessionID, eventID, sou
 		ExecutionID: exec.ID,
 		TraceID:     traceID,
 		CreatedAt:   now,
-		Async:       true,
+		// The trigger event must be durably visible before the worker evaluates
+		// the execution, otherwise a coalesced execution can be stranded waiting
+		// on an event that has not been flushed yet.
+		Async: false,
 	})
 	if err != nil {
 		return session.Event{}, "", "", err

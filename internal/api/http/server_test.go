@@ -80,6 +80,13 @@ func TestEnqueueSessionTurnCoalescesQuickCustomerMessages(t *testing.T) {
 	if len(steps) == 0 || steps[0].Status != execution.StatusWaiting || steps[0].NextAttemptAt.IsZero() {
 		t.Fatalf("first step = %#v, want waiting with wake cursor", steps)
 	}
+	events, err := repo.ListEvents(ctx, "sess_coalesce")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].ID != "evt_first" || events[1].ID != "evt_second" {
+		t.Fatalf("events = %#v, want both trigger events persisted immediately", events)
+	}
 }
 
 func TestEnqueueSessionTurnDoesNotCoalesceRunningExecution(t *testing.T) {

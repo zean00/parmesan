@@ -699,7 +699,7 @@ func (c *Client) AppendEvent(ctx context.Context, event session.Event) error {
 		return err
 	}
 	_, err = db.Exec(ctx, `
-		INSERT INTO session_events (id, session_id, source, kind, execution_id, payload, created_at, offset, trace_id, metadata_json, deleted)
+		INSERT INTO session_events (id, session_id, source, kind, execution_id, payload, created_at, "offset", trace_id, metadata_json, deleted)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (id) DO NOTHING
 	`, event.ID, event.SessionID, event.Source, event.Kind, nullString(event.ExecutionID), raw, event.CreatedAt, event.Offset, nullString(event.TraceID), metadata, event.Deleted)
@@ -712,7 +712,7 @@ func (c *Client) ListEvents(ctx context.Context, sessionID string) ([]session.Ev
 
 func (c *Client) ReadEvent(ctx context.Context, sessionID string, eventID string) (session.Event, error) {
 	row := c.sessionQuery().QueryRow(ctx, `
-		SELECT payload, COALESCE(offset,0), COALESCE(trace_id,''), metadata_json, deleted
+		SELECT payload, COALESCE("offset",0), COALESCE(trace_id,''), metadata_json, deleted
 		FROM session_events
 		WHERE session_id = $1 AND id = $2
 	`, sessionID, eventID)
@@ -751,7 +751,7 @@ func (c *Client) UpdateEvent(ctx context.Context, event session.Event) error {
 		    execution_id = $5,
 		    payload = $6,
 		    created_at = $7,
-		    offset = $8,
+		    "offset" = $8,
 		    trace_id = $9,
 		    metadata_json = $10,
 		    deleted = $11
@@ -762,7 +762,7 @@ func (c *Client) UpdateEvent(ctx context.Context, event session.Event) error {
 
 func (c *Client) ListEventsFiltered(ctx context.Context, query session.EventQuery) ([]session.Event, error) {
 	sql := `
-		SELECT payload, COALESCE(offset,0), COALESCE(trace_id,''), metadata_json, deleted
+		SELECT payload, COALESCE("offset",0), COALESCE(trace_id,''), metadata_json, deleted
 		FROM session_events
 		WHERE session_id = $1
 	`
@@ -779,7 +779,7 @@ func (c *Client) ListEventsFiltered(ctx context.Context, query session.EventQuer
 		arg++
 	}
 	if query.MinOffset > 0 {
-		sql += ` AND COALESCE(offset,0) >= $` + strconv.Itoa(arg)
+		sql += ` AND COALESCE("offset",0) >= $` + strconv.Itoa(arg)
 		args = append(args, query.MinOffset)
 		arg++
 	}
@@ -791,7 +791,7 @@ func (c *Client) ListEventsFiltered(ctx context.Context, query session.EventQuer
 		args = append(args, query.Kinds)
 		arg++
 	}
-	sql += ` ORDER BY COALESCE(offset,0) ASC, created_at ASC`
+	sql += ` ORDER BY COALESCE("offset",0) ASC, created_at ASC`
 	if query.Limit > 0 {
 		sql += ` LIMIT $` + strconv.Itoa(arg)
 		args = append(args, query.Limit)

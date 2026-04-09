@@ -269,7 +269,7 @@ func TestReadEventDecodesOffsetTraceAndMetadata(t *testing.T) {
 		AddRow(payload, int64(123), "trace_1", metadata, false)
 
 	mock.ExpectQuery(regexp.QuoteMeta(`
-		SELECT payload, COALESCE(offset,0), COALESCE(trace_id,''), metadata_json, deleted
+		SELECT payload, COALESCE("offset",0), COALESCE(trace_id,''), metadata_json, deleted
 		FROM session_events
 		WHERE session_id = $1 AND id = $2
 	`)).
@@ -310,10 +310,10 @@ func TestListEventsFilteredBuildsExpectedFilters(t *testing.T) {
 		AddRow(payload, int64(200), "trace_2", []byte(`{}`), false)
 
 	mock.ExpectQuery(regexp.QuoteMeta(`
-		SELECT payload, COALESCE(offset,0), COALESCE(trace_id,''), metadata_json, deleted
+		SELECT payload, COALESCE("offset",0), COALESCE(trace_id,''), metadata_json, deleted
 		FROM session_events
 		WHERE session_id = $1
-	 AND source = $2 AND trace_id = $3 AND COALESCE(offset,0) >= $4 AND deleted = FALSE AND kind = ANY($5) ORDER BY COALESCE(offset,0) ASC, created_at ASC LIMIT $6`)).
+	 AND source = $2 AND trace_id = $3 AND COALESCE("offset",0) >= $4 AND deleted = FALSE AND kind = ANY($5) ORDER BY COALESCE("offset",0) ASC, created_at ASC LIMIT $6`)).
 		WithArgs("sess_1", "assistant", "trace_2", int64(150), []string{"status"}, 10).
 		WillReturnRows(rows)
 
