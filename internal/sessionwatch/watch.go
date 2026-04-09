@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sahal/parmesan/internal/domain/session"
+	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/store"
 )
 
@@ -148,6 +149,44 @@ func BuildAppointmentReminderIntent(source, subjectRef string, remindAt time.Tim
 		Arguments:  cloneMap(args),
 		NextRunAt:  remindAt.UTC(),
 	}, now), true
+}
+
+func BuildIntentFromCapability(capability policy.WatchCapability, source, toolID, subjectRef string, args map[string]any, now time.Time) (UpdateIntent, bool) {
+	switch strings.ToLower(strings.TrimSpace(capability.ScheduleStrategy)) {
+	case "reminder":
+		appointmentAt, ok := ParseAppointmentTime(args, now)
+		if !ok {
+			return UpdateIntent{}, false
+		}
+		lead := time.Duration(capability.ReminderLeadSeconds) * time.Second
+		remindAt := appointmentAt.Add(-lead)
+		if remindAt.Before(now.Add(5 * time.Second)) {
+			remindAt = now.Add(5 * time.Second)
+		}
+		intent, ok := BuildAppointmentReminderIntent(source, firstNonEmpty(subjectRef, appointmentAt.UTC().Format(time.RFC3339)), remindAt, args, now)
+		if ok && strings.TrimSpace(toolID) != "" {
+			intent.ToolID = strings.TrimSpace(toolID)
+		}
+		return intent, ok
+	default:
+		if len(capability.SubjectKeys) > 0 && strings.TrimSpace(subjectRef) == "" {
+			subjectRef = ExtractSubjectRef(args, capability.SubjectKeys...)
+		}
+		intent, ok := BuildDeliveryIntent(source, firstNonEmpty(toolID, capability.ID), subjectRef, args, now)
+		if !ok {
+			return UpdateIntent{}, false
+		}
+		intent.Kind = capability.Kind
+		intent.StopCondition = firstNonEmpty(strings.TrimSpace(capability.StopCondition), intent.StopCondition)
+		if capability.PollIntervalSeconds > 0 {
+			intent.PollInterval = time.Duration(capability.PollIntervalSeconds) * time.Second
+			intent.NextRunAt = now.Add(intent.PollInterval)
+		}
+		if strings.TrimSpace(toolID) != "" {
+			intent.ToolID = strings.TrimSpace(toolID)
+		}
+		return NormalizeIntent(intent, now), true
+	}
 }
 
 func ReminderTimeFromAppointment(appointmentAt, now time.Time) time.Time {

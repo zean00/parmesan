@@ -354,6 +354,7 @@ type BatchResult struct {
 }
 
 type UpdateIntentArtifact struct {
+	CapabilityID         string         `json:"capability_id,omitempty"`
 	Kind                string         `json:"kind,omitempty"`
 	Source              string         `json:"source,omitempty"`
 	SubjectRef          string         `json:"subject_ref,omitempty"`
@@ -391,6 +392,10 @@ type EngineResult struct {
 	ToolPlanStage               ToolPlanStageResult
 	ToolDecisionStage           ToolDecisionStageResult
 	UpdateIntents               []UpdateIntentArtifact
+	WatchCapabilities           []policy.WatchCapability
+	SemanticsPolicy             policy.SemanticsPolicy
+	QualityProfile              policy.QualityProfile
+	LifecyclePolicy             policy.LifecyclePolicy
 	CompositionMode             string
 	CustomerPreferences         []customer.Preference
 	NoMatch                     string

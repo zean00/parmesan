@@ -186,6 +186,7 @@ func BuildResponsePlan(view policyruntime.EngineResult) ResponsePlan {
 	if shouldUseBoundaryReply(view.ScopeBoundaryStage) {
 		plan.DesiredStructure = append(plan.DesiredStructure, "Use the configured domain-boundary refusal or redirect response exactly.")
 	}
+	applyQualityProfile(&plan, view.QualityProfile)
 	plan.DesiredStructure = append(plan.DesiredStructure, highRiskBlueprintForView(view, plan)...)
 	return plan
 }
@@ -1394,6 +1395,9 @@ func expectedRefusalModeForScenario(category, input string) string {
 }
 
 func inferRiskTier(view policyruntime.EngineResult) string {
+	if strings.TrimSpace(view.QualityProfile.RiskTier) != "" {
+		return strings.TrimSpace(view.QualityProfile.RiskTier)
+	}
 	if shouldUseBoundaryReply(view.ScopeBoundaryStage) {
 		return "high"
 	}
@@ -1407,6 +1411,14 @@ func inferRiskTier(view policyruntime.EngineResult) string {
 }
 
 func highRiskBlueprintForView(view policyruntime.EngineResult, plan ResponsePlan) []string {
+	if len(view.QualityProfile.BlueprintRules) > 0 {
+		if rules := view.QualityProfile.BlueprintRules[highRiskIntent(view)]; len(rules) > 0 {
+			return append([]string(nil), rules...)
+		}
+		if rules := view.QualityProfile.BlueprintRules["default"]; len(rules) > 0 {
+			return append([]string(nil), rules...)
+		}
+	}
 	if !strings.EqualFold(plan.RiskTier, "high") {
 		return nil
 	}
@@ -1479,6 +1491,9 @@ func highRiskSignals(view policyruntime.EngineResult) []string {
 }
 
 func requiredEvidenceKindsForView(view policyruntime.EngineResult) []string {
+	if len(view.QualityProfile.RequiredEvidence) > 0 {
+		return append([]string(nil), view.QualityProfile.RequiredEvidence...)
+	}
 	var out []string
 	if len(view.RetrieverStage.Results) > 0 {
 		out = append(out, "retrieved_knowledge")
@@ -1496,7 +1511,33 @@ func requiredEvidenceKindsForView(view policyruntime.EngineResult) []string {
 }
 
 func allowedCommitmentsForView(view policyruntime.EngineResult) []string {
+	if len(view.QualityProfile.AllowedCommitments) > 0 {
+		return append([]string(nil), view.QualityProfile.AllowedCommitments...)
+	}
 	return allowedCommitmentsForRisk(inferRiskTier(view))
+}
+
+func applyQualityProfile(plan *ResponsePlan, profile policy.QualityProfile) {
+	if plan == nil {
+		return
+	}
+	if strings.TrimSpace(profile.RiskTier) != "" {
+		plan.RiskTier = strings.TrimSpace(profile.RiskTier)
+	}
+	if len(profile.RequiredEvidence) > 0 {
+		plan.RequiredEvidence = append([]string(nil), profile.RequiredEvidence...)
+		plan.RequiredEvidenceClasses = append([]string(nil), profile.RequiredEvidence...)
+		plan.RetrievalRequired = containsString(plan.RequiredEvidence, []string{"retrieved_knowledge"})
+	}
+	if len(profile.AllowedCommitments) > 0 {
+		plan.AllowedCommitments = append([]string(nil), profile.AllowedCommitments...)
+	}
+	if len(profile.RequiredVerificationSteps) > 0 {
+		plan.RequiredVerificationSteps = append([]string(nil), profile.RequiredVerificationSteps...)
+		if len(plan.VerificationSteps) == 0 {
+			plan.VerificationSteps = append([]string(nil), profile.RequiredVerificationSteps...)
+		}
+	}
 }
 
 func requiredEvidenceKindsForClaim(claimType string) []string {

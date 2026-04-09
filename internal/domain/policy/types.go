@@ -23,6 +23,10 @@ type Bundle struct {
 	Version                   string                     `json:"version" yaml:"version"`
 	CompositionMode           string                     `json:"composition_mode,omitempty" yaml:"composition_mode,omitempty"`
 	PerceivedPerformance      PerceivedPerformancePolicy `json:"perceived_performance,omitempty" yaml:"perceived_performance,omitempty"`
+	Semantics                 SemanticsPolicy            `json:"semantics,omitempty" yaml:"semantics,omitempty"`
+	WatchCapabilities         []WatchCapability          `json:"watch_capabilities,omitempty" yaml:"watch_capabilities,omitempty"`
+	QualityProfile            QualityProfile             `json:"quality_profile,omitempty" yaml:"quality_profile,omitempty"`
+	LifecyclePolicy           LifecyclePolicy            `json:"lifecycle_policy,omitempty" yaml:"lifecycle_policy,omitempty"`
 	NoMatch                   string                     `json:"no_match,omitempty" yaml:"no_match,omitempty"`
 	DomainBoundary            DomainBoundary             `json:"domain_boundary,omitempty" yaml:"domain_boundary,omitempty"`
 	Soul                      Soul                       `json:"soul,omitempty" yaml:"soul,omitempty"`
@@ -54,6 +58,69 @@ type PerceivedPerformancePolicy struct {
 	ProcessingUpdateDelayMS int      `json:"processing_update_delay_ms,omitempty" yaml:"processing_update_delay_ms,omitempty"`
 	Preambles               []string `json:"preambles,omitempty" yaml:"preambles,omitempty"`
 	AllowedRiskTiers        []string `json:"allowed_risk_tiers,omitempty" yaml:"allowed_risk_tiers,omitempty"`
+}
+
+type SemanticsPolicy struct {
+	Signals       []SemanticSignal   `json:"signals,omitempty" yaml:"signals,omitempty"`
+	Categories    []SemanticCategory `json:"categories,omitempty" yaml:"categories,omitempty"`
+	Slots         []SemanticSlot     `json:"slots,omitempty" yaml:"slots,omitempty"`
+	RelativeDates []string           `json:"relative_dates,omitempty" yaml:"relative_dates,omitempty"`
+}
+
+type SemanticSignal struct {
+	ID      string   `json:"id" yaml:"id"`
+	Parent  string   `json:"parent,omitempty" yaml:"parent,omitempty"`
+	Phrases []string `json:"phrases,omitempty" yaml:"phrases,omitempty"`
+	Tokens  []string `json:"tokens,omitempty" yaml:"tokens,omitempty"`
+	Aliases []string `json:"aliases,omitempty" yaml:"aliases,omitempty"`
+}
+
+type SemanticCategory struct {
+	ID      string   `json:"id" yaml:"id"`
+	Signals []string `json:"signals,omitempty" yaml:"signals,omitempty"`
+}
+
+type SemanticSlot struct {
+	Field      string   `json:"field" yaml:"field"`
+	Kind       string   `json:"kind" yaml:"kind"`
+	Markers    []string `json:"markers,omitempty" yaml:"markers,omitempty"`
+	StopTokens []string `json:"stop_tokens,omitempty" yaml:"stop_tokens,omitempty"`
+}
+
+type WatchCapability struct {
+	ID                    string   `json:"id" yaml:"id"`
+	Kind                  string   `json:"kind" yaml:"kind"`
+	ScheduleStrategy      string   `json:"schedule_strategy,omitempty" yaml:"schedule_strategy,omitempty"`
+	TriggerSignals        []string `json:"trigger_signals,omitempty" yaml:"trigger_signals,omitempty"`
+	ToolMatchTerms        []string `json:"tool_match_terms,omitempty" yaml:"tool_match_terms,omitempty"`
+	SubjectKeys           []string `json:"subject_keys,omitempty" yaml:"subject_keys,omitempty"`
+	RequiredFields        []string `json:"required_fields,omitempty" yaml:"required_fields,omitempty"`
+	PollIntervalSeconds   int      `json:"poll_interval_seconds,omitempty" yaml:"poll_interval_seconds,omitempty"`
+	StopCondition         string   `json:"stop_condition,omitempty" yaml:"stop_condition,omitempty"`
+	ReminderLeadSeconds   int      `json:"reminder_lead_seconds,omitempty" yaml:"reminder_lead_seconds,omitempty"`
+	AllowLifecycleFallback bool    `json:"allow_lifecycle_fallback,omitempty" yaml:"allow_lifecycle_fallback,omitempty"`
+	DeliveryTemplate      string   `json:"delivery_template,omitempty" yaml:"delivery_template,omitempty"`
+}
+
+type QualityProfile struct {
+	ID                        string              `json:"id,omitempty" yaml:"id,omitempty"`
+	RiskTier                  string              `json:"risk_tier,omitempty" yaml:"risk_tier,omitempty"`
+	AllowedCommitments        []string            `json:"allowed_commitments,omitempty" yaml:"allowed_commitments,omitempty"`
+	RequiredEvidence          []string            `json:"required_evidence,omitempty" yaml:"required_evidence,omitempty"`
+	RequiredVerificationSteps []string            `json:"required_verification_steps,omitempty" yaml:"required_verification_steps,omitempty"`
+	BlueprintRules            map[string][]string `json:"blueprint_rules,omitempty" yaml:"blueprint_rules,omitempty"`
+	MinimumOverall            float64             `json:"minimum_overall,omitempty" yaml:"minimum_overall,omitempty"`
+}
+
+type LifecyclePolicy struct {
+	ID                        string   `json:"id,omitempty" yaml:"id,omitempty"`
+	IdleCandidateAfterMS      int      `json:"idle_candidate_after_ms,omitempty" yaml:"idle_candidate_after_ms,omitempty"`
+	AwaitingCloseAfterMS      int      `json:"awaiting_close_after_ms,omitempty" yaml:"awaiting_close_after_ms,omitempty"`
+	KeepRecheckAfterMS        int      `json:"keep_recheck_after_ms,omitempty" yaml:"keep_recheck_after_ms,omitempty"`
+	FollowupMessage           string   `json:"followup_message,omitempty" yaml:"followup_message,omitempty"`
+	ResolutionSignals         []string `json:"resolution_signals,omitempty" yaml:"resolution_signals,omitempty"`
+	DeliveryUpdateSignals     []string `json:"delivery_update_signals,omitempty" yaml:"delivery_update_signals,omitempty"`
+	AppointmentReminderSignals []string `json:"appointment_reminder_signals,omitempty" yaml:"appointment_reminder_signals,omitempty"`
 }
 
 type DomainBoundary struct {

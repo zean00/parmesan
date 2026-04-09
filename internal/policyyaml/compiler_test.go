@@ -81,6 +81,53 @@ templates:
 	}
 }
 
+func TestParseBundleSupportsGenericRuntimeSections(t *testing.T) {
+	raw := []byte(`
+id: bundle-1
+version: v1
+watch_capabilities:
+  - id: reminder_watch
+    kind: appointment_reminder
+    schedule_strategy: reminder
+    trigger_signals:
+      - scheduling
+    tool_match_terms:
+      - appointment
+    subject_keys:
+      - appointment_id
+    required_fields:
+      - appointment_at
+    reminder_lead_seconds: 1800
+    allow_lifecycle_fallback: true
+quality_profile:
+  id: support_quality
+  risk_tier: high
+  allowed_commitments:
+    - evidence-backed support guidance
+lifecycle_policy:
+  id: support_lifecycle
+  followup_message: Need anything else before I close this support request?
+semantics:
+  signals:
+    - id: scheduling
+      tokens: [schedule, appointment]
+`)
+
+	bundle, err := ParseBundle(raw)
+	if err != nil {
+		t.Fatalf("ParseBundle() error = %v", err)
+	}
+	if len(bundle.WatchCapabilities) != 1 || bundle.WatchCapabilities[0].ID != "reminder_watch" {
+		t.Fatalf("watch capabilities = %#v, want parsed capability", bundle.WatchCapabilities)
+	}
+	if bundle.QualityProfile.ID != "support_quality" || bundle.LifecyclePolicy.ID != "support_lifecycle" {
+		t.Fatalf("quality/lifecycle = %#v / %#v, want parsed profile and lifecycle policy", bundle.QualityProfile, bundle.LifecyclePolicy)
+	}
+	if len(bundle.Semantics.Signals) != 1 || bundle.Semantics.Signals[0].ID != "scheduling" {
+		t.Fatalf("semantics = %#v, want parsed semantics", bundle.Semantics)
+	}
+}
+
 func TestParseBundleNormalizesJourneyRootAndEdges(t *testing.T) {
 	raw := []byte(`
 id: bundle-1

@@ -1111,31 +1111,44 @@ func (r *Runner) runtimeUpdateIntent(ctx context.Context, exec execution.TurnExe
 
 func runtimeUpdateIntentFromArtifacts(view resolvedView, now time.Time) (sessionwatch.UpdateIntent, bool) {
 	for _, item := range view.UpdateIntents {
-		switch strings.TrimSpace(item.Kind) {
-		case sessionwatch.KindDeliveryStatus:
-			intent, ok := sessionwatch.BuildDeliveryIntent(firstNonEmptyString(item.Source, sessionwatch.SourceRuntime), item.ToolID, item.SubjectRef, cloneAnyMap(item.Arguments), now)
-			if ok {
-				if item.StopCondition != "" {
-					intent.StopCondition = item.StopCondition
-				}
-				if item.PollIntervalSeconds > 0 {
-					intent.PollInterval = time.Duration(item.PollIntervalSeconds) * time.Second
-					intent.NextRunAt = now.Add(intent.PollInterval)
-				}
-				return intent, true
+		capability, ok := watchCapabilityByID(view.WatchCapabilities, item.CapabilityID, item.Kind)
+		if !ok {
+			capability = policy.WatchCapability{
+				ID:                  firstNonEmptyString(item.CapabilityID, item.Kind),
+				Kind:                item.Kind,
+				ScheduleStrategy:    watchScheduleFromArtifact(item),
+				SubjectKeys:         []string{"order_id", "tracking_id", "shipment_id", "package_id", "id"},
+				PollIntervalSeconds: item.PollIntervalSeconds,
+				StopCondition:       item.StopCondition,
 			}
-		case sessionwatch.KindAppointmentReminder:
-			remindAt, _ := time.Parse(time.RFC3339, strings.TrimSpace(item.RemindAt))
-			intent, ok := sessionwatch.BuildAppointmentReminderIntent(firstNonEmptyString(item.Source, sessionwatch.SourceRuntime), item.SubjectRef, remindAt, cloneAnyMap(item.Arguments), now)
-			if ok {
-				if item.ToolID != "" {
-					intent.ToolID = item.ToolID
-				}
-				return intent, true
-			}
+		}
+		intent, ok := sessionwatch.BuildIntentFromCapability(capability, firstNonEmptyString(item.Source, sessionwatch.SourceRuntime), item.ToolID, item.SubjectRef, cloneAnyMap(item.Arguments), now)
+		if ok {
+			return intent, true
 		}
 	}
 	return sessionwatch.UpdateIntent{}, false
+}
+
+func watchCapabilityByID(items []policy.WatchCapability, capabilityID, kind string) (policy.WatchCapability, bool) {
+	for _, item := range items {
+		if strings.TrimSpace(capabilityID) != "" && item.ID == capabilityID {
+			return item, true
+		}
+	}
+	for _, item := range items {
+		if strings.TrimSpace(kind) != "" && item.Kind == kind {
+			return item, true
+		}
+	}
+	return policy.WatchCapability{}, false
+}
+
+func watchScheduleFromArtifact(item policyruntime.UpdateIntentArtifact) string {
+	if strings.TrimSpace(item.RemindAt) != "" {
+		return "reminder"
+	}
+	return "poll"
 }
 
 func runtimeDeliveryWatchIntentFromView(view resolvedView, now time.Time) (sessionwatch.UpdateIntent, bool) {

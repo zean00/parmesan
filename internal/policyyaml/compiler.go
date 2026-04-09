@@ -20,6 +20,7 @@ func ParseBundle(raw []byte) (policy.Bundle, error) {
 	bundle.SourceYAML = string(raw)
 	bundle.ImportedAt = time.Now().UTC()
 	bundle.Journeys = normalizeJourneys(bundle.Journeys)
+	bundle = applyBundleDefaults(bundle)
 
 	if err := ValidateBundle(bundle); err != nil {
 		return policy.Bundle{}, err
@@ -40,6 +41,18 @@ func ValidateBundle(bundle policy.Bundle) error {
 		return err
 	}
 	if err := validatePerceivedPerformance(bundle.PerceivedPerformance); err != nil {
+		return err
+	}
+	if err := validateSemantics(bundle.Semantics); err != nil {
+		return err
+	}
+	if err := validateWatchCapabilities(bundle.WatchCapabilities); err != nil {
+		return err
+	}
+	if err := validateQualityProfile(bundle.QualityProfile); err != nil {
+		return err
+	}
+	if err := validateLifecyclePolicy(bundle.LifecyclePolicy); err != nil {
 		return err
 	}
 	if err := validateDomainBoundary(bundle.DomainBoundary); err != nil {
@@ -171,6 +184,22 @@ func ValidateBundle(bundle policy.Bundle) error {
 	return nil
 }
 
+func applyBundleDefaults(bundle policy.Bundle) policy.Bundle {
+	if len(bundle.Semantics.Signals) == 0 && len(bundle.Semantics.Categories) == 0 && len(bundle.Semantics.Slots) == 0 {
+		bundle.Semantics = defaultSemanticsPolicy()
+	}
+	if len(bundle.WatchCapabilities) == 0 {
+		bundle.WatchCapabilities = defaultWatchCapabilities()
+	}
+	if strings.TrimSpace(bundle.QualityProfile.ID) == "" {
+		bundle.QualityProfile = defaultQualityProfile(bundle.QualityProfile)
+	}
+	if strings.TrimSpace(bundle.LifecyclePolicy.ID) == "" {
+		bundle.LifecyclePolicy = defaultLifecyclePolicy(bundle.LifecyclePolicy)
+	}
+	return bundle
+}
+
 func validateSoul(soul policy.Soul) error {
 	if strings.TrimSpace(soul.DefaultLanguage) != "" {
 		if err := validateLanguageCode("soul.default_language", soul.DefaultLanguage); err != nil {
@@ -282,6 +311,205 @@ func validateLanguageCode(field, value string) error {
 		return fmt.Errorf("%s has invalid language code %q", field, value)
 	}
 	return nil
+}
+
+func validateSemantics(sem policy.SemanticsPolicy) error {
+	seen := map[string]struct{}{}
+	for _, item := range sem.Signals {
+		if strings.TrimSpace(item.ID) == "" {
+			return errors.New("semantics.signals.id is required")
+		}
+		if err := validateID("semantic signal", item.ID, seen); err != nil {
+			return err
+		}
+		if err := validateNonEmptyUnique("semantics.signals.phrases", item.Phrases); err != nil {
+			return err
+		}
+		if err := validateNonEmptyUnique("semantics.signals.tokens", item.Tokens); err != nil {
+			return err
+		}
+	}
+	for _, item := range sem.Categories {
+		if strings.TrimSpace(item.ID) == "" {
+			return errors.New("semantics.categories.id is required")
+		}
+		if err := validateNonEmptyUnique("semantics.categories.signals", item.Signals); err != nil {
+			return err
+		}
+	}
+	for _, item := range sem.Slots {
+		if strings.TrimSpace(item.Field) == "" || strings.TrimSpace(item.Kind) == "" {
+			return errors.New("semantics.slots require field and kind")
+		}
+	}
+	return validateNonEmptyUnique("semantics.relative_dates", sem.RelativeDates)
+}
+
+func validateWatchCapabilities(items []policy.WatchCapability) error {
+	seen := map[string]struct{}{}
+	for _, item := range items {
+		if err := validateID("watch_capability", item.ID, seen); err != nil {
+			return err
+		}
+		if strings.TrimSpace(item.Kind) == "" {
+			return fmt.Errorf("watch_capability %q requires kind", item.ID)
+		}
+		switch strings.TrimSpace(item.ScheduleStrategy) {
+		case "", "poll", "reminder":
+		default:
+			return fmt.Errorf("watch_capability %q has unsupported schedule_strategy %q", item.ID, item.ScheduleStrategy)
+		}
+		if item.PollIntervalSeconds < 0 || item.ReminderLeadSeconds < 0 {
+			return fmt.Errorf("watch_capability %q cannot use negative intervals", item.ID)
+		}
+		if err := validateNonEmptyUnique("watch_capability.trigger_signals", item.TriggerSignals); err != nil {
+			return err
+		}
+		if err := validateNonEmptyUnique("watch_capability.tool_match_terms", item.ToolMatchTerms); err != nil {
+			return err
+		}
+		if err := validateNonEmptyUnique("watch_capability.subject_keys", item.SubjectKeys); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateQualityProfile(profile policy.QualityProfile) error {
+	if profile.MinimumOverall < 0 || profile.MinimumOverall > 1 {
+		return errors.New("quality_profile.minimum_overall must be between 0 and 1")
+	}
+	if err := validateNonEmptyUnique("quality_profile.allowed_commitments", profile.AllowedCommitments); err != nil {
+		return err
+	}
+	if err := validateNonEmptyUnique("quality_profile.required_evidence", profile.RequiredEvidence); err != nil {
+		return err
+	}
+	return validateNonEmptyUnique("quality_profile.required_verification_steps", profile.RequiredVerificationSteps)
+}
+
+func validateLifecyclePolicy(policyDef policy.LifecyclePolicy) error {
+	if policyDef.IdleCandidateAfterMS < 0 || policyDef.AwaitingCloseAfterMS < 0 || policyDef.KeepRecheckAfterMS < 0 {
+		return errors.New("lifecycle_policy timeouts cannot be negative")
+	}
+	if err := validateNonEmptyUnique("lifecycle_policy.resolution_signals", policyDef.ResolutionSignals); err != nil {
+		return err
+	}
+	if err := validateNonEmptyUnique("lifecycle_policy.delivery_update_signals", policyDef.DeliveryUpdateSignals); err != nil {
+		return err
+	}
+	return validateNonEmptyUnique("lifecycle_policy.appointment_reminder_signals", policyDef.AppointmentReminderSignals)
+}
+
+func defaultSemanticsPolicy() policy.SemanticsPolicy {
+	return policy.SemanticsPolicy{
+		Signals: []policy.SemanticSignal{
+			{ID: "return_status", Phrases: []string{"return status", "tracking"}, Tokens: []string{"refund", "return", "damaged", "cancel", "order"}},
+			{ID: "order_status", Phrases: []string{"order status", "status is"}},
+			{ID: "scheduling", Tokens: []string{"schedule", "appointment", "booking", "book", "reschedule"}},
+			{ID: "delivery", Phrases: []string{"delivery", "shipping"}, Tokens: []string{"delivery", "shipping", "tracking"}},
+			{ID: "confirmation", Tokens: []string{"confirm", "confirmation", "notify", "email"}},
+		},
+		Categories: []policy.SemanticCategory{
+			{ID: "scheduling", Signals: []string{"scheduling"}},
+			{ID: "confirmation", Signals: []string{"confirmation"}},
+		},
+		Slots: []policy.SemanticSlot{
+			{Field: "destination", Kind: "destination", Markers: []string{"to"}, StopTokens: []string{"today", "tomorrow", "next", "return", "for"}},
+			{Field: "product_name", Kind: "product_like", Markers: []string{"for a", "for an", "for the", "for"}, StopTokens: []string{"today", "tomorrow", "next", "with", "from", "to"}},
+		},
+		RelativeDates: []string{"today", "tomorrow", "next week", "next month", "return in"},
+	}
+}
+
+func defaultWatchCapabilities() []policy.WatchCapability {
+	return []policy.WatchCapability{
+		{
+			ID:                    "delivery_status_watch",
+			Kind:                  "delivery_status",
+			ScheduleStrategy:      "poll",
+			TriggerSignals:        []string{"delivery", "tracking", "order_status", "return_status"},
+			ToolMatchTerms:        []string{"order", "delivery", "shipping", "tracking"},
+			SubjectKeys:           []string{"order_id", "tracking_id", "shipment_id", "package_id", "id"},
+			PollIntervalSeconds:   int((15 * time.Minute) / time.Second),
+			StopCondition:         "delivered",
+			AllowLifecycleFallback: true,
+			DeliveryTemplate:      "I have an update on your delivery status: {{status}}.",
+		},
+		{
+			ID:                    "appointment_reminder_watch",
+			Kind:                  "appointment_reminder",
+			ScheduleStrategy:      "reminder",
+			TriggerSignals:        []string{"scheduling", "appointment_reminder"},
+			ToolMatchTerms:        []string{"appointment", "schedule", "calendar", "booking"},
+			SubjectKeys:           []string{"appointment_id", "booking_id", "id"},
+			RequiredFields:        []string{"appointment_at"},
+			ReminderLeadSeconds:   3600,
+			AllowLifecycleFallback: true,
+			DeliveryTemplate:      "This is your reminder about the appointment scheduled for {{appointment_at}}.",
+		},
+	}
+}
+
+func defaultQualityProfile(existing policy.QualityProfile) policy.QualityProfile {
+	if strings.TrimSpace(existing.ID) == "" {
+		existing.ID = "default_quality_profile"
+	}
+	if strings.TrimSpace(existing.RiskTier) == "" {
+		existing.RiskTier = "medium"
+	}
+	if len(existing.AllowedCommitments) == 0 {
+		existing.AllowedCommitments = []string{"cautious policy-backed guidance"}
+	}
+	if len(existing.RequiredEvidence) == 0 {
+		existing.RequiredEvidence = []string{"matched_guideline"}
+	}
+	if existing.BlueprintRules == nil {
+		existing.BlueprintRules = map[string][]string{
+			"refund_replacement": {
+				"Start by stating what still must be verified before any refund or replacement decision.",
+				"Do not imply approval before the required review or verification step is complete.",
+			},
+			"approval": {
+				"State the review or approval requirement before suggesting the outcome is complete.",
+			},
+			"escalation": {
+				"State the handoff need clearly and give the next step.",
+			},
+		}
+	}
+	if existing.MinimumOverall == 0 {
+		existing.MinimumOverall = 0.7
+	}
+	return existing
+}
+
+func defaultLifecyclePolicy(existing policy.LifecyclePolicy) policy.LifecyclePolicy {
+	if strings.TrimSpace(existing.ID) == "" {
+		existing.ID = "default_lifecycle_policy"
+	}
+	if existing.IdleCandidateAfterMS <= 0 {
+		existing.IdleCandidateAfterMS = int((30 * time.Minute) / time.Millisecond)
+	}
+	if existing.AwaitingCloseAfterMS <= 0 {
+		existing.AwaitingCloseAfterMS = int((12 * time.Hour) / time.Millisecond)
+	}
+	if existing.KeepRecheckAfterMS <= 0 {
+		existing.KeepRecheckAfterMS = int((30 * time.Minute) / time.Millisecond)
+	}
+	if strings.TrimSpace(existing.FollowupMessage) == "" {
+		existing.FollowupMessage = "Do you need any more help with this?"
+	}
+	if len(existing.ResolutionSignals) == 0 {
+		existing.ResolutionSignals = []string{"thanks", "thank you", "that helps", "all good", "solved", "ok got it"}
+	}
+	if len(existing.DeliveryUpdateSignals) == 0 {
+		existing.DeliveryUpdateSignals = []string{"update me", "keep me updated", "notify me", "let me know", "delivery", "shipping", "order status", "package"}
+	}
+	if len(existing.AppointmentReminderSignals) == 0 {
+		existing.AppointmentReminderSignals = []string{"remind me", "appointment reminder", "reminder for my appointment", "notify me about my appointment"}
+	}
+	return existing
 }
 
 func validateNonEmptyUnique(field string, values []string) error {

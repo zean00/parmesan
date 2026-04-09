@@ -191,6 +191,51 @@ func TestResolveEmitsUpdateIntentArtifacts(t *testing.T) {
 	}
 }
 
+func TestResolveEmitsGenericWatchCapabilityArtifact(t *testing.T) {
+	now := time.Date(2026, 4, 9, 10, 0, 0, 0, time.UTC)
+	view, err := Resolve(
+		[]session.Event{{
+			ID:        "evt_1",
+			SessionID: "sess_1",
+			Source:    "customer",
+			Kind:      "message",
+			CreatedAt: now,
+			Content:   []session.ContentPart{{Type: "text", Text: "Please schedule an appointment tomorrow at 6pm and notify me about it."}},
+		}},
+		[]policy.Bundle{{
+			ID:      "bundle_1",
+			Version: "v1",
+			Semantics: policy.SemanticsPolicy{
+				Signals: []policy.SemanticSignal{{ID: "custom_reminder", Tokens: []string{"schedule", "appointment", "notify"}}},
+			},
+			WatchCapabilities: []policy.WatchCapability{{
+				ID:                  "custom_appointment_reminder",
+				Kind:                "appointment_reminder",
+				ScheduleStrategy:    "reminder",
+				TriggerSignals:      []string{"custom_reminder"},
+				ToolMatchTerms:      []string{"appointment", "schedule"},
+				SubjectKeys:         []string{"appointment_id", "id"},
+				ReminderLeadSeconds: 1800,
+			}},
+			GuidelineToolAssociations: []policy.GuidelineToolAssociation{
+				{GuidelineID: "schedule", ToolID: "local.schedule_appointment"},
+			},
+			Guidelines: []policy.Guideline{{ID: "schedule", When: "appointment", Then: "Schedule the appointment"}},
+		}},
+		nil,
+		[]tool.CatalogEntry{{ID: "local_schedule_appointment", ProviderID: "local", Name: "schedule_appointment"}},
+	)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if len(view.UpdateIntents) != 1 {
+		t.Fatalf("update intents = %#v, want one generic watch artifact", view.UpdateIntents)
+	}
+	if got := view.UpdateIntents[0]; got.CapabilityID != "custom_appointment_reminder" || got.Kind != "appointment_reminder" {
+		t.Fatalf("update intent = %#v, want capability-backed artifact", got)
+	}
+}
+
 func TestResolveWithCustomMatcherUsesCustomStrategy(t *testing.T) {
 	view, err := Resolve(
 		[]session.Event{{

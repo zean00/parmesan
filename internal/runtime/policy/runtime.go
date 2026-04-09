@@ -30,7 +30,7 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	if len(bundles) == 0 {
 		return EngineResult{}, nil
 	}
-	bundle := bundles[0]
+	bundle := applyRuntimeBundleDefaults(bundles[0])
 	matchCtx := buildMatchingContext(events)
 	matchCtx.DerivedSignals = append([]string(nil), options.DerivedSignals...)
 	if len(matchCtx.DerivedSignals) > 0 {
@@ -76,7 +76,7 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	toolDecisionResult.Apply(state)
 	toolPlanOutput := toolPlanResult.BatchOutput()
 	toolDecisionOutput := toolDecisionResult.BatchOutput()
-	updateIntents := buildUpdateIntentArtifacts(state.context, toolPlanResult.Plan)
+	updateIntents := buildUpdateIntentArtifacts(bundle, state.context, toolPlanResult.Plan)
 
 	mode := strings.ToLower(strings.TrimSpace(bundle.CompositionMode))
 	if mode == "" {
@@ -114,6 +114,74 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	return resolvedViewFromState(bundle, state, mode, arqs, updateIntents), nil
 }
 
+func applyRuntimeBundleDefaults(bundle policy.Bundle) policy.Bundle {
+	if len(bundle.Semantics.Signals) == 0 && len(bundle.Semantics.Categories) == 0 && len(bundle.Semantics.Slots) == 0 {
+		bundle.Semantics = policy.SemanticsPolicy{
+			Signals: []policy.SemanticSignal{
+				{ID: "return_status", Phrases: []string{"return status", "tracking"}, Tokens: []string{"refund", "return", "damaged", "cancel", "order"}},
+				{ID: "order_status", Phrases: []string{"order status", "status is"}},
+				{ID: "scheduling", Tokens: []string{"schedule", "appointment", "booking", "book", "reschedule"}},
+				{ID: "delivery", Phrases: []string{"delivery", "shipping"}, Tokens: []string{"delivery", "shipping", "tracking"}},
+			},
+		}
+	}
+	if len(bundle.WatchCapabilities) == 0 {
+		bundle.WatchCapabilities = []policy.WatchCapability{
+			{
+				ID:                    "delivery_status_watch",
+				Kind:                  sessionwatch.KindDeliveryStatus,
+				ScheduleStrategy:      "poll",
+				TriggerSignals:        []string{"delivery", "tracking", "order_status", "return_status"},
+				ToolMatchTerms:        []string{"order", "delivery", "shipping", "tracking"},
+				SubjectKeys:           []string{"order_id", "tracking_id", "shipment_id", "package_id", "id"},
+				PollIntervalSeconds:   int((15 * time.Minute) / time.Second),
+				StopCondition:         "delivered",
+				AllowLifecycleFallback: true,
+			},
+			{
+				ID:                    "appointment_reminder_watch",
+				Kind:                  sessionwatch.KindAppointmentReminder,
+				ScheduleStrategy:      "reminder",
+				TriggerSignals:        []string{"scheduling", "remind me", "appointment reminder"},
+				ToolMatchTerms:        []string{"appointment", "schedule", "calendar", "booking"},
+				SubjectKeys:           []string{"appointment_id", "booking_id", "id"},
+				RequiredFields:        []string{"appointment_at"},
+				ReminderLeadSeconds:   3600,
+				AllowLifecycleFallback: true,
+			},
+		}
+	}
+	if strings.TrimSpace(bundle.QualityProfile.ID) == "" {
+		bundle.QualityProfile = policy.QualityProfile{
+			ID:                 "default_quality_profile",
+			RiskTier:           "",
+			AllowedCommitments: []string{"cautious policy-backed guidance"},
+			RequiredEvidence:   []string{"matched_guideline"},
+			BlueprintRules: map[string][]string{
+				"refund_replacement": {
+					"Start by stating what still must be verified before any refund or replacement decision.",
+					"Do not promise eligibility, approval, or timing before verification is complete.",
+					"End with the next review step or the information the customer must provide.",
+				},
+			},
+			MinimumOverall: 0.7,
+		}
+	}
+	if strings.TrimSpace(bundle.LifecyclePolicy.ID) == "" {
+		bundle.LifecyclePolicy = policy.LifecyclePolicy{
+			ID:                     "default_lifecycle_policy",
+			IdleCandidateAfterMS:   int((30 * time.Minute) / time.Millisecond),
+			AwaitingCloseAfterMS:   int((12 * time.Hour) / time.Millisecond),
+			KeepRecheckAfterMS:     int((30 * time.Minute) / time.Millisecond),
+			FollowupMessage:        "Do you need any more help with this?",
+			ResolutionSignals:      []string{"thanks", "thank you", "that helps", "all good", "solved", "ok got it"},
+			DeliveryUpdateSignals:  []string{"update me", "keep me updated", "notify me", "let me know", "delivery", "shipping", "order status", "package"},
+			AppointmentReminderSignals: []string{"remind me", "appointment reminder", "reminder for my appointment", "notify me about my appointment"},
+		}
+	}
+	return bundle
+}
+
 func resolvedViewFromState(bundle policy.Bundle, state *matchingState, mode string, arqs []ARQResult, updateIntents []UpdateIntentArtifact) EngineResult {
 	suppressed := effectiveSuppressedGuidelines(state.relationshipResolutionStage, state.disambiguationStage)
 	suppressed = filterSuppressedAgainstMatched(suppressed, state.matchFinalizeStage.MatchedGuidelines)
@@ -145,6 +213,10 @@ func resolvedViewFromState(bundle policy.Bundle, state *matchingState, mode stri
 		ToolPlanStage:               state.toolPlanStage,
 		ToolDecisionStage:           state.toolDecisionStage,
 		UpdateIntents:               append([]UpdateIntentArtifact(nil), updateIntents...),
+		WatchCapabilities:           append([]policy.WatchCapability(nil), bundle.WatchCapabilities...),
+		SemanticsPolicy:             bundle.Semantics,
+		QualityProfile:              bundle.QualityProfile,
+		LifecyclePolicy:             bundle.LifecyclePolicy,
 		CompositionMode:             mode,
 		NoMatch:                     bundle.NoMatch,
 		DisambiguationPrompt:        prompt,
@@ -154,30 +226,36 @@ func resolvedViewFromState(bundle policy.Bundle, state *matchingState, mode stri
 	}
 }
 
-func buildUpdateIntentArtifacts(ctx MatchingContext, plan ToolCallPlan) []UpdateIntentArtifact {
+func buildUpdateIntentArtifacts(bundle policy.Bundle, ctx MatchingContext, plan ToolCallPlan) []UpdateIntentArtifact {
 	var out []UpdateIntentArtifact
-	customerText := strings.ToLower(strings.TrimSpace(ctx.LatestCustomerText))
 	now := ctx.OccurredAt.UTC()
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	if wantsAppointmentReminder(customerText) {
-		if item, ok := buildAppointmentReminderArtifact(ctx, plan, now); ok {
-			out = append(out, item)
-		}
-	}
-	if wantsDeliveryUpdates(customerText) {
-		if item, ok := buildDeliveryUpdateArtifact(plan); ok {
+	for _, capability := range bundle.WatchCapabilities {
+		if item, ok := buildUpdateIntentArtifactForCapability(bundle, capability, ctx, plan, now); ok {
 			out = append(out, item)
 		}
 	}
 	return out
 }
 
-func buildAppointmentReminderArtifact(ctx MatchingContext, plan ToolCallPlan, now time.Time) (UpdateIntentArtifact, bool) {
+func buildUpdateIntentArtifactForCapability(bundle policy.Bundle, capability policy.WatchCapability, ctx MatchingContext, plan ToolCallPlan, now time.Time) (UpdateIntentArtifact, bool) {
+	if !watchCapabilityTriggered(bundle.Semantics, capability, ctx.LatestCustomerText, plan) {
+		return UpdateIntentArtifact{}, false
+	}
+	switch strings.ToLower(strings.TrimSpace(capability.ScheduleStrategy)) {
+	case "reminder":
+		return buildReminderArtifact(capability, ctx, plan, now)
+	default:
+		return buildPollingArtifact(capability, plan, now)
+	}
+}
+
+func buildReminderArtifact(capability policy.WatchCapability, ctx MatchingContext, plan ToolCallPlan, now time.Time) (UpdateIntentArtifact, bool) {
 	for _, candidate := range plan.Candidates {
 		toolID := strings.TrimSpace(candidate.ToolID)
-		if !containsAnyLower(strings.ToLower(toolID), "appointment", "schedule", "calendar", "booking") {
+		if !watchCapabilityToolMatches(capability, toolID) {
 			continue
 		}
 		appointmentAt, ok := sessionwatch.ParseAppointmentTime(candidate.Arguments, now)
@@ -193,40 +271,101 @@ func buildAppointmentReminderArtifact(ctx MatchingContext, plan ToolCallPlan, no
 		}
 		args["appointment_at"] = appointmentAt.UTC().Format(time.RFC3339)
 		return UpdateIntentArtifact{
+			CapabilityID: capability.ID,
 			Kind:       sessionwatch.KindAppointmentReminder,
 			Source:     sessionwatch.SourceRuntime,
 			SubjectRef: firstNonEmpty(sessionwatch.ExtractSubjectRef(args, "appointment_id", "booking_id", "id"), appointmentAt.UTC().Format(time.RFC3339)),
 			ToolID:     toolID,
 			Arguments:  args,
 			RemindAt:   sessionwatch.ReminderTimeFromAppointment(appointmentAt, now).UTC().Format(time.RFC3339),
-			Rationale:  "runtime_resolved_appointment_reminder",
+			Rationale:  "runtime_resolved_" + capability.ID,
 		}, true
 	}
 	return UpdateIntentArtifact{}, false
 }
 
-func buildDeliveryUpdateArtifact(plan ToolCallPlan) (UpdateIntentArtifact, bool) {
+func buildPollingArtifact(capability policy.WatchCapability, plan ToolCallPlan, now time.Time) (UpdateIntentArtifact, bool) {
 	for _, candidate := range plan.Candidates {
 		toolID := strings.TrimSpace(candidate.ToolID)
-		if !containsAnyLower(strings.ToLower(toolID), "order", "delivery", "shipping", "tracking") {
+		if !watchCapabilityToolMatches(capability, toolID) {
 			continue
 		}
-		subjectRef := sessionwatch.ExtractSubjectRef(candidate.Arguments, "order_id", "tracking_id", "shipment_id", "package_id", "id")
+		subjectRef := sessionwatch.ExtractSubjectRef(candidate.Arguments, capability.SubjectKeys...)
 		if subjectRef == "" {
 			continue
 		}
 		return UpdateIntentArtifact{
-			Kind:                sessionwatch.KindDeliveryStatus,
+			CapabilityID:        capability.ID,
+			Kind:                capability.Kind,
 			Source:              sessionwatch.SourceRuntime,
 			SubjectRef:          subjectRef,
 			ToolID:              toolID,
 			Arguments:           cloneMap(candidate.Arguments),
-			PollIntervalSeconds: int((15 * time.Minute) / time.Second),
-			StopCondition:       "delivered",
-			Rationale:           "runtime_resolved_delivery_updates",
+			PollIntervalSeconds: capability.PollIntervalSeconds,
+			StopCondition:       capability.StopCondition,
+			Rationale:           "runtime_resolved_" + capability.ID,
 		}, true
 	}
+	_ = now
 	return UpdateIntentArtifact{}, false
+}
+
+func watchCapabilityTriggered(sem policy.SemanticsPolicy, capability policy.WatchCapability, text string, plan ToolCallPlan) bool {
+	if textMatchesSignals(sem, text, capability.TriggerSignals) {
+		return true
+	}
+	for _, candidate := range plan.Candidates {
+		if watchCapabilityToolMatches(capability, candidate.ToolID) {
+			return true
+		}
+	}
+	return false
+}
+
+func watchCapabilityToolMatches(capability policy.WatchCapability, toolID string) bool {
+	if len(capability.ToolMatchTerms) == 0 {
+		return true
+	}
+	return containsAnyLower(strings.ToLower(strings.TrimSpace(toolID)), capability.ToolMatchTerms...)
+}
+
+func textMatchesSignals(sem policy.SemanticsPolicy, text string, signals []string) bool {
+	if len(signals) == 0 {
+		return false
+	}
+	text = strings.ToLower(strings.TrimSpace(text))
+	if text == "" {
+		return false
+	}
+	for _, signal := range signals {
+		signal = strings.ToLower(strings.TrimSpace(signal))
+		if signal == "" {
+			continue
+		}
+		if strings.Contains(text, signal) {
+			return true
+		}
+		for _, item := range sem.Signals {
+			if strings.EqualFold(item.ID, signal) {
+				for _, phrase := range item.Phrases {
+					if strings.Contains(text, strings.ToLower(strings.TrimSpace(phrase))) {
+						return true
+					}
+				}
+				for _, token := range item.Tokens {
+					if strings.Contains(text, strings.ToLower(strings.TrimSpace(token))) {
+						return true
+					}
+				}
+				for _, alias := range item.Aliases {
+					if strings.Contains(text, strings.ToLower(strings.TrimSpace(alias))) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 func containsAnyLower(text string, parts ...string) bool {

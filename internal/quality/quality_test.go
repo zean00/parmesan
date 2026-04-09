@@ -256,6 +256,38 @@ func TestBuildResponsePlanIncludesHighRiskBlueprint(t *testing.T) {
 	}
 }
 
+func TestBuildResponsePlanUsesQualityProfileOverrides(t *testing.T) {
+	view := policyruntime.EngineResult{
+		QualityProfile: policy.QualityProfile{
+			ID:                        "support_profile",
+			RiskTier:                  "high",
+			AllowedCommitments:        []string{"evidence-backed support guidance"},
+			RequiredEvidence:          []string{"retrieved_knowledge", "matched_guideline"},
+			RequiredVerificationSteps: []string{"verify the account first"},
+			BlueprintRules: map[string][]string{
+				"default": {"Use the approved support blueprint."},
+			},
+		},
+	}
+
+	plan := BuildResponsePlan(view)
+	if plan.RiskTier != "high" {
+		t.Fatalf("risk tier = %q, want high", plan.RiskTier)
+	}
+	if !containsString(plan.AllowedCommitments, []string{"evidence-backed support guidance"}) {
+		t.Fatalf("allowed commitments = %#v, want profile override", plan.AllowedCommitments)
+	}
+	if !containsString(plan.RequiredEvidence, []string{"retrieved_knowledge"}) {
+		t.Fatalf("required evidence = %#v, want profile override", plan.RequiredEvidence)
+	}
+	if !containsString(plan.RequiredVerificationSteps, []string{"verify the account first"}) {
+		t.Fatalf("verification steps = %#v, want profile override", plan.RequiredVerificationSteps)
+	}
+	if !containsString(plan.DesiredStructure, []string{"Use the approved support blueprint."}) {
+		t.Fatalf("desired structure = %#v, want profile blueprint", plan.DesiredStructure)
+	}
+}
+
 func TestGradeFlagsNoisyUnusedRetrieval(t *testing.T) {
 	view := policyruntime.EngineResult{
 		RetrieverStage: policyruntime.RetrieverStageResult{Results: []knowledgeretriever.Result{{

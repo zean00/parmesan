@@ -13,6 +13,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
 	"github.com/sahal/parmesan/internal/domain/execution"
+	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	knowledgelearning "github.com/sahal/parmesan/internal/knowledge/learning"
@@ -78,7 +79,8 @@ func (r *Runner) processIdleSessions(ctx context.Context, now time.Time) {
 	}
 	execs, _ := r.repo.ListExecutions(ctx)
 	for _, sess := range sessions {
-		if !isLifecycleEligible(sess, now) {
+		bundle, _ := r.sessionBundle(ctx, sess)
+		if !r.isLifecycleEligible(sess, bundle, now) {
 			continue
 		}
 		if sessionModeManual(sess) {
@@ -90,17 +92,17 @@ func (r *Runner) processIdleSessions(ctx context.Context, now time.Time) {
 		if hasOpenExecutions(execs, sess.ID) {
 			continue
 		}
-		decision, reason := r.decideLifecycleAction(ctx, sess)
+		decision, reason := r.decideLifecycleAction(ctx, sess, bundle)
 		switch decision {
 		case "ask_followup":
-			_ = r.askFollowup(ctx, &sess, reason, now)
+			_ = r.askFollowup(ctx, &sess, bundle.LifecyclePolicy, reason, now)
 		case "close_session":
 			_ = r.closeSession(ctx, &sess, reason, now)
 		case "schedule_watch":
-			if ok := r.ensureInferredWatch(ctx, &sess, eventsForSession(ctx, r.repo, sess.ID), now); ok {
+			if ok := r.ensureInferredWatch(ctx, &sess, bundle, eventsForSession(ctx, r.repo, sess.ID), now); ok {
 				_ = r.markKeep(ctx, &sess, reason, now)
 			} else {
-				_ = r.askFollowup(ctx, &sess, "watch_requested_without_tool_context", now)
+				_ = r.askFollowup(ctx, &sess, bundle.LifecyclePolicy, "watch_requested_without_tool_context", now)
 			}
 		case "keep_open":
 			_ = r.markKeep(ctx, &sess, reason, now)
@@ -121,7 +123,7 @@ func (r *Runner) processRunnableWatches(ctx context.Context, now time.Time) {
 	}
 }
 
-func isLifecycleEligible(sess session.Session, now time.Time) bool {
+func (r *Runner) isLifecycleEligible(sess session.Session, bundle policy.Bundle, now time.Time) bool {
 	if sess.Status == session.StatusClosed {
 		return false
 	}
@@ -131,12 +133,16 @@ func isLifecycleEligible(sess session.Session, now time.Time) bool {
 	}
 	switch sess.Status {
 	case session.StatusAwaitingCustomer:
-		return now.Sub(last) >= awaitingCloseAfter()
+		return now.Sub(last) >= awaitingCloseAfter(bundle.LifecyclePolicy)
 	case session.StatusSessionKeep:
-		return now.Sub(last) >= keepRecheckAfter()
+		return now.Sub(last) >= keepRecheckAfter(bundle.LifecyclePolicy)
 	default:
-		return now.Sub(last) >= idleCandidateAfter()
+		return now.Sub(last) >= idleCandidateAfter(bundle.LifecyclePolicy)
 	}
+}
+
+func isLifecycleEligible(sess session.Session, now time.Time) bool {
+	return (&Runner{}).isLifecycleEligible(sess, policy.Bundle{}, now)
 }
 
 func sessionModeManual(sess session.Session) bool {
@@ -169,7 +175,69 @@ func hasSessionApprovals(ctx context.Context, repo store.Repository, sessionID s
 	return false
 }
 
-func (r *Runner) decideLifecycleAction(ctx context.Context, sess session.Session) (string, string) {
+func (r *Runner) sessionBundle(ctx context.Context, sess session.Session) (policy.Bundle, bool) {
+	if strings.TrimSpace(sess.AgentID) == "" {
+		return defaultLifecycleBundle(), true
+	}
+	profile, err := r.repo.GetAgentProfile(ctx, sess.AgentID)
+	if err != nil || strings.TrimSpace(profile.DefaultPolicyBundleID) == "" {
+		return defaultLifecycleBundle(), true
+	}
+	bundles, err := r.repo.ListBundles(ctx)
+	if err != nil {
+		return defaultLifecycleBundle(), true
+	}
+	for _, item := range bundles {
+		if item.ID == profile.DefaultPolicyBundleID {
+			return item, true
+		}
+	}
+	return defaultLifecycleBundle(), true
+}
+
+func defaultLifecycleBundle() policy.Bundle {
+	return policy.Bundle{
+		Semantics: policy.SemanticsPolicy{
+			Signals: []policy.SemanticSignal{
+				{ID: "delivery", Phrases: []string{"delivery", "shipping"}, Tokens: []string{"delivery", "shipping", "tracking", "package"}},
+				{ID: "appointment_reminder", Phrases: []string{"appointment reminder"}, Tokens: []string{"remind", "appointment", "notify"}},
+			},
+		},
+		WatchCapabilities: []policy.WatchCapability{
+			{
+				ID:                    "delivery_status_watch",
+				Kind:                  sessionwatch.KindDeliveryStatus,
+				ScheduleStrategy:      "poll",
+				TriggerSignals:        []string{"delivery", "tracking", "order status", "package", "update me", "keep me updated", "notify me", "let me know"},
+				ToolMatchTerms:        []string{"order", "delivery", "shipping", "tracking"},
+				SubjectKeys:           []string{"order_id", "tracking_id", "shipment_id", "package_id", "id"},
+				PollIntervalSeconds:   int((15 * time.Minute) / time.Second),
+				StopCondition:         "delivered",
+				AllowLifecycleFallback: true,
+			},
+			{
+				ID:                    "appointment_reminder_watch",
+				Kind:                  sessionwatch.KindAppointmentReminder,
+				ScheduleStrategy:      "reminder",
+				TriggerSignals:        []string{"appointment_reminder", "remind me", "appointment reminder", "reminder for my appointment", "notify me about my appointment"},
+				ToolMatchTerms:        []string{"appointment", "schedule", "calendar", "booking"},
+				SubjectKeys:           []string{"appointment_id", "booking_id", "id"},
+				RequiredFields:        []string{"appointment_at"},
+				ReminderLeadSeconds:   3600,
+				AllowLifecycleFallback: true,
+			},
+		},
+		LifecyclePolicy: policy.LifecyclePolicy{
+			ID:                        "default_lifecycle_policy",
+			FollowupMessage:           "Do you need any more help with this?",
+			ResolutionSignals:         []string{"thanks", "thank you", "that helps", "all good", "solved", "ok got it"},
+			DeliveryUpdateSignals:     []string{"update me", "keep me updated", "notify me", "let me know", "delivery", "shipping", "order status", "package"},
+			AppointmentReminderSignals: []string{"remind me", "appointment reminder", "reminder for my appointment", "notify me about my appointment"},
+		},
+	}
+}
+
+func (r *Runner) decideLifecycleAction(ctx context.Context, sess session.Session, bundle policy.Bundle) (string, string) {
 	events, err := r.repo.ListEvents(ctx, sess.ID)
 	if err != nil || len(events) == 0 {
 		return "", ""
@@ -177,28 +245,28 @@ func (r *Runner) decideLifecycleAction(ctx context.Context, sess session.Session
 	if sess.Status == session.StatusAwaitingCustomer && sess.FollowupCount > 0 {
 		return "close_session", "no_customer_reply_after_followup"
 	}
-	if shouldScheduleWatch(events) {
+	if shouldScheduleWatch(bundle, events) {
 		return "schedule_watch", "customer_requested_delivery_updates"
 	}
-	if latestCustomerLooksResolved(events) {
+	if latestCustomerLooksResolved(bundle.LifecyclePolicy, events) {
 		return "close_session", "customer_indicated_resolution"
 	}
 	if latestAgentAskedFollowup(events) {
 		return "close_session", "followup_already_sent"
 	}
-	if action, reason := r.llmLifecycleDecision(ctx, sess, events); action != "" {
+	if action, reason := r.llmLifecycleDecision(ctx, sess, bundle, events); action != "" {
 		return action, reason
 	}
 	return "ask_followup", "idle_conversation_unclear"
 }
 
-func latestCustomerLooksResolved(events []session.Event) bool {
+func latestCustomerLooksResolved(policyDef policy.LifecyclePolicy, events []session.Event) bool {
 	for i := len(events) - 1; i >= 0; i-- {
 		if events[i].Source != "customer" {
 			continue
 		}
 		text := strings.ToLower(strings.TrimSpace(sessionEventText(events[i])))
-		return containsAny(text, "thanks", "thank you", "that helps", "all good", "solved", "ok got it")
+		return containsAny(text, policyDef.ResolutionSignals...)
 	}
 	return false
 }
@@ -220,23 +288,25 @@ func latestAgentAskedFollowup(events []session.Event) bool {
 	return false
 }
 
-func shouldScheduleWatch(events []session.Event) bool {
+func shouldScheduleWatch(bundle policy.Bundle, events []session.Event) bool {
 	for i := len(events) - 1; i >= 0; i-- {
 		text := strings.ToLower(strings.TrimSpace(sessionEventText(events[i])))
 		if text == "" {
 			continue
 		}
-		if containsAny(text, "update me", "keep me updated", "notify me", "let me know") && containsAny(text, "delivery", "shipping", "order status", "package") {
-			return true
-		}
-		if containsAny(text, "remind me", "appointment reminder", "reminder for my appointment", "notify me about my appointment") {
-			return true
+		for _, capability := range bundle.WatchCapabilities {
+			if !capability.AllowLifecycleFallback {
+				continue
+			}
+			if containsAny(text, capability.TriggerSignals...) || textMatchesSignals(bundle.Semantics, text, capability.TriggerSignals) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-func (r *Runner) llmLifecycleDecision(ctx context.Context, sess session.Session, events []session.Event) (string, string) {
+func (r *Runner) llmLifecycleDecision(ctx context.Context, sess session.Session, bundle policy.Bundle, events []session.Event) (string, string) {
 	if r.router == nil {
 		return "", ""
 	}
@@ -249,9 +319,10 @@ func (r *Runner) llmLifecycleDecision(ctx context.Context, sess session.Session,
 Return strict JSON: {"action":"close_session|ask_followup|keep_open|schedule_watch","rationale":"string"}.
 Choose close_session only if the conversation is clearly resolved.
 Choose ask_followup if unclear and a single polite follow-up is appropriate.
-Choose schedule_watch only if the customer expects periodic updates.
+Choose schedule_watch only if the customer expects periodic updates that fit the lifecycle policy.
 Session status: ` + string(sess.Status) + `
 Followup count: ` + fmt.Sprint(sess.FollowupCount) + `
+Lifecycle policy: ` + bundle.LifecyclePolicy.ID + `
 Transcript:
 ` + transcript)
 	resp, err := r.router.Generate(ctx, model.CapabilityStructured, model.Request{Prompt: prompt})
@@ -270,11 +341,11 @@ Transcript:
 	}
 }
 
-func (r *Runner) askFollowup(ctx context.Context, sess *session.Session, reason string, now time.Time) error {
+func (r *Runner) askFollowup(ctx context.Context, sess *session.Session, policyDef policy.LifecyclePolicy, reason string, now time.Time) error {
 	if sess == nil {
 		return nil
 	}
-	message := "Do you need any more help with this?"
+	message := firstNonEmpty(strings.TrimSpace(policyDef.FollowupMessage), "Do you need any more help with this?")
 	if _, err := r.sessions.CreateMessageEvent(ctx, sess.ID, "ai_agent", message, "", traceIDForSession(sess.ID, "idle_followup"), map[string]any{
 		"lifecycle_kind": "idle_followup",
 		"reason":         reason,
@@ -359,29 +430,39 @@ func (r *Runner) markKeep(ctx context.Context, sess *session.Session, reason str
 	return nil
 }
 
-func (r *Runner) ensureInferredWatch(ctx context.Context, sess *session.Session, events []session.Event, now time.Time) bool {
+func (r *Runner) ensureInferredWatch(ctx context.Context, sess *session.Session, bundle policy.Bundle, events []session.Event, now time.Time) bool {
 	if sess == nil {
 		return false
 	}
-	if intent, ok := r.inferLifecycleWatchIntent(ctx, *sess, events, now); ok {
+	if intent, ok := r.inferLifecycleWatchIntent(ctx, *sess, bundle, events, now); ok {
 		_, _, err := sessionwatch.EnsureSessionWatch(ctx, r.repo, *sess, intent, now)
 		return err == nil
 	}
 	return false
 }
 
-func (r *Runner) inferLifecycleWatchIntent(ctx context.Context, sess session.Session, events []session.Event, now time.Time) (sessionwatch.UpdateIntent, bool) {
-	if latestCustomerRequestsAppointmentReminder(events) {
-		if appointmentAt, ok := latestAppointmentTime(events, now); ok {
-			args := map[string]any{"appointment_at": appointmentAt.UTC().Format(time.RFC3339)}
-			subjectRef := appointmentAt.UTC().Format(time.RFC3339)
-			return sessionwatch.BuildAppointmentReminderIntent(sessionwatch.SourceLifecycle, subjectRef, sessionwatch.ReminderTimeFromAppointment(appointmentAt, now), args, now)
+func (r *Runner) inferLifecycleWatchIntent(ctx context.Context, sess session.Session, bundle policy.Bundle, events []session.Event, now time.Time) (sessionwatch.UpdateIntent, bool) {
+	for _, capability := range bundle.WatchCapabilities {
+		if !capability.AllowLifecycleFallback {
+			continue
 		}
+		if !latestCustomerRequestsCapability(bundle.Semantics, capability, events) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(capability.ScheduleStrategy), "reminder") {
+			if appointmentAt, ok := latestAppointmentTime(events, now); ok {
+				args := map[string]any{"appointment_at": appointmentAt.UTC().Format(time.RFC3339)}
+				subjectRef := appointmentAt.UTC().Format(time.RFC3339)
+				return sessionwatch.BuildIntentFromCapability(capability, sessionwatch.SourceLifecycle, capability.ID, subjectRef, args, now)
+			}
+			continue
+		}
+		return r.pollingWatchIntentFromLatestExecution(ctx, sess, capability, now)
 	}
-	return r.deliveryWatchIntentFromLatestExecution(ctx, sess, now)
+	return sessionwatch.UpdateIntent{}, false
 }
 
-func (r *Runner) deliveryWatchIntentFromLatestExecution(ctx context.Context, sess session.Session, now time.Time) (sessionwatch.UpdateIntent, bool) {
+func (r *Runner) pollingWatchIntentFromLatestExecution(ctx context.Context, sess session.Session, capability policy.WatchCapability, now time.Time) (sessionwatch.UpdateIntent, bool) {
 	execs, err := r.repo.ListExecutions(ctx)
 	if err != nil {
 		return sessionwatch.UpdateIntent{}, false
@@ -405,15 +486,15 @@ func (r *Runner) deliveryWatchIntentFromLatestExecution(ctx context.Context, ses
 	var chosen toolRunSeed
 	for _, run := range runs {
 		args := parseJSONMap(run.InputJSON)
-		if strings.Contains(strings.ToLower(run.ToolID), "order") || strings.Contains(strings.ToLower(run.ToolID), "delivery") || strings.Contains(strings.ToLower(run.ToolID), "shipping") {
+		if containsAny(strings.ToLower(run.ToolID), capability.ToolMatchTerms...) {
 			chosen = toolRunSeed{ToolID: run.ToolID, Arguments: args}
 		}
 	}
 	if chosen.ToolID == "" {
 		return sessionwatch.UpdateIntent{}, false
 	}
-	subjectRef := sessionwatch.ExtractSubjectRef(chosen.Arguments, "order_id", "tracking_id", "shipment_id", "package_id", "id")
-	return sessionwatch.BuildDeliveryIntent(sessionwatch.SourceLifecycle, chosen.ToolID, subjectRef, chosen.Arguments, now)
+	subjectRef := sessionwatch.ExtractSubjectRef(chosen.Arguments, capability.SubjectKeys...)
+	return sessionwatch.BuildIntentFromCapability(capability, sessionwatch.SourceLifecycle, chosen.ToolID, subjectRef, chosen.Arguments, now)
 }
 
 type toolRunSeed struct {
@@ -421,13 +502,13 @@ type toolRunSeed struct {
 	Arguments map[string]any
 }
 
-func latestCustomerRequestsAppointmentReminder(events []session.Event) bool {
+func latestCustomerRequestsCapability(sem policy.SemanticsPolicy, capability policy.WatchCapability, events []session.Event) bool {
 	for i := len(events) - 1; i >= 0; i-- {
 		if events[i].Source != "customer" {
 			continue
 		}
 		text := strings.ToLower(strings.TrimSpace(sessionEventText(events[i])))
-		if containsAny(text, "remind me", "appointment reminder", "reminder for my appointment", "notify me about my appointment") {
+		if containsAny(text, capability.TriggerSignals...) || textMatchesSignals(sem, text, capability.TriggerSignals) {
 			return true
 		}
 		return false
@@ -445,6 +526,43 @@ func latestAppointmentTime(events []session.Event, now time.Time) (time.Time, bo
 		}
 	}
 	return time.Time{}, false
+}
+
+func textMatchesSignals(sem policy.SemanticsPolicy, text string, signals []string) bool {
+	text = strings.ToLower(strings.TrimSpace(text))
+	if text == "" || len(signals) == 0 {
+		return false
+	}
+	for _, signal := range signals {
+		signal = strings.ToLower(strings.TrimSpace(signal))
+		if signal == "" {
+			continue
+		}
+		if strings.Contains(text, signal) {
+			return true
+		}
+		for _, item := range sem.Signals {
+			if !strings.EqualFold(item.ID, signal) {
+				continue
+			}
+			for _, phrase := range item.Phrases {
+				if strings.Contains(text, strings.ToLower(strings.TrimSpace(phrase))) {
+					return true
+				}
+			}
+			for _, token := range item.Tokens {
+				if strings.Contains(text, strings.ToLower(strings.TrimSpace(token))) {
+					return true
+				}
+			}
+			for _, alias := range item.Aliases {
+				if strings.Contains(text, strings.ToLower(strings.TrimSpace(alias))) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (r *Runner) processWatch(ctx context.Context, watch session.Watch, now time.Time) error {
@@ -564,15 +682,24 @@ func watchPollInterval() time.Duration {
 	return 15 * time.Minute
 }
 
-func idleCandidateAfter() time.Duration {
+func idleCandidateAfter(policyDef policy.LifecyclePolicy) time.Duration {
+	if policyDef.IdleCandidateAfterMS > 0 {
+		return time.Duration(policyDef.IdleCandidateAfterMS) * time.Millisecond
+	}
 	return durationEnv("SESSION_IDLE_CANDIDATE_AFTER", 30*time.Minute)
 }
 
-func awaitingCloseAfter() time.Duration {
+func awaitingCloseAfter(policyDef policy.LifecyclePolicy) time.Duration {
+	if policyDef.AwaitingCloseAfterMS > 0 {
+		return time.Duration(policyDef.AwaitingCloseAfterMS) * time.Millisecond
+	}
 	return durationEnv("SESSION_AWAITING_CLOSE_AFTER", 12*time.Hour)
 }
 
-func keepRecheckAfter() time.Duration {
+func keepRecheckAfter(policyDef policy.LifecyclePolicy) time.Duration {
+	if policyDef.KeepRecheckAfterMS > 0 {
+		return time.Duration(policyDef.KeepRecheckAfterMS) * time.Millisecond
+	}
 	return durationEnv("SESSION_KEEP_RECHECK_AFTER", 30*time.Minute)
 }
 
