@@ -118,6 +118,7 @@ func MaterializeGraph(bundle Bundle) ([]GraphArtifact, []GraphEdge, Snapshot) {
 		rootArtifact(stableGraphID(bundle.ID, "semantics"), "semantic_pack", map[string]any{"semantics": bundle.Semantics}),
 		rootArtifact(stableGraphID(bundle.ID, "quality_profile"), "quality_profile", map[string]any{"quality_profile": bundle.QualityProfile}),
 		rootArtifact(stableGraphID(bundle.ID, "lifecycle_policy"), "lifecycle_policy", map[string]any{"lifecycle_policy": bundle.LifecyclePolicy}),
+		rootArtifact(stableGraphID(bundle.ID, "capability_isolation"), "capability_isolation", map[string]any{"capability_isolation": bundle.CapabilityIsolation}),
 		rootArtifact(stableGraphID(bundle.ID, "domain_boundary"), "domain_boundary", map[string]any{"domain_boundary": bundle.DomainBoundary}),
 		rootArtifact(stableGraphID(bundle.ID, "perceived_performance"), "perceived_performance", map[string]any{"perceived_performance": bundle.PerceivedPerformance}),
 	)

@@ -27,6 +27,7 @@ type Bundle struct {
 	WatchCapabilities         []WatchCapability          `json:"watch_capabilities,omitempty" yaml:"watch_capabilities,omitempty"`
 	QualityProfile            QualityProfile             `json:"quality_profile,omitempty" yaml:"quality_profile,omitempty"`
 	LifecyclePolicy           LifecyclePolicy            `json:"lifecycle_policy,omitempty" yaml:"lifecycle_policy,omitempty"`
+	CapabilityIsolation       CapabilityIsolation        `json:"capability_isolation,omitempty" yaml:"capability_isolation,omitempty"`
 	NoMatch                   string                     `json:"no_match,omitempty" yaml:"no_match,omitempty"`
 	DomainBoundary            DomainBoundary             `json:"domain_boundary,omitempty" yaml:"domain_boundary,omitempty"`
 	Soul                      Soul                       `json:"soul,omitempty" yaml:"soul,omitempty"`
@@ -85,6 +86,18 @@ type SemanticSlot struct {
 	Kind       string   `json:"kind" yaml:"kind"`
 	Markers    []string `json:"markers,omitempty" yaml:"markers,omitempty"`
 	StopTokens []string `json:"stop_tokens,omitempty" yaml:"stop_tokens,omitempty"`
+}
+
+type CapabilityIsolation struct {
+	AllowedProviderIDs    []string             `json:"allowed_provider_ids,omitempty" yaml:"allowed_provider_ids,omitempty"`
+	AllowedToolIDs        []string             `json:"allowed_tool_ids,omitempty" yaml:"allowed_tool_ids,omitempty"`
+	AllowedRetrieverIDs   []string             `json:"allowed_retriever_ids,omitempty" yaml:"allowed_retriever_ids,omitempty"`
+	AllowedKnowledgeScopes []KnowledgeScopeRef `json:"allowed_knowledge_scopes,omitempty" yaml:"allowed_knowledge_scopes,omitempty"`
+}
+
+type KnowledgeScopeRef struct {
+	Kind string `json:"kind" yaml:"kind"`
+	ID   string `json:"id" yaml:"id"`
 }
 
 type WatchCapability struct {

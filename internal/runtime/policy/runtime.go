@@ -31,6 +31,7 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 		return EngineResult{}, nil
 	}
 	bundle := applyRuntimeBundleDefaults(bundles[0])
+	bundle.Retrievers = bundle.CapabilityIsolation.FilterRetrieverBindings(bundle.Retrievers)
 	matchCtx := buildMatchingContext(events)
 	matchCtx.DerivedSignals = append([]string(nil), options.DerivedSignals...)
 	matchCtx.DerivedSignals = append(matchCtx.DerivedSignals, semantics.SignalsForPolicy(bundle.Semantics, matchCtx.LatestCustomerText)...)
@@ -256,6 +257,7 @@ func resolvedViewFromState(bundle policy.Bundle, state *matchingState, mode stri
 		SemanticsPolicy:             bundle.Semantics,
 		QualityProfile:              bundle.QualityProfile,
 		LifecyclePolicy:             bundle.LifecyclePolicy,
+		CapabilityIsolation:         bundle.CapabilityIsolation,
 		CompositionMode:             mode,
 		NoMatch:                     bundle.NoMatch,
 		DisambiguationPrompt:        prompt,

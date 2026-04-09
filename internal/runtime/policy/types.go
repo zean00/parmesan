@@ -396,6 +396,7 @@ type EngineResult struct {
 	SemanticsPolicy             policy.SemanticsPolicy
 	QualityProfile              policy.QualityProfile
 	LifecyclePolicy             policy.LifecyclePolicy
+	CapabilityIsolation         policy.CapabilityIsolation
 	CompositionMode             string
 	CustomerPreferences         []customer.Preference
 	NoMatch                     string

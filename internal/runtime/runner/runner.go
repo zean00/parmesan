@@ -752,6 +752,7 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 	if len(selectedBundles) == 0 {
 		return resolvedView{}, nil, fmt.Errorf("policy snapshot not found for selection bundle=%q fallback=%q", selection.BundleID, defaultBundleID)
 	}
+	catalog = filterCatalogForBundles(catalog, selectedBundles)
 	knowledgeSnapshot, knowledgeChunks := r.resolveKnowledgeSnapshot(ctx, sess, profile, selectedBundles)
 	derivedSignals := r.derivedSignalText(ctx, exec.SessionID)
 	view, err := policyruntime.ResolveWithOptions(ctx, events, selectedBundles, journeys, catalog, policyruntime.ResolveOptions{
@@ -1284,6 +1285,7 @@ func (r *Runner) resolveKnowledgeSnapshot(ctx context.Context, sess session.Sess
 	var snapshots []knowledge.Snapshot
 	var chunks []knowledge.Chunk
 	customerScopeKind, customerScopeID := customerKnowledgeScope(sess)
+	customerScopeKind, customerScopeID = candidateKnowledgeScope(bundles, customerScopeKind, customerScopeID)
 	if customerScopeID != "" {
 		customerSnapshots, err := r.repo.ListKnowledgeSnapshots(ctx, knowledge.SnapshotQuery{ScopeKind: customerScopeKind, ScopeID: customerScopeID, Limit: 1})
 		if err == nil && len(customerSnapshots) > 0 {
@@ -1293,6 +1295,7 @@ func (r *Runner) resolveKnowledgeSnapshot(ctx context.Context, sess session.Sess
 		}
 	}
 	scopeKind, scopeID := knowledgeScope(sess, bundles)
+	scopeKind, scopeID = candidateKnowledgeScope(bundles, scopeKind, scopeID)
 	if scopeID != "" {
 		sharedSnapshots, err := r.repo.ListKnowledgeSnapshots(ctx, knowledge.SnapshotQuery{ScopeKind: scopeKind, ScopeID: scopeID, Limit: 1})
 		if err == nil && len(sharedSnapshots) > 0 {
@@ -1301,11 +1304,12 @@ func (r *Runner) resolveKnowledgeSnapshot(ctx context.Context, sess session.Sess
 			chunks = append(chunks, sharedChunks...)
 		}
 	}
-	if len(snapshots) == 0 && strings.TrimSpace(profile.DefaultKnowledgeScopeKind) != "" && strings.TrimSpace(profile.DefaultKnowledgeScopeID) != "" {
-		profileSnapshots, err := r.repo.ListKnowledgeSnapshots(ctx, knowledge.SnapshotQuery{ScopeKind: profile.DefaultKnowledgeScopeKind, ScopeID: profile.DefaultKnowledgeScopeID, Limit: 1})
+	profileScopeKind, profileScopeID := candidateKnowledgeScope(bundles, profile.DefaultKnowledgeScopeKind, profile.DefaultKnowledgeScopeID)
+	if len(snapshots) == 0 && profileScopeKind != "" && profileScopeID != "" {
+		profileSnapshots, err := r.repo.ListKnowledgeSnapshots(ctx, knowledge.SnapshotQuery{ScopeKind: profileScopeKind, ScopeID: profileScopeID, Limit: 1})
 		if err == nil && len(profileSnapshots) > 0 {
 			snapshots = append(snapshots, profileSnapshots[0])
-			profileChunks, _ := r.repo.ListKnowledgeChunks(ctx, knowledge.ChunkQuery{ScopeKind: profile.DefaultKnowledgeScopeKind, ScopeID: profile.DefaultKnowledgeScopeID, SnapshotID: profileSnapshots[0].ID})
+			profileChunks, _ := r.repo.ListKnowledgeChunks(ctx, knowledge.ChunkQuery{ScopeKind: profileScopeKind, ScopeID: profileScopeID, SnapshotID: profileSnapshots[0].ID})
 			chunks = append(chunks, profileChunks...)
 		}
 	}

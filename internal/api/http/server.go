@@ -2864,6 +2864,7 @@ func (s *Server) policyActiveStateView(ctx context.Context, sess session.Session
 	}
 	if len(selected) > 0 {
 		payload["bundle"] = selected[0]
+		payload["capability_isolation"] = capabilityIsolationPayload(selected[0].CapabilityIsolation)
 	}
 	if snapshotID != "" {
 		snapshot, err := s.store.GetPolicySnapshot(ctx, snapshotID)
@@ -2929,7 +2930,11 @@ func (s *Server) policyComposedStateView(ctx context.Context, sess session.Sessi
 			}
 		}
 	}
-	scopeKind, scopeID := qualityKnowledgeScope(sess, nil)
+	selectedBundles := []policy.Bundle{}
+	if item, ok := payload["bundle"].(policy.Bundle); ok {
+		selectedBundles = []policy.Bundle{item}
+	}
+	scopeKind, scopeID := qualityKnowledgeScope(sess, selectedBundles)
 	if knowledgeState, err := s.knowledgeActiveStatePayload(ctx, scopeKind, scopeID); err == nil && knowledgeState != nil {
 		payload["knowledge_active_state"] = knowledgeState
 	}
@@ -2986,7 +2991,13 @@ func (s *Server) operatorControlStatePayload(ctx context.Context, query url.Valu
 		}
 	}
 	if scopeKind == "" || scopeID == "" {
-		scopeKind, scopeID = qualityKnowledgeScope(sessionStub, nil)
+		selectedBundles := []policy.Bundle{}
+		if policyState, ok := payload["policy"].(map[string]any); ok {
+			if item, ok := policyState["bundle"].(policy.Bundle); ok {
+				selectedBundles = []policy.Bundle{item}
+			}
+		}
+		scopeKind, scopeID = qualityKnowledgeScope(sessionStub, selectedBundles)
 	}
 	if scopeKind != "" && scopeID != "" {
 		if knowledgeState, err := s.knowledgeActiveStatePayload(ctx, scopeKind, scopeID); err == nil {
@@ -8200,6 +8211,7 @@ type resolvedPolicyResponse struct {
 	BatchResults         []policyruntime.BatchResult       `json:"batch_results,omitempty"`
 	PromptSetVersions    map[string]string                 `json:"prompt_set_versions,omitempty"`
 	ARQResults           []string                          `json:"arq_results,omitempty"`
+	CapabilityIsolation  map[string]any                    `json:"capability_isolation,omitempty"`
 }
 
 func (s *Server) resolveExecutionView(ctx context.Context, exec execution.TurnExecution, bundleID string) (resolvedPolicyResponse, error) {
@@ -8219,6 +8231,7 @@ func (s *Server) resolveExecutionView(ctx context.Context, exec execution.TurnEx
 	if err != nil {
 		return resolvedPolicyResponse{}, err
 	}
+	catalog = filterCatalogForPolicy(catalog, selected)
 	view, err := policyruntime.ResolveWithRouter(ctx, s.router, events, selected, journeyInstances, catalog)
 	if err != nil {
 		return resolvedPolicyResponse{}, err
@@ -8271,6 +8284,7 @@ func (s *Server) executionQualityPayload(ctx context.Context, exec execution.Tur
 	if err != nil {
 		return nil, err
 	}
+	catalog = filterCatalogForPolicy(catalog, selected)
 	if snapshotID != "" {
 		exec.PolicySnapshotID = snapshotID
 	}
@@ -8295,6 +8309,7 @@ func (s *Server) executionQualityPayload(ctx context.Context, exec execution.Tur
 		"execution_id":     exec.ID,
 		"session_id":       exec.SessionID,
 		"bundle_id":        exec.PolicyBundleID,
+		"capability_isolation": capabilityIsolationPayload(view.CapabilityIsolation),
 		"response":         response,
 		"plan":             quality.BuildResponsePlan(view),
 		"claims":           card.Claims,
@@ -8418,6 +8433,7 @@ func (s *Server) qualityKnowledgeSnapshot(ctx context.Context, sess session.Sess
 	var snapshots []knowledge.Snapshot
 	var chunks []knowledge.Chunk
 	customerScopeKind, customerScopeID := qualityCustomerKnowledgeScope(sess)
+	customerScopeKind, customerScopeID = allowedKnowledgeScopeForPolicy(bundles, customerScopeKind, customerScopeID)
 	if customerScopeID != "" {
 		customerSnapshots, err := s.store.ListKnowledgeSnapshots(ctx, knowledge.SnapshotQuery{ScopeKind: customerScopeKind, ScopeID: customerScopeID, Limit: 1})
 		if err == nil && len(customerSnapshots) > 0 {
@@ -8427,6 +8443,7 @@ func (s *Server) qualityKnowledgeSnapshot(ctx context.Context, sess session.Sess
 		}
 	}
 	scopeKind, scopeID := qualityKnowledgeScope(sess, bundles)
+	scopeKind, scopeID = allowedKnowledgeScopeForPolicy(bundles, scopeKind, scopeID)
 	if scopeID != "" {
 		sharedSnapshots, err := s.store.ListKnowledgeSnapshots(ctx, knowledge.SnapshotQuery{ScopeKind: scopeKind, ScopeID: scopeID, Limit: 1})
 		if err == nil && len(sharedSnapshots) > 0 {
@@ -8435,11 +8452,12 @@ func (s *Server) qualityKnowledgeSnapshot(ctx context.Context, sess session.Sess
 			chunks = append(chunks, sharedChunks...)
 		}
 	}
-	if len(snapshots) == 0 && strings.TrimSpace(profile.DefaultKnowledgeScopeKind) != "" && strings.TrimSpace(profile.DefaultKnowledgeScopeID) != "" {
-		profileSnapshots, err := s.store.ListKnowledgeSnapshots(ctx, knowledge.SnapshotQuery{ScopeKind: profile.DefaultKnowledgeScopeKind, ScopeID: profile.DefaultKnowledgeScopeID, Limit: 1})
+	profileScopeKind, profileScopeID := allowedKnowledgeScopeForPolicy(bundles, profile.DefaultKnowledgeScopeKind, profile.DefaultKnowledgeScopeID)
+	if len(snapshots) == 0 && profileScopeKind != "" && profileScopeID != "" {
+		profileSnapshots, err := s.store.ListKnowledgeSnapshots(ctx, knowledge.SnapshotQuery{ScopeKind: profileScopeKind, ScopeID: profileScopeID, Limit: 1})
 		if err == nil && len(profileSnapshots) > 0 {
 			snapshots = append(snapshots, profileSnapshots[0])
-			profileChunks, _ := s.store.ListKnowledgeChunks(ctx, knowledge.ChunkQuery{ScopeKind: profile.DefaultKnowledgeScopeKind, ScopeID: profile.DefaultKnowledgeScopeID, SnapshotID: profileSnapshots[0].ID})
+			profileChunks, _ := s.store.ListKnowledgeChunks(ctx, knowledge.ChunkQuery{ScopeKind: profileScopeKind, ScopeID: profileScopeID, SnapshotID: profileSnapshots[0].ID})
 			chunks = append(chunks, profileChunks...)
 		}
 	}
@@ -8588,6 +8606,7 @@ func toResolvedPolicyResponse(exec execution.TurnExecution, view policyruntime.E
 		BatchResults:         append([]policyruntime.BatchResult(nil), view.BatchResults...),
 		PromptSetVersions:    cloneStringMap(view.PromptSetVersions),
 		ARQResults:           arqNames(view.ARQResults),
+		CapabilityIsolation:  capabilityIsolationPayload(view.CapabilityIsolation),
 	}
 	if view.Bundle != nil {
 		resp.BundleID = view.Bundle.ID

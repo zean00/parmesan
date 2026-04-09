@@ -243,6 +243,10 @@ func TestOperatorGetPolicyActiveStateIncludesSelectedSnapshotAndRollout(t *testi
 		Version:    "v2",
 		ImportedAt: now.Add(time.Second),
 		Soul:       policy.Soul{Identity: "candidate"},
+		CapabilityIsolation: policy.CapabilityIsolation{
+			AllowedProviderIDs: []string{"commerce"},
+			AllowedToolIDs:     []string{"commerce_get_order"},
+		},
 		Guidelines: []policy.Guideline{
 			{ID: "greet_base", When: "hi", Then: "hello warmly"},
 			{ID: "handoff_candidate", When: "needs human", Then: "handoff"},
@@ -325,6 +329,11 @@ func TestOperatorGetPolicyActiveStateIncludesSelectedSnapshotAndRollout(t *testi
 	}
 	if _, ok := payload["candidate_snapshot"].(map[string]any); !ok {
 		t.Fatalf("payload = %#v, want candidate_snapshot", payload)
+	}
+	if isolation, ok := payload["capability_isolation"].(map[string]any); !ok {
+		t.Fatalf("payload = %#v, want capability_isolation", payload)
+	} else if providers, ok := isolation["allowed_provider_ids"].([]any); !ok || len(providers) != 1 {
+		t.Fatalf("capability_isolation = %#v, want allowed provider ids", isolation)
 	}
 }
 
@@ -716,7 +725,15 @@ func TestRolloutSummaryAndPolicyComposedState(t *testing.T) {
 	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
 	now := time.Now().UTC()
 	base := policy.Bundle{ID: "bundle_base", Version: "v1", ImportedAt: now, Soul: policy.Soul{Identity: "base"}}
-	candidate := policy.Bundle{ID: "bundle_candidate", Version: "v2", ImportedAt: now.Add(time.Second), Soul: policy.Soul{Identity: "candidate"}}
+	candidate := policy.Bundle{
+		ID:         "bundle_candidate",
+		Version:    "v2",
+		ImportedAt: now.Add(time.Second),
+		Soul:       policy.Soul{Identity: "candidate"},
+		CapabilityIsolation: policy.CapabilityIsolation{
+			AllowedToolIDs: []string{"commerce_schedule_appointment"},
+		},
+	}
 	if err := repo.SaveBundle(context.Background(), base); err != nil {
 		t.Fatal(err)
 	}
@@ -772,6 +789,11 @@ func TestRolloutSummaryAndPolicyComposedState(t *testing.T) {
 	}
 	if _, ok := composedPayload["recent_changes"].([]any); !ok {
 		t.Fatalf("composed payload = %#v, want recent_changes", composedPayload)
+	}
+	if isolation, ok := composedPayload["capability_isolation"].(map[string]any); !ok {
+		t.Fatalf("composed payload = %#v, want capability_isolation", composedPayload)
+	} else if tools, ok := isolation["allowed_tool_ids"].([]any); !ok || len(tools) != 1 {
+		t.Fatalf("capability_isolation = %#v, want allowed tool ids", isolation)
 	}
 }
 
@@ -889,6 +911,11 @@ func TestOperatorControlStateAndHistory(t *testing.T) {
 	}
 	if _, ok := payload["policy"].(map[string]any); !ok {
 		t.Fatalf("payload = %#v, want policy", payload)
+	}
+	if policyPayload, ok := payload["policy"].(map[string]any); !ok {
+		t.Fatalf("payload = %#v, want policy payload", payload)
+	} else if _, ok := policyPayload["capability_isolation"].(map[string]any); !ok {
+		t.Fatalf("policy payload = %#v, want capability_isolation", policyPayload)
 	}
 	if _, ok := payload["knowledge"].(map[string]any); !ok {
 		t.Fatalf("payload = %#v, want knowledge", payload)

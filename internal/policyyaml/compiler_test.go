@@ -107,6 +107,13 @@ quality_profile:
 lifecycle_policy:
   id: support_lifecycle
   followup_message: Need anything else before I close this support request?
+capability_isolation:
+  allowed_provider_ids: [commerce]
+  allowed_tool_ids: [commerce_schedule_appointment]
+  allowed_retriever_ids: [kb_agent]
+  allowed_knowledge_scopes:
+    - kind: agent
+      id: agent_support
 semantics:
   signals:
     - id: scheduling
@@ -122,6 +129,12 @@ semantics:
 	}
 	if bundle.QualityProfile.ID != "support_quality" || bundle.LifecyclePolicy.ID != "support_lifecycle" {
 		t.Fatalf("quality/lifecycle = %#v / %#v, want parsed profile and lifecycle policy", bundle.QualityProfile, bundle.LifecyclePolicy)
+	}
+	if len(bundle.CapabilityIsolation.AllowedProviderIDs) != 1 ||
+		bundle.CapabilityIsolation.AllowedProviderIDs[0] != "commerce" ||
+		len(bundle.CapabilityIsolation.AllowedKnowledgeScopes) != 1 ||
+		bundle.CapabilityIsolation.AllowedKnowledgeScopes[0].ID != "agent_support" {
+		t.Fatalf("capability isolation = %#v, want parsed allowlists", bundle.CapabilityIsolation)
 	}
 	if len(bundle.Semantics.Signals) != 1 || bundle.Semantics.Signals[0].ID != "scheduling" {
 		t.Fatalf("semantics = %#v, want parsed semantics", bundle.Semantics)

@@ -940,6 +940,122 @@ func TestComposePromptIncludesSoulGuidance(t *testing.T) {
 	}
 }
 
+func TestResolveViewFiltersCatalogByCapabilityIsolation(t *testing.T) {
+	repo := memory.New()
+	r := New(repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), "test-runner")
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if err := repo.SaveBundle(ctx, policy.Bundle{
+		ID:      "bundle_capability_isolation",
+		Version: "v1",
+		ImportedAt: now,
+		CapabilityIsolation: policy.CapabilityIsolation{
+			AllowedProviderIDs: []string{"commerce"},
+			AllowedToolIDs:     []string{"commerce_schedule_appointment"},
+		},
+		Guidelines: []policy.Guideline{
+			{ID: "schedule_visit", When: "appointment", Then: "schedule the appointment"},
+			{ID: "check_delivery", When: "delivery", Then: "check the delivery status"},
+		},
+		GuidelineToolAssociations: []policy.GuidelineToolAssociation{
+			{GuidelineID: "schedule_visit", ToolID: "commerce.schedule_appointment"},
+			{GuidelineID: "check_delivery", ToolID: "logistics.get_delivery_status"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveAgentProfile(ctx, agent.Profile{
+		ID:                    "agent_capability_isolation",
+		Name:                  "Support",
+		Status:                "active",
+		DefaultPolicyBundleID: "bundle_capability_isolation",
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateSession(ctx, session.Session{
+		ID:        "sess_capability_isolation",
+		Channel:   "web",
+		AgentID:   "agent_capability_isolation",
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendEvent(ctx, session.Event{
+		ID:        "evt_capability_isolation",
+		SessionID: "sess_capability_isolation",
+		Source:    "customer",
+		Kind:      "message",
+		CreatedAt: now,
+		Content:   []session.ContentPart{{Type: "text", Text: "Please schedule my appointment and check the delivery status."}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveCatalogEntries(ctx, []tool.CatalogEntry{
+		{ID: "commerce_schedule_appointment", ProviderID: "commerce", Name: "schedule_appointment", RuntimeProtocol: "mcp", ImportedAt: now},
+		{ID: "logistics_get_delivery_status", ProviderID: "logistics", Name: "get_delivery_status", RuntimeProtocol: "mcp", ImportedAt: now},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	exec := execution.TurnExecution{
+		ID:             "exec_capability_isolation",
+		SessionID:      "sess_capability_isolation",
+		TriggerEventID: "evt_capability_isolation",
+		TraceID:        "trace_capability_isolation",
+		Status:         execution.StatusRunning,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := repo.CreateExecution(ctx, exec, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	view, _, err := r.resolveView(ctx, exec)
+	if err != nil {
+		t.Fatalf("resolveView() error = %v", err)
+	}
+	if len(view.ToolExposureStage.ExposedTools) != 1 || view.ToolExposureStage.ExposedTools[0] != "schedule_appointment" {
+		t.Fatalf("exposed tools = %#v, want only allowed schedule_appointment", view.ToolExposureStage.ExposedTools)
+	}
+}
+
+func TestResolveKnowledgeSnapshotSkipsDisallowedProfileDefaultScope(t *testing.T) {
+	repo := memory.New()
+	r := New(repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), "test-runner")
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if err := repo.SaveKnowledgeSnapshot(ctx, knowledge.Snapshot{
+		ID:        "snap_profile_default",
+		ScopeKind: "agent",
+		ScopeID:   "agent_disallowed_scope",
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, chunks := r.resolveKnowledgeSnapshot(ctx, session.Session{
+		ID:      "sess_knowledge_isolation",
+		Channel: "web",
+		AgentID: "agent_knowledge_isolation",
+	}, agent.Profile{
+		ID:                        "agent_knowledge_isolation",
+		DefaultKnowledgeScopeKind: "agent",
+		DefaultKnowledgeScopeID:   "agent_disallowed_scope",
+	}, []policy.Bundle{{
+		ID:      "bundle_knowledge_isolation",
+		Version: "v1",
+		CapabilityIsolation: policy.CapabilityIsolation{
+			AllowedKnowledgeScopes: []policy.KnowledgeScopeRef{{Kind: "agent", ID: "agent_allowed_scope"}},
+		},
+	}})
+	if snapshot != nil || chunks != nil {
+		t.Fatalf("snapshot=%#v chunks=%#v, want disallowed profile default scope skipped", snapshot, chunks)
+	}
+}
+
 func TestCreateAssistantMessageSequenceAddsBatchMetadata(t *testing.T) {
 	repo := memory.New()
 	r := New(repo, nil, nil, nil, "test-runner")

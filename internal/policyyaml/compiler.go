@@ -55,6 +55,9 @@ func ValidateBundle(bundle policy.Bundle) error {
 	if err := validateLifecyclePolicy(bundle.LifecyclePolicy); err != nil {
 		return err
 	}
+	if err := validateCapabilityIsolation(bundle.CapabilityIsolation); err != nil {
+		return err
+	}
 	if err := validateDomainBoundary(bundle.DomainBoundary); err != nil {
 		return err
 	}
@@ -198,6 +201,32 @@ func applyBundleDefaults(bundle policy.Bundle) policy.Bundle {
 		bundle.LifecyclePolicy = defaultLifecyclePolicy(bundle.LifecyclePolicy)
 	}
 	return bundle
+}
+
+func validateCapabilityIsolation(item policy.CapabilityIsolation) error {
+	if err := validateNonEmptyUnique("capability_isolation.allowed_provider_ids", item.AllowedProviderIDs); err != nil {
+		return err
+	}
+	if err := validateNonEmptyUnique("capability_isolation.allowed_tool_ids", item.AllowedToolIDs); err != nil {
+		return err
+	}
+	if err := validateNonEmptyUnique("capability_isolation.allowed_retriever_ids", item.AllowedRetrieverIDs); err != nil {
+		return err
+	}
+	seenScopes := map[string]struct{}{}
+	for _, scope := range item.AllowedKnowledgeScopes {
+		kind := strings.TrimSpace(scope.Kind)
+		id := strings.TrimSpace(scope.ID)
+		if kind == "" || id == "" {
+			return errors.New("capability_isolation.allowed_knowledge_scopes requires kind and id")
+		}
+		key := kind + ":" + id
+		if _, ok := seenScopes[key]; ok {
+			return fmt.Errorf("capability_isolation.allowed_knowledge_scopes contains duplicate %q", key)
+		}
+		seenScopes[key] = struct{}{}
+	}
+	return nil
 }
 
 func validateSoul(soul policy.Soul) error {
