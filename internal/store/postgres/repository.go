@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sahal/parmesan/internal/controlgraph"
 	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/artifactmeta"
@@ -96,6 +97,9 @@ func (c *Client) ListBundles(ctx context.Context) ([]policy.Bundle, error) {
 }
 
 func (c *Client) SavePolicyArtifacts(ctx context.Context, items []policy.GraphArtifact) error {
+	if c.Pool == nil {
+		return c.savePolicyArtifactsQuery(ctx, c.sessionQuery(), items)
+	}
 	tx, err := c.Pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -153,6 +157,9 @@ func (c *Client) ListPolicyArtifacts(ctx context.Context, query policy.ArtifactQ
 }
 
 func (c *Client) SavePolicyEdges(ctx context.Context, items []policy.GraphEdge) error {
+	if c.Pool == nil {
+		return c.savePolicyEdgesQuery(ctx, c.sessionQuery(), items)
+	}
 	tx, err := c.Pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -280,12 +287,16 @@ func (c *Client) ListPolicySnapshots(ctx context.Context, query policy.SnapshotQ
 }
 
 func (c *Client) savePolicyArtifactsTx(ctx context.Context, tx pgx.Tx, items []policy.GraphArtifact) error {
+	return c.savePolicyArtifactsQuery(ctx, tx, items)
+}
+
+func (c *Client) savePolicyArtifactsQuery(ctx context.Context, q sessionEventQuerier, items []policy.GraphArtifact) error {
 	for _, item := range items {
 		raw, err := json.Marshal(item.Payload)
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `
+		_, err = q.Exec(ctx, `
 			INSERT INTO policy_artifacts (id, bundle_id, kind, version, source_yaml, artifact_json, metadata_json, created_at)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 			ON CONFLICT (id) DO UPDATE
@@ -305,8 +316,12 @@ func (c *Client) savePolicyArtifactsTx(ctx context.Context, tx pgx.Tx, items []p
 }
 
 func (c *Client) savePolicyEdgesTx(ctx context.Context, tx pgx.Tx, items []policy.GraphEdge) error {
+	return c.savePolicyEdgesQuery(ctx, tx, items)
+}
+
+func (c *Client) savePolicyEdgesQuery(ctx context.Context, q sessionEventQuerier, items []policy.GraphEdge) error {
 	for _, item := range items {
-		_, err := tx.Exec(ctx, `
+		_, err := q.Exec(ctx, `
 			INSERT INTO policy_edges (id, bundle_id, snapshot_id, source_id, kind, target_id, metadata_json, created_at)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 			ON CONFLICT (id) DO UPDATE
@@ -564,6 +579,13 @@ func (c *Client) SaveCustomerPreference(ctx context.Context, pref customer.Prefe
 	if err != nil {
 		return err
 	}
+	artifacts, edges := controlgraph.CustomerPreferenceRecord(pref)
+	if err := c.savePolicyArtifactsQuery(ctx, db, artifacts); err != nil {
+		return err
+	}
+	if err := c.savePolicyEdgesQuery(ctx, db, edges); err != nil {
+		return err
+	}
 	if event.ID != "" {
 		return c.AppendCustomerPreferenceEvent(ctx, event)
 	}
@@ -634,7 +656,14 @@ func (c *Client) AppendCustomerPreferenceEvent(ctx context.Context, event custom
 		INSERT INTO customer_preference_events (id, preference_id, agent_id, customer_id, key, value, action, source, confidence, evidence_refs_json, metadata_json, created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 	`, event.ID, nullString(event.PreferenceID), event.AgentID, event.CustomerID, event.Key, event.Value, event.Action, event.Source, event.Confidence, evidence, metadata, event.CreatedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	artifacts, edges := controlgraph.CustomerPreferenceEvent(event)
+	if err := c.savePolicyArtifactsQuery(ctx, db, artifacts); err != nil {
+		return err
+	}
+	return c.savePolicyEdgesQuery(ctx, db, edges)
 }
 
 func (c *Client) ListCustomerPreferenceEvents(ctx context.Context, query customer.PreferenceQuery) ([]customer.PreferenceEvent, error) {
@@ -698,7 +727,14 @@ func (c *Client) SaveFeedbackRecord(ctx context.Context, record feedback.Record)
 		    outputs_json = EXCLUDED.outputs_json,
 		    updated_at = EXCLUDED.updated_at
 	`, record.ID, record.SessionID, nullString(record.ExecutionID), nullString(record.TraceID), nullString(record.OperatorID), record.Rating, record.Category, record.Text, labels, targets, metadata, outputs, record.CreatedAt, record.UpdatedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	artifacts, edges := controlgraph.FeedbackRecord(record)
+	if err := c.savePolicyArtifactsQuery(ctx, db, artifacts); err != nil {
+		return err
+	}
+	return c.savePolicyEdgesQuery(ctx, db, edges)
 }
 
 func (c *Client) GetFeedbackRecord(ctx context.Context, feedbackID string) (feedback.Record, error) {
@@ -1119,7 +1155,14 @@ func (c *Client) SaveKnowledgeSource(ctx context.Context, source knowledge.Sourc
 		    metadata_json = EXCLUDED.metadata_json,
 		    updated_at = EXCLUDED.updated_at
 	`, source.ID, source.ScopeKind, source.ScopeID, source.Kind, source.URI, nullString(source.Checksum), source.Status, metadata, source.CreatedAt, source.UpdatedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	artifacts, edges := controlgraph.KnowledgeSource(source)
+	if err := c.savePolicyArtifactsQuery(ctx, c.sessionQuery(), artifacts); err != nil {
+		return err
+	}
+	return c.savePolicyEdgesQuery(ctx, c.sessionQuery(), edges)
 }
 
 func (c *Client) GetKnowledgeSource(ctx context.Context, sourceID string) (knowledge.Source, error) {
@@ -1181,7 +1224,14 @@ func (c *Client) SaveKnowledgeSyncJob(ctx context.Context, job knowledge.SyncJob
 		    started_at = EXCLUDED.started_at,
 		    finished_at = EXCLUDED.finished_at
 	`, job.ID, job.SourceID, job.Status, job.Force, nullString(job.RequestedBy), nullString(job.Error), nullString(job.OldChecksum), nullString(job.NewChecksum), nullString(job.SnapshotID), job.Changed, metadata, job.CreatedAt, job.StartedAt, job.FinishedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	artifacts, edges := controlgraph.KnowledgeSyncJob(job)
+	if err := c.savePolicyArtifactsQuery(ctx, c.sessionQuery(), artifacts); err != nil {
+		return err
+	}
+	return c.savePolicyEdgesQuery(ctx, c.sessionQuery(), edges)
 }
 
 func (c *Client) GetKnowledgeSyncJob(ctx context.Context, jobID string) (knowledge.SyncJob, error) {
@@ -1454,7 +1504,14 @@ func (c *Client) SaveKnowledgeSnapshot(ctx context.Context, snapshot knowledge.S
 		    chunk_ids_json = EXCLUDED.chunk_ids_json,
 		    metadata_json = EXCLUDED.metadata_json
 	`, snapshot.ID, snapshot.ScopeKind, snapshot.ScopeID, pageIDs, chunkIDs, metadata, snapshot.CreatedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	artifacts, edges := controlgraph.KnowledgeSnapshot(snapshot)
+	if err := c.savePolicyArtifactsQuery(ctx, c.sessionQuery(), artifacts); err != nil {
+		return err
+	}
+	return c.savePolicyEdgesQuery(ctx, c.sessionQuery(), edges)
 }
 
 func (c *Client) GetKnowledgeSnapshot(ctx context.Context, snapshotID string) (knowledge.Snapshot, error) {
@@ -1527,7 +1584,14 @@ func (c *Client) SaveKnowledgeUpdateProposal(ctx context.Context, proposal knowl
 		    payload_json = EXCLUDED.payload_json,
 		    updated_at = EXCLUDED.updated_at
 	`, proposal.ID, proposal.ScopeKind, proposal.ScopeID, proposal.Kind, proposal.State, proposal.Rationale, evidence, payload, proposal.CreatedAt, proposal.UpdatedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	artifacts, edges := controlgraph.KnowledgeUpdateProposal(proposal)
+	if err := c.savePolicyArtifactsQuery(ctx, c.sessionQuery(), artifacts); err != nil {
+		return err
+	}
+	return c.savePolicyEdgesQuery(ctx, c.sessionQuery(), edges)
 }
 
 func (c *Client) GetKnowledgeUpdateProposal(ctx context.Context, proposalID string) (knowledge.UpdateProposal, error) {
@@ -1590,7 +1654,14 @@ func (c *Client) SaveKnowledgeLintFinding(ctx context.Context, finding knowledge
 		    metadata_json = EXCLUDED.metadata_json,
 		    updated_at = EXCLUDED.updated_at
 	`, finding.ID, finding.ScopeKind, finding.ScopeID, nullString(finding.ProposalID), nullString(finding.PageID), nullString(finding.SourceID), finding.Kind, finding.Severity, finding.Status, finding.Message, evidence, metadata, finding.CreatedAt, finding.UpdatedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	artifacts, edges := controlgraph.KnowledgeLintFinding(finding)
+	if err := c.savePolicyArtifactsQuery(ctx, c.sessionQuery(), artifacts); err != nil {
+		return err
+	}
+	return c.savePolicyEdgesQuery(ctx, c.sessionQuery(), edges)
 }
 
 func (c *Client) ListKnowledgeLintFindings(ctx context.Context, query knowledge.LintQuery) ([]knowledge.LintFinding, error) {
@@ -2672,6 +2743,7 @@ func (c *Client) ListRunnableEvalRuns(ctx context.Context, now time.Time) ([]rep
 }
 
 func (c *Client) SaveProposal(ctx context.Context, proposal rollout.Proposal) error {
+	db := c.sessionQuery()
 	evidence, err := json.Marshal(proposal.EvidenceRefs)
 	if err != nil {
 		return err
@@ -2680,7 +2752,7 @@ func (c *Client) SaveProposal(ctx context.Context, proposal rollout.Proposal) er
 	if err != nil {
 		return err
 	}
-	_, err = c.Pool.Exec(ctx, `
+	_, err = db.Exec(ctx, `
 		INSERT INTO policy_proposals (id, source_bundle_id, candidate_bundle_id, state, rationale, evidence_refs, replay_score, safety_score, risk_flags, requires_manual_approval, eval_summary_json, origin, created_at, updated_at, metadata_json)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 		ON CONFLICT (id) DO UPDATE
@@ -2696,7 +2768,14 @@ func (c *Client) SaveProposal(ctx context.Context, proposal rollout.Proposal) er
 		    updated_at = EXCLUDED.updated_at,
 		    metadata_json = EXCLUDED.metadata_json
 	`, proposal.ID, proposal.SourceBundleID, proposal.CandidateBundleID, proposal.State, proposal.Rationale, evidence, proposal.ReplayScore, proposal.SafetyScore, risks, proposal.RequiresManualApproval, mustJSON(proposal.EvalSummaryJSON), nullString(proposal.Origin), proposal.CreatedAt, proposal.UpdatedAt, metadataJSON(nil, proposal.ArtifactMeta))
-	return err
+	if err != nil {
+		return err
+	}
+	artifacts, edges := controlgraph.RolloutProposal(proposal)
+	if err := c.SavePolicyArtifacts(ctx, artifacts); err != nil {
+		return err
+	}
+	return c.SavePolicyEdges(ctx, edges)
 }
 
 func (c *Client) GetProposal(ctx context.Context, proposalID string) (rollout.Proposal, error) {
@@ -2745,11 +2824,12 @@ func (c *Client) ListProposals(ctx context.Context) ([]rollout.Proposal, error) 
 }
 
 func (c *Client) SaveRollout(ctx context.Context, record rollout.Record) error {
+	db := c.sessionQuery()
 	includeRaw, err := json.Marshal(record.IncludeSessionIDs)
 	if err != nil {
 		return err
 	}
-	_, err = c.Pool.Exec(ctx, `
+	_, err = db.Exec(ctx, `
 		INSERT INTO policy_rollouts (id, proposal_id, status, channel, percentage, include_session_ids, previous_bundle_id, created_at, updated_at, metadata_json)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		ON CONFLICT (id) DO UPDATE
@@ -2760,7 +2840,14 @@ func (c *Client) SaveRollout(ctx context.Context, record rollout.Record) error {
 		    updated_at = EXCLUDED.updated_at,
 		    metadata_json = EXCLUDED.metadata_json
 	`, record.ID, record.ProposalID, record.Status, record.Channel, record.Percentage, includeRaw, nullString(record.PreviousBundleID), record.CreatedAt, record.UpdatedAt, metadataJSON(nil, record.ArtifactMeta))
-	return err
+	if err != nil {
+		return err
+	}
+	artifacts, edges := controlgraph.RolloutRecord(record)
+	if err := c.SavePolicyArtifacts(ctx, artifacts); err != nil {
+		return err
+	}
+	return c.SavePolicyEdges(ctx, edges)
 }
 
 func (c *Client) GetRollout(ctx context.Context, rolloutID string) (rollout.Record, error) {

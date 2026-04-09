@@ -178,6 +178,38 @@ func TestOperatorPolicyGraphEndpointsExposeMaterializedSnapshot(t *testing.T) {
 	}
 }
 
+func TestOperatorPolicyGraphEndpointsExposeControlGraphByGroupID(t *testing.T) {
+	repo := memory.New()
+	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.SaveKnowledgeSource(context.Background(), knowledge.Source{
+		ID:        "src_graph_api",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		Kind:      "folder",
+		URI:       "/docs",
+		Status:    "active",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/policy/artifacts?group_id=knowledge:agent:agent_1&kind=knowledge_source", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("artifacts status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var artifacts []policy.GraphArtifact
+	if err := json.Unmarshal(rec.Body.Bytes(), &artifacts); err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 1 || artifacts[0].ID != "src_graph_api" {
+		t.Fatalf("artifacts = %#v, want one knowledge source artifact", artifacts)
+	}
+}
+
 func TestResponseLifecycleAPI(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sahal/parmesan/internal/controlgraph"
 	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
@@ -362,6 +363,9 @@ func (s *Store) SaveCustomerPreference(_ context.Context, pref customer.Preferen
 			if event.ID != "" {
 				s.customerPreferenceEvents = append(s.customerPreferenceEvents, event)
 			}
+			artifacts, edges := controlgraph.CustomerPreferenceRecord(pref)
+			s.savePolicyArtifactsLocked(artifacts)
+			s.savePolicyEdgesLocked(edges)
 			return nil
 		}
 	}
@@ -369,6 +373,9 @@ func (s *Store) SaveCustomerPreference(_ context.Context, pref customer.Preferen
 	if event.ID != "" {
 		s.customerPreferenceEvents = append(s.customerPreferenceEvents, event)
 	}
+	artifacts, edges := controlgraph.CustomerPreferenceRecord(pref)
+	s.savePolicyArtifactsLocked(artifacts)
+	s.savePolicyEdgesLocked(edges)
 	return nil
 }
 
@@ -425,6 +432,9 @@ func (s *Store) AppendCustomerPreferenceEvent(_ context.Context, event customer.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.customerPreferenceEvents = append(s.customerPreferenceEvents, event)
+	artifacts, edges := controlgraph.CustomerPreferenceEvent(event)
+	s.savePolicyArtifactsLocked(artifacts)
+	s.savePolicyEdgesLocked(edges)
 	return nil
 }
 
@@ -462,10 +472,16 @@ func (s *Store) SaveFeedbackRecord(_ context.Context, record feedback.Record) er
 	for i, item := range s.feedbackRecords {
 		if item.ID == record.ID {
 			s.feedbackRecords[i] = record
+			artifacts, edges := controlgraph.FeedbackRecord(record)
+			s.savePolicyArtifactsLocked(artifacts)
+			s.savePolicyEdgesLocked(edges)
 			return nil
 		}
 	}
 	s.feedbackRecords = append(s.feedbackRecords, record)
+	artifacts, edges := controlgraph.FeedbackRecord(record)
+	s.savePolicyArtifactsLocked(artifacts)
+	s.savePolicyEdgesLocked(edges)
 	return nil
 }
 
@@ -1208,10 +1224,16 @@ func (s *Store) SaveProposal(_ context.Context, proposal rollout.Proposal) error
 	for i, item := range s.proposals {
 		if item.ID == proposal.ID {
 			s.proposals[i] = proposal
+			artifacts, edges := controlgraph.RolloutProposal(proposal)
+			s.savePolicyArtifactsLocked(artifacts)
+			s.savePolicyEdgesLocked(edges)
 			return nil
 		}
 	}
 	s.proposals = append(s.proposals, proposal)
+	artifacts, edges := controlgraph.RolloutProposal(proposal)
+	s.savePolicyArtifactsLocked(artifacts)
+	s.savePolicyEdgesLocked(edges)
 	return nil
 }
 
@@ -1238,10 +1260,16 @@ func (s *Store) SaveRollout(_ context.Context, record rollout.Record) error {
 	for i, item := range s.rollouts {
 		if item.ID == record.ID {
 			s.rollouts[i] = record
+			artifacts, edges := controlgraph.RolloutRecord(record)
+			s.savePolicyArtifactsLocked(artifacts)
+			s.savePolicyEdgesLocked(edges)
 			return nil
 		}
 	}
 	s.rollouts = append(s.rollouts, record)
+	artifacts, edges := controlgraph.RolloutRecord(record)
+	s.savePolicyArtifactsLocked(artifacts)
+	s.savePolicyEdgesLocked(edges)
 	return nil
 }
 
@@ -1268,10 +1296,16 @@ func (s *Store) SaveKnowledgeSource(_ context.Context, source knowledge.Source) 
 	for i, item := range s.knowledgeSources {
 		if item.ID == source.ID {
 			s.knowledgeSources[i] = source
+			artifacts, edges := controlgraph.KnowledgeSource(source)
+			s.savePolicyArtifactsLocked(artifacts)
+			s.savePolicyEdgesLocked(edges)
 			return nil
 		}
 	}
 	s.knowledgeSources = append(s.knowledgeSources, source)
+	artifacts, edges := controlgraph.KnowledgeSource(source)
+	s.savePolicyArtifactsLocked(artifacts)
+	s.savePolicyEdgesLocked(edges)
 	return nil
 }
 
@@ -1308,10 +1342,16 @@ func (s *Store) SaveKnowledgeSyncJob(_ context.Context, job knowledge.SyncJob) e
 	for i, item := range s.knowledgeSyncJobs {
 		if item.ID == job.ID {
 			s.knowledgeSyncJobs[i] = job
+			artifacts, edges := controlgraph.KnowledgeSyncJob(job)
+			s.savePolicyArtifactsLocked(artifacts)
+			s.savePolicyEdgesLocked(edges)
 			return nil
 		}
 	}
 	s.knowledgeSyncJobs = append(s.knowledgeSyncJobs, job)
+	artifacts, edges := controlgraph.KnowledgeSyncJob(job)
+	s.savePolicyArtifactsLocked(artifacts)
+	s.savePolicyEdgesLocked(edges)
 	return nil
 }
 
@@ -1552,10 +1592,16 @@ func (s *Store) SaveKnowledgeSnapshot(_ context.Context, snapshot knowledge.Snap
 	for i, item := range s.knowledgeSnapshots {
 		if item.ID == snapshot.ID {
 			s.knowledgeSnapshots[i] = snapshot
+			artifacts, edges := controlgraph.KnowledgeSnapshot(snapshot)
+			s.savePolicyArtifactsLocked(artifacts)
+			s.savePolicyEdgesLocked(edges)
 			return nil
 		}
 	}
 	s.knowledgeSnapshots = append(s.knowledgeSnapshots, snapshot)
+	artifacts, edges := controlgraph.KnowledgeSnapshot(snapshot)
+	s.savePolicyArtifactsLocked(artifacts)
+	s.savePolicyEdgesLocked(edges)
 	return nil
 }
 
@@ -1596,10 +1642,16 @@ func (s *Store) SaveKnowledgeUpdateProposal(_ context.Context, proposal knowledg
 	for i, item := range s.knowledgeUpdateProposals {
 		if item.ID == proposal.ID {
 			s.knowledgeUpdateProposals[i] = proposal
+			artifacts, edges := controlgraph.KnowledgeUpdateProposal(proposal)
+			s.savePolicyArtifactsLocked(artifacts)
+			s.savePolicyEdgesLocked(edges)
 			return nil
 		}
 	}
 	s.knowledgeUpdateProposals = append(s.knowledgeUpdateProposals, proposal)
+	artifacts, edges := controlgraph.KnowledgeUpdateProposal(proposal)
+	s.savePolicyArtifactsLocked(artifacts)
+	s.savePolicyEdgesLocked(edges)
 	return nil
 }
 
@@ -1636,10 +1688,16 @@ func (s *Store) SaveKnowledgeLintFinding(_ context.Context, finding knowledge.Li
 	for i, item := range s.knowledgeLintFindings {
 		if item.ID == finding.ID {
 			s.knowledgeLintFindings[i] = finding
+			artifacts, edges := controlgraph.KnowledgeLintFinding(finding)
+			s.savePolicyArtifactsLocked(artifacts)
+			s.savePolicyEdgesLocked(edges)
 			return nil
 		}
 	}
 	s.knowledgeLintFindings = append(s.knowledgeLintFindings, finding)
+	artifacts, edges := controlgraph.KnowledgeLintFinding(finding)
+	s.savePolicyArtifactsLocked(artifacts)
+	s.savePolicyEdgesLocked(edges)
 	return nil
 }
 

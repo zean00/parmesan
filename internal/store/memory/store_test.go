@@ -5,7 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sahal/parmesan/internal/domain/customer"
 	"github.com/sahal/parmesan/internal/domain/execution"
+	"github.com/sahal/parmesan/internal/domain/feedback"
+	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/policy"
 )
 
@@ -94,5 +97,76 @@ func TestSaveBundleMaterializesGraphSnapshot(t *testing.T) {
 	}
 	if !foundWatch {
 		t.Fatalf("artifacts = %#v, want watch_capability", artifacts)
+	}
+}
+
+func TestSaveKnowledgeSourceProjectsControlGraphArtifacts(t *testing.T) {
+	store := New()
+	now := time.Now().UTC()
+	source := knowledge.Source{
+		ID:        "src_graph",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		Kind:      "folder",
+		URI:       "/docs",
+		Status:    "active",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := store.SaveKnowledgeSource(context.Background(), source); err != nil {
+		t.Fatalf("SaveKnowledgeSource() error = %v", err)
+	}
+	items, err := store.ListPolicyArtifacts(context.Background(), policy.ArtifactQuery{BundleID: "knowledge:agent:agent_1", Kind: "knowledge_source"})
+	if err != nil {
+		t.Fatalf("ListPolicyArtifacts() error = %v", err)
+	}
+	if len(items) != 1 || items[0].ID != source.ID {
+		t.Fatalf("artifacts = %#v, want knowledge source projection", items)
+	}
+}
+
+func TestSaveFeedbackRecordProjectsLineageEdges(t *testing.T) {
+	store := New()
+	now := time.Now().UTC()
+	pref := customer.Preference{
+		ID:         "pref_1",
+		AgentID:    "agent_1",
+		CustomerID: "cust_1",
+		Key:        "locale",
+		Value:      "id",
+		Source:     "feedback",
+		Status:     customer.PreferenceStatusActive,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := store.SaveCustomerPreference(context.Background(), pref, customer.PreferenceEvent{}); err != nil {
+		t.Fatalf("SaveCustomerPreference() error = %v", err)
+	}
+	record := feedback.Record{
+		ID:        "feedback_1",
+		SessionID: "sess_1",
+		Text:      "customer prefers Indonesian",
+		Outputs: feedback.Outputs{
+			PreferenceIDs: []string{"pref_1"},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := store.SaveFeedbackRecord(context.Background(), record); err != nil {
+		t.Fatalf("SaveFeedbackRecord() error = %v", err)
+	}
+	edges, err := store.ListPolicyEdges(context.Background(), policy.EdgeQuery{BundleID: "feedback:sess_1"})
+	if err != nil {
+		t.Fatalf("ListPolicyEdges() error = %v", err)
+	}
+	var found bool
+	for _, item := range edges {
+		if item.SourceID == record.ID && item.TargetID == "pref_1" && item.Kind == "derived_from" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("edges = %#v, want feedback -> preference lineage", edges)
 	}
 }

@@ -487,8 +487,12 @@ func (s *Server) operatorListPolicySnapshots(w http.ResponseWriter, r *http.Requ
 
 func (s *Server) operatorListPolicyArtifacts(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
+	groupID := strings.TrimSpace(r.URL.Query().Get("group_id"))
+	if groupID == "" {
+		groupID = strings.TrimSpace(r.URL.Query().Get("bundle_id"))
+	}
 	items, err := s.store.ListPolicyArtifacts(r.Context(), policy.ArtifactQuery{
-		BundleID: strings.TrimSpace(r.URL.Query().Get("bundle_id")),
+		BundleID: groupID,
 		Kind:     strings.TrimSpace(r.URL.Query().Get("kind")),
 		Limit:    limit,
 	})
@@ -501,8 +505,12 @@ func (s *Server) operatorListPolicyArtifacts(w http.ResponseWriter, r *http.Requ
 
 func (s *Server) operatorListPolicyEdges(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
+	groupID := strings.TrimSpace(r.URL.Query().Get("group_id"))
+	if groupID == "" {
+		groupID = strings.TrimSpace(r.URL.Query().Get("bundle_id"))
+	}
 	items, err := s.store.ListPolicyEdges(r.Context(), policy.EdgeQuery{
-		BundleID:   strings.TrimSpace(r.URL.Query().Get("bundle_id")),
+		BundleID:   groupID,
 		SnapshotID: strings.TrimSpace(r.URL.Query().Get("snapshot_id")),
 		SourceID:   strings.TrimSpace(r.URL.Query().Get("source_id")),
 		TargetID:   strings.TrimSpace(r.URL.Query().Get("target_id")),
@@ -5685,18 +5693,18 @@ func (s *Server) ensureResponseForExecution(ctx context.Context, exec execution.
 		return s.store.SaveResponse(ctx, record)
 	}
 	record := responsedomain.Response{
-		ID:              fmt.Sprintf("resp_%d", now.UnixNano()),
-		SessionID:       exec.SessionID,
-		ExecutionID:     exec.ID,
+		ID:               fmt.Sprintf("resp_%d", now.UnixNano()),
+		SessionID:        exec.SessionID,
+		ExecutionID:      exec.ID,
 		PolicySnapshotID: exec.PolicySnapshotID,
-		TraceID:         exec.TraceID,
-		TriggerEventIDs: appendUniqueIDs(exec.TriggerEventIDs, triggerEventID),
-		TriggerSource:   "customer",
-		TriggerReason:   "unspecified",
-		Status:          responsedomain.StatusPreparing,
-		MaxIterations:   4,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		TraceID:          exec.TraceID,
+		TriggerEventIDs:  appendUniqueIDs(exec.TriggerEventIDs, triggerEventID),
+		TriggerSource:    "customer",
+		TriggerReason:    "unspecified",
+		Status:           responsedomain.StatusPreparing,
+		MaxIterations:    4,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 	return s.store.SaveResponse(ctx, record)
 }

@@ -17,6 +17,38 @@ import (
 	"github.com/sahal/parmesan/internal/domain/session"
 )
 
+func expectGraphArtifactExec(mock pgxmock.PgxPoolIface) {
+	mock.ExpectExec(regexp.QuoteMeta(`
+		INSERT INTO policy_artifacts (id, bundle_id, kind, version, source_yaml, artifact_json, metadata_json, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		ON CONFLICT (id) DO UPDATE
+		SET bundle_id = EXCLUDED.bundle_id,
+		    kind = EXCLUDED.kind,
+		    version = EXCLUDED.version,
+		    source_yaml = EXCLUDED.source_yaml,
+		    artifact_json = EXCLUDED.artifact_json,
+		    metadata_json = EXCLUDED.metadata_json,
+		    created_at = EXCLUDED.created_at
+	`)).WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+}
+
+func expectGraphEdgeExec(mock pgxmock.PgxPoolIface) {
+	mock.ExpectExec(regexp.QuoteMeta(`
+		INSERT INTO policy_edges (id, bundle_id, snapshot_id, source_id, kind, target_id, metadata_json, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		ON CONFLICT (id) DO UPDATE
+		SET bundle_id = EXCLUDED.bundle_id,
+		    snapshot_id = EXCLUDED.snapshot_id,
+		    source_id = EXCLUDED.source_id,
+		    kind = EXCLUDED.kind,
+		    target_id = EXCLUDED.target_id,
+		    metadata_json = EXCLUDED.metadata_json,
+		    created_at = EXCLUDED.created_at
+	`)).WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+}
+
 func TestCreateSessionPersistsRichFields(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	if err != nil {
@@ -209,12 +241,15 @@ func TestSaveCustomerPreferenceAndFeedbackRecord(t *testing.T) {
 	`)).
 		WithArgs(pref.ID, pref.AgentID, pref.CustomerID, pref.Key, pref.Value, pref.Source, pref.Confidence, pref.Status, pgxmock.AnyArg(), pgxmock.AnyArg(), pref.LastConfirmedAt, pref.ExpiresAt, pref.CreatedAt, pref.UpdatedAt).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	expectGraphArtifactExec(mock)
 	mock.ExpectExec(regexp.QuoteMeta(`
 		INSERT INTO customer_preference_events (id, preference_id, agent_id, customer_id, key, value, action, source, confidence, evidence_refs_json, metadata_json, created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 	`)).
 		WithArgs(event.ID, event.PreferenceID, event.AgentID, event.CustomerID, event.Key, event.Value, event.Action, event.Source, event.Confidence, pgxmock.AnyArg(), pgxmock.AnyArg(), event.CreatedAt).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	expectGraphArtifactExec(mock)
+	expectGraphEdgeExec(mock)
 	if err := client.SaveCustomerPreference(context.Background(), pref, event); err != nil {
 		t.Fatalf("SaveCustomerPreference() error = %v", err)
 	}
@@ -240,6 +275,8 @@ func TestSaveCustomerPreferenceAndFeedbackRecord(t *testing.T) {
 	`)).
 		WithArgs(record.ID, record.SessionID, nil, nil, record.OperatorID, record.Rating, record.Category, record.Text, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), record.CreatedAt, record.UpdatedAt).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	expectGraphArtifactExec(mock)
+	expectGraphEdgeExec(mock)
 	if err := client.SaveFeedbackRecord(context.Background(), record); err != nil {
 		t.Fatalf("SaveFeedbackRecord() error = %v", err)
 	}
@@ -373,6 +410,7 @@ func TestSaveKnowledgeSourcePersistsRichFields(t *testing.T) {
 	`)).
 		WithArgs(source.ID, source.ScopeKind, source.ScopeID, source.Kind, source.URI, source.Checksum, source.Status, pgxmock.AnyArg(), source.CreatedAt, source.UpdatedAt).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	expectGraphArtifactExec(mock)
 
 	if err := client.SaveKnowledgeSource(context.Background(), source); err != nil {
 		t.Fatalf("SaveKnowledgeSource() error = %v", err)
