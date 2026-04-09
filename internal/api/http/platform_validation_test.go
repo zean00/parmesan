@@ -354,6 +354,21 @@ retrievers:
 	if err != nil || prefSeed.Value != "email" || prefSeed.Status != customer.PreferenceStatusActive {
 		t.Fatalf("seeded preference = %#v err=%v, want active email", prefSeed, err)
 	}
+	rec = doJSONRequest(t, srv, http.MethodPost, "/v1/operator/sessions/sess_validation_1/close", `{
+		"reason":"resolved"
+	}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("close session 1 status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	rec = doJSONRequest(t, srv, http.MethodPost, "/v1/operator/sessions/sess_validation_1/feedback", `{
+		"id":"fb_preference_validation",
+		"operator_id":"op_manager",
+		"text":"Call me Alex."
+	}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("preference feedback status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
 	waitForCustomerPreference(t, repo, "agent_storefront", "cust_1", "preferred_name", "Alex", validationTimeout(2*time.Second))
 
 	rec = doJSONRequest(t, srv, http.MethodPost, "/v1/operator/sessions/sess_validation_1/feedback", `{
@@ -585,6 +600,13 @@ retrievers:
 	}
 	waitForExecutionStatus(t, repo, "sess_pref_review_1", execution.StatusSucceeded, validationTimeout(4*time.Second))
 
+	rec = doJSONRequest(t, srv, http.MethodPost, "/v1/operator/sessions/sess_pref_review_1/close", `{
+		"reason":"resolved"
+	}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("close session 1 status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
 	rec = doJSONRequest(t, srv, http.MethodPost, "/v1/operator/sessions/sess_pref_review_1/feedback", `{
 		"id":"fb_pref_pending",
 		"operator_id":"op_pref",
@@ -752,7 +774,20 @@ retrievers:
 		t.Fatalf("send message 1 status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
 	}
 	waitForExecutionStatus(t, repo, "sess_language_1", execution.StatusSucceeded, validationTimeout(4*time.Second))
-
+	rec = doJSONRequest(t, srv, http.MethodPost, "/v1/operator/sessions/sess_language_1/close", `{
+		"reason":"resolved"
+	}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("close session 1 status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	rec = doJSONRequest(t, srv, http.MethodPost, "/v1/operator/sessions/sess_language_1/feedback", `{
+		"id":"fb_language_learning",
+		"operator_id":"op_lang",
+		"text":"Respond in Indonesian. Call me Rina."
+	}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("language feedback status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
 	waitForCustomerPreference(t, repo, "agent_language", "cust_lang", "preferred_name", "Rina", validationTimeout(2*time.Second))
 	waitForCustomerPreference(t, repo, "agent_language", "cust_lang", "preferred_language", "indonesian", validationTimeout(2*time.Second))
 

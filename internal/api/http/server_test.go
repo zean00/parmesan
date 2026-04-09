@@ -518,7 +518,7 @@ func TestOperatorFeedbackCompilesPreferenceAndKnowledgeProposal(t *testing.T) {
 	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
 	now := time.Now().UTC()
 	if err := repo.CreateSession(context.Background(), session.Session{
-		ID: "sess_1", Channel: "acp", AgentID: "agent_1", CustomerID: "cust_1", CreatedAt: now,
+		ID: "sess_1", Channel: "acp", AgentID: "agent_1", CustomerID: "cust_1", Status: session.StatusClosed, ClosedAt: now, CreatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -575,7 +575,7 @@ func TestOperatorFeedbackDoesNotRoutePreferenceOnlyMediaSessionToKnowledge(t *te
 	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
 	now := time.Now().UTC()
 	if err := repo.CreateSession(context.Background(), session.Session{
-		ID: "sess_1", Channel: "acp", AgentID: "agent_1", CustomerID: "cust_1", CreatedAt: now,
+		ID: "sess_1", Channel: "acp", AgentID: "agent_1", CustomerID: "cust_1", Status: session.StatusClosed, ClosedAt: now, CreatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -681,7 +681,7 @@ func TestExplicitPreferenceFeedbackSupersedesActiveValue(t *testing.T) {
 	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
 	now := time.Now().UTC()
 	if err := repo.CreateSession(context.Background(), session.Session{
-		ID: "sess_pref_conflict", Channel: "acp", AgentID: "agent_1", CustomerID: "cust_1", CreatedAt: now,
+		ID: "sess_pref_conflict", Channel: "acp", AgentID: "agent_1", CustomerID: "cust_1", Status: session.StatusClosed, ClosedAt: now, CreatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -740,7 +740,7 @@ func TestOperatorFeedbackCreatesSoulProposal(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := repo.CreateSession(context.Background(), session.Session{
-		ID: "sess_1", Channel: "acp", AgentID: "agent_1", CustomerID: "cust_1", CreatedAt: now,
+		ID: "sess_1", Channel: "acp", AgentID: "agent_1", CustomerID: "cust_1", Status: session.StatusClosed, ClosedAt: now, CreatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -805,7 +805,7 @@ func TestOperatorFeedbackQualityLabelsRouteToProposals(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := repo.CreateSession(context.Background(), session.Session{
-		ID: "sess_quality_feedback", Channel: "acp", AgentID: "agent_1", CustomerID: "cust_1", CreatedAt: now,
+		ID: "sess_quality_feedback", Channel: "acp", AgentID: "agent_1", CustomerID: "cust_1", Status: session.StatusClosed, ClosedAt: now, CreatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -2522,6 +2522,80 @@ func TestACPMessageIngressManualModeStoresEventWithoutExecution(t *testing.T) {
 	}
 }
 
+func TestOperatorSessionLifecycleEndpointsAndFeedbackGate(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID:             "sess_lifecycle",
+		Channel:        "acp",
+		AgentID:        "agent_1",
+		CustomerID:     "cust_1",
+		Status:         session.StatusActive,
+		CreatedAt:      time.Now().UTC(),
+		LastActivityAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	if err := repo.AppendEvent(ctx, session.Event{
+		ID:        "evt_1",
+		SessionID: "sess_lifecycle",
+		Source:    "customer",
+		Kind:      "message",
+		Content:   []session.ContentPart{{Type: "text", Text: "Please call me Rina"}},
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/sessions/sess_lifecycle/lifecycle", nil)
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("lifecycle status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_lifecycle/feedback", strings.NewReader(`{"text":"Call me Rina."}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("feedback status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var activeFeedback feedback.Record
+	if err := json.Unmarshal(rec.Body.Bytes(), &activeFeedback); err != nil {
+		t.Fatal(err)
+	}
+	if len(activeFeedback.Outputs.PreferenceIDs) != 0 {
+		t.Fatalf("feedback outputs = %#v, want learning deferred while session active", activeFeedback.Outputs)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_lifecycle/close", strings.NewReader(`{"reason":"resolved"}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("close status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	compiledFeedback, err := repo.GetFeedbackRecord(context.Background(), activeFeedback.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compiledFeedback.Outputs.PreferenceIDs) == 0 {
+		t.Fatalf("compiled feedback outputs = %#v, want deferred feedback compiled after close", compiledFeedback.Outputs)
+	}
+	if compiledFeedback.Metadata["learning_deferred"] != nil {
+		t.Fatalf("compiled feedback metadata = %#v, want deferred flag cleared", compiledFeedback.Metadata)
+	}
+}
+
 func TestACPMessageIngressModerationCensorsPublicEventButPreservesOperatorRawContent(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
@@ -2627,16 +2701,20 @@ func TestExecutionExplainIncludesModerationSummary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/v1/executions/"+execs[0].ID+"/explain", nil)
-	srv.httpServer.Handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
-	}
 	var payload map[string]any
-	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
-		t.Fatal(err)
-	}
+	waitFor(t, time.Second, func() bool {
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodGet, "/v1/executions/"+execs[0].ID+"/explain", nil)
+		srv.httpServer.Handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			return false
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+			return false
+		}
+		_, ok := payload["moderation"].(map[string]any)
+		return ok
+	})
 	moderationPayload, ok := payload["moderation"].(map[string]any)
 	if !ok {
 		t.Fatalf("payload moderation = %#v, want map", payload["moderation"])

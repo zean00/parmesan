@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/store/memory"
 )
@@ -55,6 +56,37 @@ func TestInboundMessagePersistsTriggerEventID(t *testing.T) {
 	}
 	if execs[0].TriggerEventID != payload.EventID {
 		t.Fatalf("TriggerEventID = %q, want %q", execs[0].TriggerEventID, payload.EventID)
+	}
+}
+
+func TestEnsureBindingCreatesNewSessionWhenPreviousSessionClosed(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	srv := New(":0", repo, writes)
+	first, err := srv.ensureBinding(ctx, "conv_1", "user_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := repo.GetSession(ctx, first.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.Status = session.StatusClosed
+	sess.ClosedAt = time.Now().UTC()
+	if err := repo.UpdateSession(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	second, err := srv.ensureBinding(ctx, "conv_1", "user_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.SessionID == first.SessionID {
+		t.Fatalf("second binding session = %s, want new session after close", second.SessionID)
 	}
 }
 

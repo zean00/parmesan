@@ -50,6 +50,12 @@ func (s *Service) CreateSession(ctx context.Context, sess session.Session) (sess
 	if sess.Labels == nil {
 		sess.Labels = []string{}
 	}
+	if sess.Status == "" {
+		sess.Status = session.StatusActive
+	}
+	if sess.LastActivityAt.IsZero() {
+		sess.LastActivityAt = sess.CreatedAt
+	}
 	if err := s.repo.CreateSession(ctx, sess); err != nil {
 		return session.Session{}, err
 	}
@@ -62,6 +68,9 @@ func (s *Service) UpdateSession(ctx context.Context, sess session.Session) (sess
 	}
 	if sess.Labels == nil {
 		sess.Labels = []string{}
+	}
+	if sess.Status == "" {
+		sess.Status = session.StatusActive
 	}
 	if err := s.repo.UpdateSession(ctx, sess); err != nil {
 		return session.Session{}, err
@@ -224,6 +233,18 @@ func (s *Service) CreateEvent(ctx context.Context, params CreateEventParams) (se
 		Data:        params.Data,
 		Metadata:    params.Metadata,
 		ExecutionID: params.ExecutionID,
+	}
+	sess, err := s.repo.GetSession(ctx, params.SessionID)
+	if err == nil {
+		sess.LastActivityAt = params.CreatedAt
+		if params.Source == "customer" && sess.Status != session.StatusClosed {
+			sess.Status = session.StatusActive
+			sess.AwaitingCustomerSince = time.Time{}
+			sess.CloseReason = ""
+			sess.KeepReason = ""
+			sess.IdleCheckedAt = time.Time{}
+		}
+		_ = s.repo.UpdateSession(ctx, sess)
 	}
 	if params.Async && s.writes != nil {
 		return event, s.writes.AppendEvent(ctx, event)

@@ -26,23 +26,25 @@ func TestCreateSessionPersistsRichFields(t *testing.T) {
 
 	client := &Client{querier: mock}
 	sess := session.Session{
-		ID:         "sess_1",
-		Channel:    "acp",
-		CustomerID: "cust_1",
-		AgentID:    "agent_1",
-		Mode:       "live",
-		Title:      "Support",
-		Metadata:   map[string]any{"source": "test"},
-		Labels:     []string{"vip"},
-		CreatedAt:  time.Unix(10, 0).UTC(),
+		ID:             "sess_1",
+		Channel:        "acp",
+		CustomerID:     "cust_1",
+		AgentID:        "agent_1",
+		Mode:           "live",
+		Status:         session.StatusActive,
+		Title:          "Support",
+		Metadata:       map[string]any{"source": "test"},
+		Labels:         []string{"vip"},
+		LastActivityAt: time.Unix(10, 0).UTC(),
+		CreatedAt:      time.Unix(10, 0).UTC(),
 	}
 
 	mock.ExpectExec(regexp.QuoteMeta(`
-		INSERT INTO sessions (id, channel, customer_id, agent_id, mode, title, metadata_json, labels_json, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO sessions (id, channel, customer_id, agent_id, mode, status, title, metadata_json, labels_json, last_activity_at, idle_checked_at, awaiting_customer_since, closed_at, close_reason, keep_reason, followup_count, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, TIMESTAMPTZ '0001-01-01 00:00:00+00'), NULLIF($12, TIMESTAMPTZ '0001-01-01 00:00:00+00'), NULLIF($13, TIMESTAMPTZ '0001-01-01 00:00:00+00'), $14, $15, $16, $17)
 		ON CONFLICT (id) DO NOTHING
 	`)).
-		WithArgs(sess.ID, sess.Channel, sess.CustomerID, sess.AgentID, sess.Mode, sess.Title, pgxmock.AnyArg(), pgxmock.AnyArg(), sess.CreatedAt).
+		WithArgs(sess.ID, sess.Channel, sess.CustomerID, sess.AgentID, sess.Mode, string(sess.Status), sess.Title, pgxmock.AnyArg(), pgxmock.AnyArg(), sess.LastActivityAt, time.Time{}, time.Time{}, time.Time{}, nil, nil, 0, sess.CreatedAt).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	if err := client.CreateSession(context.Background(), sess); err != nil {
@@ -67,12 +69,19 @@ func TestUpdateSessionPersistsOperatorModeAndMetadata(t *testing.T) {
 		CustomerID: "cust_1",
 		AgentID:    "agent_1",
 		Mode:       "manual",
+		Status:     session.StatusAwaitingCustomer,
 		Title:      "Support",
 		Metadata: map[string]any{
 			"assigned_operator_id": "op_1",
 			"handoff_reason":       "requested human",
 		},
-		Labels: []string{"vip"},
+		Labels:                []string{"vip"},
+		LastActivityAt:        time.Unix(20, 0).UTC(),
+		IdleCheckedAt:         time.Unix(21, 0).UTC(),
+		AwaitingCustomerSince: time.Unix(22, 0).UTC(),
+		CloseReason:           "",
+		KeepReason:            "",
+		FollowupCount:         1,
 	}
 	mock.ExpectExec(regexp.QuoteMeta(`
 		UPDATE sessions
@@ -80,12 +89,20 @@ func TestUpdateSessionPersistsOperatorModeAndMetadata(t *testing.T) {
 		    customer_id = $3,
 		    agent_id = $4,
 		    mode = $5,
-		    title = $6,
-		    metadata_json = $7,
-		    labels_json = $8
+		    status = $6,
+		    title = $7,
+		    metadata_json = $8,
+		    labels_json = $9,
+		    last_activity_at = $10,
+		    idle_checked_at = NULLIF($11, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
+		    awaiting_customer_since = NULLIF($12, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
+		    closed_at = NULLIF($13, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
+		    close_reason = $14,
+		    keep_reason = $15,
+		    followup_count = $16
 		WHERE id = $1
 	`)).
-		WithArgs(sess.ID, sess.Channel, sess.CustomerID, sess.AgentID, sess.Mode, sess.Title, pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(sess.ID, sess.Channel, sess.CustomerID, sess.AgentID, sess.Mode, string(sess.Status), sess.Title, pgxmock.AnyArg(), pgxmock.AnyArg(), sess.LastActivityAt, sess.IdleCheckedAt, sess.AwaitingCustomerSince, time.Time{}, nil, nil, sess.FollowupCount).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	if err := client.UpdateSession(context.Background(), sess); err != nil {

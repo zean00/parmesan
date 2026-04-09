@@ -270,16 +270,21 @@ func (s *Server) respondApproval(w http.ResponseWriter, r *http.Request) {
 func (s *Server) ensureBinding(ctx context.Context, conversationID, userID string) (gatewaydomain.ConversationBinding, error) {
 	binding, err := s.repo.GetConversationBinding(ctx, "web", conversationID)
 	if err == nil {
-		return binding, nil
+		sess, sessErr := s.repo.GetSession(ctx, binding.SessionID)
+		if sessErr == nil && sess.Status != session.StatusClosed {
+			return binding, nil
+		}
 	}
 	now := time.Now().UTC()
 	sess := session.Session{
-		ID:         fmt.Sprintf("sess_%d", now.UnixNano()),
-		Channel:    "web",
-		CustomerID: userID,
-		Metadata:   map[string]any{"external_conversation_id": conversationID},
-		Labels:     []string{},
-		CreatedAt:  now,
+		ID:             fmt.Sprintf("sess_%d", now.UnixNano()),
+		Channel:        "web",
+		CustomerID:     userID,
+		Status:         session.StatusActive,
+		Metadata:       map[string]any{"external_conversation_id": conversationID},
+		Labels:         []string{},
+		CreatedAt:      now,
+		LastActivityAt: now,
 	}
 	if _, err := s.sessions.CreateSession(ctx, sess); err != nil {
 		return gatewaydomain.ConversationBinding{}, err

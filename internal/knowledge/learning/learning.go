@@ -106,6 +106,57 @@ func (l *Learner) CompileFeedback(ctx context.Context, record feedback.Record, s
 	return out, nil
 }
 
+func (l *Learner) CompileDeferredFeedbackRecords(ctx context.Context, sess session.Session) error {
+	if l == nil || l.repo == nil {
+		return nil
+	}
+	if sess.Status != session.StatusClosed && sess.Status != session.StatusSessionKeep {
+		return nil
+	}
+	records, err := l.repo.ListFeedbackRecords(ctx, feedback.Query{SessionID: sess.ID, Limit: 1000})
+	if err != nil {
+		return err
+	}
+	var pending []feedback.Record
+	for _, record := range records {
+		if !boolMetadata(record.Metadata, "learning_deferred") {
+			continue
+		}
+		pending = append(pending, record)
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	events, err := l.repo.ListEvents(ctx, sess.ID)
+	if err != nil {
+		return err
+	}
+	signals, err := l.repo.ListDerivedSignals(ctx, sess.ID)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, record := range pending {
+		outputs, err := l.CompileFeedback(ctx, record, sess, events, signals)
+		if err != nil {
+			return err
+		}
+		record.Outputs = outputs
+		if record.Metadata == nil {
+			record.Metadata = map[string]any{}
+		}
+		delete(record.Metadata, "learning_deferred")
+		delete(record.Metadata, "learning_deferred_reason")
+		record.Metadata["learning_compiled_after_status"] = string(sess.Status)
+		record.Metadata["learning_compiled_at"] = now.Format(time.RFC3339Nano)
+		record.UpdatedAt = now
+		if err := l.repo.SaveFeedbackRecord(ctx, record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 var (
 	rePrefer         = regexp.MustCompile(`(?i)\bi prefer ([^.!\n]+)`)
 	reCallMe         = regexp.MustCompile(`(?i)\bcall me ([^.!\n]+)`)
@@ -279,6 +330,25 @@ func (l *Learner) preferenceRecord(ctx context.Context, sess session.Session, ex
 			Metadata:     metadata,
 			CreatedAt:    now,
 		}, nil
+}
+
+func boolMetadata(metadata map[string]any, key string) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	raw, ok := metadata[key]
+	if !ok {
+		return false
+	}
+	switch value := raw.(type) {
+	case bool:
+		return value
+	case string:
+		value = strings.TrimSpace(strings.ToLower(value))
+		return value == "true" || value == "1" || value == "yes"
+	default:
+		return false
+	}
 }
 
 func (l *Learner) proposeSharedKnowledge(ctx context.Context, sess session.Session, exec execution.TurnExecution, events []session.Event, signals []media.DerivedSignal) error {

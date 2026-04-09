@@ -39,6 +39,7 @@ type Store struct {
 	customerPreferenceEvents []customer.PreferenceEvent
 	feedbackRecords          []feedback.Record
 	sessions                 []session.Session
+	sessionWatches           []session.Watch
 	events                   map[string][]session.Event
 	bindings                 []gatewaydomain.ConversationBinding
 	execs                    []execution.TurnExecution
@@ -353,6 +354,12 @@ func (s *Store) ListFeedbackRecords(_ context.Context, query feedback.Query) ([]
 func (s *Store) CreateSession(_ context.Context, sess session.Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if sess.Status == "" {
+		sess.Status = session.StatusActive
+	}
+	if sess.LastActivityAt.IsZero() {
+		sess.LastActivityAt = sess.CreatedAt
+	}
 	s.sessions = append(s.sessions, sess)
 	return nil
 }
@@ -384,6 +391,64 @@ func (s *Store) ListSessions(_ context.Context) ([]session.Session, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := append([]session.Session(nil), s.sessions...)
+	return out, nil
+}
+
+func (s *Store) SaveSessionWatch(_ context.Context, watch session.Watch) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.sessionWatches {
+		if item.ID == watch.ID {
+			s.sessionWatches[i] = watch
+			return nil
+		}
+	}
+	s.sessionWatches = append(s.sessionWatches, watch)
+	return nil
+}
+
+func (s *Store) GetSessionWatch(_ context.Context, watchID string) (session.Watch, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.sessionWatches {
+		if item.ID == watchID {
+			return item, nil
+		}
+	}
+	return session.Watch{}, errors.New("session watch not found")
+}
+
+func (s *Store) ListSessionWatches(_ context.Context, query session.WatchQuery) ([]session.Watch, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []session.Watch
+	for _, item := range s.sessionWatches {
+		if query.SessionID != "" && item.SessionID != query.SessionID {
+			continue
+		}
+		if query.Status != "" && string(item.Status) != query.Status {
+			continue
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (s *Store) ListRunnableSessionWatches(_ context.Context, now time.Time) ([]session.Watch, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []session.Watch
+	for _, item := range s.sessionWatches {
+		if item.Status != session.WatchStatusActive {
+			continue
+		}
+		if !item.NextRunAt.IsZero() && item.NextRunAt.After(now) {
+			continue
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].NextRunAt.Before(out[j].NextRunAt) })
 	return out, nil
 }
 

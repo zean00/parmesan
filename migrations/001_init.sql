@@ -56,8 +56,45 @@ CREATE TABLE IF NOT EXISTS policy_rollouts (
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     channel TEXT NOT NULL,
+    customer_id TEXT,
+    agent_id TEXT,
+    mode TEXT NOT NULL DEFAULT 'auto',
+    status TEXT NOT NULL DEFAULT 'active',
+    title TEXT,
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    labels_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    last_activity_at TIMESTAMPTZ,
+    idle_checked_at TIMESTAMPTZ,
+    awaiting_customer_since TIMESTAMPTZ,
+    closed_at TIMESTAMPTZ,
+    close_reason TEXT,
+    keep_reason TEXT,
+    followup_count INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS session_watches (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    tool_id TEXT,
+    arguments_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    poll_interval_seconds INTEGER NOT NULL DEFAULT 0,
+    next_run_at TIMESTAMPTZ,
+    stop_condition TEXT,
+    dedupe_key TEXT,
+    last_result_hash TEXT,
+    last_checked_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS session_watches_session_idx
+ON session_watches(session_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS session_watches_status_next_run_idx
+ON session_watches(status, next_run_at ASC, created_at ASC);
 
 CREATE TABLE IF NOT EXISTS conversation_bindings (
     id TEXT PRIMARY KEY,

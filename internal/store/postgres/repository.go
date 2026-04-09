@@ -513,25 +513,33 @@ func (c *Client) CreateSession(ctx context.Context, sess session.Session) error 
 	if err != nil {
 		return err
 	}
+	if sess.Status == "" {
+		sess.Status = session.StatusActive
+	}
+	if sess.LastActivityAt.IsZero() {
+		sess.LastActivityAt = sess.CreatedAt
+	}
 	_, err = db.Exec(ctx, `
-		INSERT INTO sessions (id, channel, customer_id, agent_id, mode, title, metadata_json, labels_json, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO sessions (id, channel, customer_id, agent_id, mode, status, title, metadata_json, labels_json, last_activity_at, idle_checked_at, awaiting_customer_since, closed_at, close_reason, keep_reason, followup_count, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, TIMESTAMPTZ '0001-01-01 00:00:00+00'), NULLIF($12, TIMESTAMPTZ '0001-01-01 00:00:00+00'), NULLIF($13, TIMESTAMPTZ '0001-01-01 00:00:00+00'), $14, $15, $16, $17)
 		ON CONFLICT (id) DO NOTHING
-	`, sess.ID, sess.Channel, nullString(sess.CustomerID), nullString(sess.AgentID), sess.Mode, nullString(sess.Title), metadata, labels, sess.CreatedAt)
+	`, sess.ID, sess.Channel, nullString(sess.CustomerID), nullString(sess.AgentID), sess.Mode, string(sess.Status), nullString(sess.Title), metadata, labels, sess.LastActivityAt, sess.IdleCheckedAt, sess.AwaitingCustomerSince, sess.ClosedAt, nullString(sess.CloseReason), nullString(sess.KeepReason), sess.FollowupCount, sess.CreatedAt)
 	return err
 }
 
 func (c *Client) GetSession(ctx context.Context, sessionID string) (session.Session, error) {
-	row := c.sessionQuery().QueryRow(ctx, `SELECT id, channel, COALESCE(customer_id,''), COALESCE(agent_id,''), COALESCE(mode,''), COALESCE(title,''), metadata_json, labels_json, created_at FROM sessions WHERE id = $1`, sessionID)
+	row := c.sessionQuery().QueryRow(ctx, `SELECT id, channel, COALESCE(customer_id,''), COALESCE(agent_id,''), COALESCE(mode,''), COALESCE(status,'active'), COALESCE(title,''), metadata_json, labels_json, COALESCE(last_activity_at, created_at), COALESCE(idle_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(awaiting_customer_since, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(closed_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(close_reason,''), COALESCE(keep_reason,''), COALESCE(followup_count,0), created_at FROM sessions WHERE id = $1`, sessionID)
 	var sess session.Session
 	var metadata []byte
 	var labels []byte
-	if err := row.Scan(&sess.ID, &sess.Channel, &sess.CustomerID, &sess.AgentID, &sess.Mode, &sess.Title, &metadata, &labels, &sess.CreatedAt); err != nil {
+	var status string
+	if err := row.Scan(&sess.ID, &sess.Channel, &sess.CustomerID, &sess.AgentID, &sess.Mode, &status, &sess.Title, &metadata, &labels, &sess.LastActivityAt, &sess.IdleCheckedAt, &sess.AwaitingCustomerSince, &sess.ClosedAt, &sess.CloseReason, &sess.KeepReason, &sess.FollowupCount, &sess.CreatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return session.Session{}, errors.New("session not found")
 		}
 		return session.Session{}, err
 	}
+	sess.Status = session.Status(status)
 	if len(metadata) > 0 {
 		_ = json.Unmarshal(metadata, &sess.Metadata)
 	}
@@ -557,16 +565,24 @@ func (c *Client) UpdateSession(ctx context.Context, sess session.Session) error 
 		    customer_id = $3,
 		    agent_id = $4,
 		    mode = $5,
-		    title = $6,
-		    metadata_json = $7,
-		    labels_json = $8
+		    status = $6,
+		    title = $7,
+		    metadata_json = $8,
+		    labels_json = $9,
+		    last_activity_at = $10,
+		    idle_checked_at = NULLIF($11, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
+		    awaiting_customer_since = NULLIF($12, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
+		    closed_at = NULLIF($13, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
+		    close_reason = $14,
+		    keep_reason = $15,
+		    followup_count = $16
 		WHERE id = $1
-	`, sess.ID, sess.Channel, nullString(sess.CustomerID), nullString(sess.AgentID), sess.Mode, nullString(sess.Title), metadata, labels)
+	`, sess.ID, sess.Channel, nullString(sess.CustomerID), nullString(sess.AgentID), sess.Mode, string(sess.Status), nullString(sess.Title), metadata, labels, sess.LastActivityAt, sess.IdleCheckedAt, sess.AwaitingCustomerSince, sess.ClosedAt, nullString(sess.CloseReason), nullString(sess.KeepReason), sess.FollowupCount)
 	return err
 }
 
 func (c *Client) ListSessions(ctx context.Context) ([]session.Session, error) {
-	rows, err := c.sessionQuery().Query(ctx, `SELECT id, channel, COALESCE(customer_id,''), COALESCE(agent_id,''), COALESCE(mode,''), COALESCE(title,''), metadata_json, labels_json, created_at FROM sessions ORDER BY created_at DESC`)
+	rows, err := c.sessionQuery().Query(ctx, `SELECT id, channel, COALESCE(customer_id,''), COALESCE(agent_id,''), COALESCE(mode,''), COALESCE(status,'active'), COALESCE(title,''), metadata_json, labels_json, COALESCE(last_activity_at, created_at), COALESCE(idle_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(awaiting_customer_since, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(closed_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(close_reason,''), COALESCE(keep_reason,''), COALESCE(followup_count,0), created_at FROM sessions ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -576,9 +592,11 @@ func (c *Client) ListSessions(ctx context.Context) ([]session.Session, error) {
 		var sess session.Session
 		var metadata []byte
 		var labels []byte
-		if err := rows.Scan(&sess.ID, &sess.Channel, &sess.CustomerID, &sess.AgentID, &sess.Mode, &sess.Title, &metadata, &labels, &sess.CreatedAt); err != nil {
+		var status string
+		if err := rows.Scan(&sess.ID, &sess.Channel, &sess.CustomerID, &sess.AgentID, &sess.Mode, &status, &sess.Title, &metadata, &labels, &sess.LastActivityAt, &sess.IdleCheckedAt, &sess.AwaitingCustomerSince, &sess.ClosedAt, &sess.CloseReason, &sess.KeepReason, &sess.FollowupCount, &sess.CreatedAt); err != nil {
 			return nil, err
 		}
+		sess.Status = session.Status(status)
 		if len(metadata) > 0 {
 			_ = json.Unmarshal(metadata, &sess.Metadata)
 		}
@@ -586,6 +604,102 @@ func (c *Client) ListSessions(ctx context.Context) ([]session.Session, error) {
 			_ = json.Unmarshal(labels, &sess.Labels)
 		}
 		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) SaveSessionWatch(ctx context.Context, watch session.Watch) error {
+	arguments, err := json.Marshal(watch.Arguments)
+	if err != nil {
+		return err
+	}
+	_, err = c.sessionQuery().Exec(ctx, `
+		INSERT INTO session_watches (id, session_id, kind, status, tool_id, arguments_json, poll_interval_seconds, next_run_at, stop_condition, dedupe_key, last_result_hash, last_checked_at, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8, TIMESTAMPTZ '0001-01-01 00:00:00+00'),$9,$10,$11,NULLIF($12, TIMESTAMPTZ '0001-01-01 00:00:00+00'),$13,$14)
+		ON CONFLICT (id) DO UPDATE SET
+		    session_id = EXCLUDED.session_id,
+		    kind = EXCLUDED.kind,
+		    status = EXCLUDED.status,
+		    tool_id = EXCLUDED.tool_id,
+		    arguments_json = EXCLUDED.arguments_json,
+		    poll_interval_seconds = EXCLUDED.poll_interval_seconds,
+		    next_run_at = EXCLUDED.next_run_at,
+		    stop_condition = EXCLUDED.stop_condition,
+		    dedupe_key = EXCLUDED.dedupe_key,
+		    last_result_hash = EXCLUDED.last_result_hash,
+		    last_checked_at = EXCLUDED.last_checked_at,
+		    updated_at = EXCLUDED.updated_at
+	`, watch.ID, watch.SessionID, watch.Kind, string(watch.Status), nullString(watch.ToolID), arguments, int(watch.PollInterval/time.Second), watch.NextRunAt, nullString(watch.StopCondition), nullString(watch.DedupeKey), nullString(watch.LastResultHash), watch.LastCheckedAt, watch.CreatedAt, watch.UpdatedAt)
+	return err
+}
+
+func (c *Client) GetSessionWatch(ctx context.Context, watchID string) (session.Watch, error) {
+	row := c.sessionQuery().QueryRow(ctx, `SELECT id, session_id, kind, status, COALESCE(tool_id,''), arguments_json, poll_interval_seconds, COALESCE(next_run_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(stop_condition,''), COALESCE(dedupe_key,''), COALESCE(last_result_hash,''), COALESCE(last_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at FROM session_watches WHERE id = $1`, watchID)
+	var item session.Watch
+	var status string
+	var arguments []byte
+	var pollSeconds int
+	if err := row.Scan(&item.ID, &item.SessionID, &item.Kind, &status, &item.ToolID, &arguments, &pollSeconds, &item.NextRunAt, &item.StopCondition, &item.DedupeKey, &item.LastResultHash, &item.LastCheckedAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return session.Watch{}, errors.New("session watch not found")
+		}
+		return session.Watch{}, err
+	}
+	item.Status = session.WatchStatus(status)
+	item.PollInterval = time.Duration(pollSeconds) * time.Second
+	if len(arguments) > 0 {
+		_ = json.Unmarshal(arguments, &item.Arguments)
+	}
+	return item, nil
+}
+
+func (c *Client) ListSessionWatches(ctx context.Context, query session.WatchQuery) ([]session.Watch, error) {
+	sql := `SELECT id, session_id, kind, status, COALESCE(tool_id,''), arguments_json, poll_interval_seconds, COALESCE(next_run_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(stop_condition,''), COALESCE(dedupe_key,''), COALESCE(last_result_hash,''), COALESCE(last_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at FROM session_watches WHERE ($1 = '' OR session_id = $1) AND ($2 = '' OR status = $2) ORDER BY created_at DESC`
+	rows, err := c.sessionQuery().Query(ctx, sql, query.SessionID, query.Status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []session.Watch
+	for rows.Next() {
+		var item session.Watch
+		var status string
+		var arguments []byte
+		var pollSeconds int
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.Kind, &status, &item.ToolID, &arguments, &pollSeconds, &item.NextRunAt, &item.StopCondition, &item.DedupeKey, &item.LastResultHash, &item.LastCheckedAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		item.Status = session.WatchStatus(status)
+		item.PollInterval = time.Duration(pollSeconds) * time.Second
+		if len(arguments) > 0 {
+			_ = json.Unmarshal(arguments, &item.Arguments)
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) ListRunnableSessionWatches(ctx context.Context, now time.Time) ([]session.Watch, error) {
+	rows, err := c.sessionQuery().Query(ctx, `SELECT id, session_id, kind, status, COALESCE(tool_id,''), arguments_json, poll_interval_seconds, COALESCE(next_run_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(stop_condition,''), COALESCE(dedupe_key,''), COALESCE(last_result_hash,''), COALESCE(last_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at FROM session_watches WHERE status = 'active' AND (next_run_at IS NULL OR next_run_at <= $1) ORDER BY next_run_at ASC, created_at ASC`, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []session.Watch
+	for rows.Next() {
+		var item session.Watch
+		var status string
+		var arguments []byte
+		var pollSeconds int
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.Kind, &status, &item.ToolID, &arguments, &pollSeconds, &item.NextRunAt, &item.StopCondition, &item.DedupeKey, &item.LastResultHash, &item.LastCheckedAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		item.Status = session.WatchStatus(status)
+		item.PollInterval = time.Duration(pollSeconds) * time.Second
+		if len(arguments) > 0 {
+			_ = json.Unmarshal(arguments, &item.Arguments)
+		}
+		out = append(out, item)
 	}
 	return out, rows.Err()
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/sahal/parmesan/internal/api/sse"
 	"github.com/sahal/parmesan/internal/config"
 	"github.com/sahal/parmesan/internal/gateway"
+	"github.com/sahal/parmesan/internal/lifecycle"
 	"github.com/sahal/parmesan/internal/model"
 	replayrunner "github.com/sahal/parmesan/internal/replay"
 	"github.com/sahal/parmesan/internal/runtime/runner"
@@ -89,6 +90,7 @@ func RunWorker(ctx context.Context) error {
 	writes.Start(ctx, 1)
 	defer writes.Stop()
 	runner.New(repo, writes, broker, router, "worker-"+hostname()).Start(ctx)
+	lifecycle.New(repo, writes, router).Start(ctx)
 	replayrunner.New(repo, writes).Start(ctx)
 	return worker.New(cfg.HTTP.Address).Run(ctx)
 }

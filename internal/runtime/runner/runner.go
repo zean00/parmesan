@@ -420,7 +420,7 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 	_ = r.updateResponseState(ctx, responseRecord, responsedomain.StatusReady, "", func(record *responsedomain.Response) {
 		record.CompletedAt = time.Now().UTC()
 	})
-	return r.learnFromExecution(ctx, exec)
+	return nil
 }
 
 func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution, step *execution.ExecutionStep) error {
@@ -1024,9 +1024,9 @@ func (r *Runner) maybeEmitPerceivedPerformance(ctx context.Context, exec executi
 		preamble = strings.TrimSpace(perf.Preambles[0])
 	}
 	event, err := r.sessions.CreateMessageEvent(ctx, exec.SessionID, "ai_agent", preamble, exec.ID, exec.TraceID, map[string]any{
-		"step":         "compose_response",
-		"preamble":     true,
-		"response_id":  record.ID,
+		"step":          "compose_response",
+		"preamble":      true,
+		"response_id":   record.ID,
 		"message_index": 0,
 	}, false)
 	if err != nil {

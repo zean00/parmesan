@@ -103,6 +103,7 @@ type sessionView struct {
 	CustomerID             string         `json:"customer_id,omitempty"`
 	AgentID                string         `json:"agent_id,omitempty"`
 	Mode                   string         `json:"mode,omitempty"`
+	Status                 string         `json:"status,omitempty"`
 	Title                  string         `json:"title,omitempty"`
 	Metadata               map[string]any `json:"metadata,omitempty"`
 	Labels                 []string       `json:"labels,omitempty"`
@@ -110,6 +111,12 @@ type sessionView struct {
 	CreatedAt              time.Time      `json:"created_at"`
 	AssignedOperatorID     string         `json:"assigned_operator_id,omitempty"`
 	LastActivityAt         time.Time      `json:"last_activity_at,omitempty"`
+	IdleCheckedAt          time.Time      `json:"idle_checked_at,omitempty"`
+	AwaitingCustomerSince  time.Time      `json:"awaiting_customer_since,omitempty"`
+	ClosedAt               time.Time      `json:"closed_at,omitempty"`
+	CloseReason            string         `json:"close_reason,omitempty"`
+	KeepReason             string         `json:"keep_reason,omitempty"`
+	FollowupCount          int            `json:"followup_count,omitempty"`
 	PendingApprovalCount   int            `json:"pending_approval_count,omitempty"`
 	FailedMediaCount       int            `json:"failed_media_count,omitempty"`
 	UnresolvedLintCount    int            `json:"unresolved_lint_count,omitempty"`
@@ -265,6 +272,9 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/operator/sessions/{id}", s.operatorGetSession)
 	mux.HandleFunc("GET /v1/operator/sessions/{id}/events", s.operatorListEvents)
 	mux.HandleFunc("GET /v1/operator/sessions/{id}/stream", s.operatorStreamEvents)
+	mux.HandleFunc("GET /v1/operator/sessions/{id}/lifecycle", s.operatorGetSessionLifecycle)
+	mux.HandleFunc("POST /v1/operator/sessions/{id}/close", s.operatorCloseSession)
+	mux.HandleFunc("POST /v1/operator/sessions/{id}/keep", s.operatorKeepSession)
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/takeover", s.operatorTakeover)
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/resume", s.operatorResume)
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/messages", s.operatorCreateMessage)
@@ -1584,6 +1594,84 @@ func (s *Server) operatorListEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, events)
 }
 
+func (s *Server) operatorGetSessionLifecycle(w http.ResponseWriter, r *http.Request) {
+	sess, err := s.store.GetSession(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	watches, err := s.store.ListSessionWatches(r.Context(), session.WatchQuery{SessionID: sess.ID})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"session":  sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess)),
+		"watches":  watches,
+		"status":   sess.Status,
+		"mode":     sess.Mode,
+		"closed":   sess.Status == session.StatusClosed,
+		"followup": sess.FollowupCount,
+	})
+}
+
+func (s *Server) operatorCloseSession(w http.ResponseWriter, r *http.Request) {
+	sess, err := s.store.GetSession(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	now := time.Now().UTC()
+	sess.Status = session.StatusClosed
+	sess.ClosedAt = now
+	sess.CloseReason = firstNonEmpty(req.Reason, "operator_closed")
+	sess.KeepReason = ""
+	sess.AwaitingCustomerSince = time.Time{}
+	sess.IdleCheckedAt = now
+	if err := s.store.UpdateSession(r.Context(), sess); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := knowledgelearning.New(s.store).CompileDeferredFeedbackRecords(r.Context(), sess); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess)))
+}
+
+func (s *Server) operatorKeepSession(w http.ResponseWriter, r *http.Request) {
+	sess, err := s.store.GetSession(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	now := time.Now().UTC()
+	sess.Status = session.StatusSessionKeep
+	sess.KeepReason = firstNonEmpty(req.Reason, "operator_keep")
+	sess.LastActivityAt = now
+	sess.CloseReason = ""
+	sess.ClosedAt = time.Time{}
+	sess.AwaitingCustomerSince = time.Time{}
+	sess.IdleCheckedAt = now
+	if err := s.store.UpdateSession(r.Context(), sess); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := knowledgelearning.New(s.store).CompileDeferredFeedbackRecords(r.Context(), sess); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess)))
+}
+
 func (s *Server) operatorStreamEvents(w http.ResponseWriter, r *http.Request) {
 	s.streamEvents(w, r)
 }
@@ -1803,10 +1891,17 @@ func (s *Server) operatorCreateFeedback(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	outputs, err := knowledgelearning.New(s.store).CompileFeedback(r.Context(), record, sess, events, signals)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	var outputs feedback.Outputs
+	if sess.Status == session.StatusClosed || sess.Status == session.StatusSessionKeep {
+		outputs, err = knowledgelearning.New(s.store).CompileFeedback(r.Context(), record, sess, events, signals)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		record.Metadata["learning_deferred"] = true
+		record.Metadata["learning_deferred_reason"] = "session_not_closed_or_keep"
+		record.Metadata["session_status"] = sess.Status
 	}
 	record.Outputs = outputs
 	if record.CreatedAt.IsZero() {
@@ -2698,7 +2793,7 @@ func (s *Server) activeSessionCount(ctx context.Context, agentID string) int {
 	}
 	var count int
 	for _, sess := range sessions {
-		if sess.AgentID == agentID && sessionMode(sess) != "closed" {
+		if sess.AgentID == agentID && sess.Status != session.StatusClosed {
 			count++
 		}
 	}
@@ -6131,16 +6226,24 @@ func (s *Server) sessionSummaryFor(ctx context.Context, sess session.Session) se
 
 func sessionViewFromDomain(sess session.Session, summary sessionSummary) sessionView {
 	return sessionView{
-		ID:         sess.ID,
-		Channel:    sess.Channel,
-		CustomerID: sess.CustomerID,
-		AgentID:    sess.AgentID,
-		Mode:       sess.Mode,
-		Title:      sess.Title,
-		Metadata:   sess.Metadata,
-		Labels:     append([]string(nil), sess.Labels...),
-		Summary:    summary,
-		CreatedAt:  sess.CreatedAt,
+		ID:                    sess.ID,
+		Channel:               sess.Channel,
+		CustomerID:            sess.CustomerID,
+		AgentID:               sess.AgentID,
+		Mode:                  sess.Mode,
+		Status:                string(sess.Status),
+		Title:                 sess.Title,
+		Metadata:              sess.Metadata,
+		Labels:                append([]string(nil), sess.Labels...),
+		Summary:               summary,
+		CreatedAt:             sess.CreatedAt,
+		LastActivityAt:        sess.LastActivityAt,
+		IdleCheckedAt:         sess.IdleCheckedAt,
+		AwaitingCustomerSince: sess.AwaitingCustomerSince,
+		ClosedAt:              sess.ClosedAt,
+		CloseReason:           sess.CloseReason,
+		KeepReason:            sess.KeepReason,
+		FollowupCount:         sess.FollowupCount,
 	}
 }
 

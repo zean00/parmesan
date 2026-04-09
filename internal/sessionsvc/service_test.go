@@ -100,3 +100,44 @@ func TestListEventsUsesQueryFilters(t *testing.T) {
 		t.Fatalf("events = %#v, want filtered evt_2", events)
 	}
 }
+
+func TestCustomerEventReactivatesKeptSession(t *testing.T) {
+	repo := memory.New()
+	svc := New(repo, nil)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	_, err := svc.CreateSession(ctx, session.Session{
+		ID:                    "sess_keep",
+		Channel:               "web",
+		Status:                session.StatusSessionKeep,
+		KeepReason:            "delivery_watch",
+		LastActivityAt:        now.Add(-time.Hour),
+		AwaitingCustomerSince: now.Add(-30 * time.Minute),
+		IdleCheckedAt:         now.Add(-10 * time.Minute),
+		CreatedAt:             now.Add(-2 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	_, err = svc.CreateEvent(ctx, CreateEventParams{
+		SessionID: "sess_keep",
+		Source:    "customer",
+		Kind:      "message",
+		Content:   []session.ContentPart{{Type: "text", Text: "Any update?"}},
+		CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("CreateEvent() error = %v", err)
+	}
+	sess, err := repo.GetSession(ctx, "sess_keep")
+	if err != nil {
+		t.Fatalf("GetSession() error = %v", err)
+	}
+	if sess.Status != session.StatusActive {
+		t.Fatalf("status = %s, want active", sess.Status)
+	}
+	if sess.KeepReason != "" || !sess.IdleCheckedAt.IsZero() || !sess.AwaitingCustomerSince.IsZero() {
+		t.Fatalf("session = %#v, want keep/idle/awaiting cleared on customer reply", sess)
+	}
+}

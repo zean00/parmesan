@@ -49,6 +49,10 @@ type Repository interface {
 	GetSession(ctx context.Context, sessionID string) (session.Session, error)
 	UpdateSession(ctx context.Context, sess session.Session) error
 	ListSessions(ctx context.Context) ([]session.Session, error)
+	SaveSessionWatch(ctx context.Context, watch session.Watch) error
+	GetSessionWatch(ctx context.Context, watchID string) (session.Watch, error)
+	ListSessionWatches(ctx context.Context, query session.WatchQuery) ([]session.Watch, error)
+	ListRunnableSessionWatches(ctx context.Context, now time.Time) ([]session.Watch, error)
 	AppendEvent(ctx context.Context, event session.Event) error
 	ReadEvent(ctx context.Context, sessionID string, eventID string) (session.Event, error)
 	UpdateEvent(ctx context.Context, event session.Event) error
