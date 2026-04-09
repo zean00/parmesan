@@ -36,6 +36,17 @@ Default ports:
 - `gateway`: `:8081` legacy compatibility only
 - `worker`: `:8082`
 
+Dashboard:
+
+```bash
+cd dashboard
+npm install
+npm run dev
+```
+
+The Vite dev server runs on `:4173` and proxies `/v1` plus `/healthz` to
+`PARMESAN_API_URL` or `http://127.0.0.1:8080` by default.
+
 ACP is the primary public conversation interface. The separate `gateway`
 service remains available for legacy `/v1/web/...` clients while ACP-to-channel
 adapters migrate externally.
@@ -218,6 +229,18 @@ Operator agent profile reads include lightweight binding context such as
 Operator media inspection now exposes:
 - per-asset signal drilldown
 - asset filtering by `status` and `type`
+
+## Dashboard
+
+`dashboard/` contains the operator control panel for:
+
+- scope `control-state` and `control-state/history`
+- policy `active-state` and `composed-state`
+- knowledge active-state inspection
+- session teaching-state and recent graph-native changes
+
+The first slice is intentionally read-focused and uses the existing operator
+HTTP APIs directly.
 - stored provenance such as provider, model, request IDs, and enrichment latency when available
 - asset-level reprocessing for failed or outdated enrichment without replaying the whole turn
 - batch reprocessing for filtered asset sets
