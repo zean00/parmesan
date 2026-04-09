@@ -187,14 +187,6 @@ func (r *Runner) sessionBundle(ctx context.Context, sess session.Session) (polic
 	if err == nil && len(snapshots) > 0 {
 		return policy.SnapshotBundle(snapshots[0]), true
 	}
-	bundles, err := r.repo.ListBundles(ctx)
-	if err == nil {
-		for _, item := range bundles {
-			if item.ID == profile.DefaultPolicyBundleID {
-				return item, true
-			}
-		}
-	}
 	return defaultLifecycleBundle(), true
 }
 

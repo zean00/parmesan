@@ -210,6 +210,28 @@ func TestOperatorPolicyGraphEndpointsExposeControlGraphByGroupID(t *testing.T) {
 	}
 }
 
+func TestSelectedPolicyBundlesUsesSnapshotOnly(t *testing.T) {
+	repo := memory.New()
+	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.SavePolicySnapshot(context.Background(), policy.Snapshot{
+		ID:        "snap_only",
+		BundleID:  "bundle_snapshot_only",
+		Version:   "v1",
+		Bundle:    policy.Bundle{ID: "bundle_snapshot_only", Version: "v1", Soul: policy.Soul{Identity: "Snapshot Only"}},
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bundles, snapshotID, err := srv.selectedPolicyBundles(context.Background(), "bundle_snapshot_only", "")
+	if err != nil {
+		t.Fatalf("selectedPolicyBundles() error = %v", err)
+	}
+	if snapshotID != "snap_only" || len(bundles) != 1 || bundles[0].Soul.Identity != "Snapshot Only" {
+		t.Fatalf("bundles=%#v snapshotID=%q, want snapshot-only selection", bundles, snapshotID)
+	}
+}
+
 func TestResponseLifecycleAPI(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
@@ -2760,9 +2782,29 @@ func TestExecutionExplainIncludesModerationSummary(t *testing.T) {
 	defer cancel()
 	writes.Start(ctx, 1)
 	defer writes.Stop()
+	now := time.Now().UTC()
+
+	if err := repo.SaveBundle(context.Background(), policy.Bundle{
+		ID:         "bundle_explain_mod",
+		Version:    "v1",
+		ImportedAt: now,
+		Soul:       policy.Soul{Identity: "Explain"},
+	}); err != nil {
+		t.Fatalf("SaveBundle() error = %v", err)
+	}
+	if err := repo.SaveAgentProfile(context.Background(), agent.Profile{
+		ID:                    "agent_explain_mod",
+		Name:                  "Explain",
+		Status:                "active",
+		DefaultPolicyBundleID: "bundle_explain_mod",
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}); err != nil {
+		t.Fatalf("SaveAgentProfile() error = %v", err)
+	}
 
 	if err := repo.CreateSession(context.Background(), session.Session{
-		ID: "sess_explain_mod", Channel: "acp", CreatedAt: time.Now().UTC(),
+		ID: "sess_explain_mod", Channel: "acp", AgentID: "agent_explain_mod", CreatedAt: now,
 	}); err != nil {
 		t.Fatalf("CreateSession() error = %v", err)
 	}

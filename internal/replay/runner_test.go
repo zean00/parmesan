@@ -165,3 +165,18 @@ func TestReplayRunnerUpdatesProposalSummary(t *testing.T) {
 		t.Fatalf("proposal safety score = %v, want quality-derived score", proposal.SafetyScore)
 	}
 }
+
+func TestSelectSnapshotBundlesUsesSnapshotOnly(t *testing.T) {
+	now := time.Now().UTC()
+	snapshots := []policy.Snapshot{{
+		ID:        "snap_1",
+		BundleID:  "bundle_1",
+		Version:   "v1",
+		Bundle:    policy.Bundle{ID: "bundle_1", Version: "v1", Soul: policy.Soul{Identity: "Snapshot Only"}},
+		CreatedAt: now,
+	}}
+	bundles := selectSnapshotBundles(snapshots, "bundle_1", "")
+	if len(bundles) != 1 || bundles[0].Soul.Identity != "Snapshot Only" {
+		t.Fatalf("bundles = %#v, want snapshot-backed bundle", bundles)
+	}
+}

@@ -2872,15 +2872,6 @@ func (s *Server) policyBundleSoulHash(ctx context.Context, bundleID string) stri
 	if err == nil && len(snapshots) > 0 {
 		return serverSoulHash(policy.SnapshotBundle(snapshots[0]).Soul)
 	}
-	bundles, err := s.store.ListBundles(ctx)
-	if err != nil {
-		return ""
-	}
-	for _, bundle := range bundles {
-		if bundle.ID == bundleID {
-			return serverSoulHash(bundle.Soul)
-		}
-	}
 	return ""
 }
 
@@ -5051,26 +5042,19 @@ func shadowQualityScorecard(resultJSON string) (quality.Scorecard, bool) {
 }
 
 func (s *Server) proposalBundles(ctx context.Context, item rollout.Proposal) (policy.Bundle, policy.Bundle, error) {
-	bundles, err := s.store.ListBundles(ctx)
+	snapshots, err := s.store.ListPolicySnapshots(ctx, policy.SnapshotQuery{})
 	if err != nil {
 		return policy.Bundle{}, policy.Bundle{}, err
 	}
-	var source, candidate policy.Bundle
-	for _, bundle := range bundles {
-		if bundle.ID == item.SourceBundleID {
-			source = bundle
-		}
-		if bundle.ID == item.CandidateBundleID {
-			candidate = bundle
-		}
-	}
-	if source.ID == "" {
+	sourceSnapshot, ok := policy.LatestSnapshotForBundle(snapshots, item.SourceBundleID)
+	if !ok {
 		return policy.Bundle{}, policy.Bundle{}, errors.New("source bundle not found")
 	}
-	if candidate.ID == "" {
+	candidateSnapshot, ok := policy.LatestSnapshotForBundle(snapshots, item.CandidateBundleID)
+	if !ok {
 		return policy.Bundle{}, policy.Bundle{}, errors.New("candidate bundle not found")
 	}
-	return source, candidate, nil
+	return policy.SnapshotBundle(sourceSnapshot), policy.SnapshotBundle(candidateSnapshot), nil
 }
 
 func (s *Server) policyProposalFindings(item rollout.Proposal, source, candidate policy.Bundle, changes map[string]any) []map[string]any {
@@ -7064,40 +7048,16 @@ func assistantTextForExecution(events []session.Event, executionID string) strin
 	return ""
 }
 
-func selectBundles(bundles []policy.Bundle, explicitID string, executionBundleID string) []policy.Bundle {
-	if explicitID != "" {
-		for _, bundle := range bundles {
-			if bundle.ID == explicitID {
-				return []policy.Bundle{bundle}
-			}
-		}
-	}
-	if executionBundleID != "" {
-		for _, bundle := range bundles {
-			if bundle.ID == executionBundleID {
-				return []policy.Bundle{bundle}
-			}
-		}
-	}
-	if len(bundles) == 0 {
-		return nil
-	}
-	return []policy.Bundle{bundles[0]}
-}
-
 func (s *Server) selectedPolicyBundles(ctx context.Context, explicitID string, fallbackBundleID string) ([]policy.Bundle, string, error) {
 	snapshots, err := s.store.ListPolicySnapshots(ctx, policy.SnapshotQuery{})
-	if err == nil {
-		snapshot, ok := policy.SelectSnapshot(snapshots, explicitID, fallbackBundleID)
-		if ok {
-			return []policy.Bundle{policy.SnapshotBundle(snapshot)}, snapshot.ID, nil
-		}
-	}
-	bundles, err := s.store.ListBundles(ctx)
 	if err != nil {
 		return nil, "", err
 	}
-	return selectBundles(bundles, explicitID, fallbackBundleID), "", nil
+	snapshot, ok := policy.SelectSnapshot(snapshots, explicitID, fallbackBundleID)
+	if !ok {
+		return nil, "", errors.New("policy snapshot not found")
+	}
+	return []policy.Bundle{policy.SnapshotBundle(snapshot)}, snapshot.ID, nil
 }
 
 func toResolvedPolicyResponse(exec execution.TurnExecution, view policyruntime.EngineResult) resolvedPolicyResponse {

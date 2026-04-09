@@ -750,11 +750,7 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 	selection := rolloutengine.SelectBundle(sess, proposals, rollouts, defaultBundleID)
 	selectedSnapshot, selectedBundles, resolvedSnapshotID := selectPolicySnapshotBundle(snapshots, selection.BundleID, defaultBundleID)
 	if len(selectedBundles) == 0 {
-		bundles, err := r.repo.ListBundles(ctx)
-		if err != nil {
-			return resolvedView{}, nil, err
-		}
-		selectedBundles = selectPolicyBundles(bundles, selection.BundleID, defaultBundleID)
+		return resolvedView{}, nil, fmt.Errorf("policy snapshot not found for selection bundle=%q fallback=%q", selection.BundleID, defaultBundleID)
 	}
 	knowledgeSnapshot, knowledgeChunks := r.resolveKnowledgeSnapshot(ctx, sess, profile, selectedBundles)
 	derivedSignals := r.derivedSignalText(ctx, exec.SessionID)
@@ -1253,27 +1249,6 @@ func (r *Runner) markSessionKeepForWatch(ctx context.Context, sess session.Sessi
 		return err
 	}
 	return knowledgelearning.New(r.repo).CompileDeferredFeedbackRecords(ctx, sess)
-}
-
-func selectPolicyBundles(bundles []policy.Bundle, preferred string, fallback string) []policy.Bundle {
-	if preferred != "" {
-		for _, item := range bundles {
-			if item.ID == preferred {
-				return []policy.Bundle{item}
-			}
-		}
-	}
-	if fallback != "" {
-		for _, item := range bundles {
-			if item.ID == fallback {
-				return []policy.Bundle{item}
-			}
-		}
-	}
-	if len(bundles) == 0 {
-		return nil
-	}
-	return []policy.Bundle{bundles[0]}
 }
 
 func selectPolicySnapshotBundle(snapshots []policy.Snapshot, preferred string, fallback string) (policy.Snapshot, []policy.Bundle, string) {
@@ -2617,16 +2592,16 @@ func (r *Runner) ensureResponseRecord(ctx context.Context, exec execution.TurnEx
 	}
 	now := time.Now().UTC()
 	record := responsedomain.Response{
-		ID:              fmt.Sprintf("resp_%d", now.UnixNano()),
-		SessionID:       exec.SessionID,
-		ExecutionID:     exec.ID,
+		ID:               fmt.Sprintf("resp_%d", now.UnixNano()),
+		SessionID:        exec.SessionID,
+		ExecutionID:      exec.ID,
 		PolicySnapshotID: exec.PolicySnapshotID,
-		TraceID:         exec.TraceID,
-		TriggerEventIDs: append([]string(nil), exec.TriggerEventIDs...),
-		Status:          responsedomain.StatusPreparing,
-		MaxIterations:   maxResponsePreparationIterations,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		TraceID:          exec.TraceID,
+		TriggerEventIDs:  append([]string(nil), exec.TriggerEventIDs...),
+		Status:           responsedomain.StatusPreparing,
+		MaxIterations:    maxResponsePreparationIterations,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 	if r.writes != nil {
 		if err := r.writes.SaveResponse(ctx, record); err != nil {

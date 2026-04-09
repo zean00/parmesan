@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -88,12 +89,16 @@ func (r *Runner) process(ctx context.Context, run replaydomain.Run) error {
 	if err != nil {
 		return r.fail(ctx, run, err)
 	}
-	bundles, err := r.repo.ListBundles(ctx)
+	snapshots, err := r.repo.ListPolicySnapshots(ctx, policy.SnapshotQuery{})
 	if err != nil {
 		return r.fail(ctx, run, err)
 	}
 
-	activeView, err := policyruntime.Resolve(events, selectBundles(bundles, run.ActiveBundleID, exec.PolicyBundleID), journeys, catalog)
+	activeBundles := selectSnapshotBundles(snapshots, run.ActiveBundleID, exec.PolicyBundleID)
+	if len(activeBundles) == 0 {
+		return r.fail(ctx, run, errors.New("active policy snapshot not found"))
+	}
+	activeView, err := policyruntime.Resolve(events, activeBundles, journeys, catalog)
 	if err != nil {
 		return r.fail(ctx, run, err)
 	}
@@ -113,7 +118,11 @@ func (r *Runner) process(ctx context.Context, run replaydomain.Run) error {
 	qualityDiff := map[string]any{}
 
 	if run.Type == replaydomain.TypeShadow && run.ShadowBundleID != "" {
-		shadowView, err := policyruntime.Resolve(events, selectBundles(bundles, run.ShadowBundleID, exec.PolicyBundleID), journeys, catalog)
+		shadowBundles := selectSnapshotBundles(snapshots, run.ShadowBundleID, exec.PolicyBundleID)
+		if len(shadowBundles) == 0 {
+			return r.fail(ctx, run, errors.New("shadow policy snapshot not found"))
+		}
+		shadowView, err := policyruntime.Resolve(events, shadowBundles, journeys, catalog)
 		if err != nil {
 			return r.fail(ctx, run, err)
 		}
@@ -207,25 +216,12 @@ func (r *Runner) updateProposalSummary(ctx context.Context, run replaydomain.Run
 	return r.repo.SaveProposal(ctx, proposal)
 }
 
-func selectBundles(bundles []policy.Bundle, explicit string, fallback string) []policy.Bundle {
-	if explicit != "" {
-		for _, item := range bundles {
-			if item.ID == explicit {
-				return []policy.Bundle{item}
-			}
-		}
-	}
-	if fallback != "" {
-		for _, item := range bundles {
-			if item.ID == fallback {
-				return []policy.Bundle{item}
-			}
-		}
-	}
-	if len(bundles) == 0 {
+func selectSnapshotBundles(snapshots []policy.Snapshot, explicit string, fallback string) []policy.Bundle {
+	snapshot, ok := policy.SelectSnapshot(snapshots, explicit, fallback)
+	if !ok {
 		return nil
 	}
-	return []policy.Bundle{bundles[0]}
+	return []policy.Bundle{policy.SnapshotBundle(snapshot)}
 }
 
 func summarizeView(view policyruntime.EngineResult) map[string]any {

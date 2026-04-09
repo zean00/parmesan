@@ -41,8 +41,17 @@ func TestRunnerCompletesExecution(t *testing.T) {
 		OpenRouterBase:    "https://openrouter.ai/api/v1",
 	})
 	r := New(repo, writes, sse.NewBroker(), router, "test-runner")
+	now := time.Now().UTC()
+	if err := repo.SaveBundle(ctx, policy.Bundle{
+		ID:         "bundle_default",
+		Version:    "v1",
+		ImportedAt: now,
+		Soul:       policy.Soul{Identity: "Default"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 
-	if err := repo.CreateSession(ctx, session.Session{ID: "sess", Channel: "web", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := repo.CreateSession(ctx, session.Session{ID: "sess", Channel: "web", CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	if err := writes.AppendEvent(ctx, session.Event{
@@ -50,7 +59,7 @@ func TestRunnerCompletesExecution(t *testing.T) {
 		SessionID: "sess",
 		Source:    "customer",
 		Kind:      "message",
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: now,
 		Content:   []session.ContentPart{{Type: "text", Text: "hello"}},
 	}); err != nil {
 		t.Fatal(err)
@@ -61,8 +70,8 @@ func TestRunnerCompletesExecution(t *testing.T) {
 		TriggerEventID: "evt_1",
 		TraceID:        "trace_1",
 		Status:         execution.StatusRunning,
-		CreatedAt:      time.Now().UTC(),
-		UpdatedAt:      time.Now().UTC(),
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}, []execution.ExecutionStep{
 		step("exec_1", "ingest", false),
 		step("exec_1", "resolve_policy", true),
@@ -191,6 +200,13 @@ func TestResolveViewUsesPolicySnapshot(t *testing.T) {
 	}
 	if updated.PolicySnapshotID != snapshots[0].ID {
 		t.Fatalf("execution policy snapshot = %q, want %q", updated.PolicySnapshotID, snapshots[0].ID)
+	}
+}
+
+func TestSelectPolicySnapshotBundleRequiresSnapshot(t *testing.T) {
+	snapshot, bundles, snapshotID := selectPolicySnapshotBundle(nil, "bundle_missing", "")
+	if snapshot.ID != "" || len(bundles) != 0 || snapshotID != "" {
+		t.Fatalf("snapshot=%#v bundles=%#v snapshotID=%q, want empty result without snapshot fallback", snapshot, bundles, snapshotID)
 	}
 }
 
