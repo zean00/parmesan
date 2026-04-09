@@ -317,6 +317,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/operator/agents/{id}", s.operatorGetAgentProfile)
 	mux.HandleFunc("PUT /v1/operator/agents/{id}", s.operatorUpdateAgentProfile)
 	mux.HandleFunc("GET /v1/operator/policy/snapshots", s.operatorListPolicySnapshots)
+	mux.HandleFunc("GET /v1/operator/policy/snapshots/{id}", s.operatorGetPolicySnapshot)
 	mux.HandleFunc("GET /v1/operator/policy/artifacts", s.operatorListPolicyArtifacts)
 	mux.HandleFunc("GET /v1/operator/policy/artifacts/{id}", s.operatorGetPolicyArtifact)
 	mux.HandleFunc("GET /v1/operator/policy/artifacts/{id}/edges", s.operatorListPolicyArtifactEdges)
@@ -491,6 +492,15 @@ func (s *Server) operatorListPolicySnapshots(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) operatorGetPolicySnapshot(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetPolicySnapshot(r.Context(), strings.TrimSpace(r.PathValue("id")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.policySnapshotView(r.Context(), item))
 }
 
 func (s *Server) operatorListPolicyArtifacts(w http.ResponseWriter, r *http.Request) {
@@ -2518,6 +2528,94 @@ func mustGraphLineagePayload(ctx context.Context, repo store.Repository, artifac
 	}
 }
 
+func (s *Server) policySnapshotView(ctx context.Context, snapshot policy.Snapshot) map[string]any {
+	var previous *policy.Snapshot
+	if items, err := s.store.ListPolicySnapshots(ctx, policy.SnapshotQuery{BundleID: snapshot.BundleID, Limit: 100}); err == nil {
+		for _, item := range items {
+			if item.ID == snapshot.ID {
+				continue
+			}
+			if item.CreatedAt.Before(snapshot.CreatedAt) {
+				candidate := item
+				if previous == nil || candidate.CreatedAt.After(previous.CreatedAt) {
+					previous = &candidate
+				}
+			}
+		}
+	}
+	out := map[string]any{
+		"snapshot": snapshot,
+	}
+	if previous != nil {
+		out["previous_snapshot_id"] = previous.ID
+		out["changes"] = policySnapshotChanges(*previous, snapshot)
+	} else {
+		out["changes"] = policySnapshotChanges(policy.Snapshot{}, snapshot)
+	}
+	return out
+}
+
+func policySnapshotChanges(previous, current policy.Snapshot) map[string]any {
+	prevByID := map[string]policy.GraphArtifact{}
+	for _, item := range previous.Artifacts {
+		prevByID[item.ID] = item
+	}
+	currByID := map[string]policy.GraphArtifact{}
+	for _, item := range current.Artifacts {
+		currByID[item.ID] = item
+	}
+	var added []map[string]any
+	var changed []map[string]any
+	var removed []string
+	for _, item := range current.Artifacts {
+		prev, ok := prevByID[item.ID]
+		if !ok {
+			added = append(added, map[string]any{"id": item.ID, "kind": item.Kind, "version": item.Version})
+			continue
+		}
+		if prev.Version != item.Version {
+			changed = append(changed, map[string]any{
+				"id":               item.ID,
+				"kind":             item.Kind,
+				"previous_version": prev.Version,
+				"version":          item.Version,
+			})
+		}
+	}
+	for _, item := range previous.Artifacts {
+		if _, ok := currByID[item.ID]; !ok {
+			removed = append(removed, item.ID)
+		}
+	}
+	slices.Sort(removed)
+	return map[string]any{
+		"added_artifacts":    added,
+		"changed_artifacts":  changed,
+		"removed_artifact_ids": removed,
+		"artifact_count":     len(current.Artifacts),
+		"edge_count":         len(current.Edges),
+	}
+}
+
+func knowledgeSnapshotPageChanges(pages []knowledge.Page) []map[string]any {
+	out := make([]map[string]any, 0, len(pages))
+	for _, item := range pages {
+		change := map[string]any{
+			"id":       item.ID,
+			"title":    item.Title,
+			"checksum": item.Checksum,
+		}
+		if proposalID := strings.TrimSpace(fmt.Sprint(item.Metadata["proposal_id"])); proposalID != "" {
+			change["proposal_id"] = proposalID
+		}
+		if item.PageType != "" {
+			change["page_type"] = item.PageType
+		}
+		out = append(out, change)
+	}
+	return out
+}
+
 func uniqueSortedQualityDimensions(dimensions map[string]any) []string {
 	seen := map[string]struct{}{}
 	for _, value := range dimensions {
@@ -3294,7 +3392,17 @@ func (s *Server) operatorGetKnowledgeSnapshot(w http.ResponseWriter, r *http.Req
 		ScopeID:    snapshot.ScopeID,
 		SnapshotID: snapshot.ID,
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"snapshot": snapshot, "pages": pages})
+	payload := map[string]any{
+		"snapshot": snapshot,
+		"pages":    pages,
+	}
+	if proposalID := strings.TrimSpace(fmt.Sprint(snapshot.Metadata["proposal_id"])); proposalID != "" {
+		payload["lineage"] = mustGraphLineagePayload(r.Context(), s.store, proposalID)
+	}
+	if changes := knowledgeSnapshotPageChanges(pages); len(changes) > 0 {
+		payload["page_changes"] = changes
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) operatorListKnowledgePages(w http.ResponseWriter, r *http.Request) {

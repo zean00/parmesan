@@ -178,6 +178,55 @@ func TestOperatorPolicyGraphEndpointsExposeMaterializedSnapshot(t *testing.T) {
 	}
 }
 
+func TestOperatorGetPolicySnapshotIncludesChangeSummary(t *testing.T) {
+	repo := memory.New()
+	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.SaveBundle(context.Background(), policy.Bundle{
+		ID:         "bundle_snapshot_changes",
+		Version:    "v1",
+		ImportedAt: now,
+		Soul:       policy.Soul{Identity: "v1"},
+		Guidelines: []policy.Guideline{{ID: "guideline_1", When: "hi", Then: "hello"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveBundle(context.Background(), policy.Bundle{
+		ID:         "bundle_snapshot_changes",
+		Version:    "v2",
+		ImportedAt: now.Add(time.Second),
+		Soul:       policy.Soul{Identity: "v2"},
+		Guidelines: []policy.Guideline{{ID: "guideline_1", When: "hi", Then: "hello again"}, {ID: "guideline_2", When: "bye", Then: "goodbye"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshots, err := repo.ListPolicySnapshots(context.Background(), policy.SnapshotQuery{BundleID: "bundle_snapshot_changes"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) < 2 {
+		t.Fatalf("snapshots = %#v, want two snapshots", snapshots)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/policy/snapshots/"+snapshots[0].ID, nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("snapshot status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["previous_snapshot_id"] == "" || payload["previous_snapshot_id"] == nil {
+		t.Fatalf("payload = %#v, want previous snapshot id", payload)
+	}
+	changes, _ := payload["changes"].(map[string]any)
+	added, _ := changes["added_artifacts"].([]any)
+	if len(added) == 0 {
+		t.Fatalf("changes = %#v, want added artifact summary", changes)
+	}
+}
+
 func TestOperatorPolicyGraphEndpointsExposeControlGraphByGroupID(t *testing.T) {
 	repo := memory.New()
 	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
@@ -4109,6 +4158,23 @@ func TestOperatorKnowledgeProposalAndMediaEndpoints(t *testing.T) {
 	}
 	if len(snapshots) == 0 {
 		t.Fatalf("snapshots = %#v, want applied knowledge snapshot", snapshots)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/knowledge/snapshots/"+snapshots[0].ID, nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("knowledge snapshot status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var snapshotPayload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &snapshotPayload); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotPayload["lineage"] == nil {
+		t.Fatalf("snapshot payload = %#v, want proposal lineage", snapshotPayload)
+	}
+	pageChanges, _ := snapshotPayload["page_changes"].([]any)
+	if len(pageChanges) == 0 {
+		t.Fatalf("snapshot payload = %#v, want page changes", snapshotPayload)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/v1/operator/media/assets?session_id=sess_1&status=failed&type=audio", nil)
