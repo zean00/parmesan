@@ -256,6 +256,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("POST /v1/rollouts", s.createRollout)
 	mux.HandleFunc("GET /v1/rollouts", s.listRollouts)
 	mux.HandleFunc("GET /v1/rollouts/{id}", s.getRollout)
+	mux.HandleFunc("GET /v1/rollouts/{id}/summary", s.getRolloutSummary)
 	mux.HandleFunc("GET /v1/rollouts/{id}/lineage", s.getRolloutLineage)
 	mux.HandleFunc("POST /v1/rollouts/{id}/disable", s.disableRollout)
 	mux.HandleFunc("POST /v1/rollouts/{id}/rollback", s.rollbackRollout)
@@ -292,6 +293,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/notes", s.operatorCreateNote)
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/process", s.operatorProcessEvent)
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/feedback", s.operatorCreateFeedback)
+	mux.HandleFunc("GET /v1/operator/sessions/{id}/teaching-state", s.operatorGetSessionTeachingState)
 	mux.HandleFunc("GET /v1/operator/feedback", s.operatorListFeedback)
 	mux.HandleFunc("GET /v1/operator/feedback/{id}", s.operatorGetFeedback)
 	mux.HandleFunc("GET /v1/operator/feedback/{id}/lineage", s.operatorGetFeedbackLineage)
@@ -319,6 +321,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/operator/policy/snapshots", s.operatorListPolicySnapshots)
 	mux.HandleFunc("GET /v1/operator/policy/snapshots/{id}", s.operatorGetPolicySnapshot)
 	mux.HandleFunc("GET /v1/operator/policy/active-state", s.operatorGetPolicyActiveState)
+	mux.HandleFunc("GET /v1/operator/policy/composed-state", s.operatorGetPolicyComposedState)
 	mux.HandleFunc("GET /v1/operator/policy/artifacts", s.operatorListPolicyArtifacts)
 	mux.HandleFunc("GET /v1/operator/policy/artifacts/{id}", s.operatorGetPolicyArtifact)
 	mux.HandleFunc("GET /v1/operator/policy/artifacts/{id}/edges", s.operatorListPolicyArtifactEdges)
@@ -331,6 +334,8 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/operator/knowledge/sources/{id}/jobs", s.operatorListKnowledgeSourceJobs)
 	mux.HandleFunc("GET /v1/operator/knowledge/jobs/{id}", s.operatorGetKnowledgeSyncJob)
 	mux.HandleFunc("GET /v1/operator/knowledge/snapshots/{id}", s.operatorGetKnowledgeSnapshot)
+	mux.HandleFunc("GET /v1/operator/knowledge/snapshots/{id}/diff", s.operatorGetKnowledgeSnapshotDiff)
+	mux.HandleFunc("GET /v1/operator/knowledge/active-state", s.operatorGetKnowledgeActiveState)
 	mux.HandleFunc("GET /v1/operator/knowledge/pages", s.operatorListKnowledgePages)
 	mux.HandleFunc("GET /v1/operator/knowledge/proposals", s.operatorListKnowledgeProposals)
 	mux.HandleFunc("GET /v1/operator/knowledge/proposals/{id}", s.operatorGetKnowledgeProposal)
@@ -516,6 +521,30 @@ func (s *Server) operatorGetPolicyActiveState(w http.ResponseWriter, r *http.Req
 		return
 	}
 	payload, err := s.policyActiveStateView(r.Context(), sess)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) operatorGetPolicyComposedState(w http.ResponseWriter, r *http.Request) {
+	agentID := strings.TrimSpace(r.URL.Query().Get("agent_id"))
+	if agentID == "" {
+		http.Error(w, "agent_id is required", http.StatusBadRequest)
+		return
+	}
+	sess := session.Session{
+		ID:         strings.TrimSpace(r.URL.Query().Get("session_key")),
+		AgentID:    agentID,
+		CustomerID: strings.TrimSpace(r.URL.Query().Get("customer_id")),
+		Channel:    strings.TrimSpace(r.URL.Query().Get("channel")),
+		Status:     session.StatusActive,
+	}
+	if sess.Channel == "" {
+		sess.Channel = "web"
+	}
+	payload, err := s.policyComposedStateView(r.Context(), sess)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -762,6 +791,7 @@ func (s *Server) getProposalSummary(w http.ResponseWriter, r *http.Request) {
 		"eval_runs":      filteredRuns,
 		"latest_quality": latestProposalQuality(r.Context(), s.store, proposalID),
 		"lineage":        mustGraphLineagePayload(r.Context(), s.store, proposalID),
+		"active_state":   s.proposalActiveStateSummary(r.Context(), item, filteredRollouts),
 	})
 }
 
@@ -935,6 +965,20 @@ func (s *Server) getRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) getRolloutSummary(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetRollout(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	payload, err := s.rolloutSummaryPayload(r.Context(), item)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) getRolloutLineage(w http.ResponseWriter, r *http.Request) {
@@ -2219,7 +2263,14 @@ func (s *Server) operatorGetFeedback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	writeJSON(w, http.StatusOK, item)
+	payload := map[string]any{"feedback": item}
+	if outputs, err := s.feedbackOutputsSummary(r.Context(), item); err == nil {
+		payload["outputs_summary"] = outputs
+	}
+	if lineage, err := s.graphLineagePayload(r.Context(), item.ID); err == nil {
+		payload["lineage"] = lineage
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) operatorGetFeedbackLineage(w http.ResponseWriter, r *http.Request) {
@@ -2229,6 +2280,46 @@ func (s *Server) operatorGetFeedbackLineage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) operatorGetSessionTeachingState(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.PathValue("id"))
+	sess, err := s.store.GetSession(r.Context(), sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	items, err := s.store.ListFeedbackRecords(r.Context(), feedback.Query{SessionID: sessionID, Limit: 1000})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	grouped := map[string][]any{
+		"preferences":         {},
+		"preference_events":   {},
+		"knowledge_proposals": {},
+		"policy_proposals":    {},
+		"regression_fixtures": {},
+	}
+	perFeedback := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		entry := map[string]any{"feedback": item}
+		if outputs, err := s.feedbackOutputsSummary(r.Context(), item); err == nil {
+			entry["outputs_summary"] = outputs
+			for key, list := range outputs {
+				grouped[key] = append(grouped[key], list...)
+			}
+		}
+		if lineage, err := s.graphLineagePayload(r.Context(), item.ID); err == nil {
+			entry["lineage"] = lineage
+		}
+		perFeedback = append(perFeedback, entry)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"session":            sess,
+		"feedback_records":   perFeedback,
+		"aggregated_outputs": grouped,
+	})
 }
 
 type regressionFixtureView struct {
@@ -2640,6 +2731,38 @@ func (s *Server) policyActiveStateView(ctx context.Context, sess session.Session
 	return payload, nil
 }
 
+func (s *Server) policyComposedStateView(ctx context.Context, sess session.Session) (map[string]any, error) {
+	payload, err := s.policyActiveStateView(ctx, sess)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(sess.ID) == "" {
+		rollouts, err := s.store.ListRollouts(ctx)
+		if err == nil {
+			var pending []rollout.Record
+			for _, item := range rollouts {
+				if item.Status != rollout.RolloutActive {
+					continue
+				}
+				if item.Channel != "" && item.Channel != sess.Channel {
+					continue
+				}
+				if len(item.IncludeSessionIDs) > 0 || (item.Percentage > 0 && item.Percentage < 100) {
+					pending = append(pending, item)
+				}
+			}
+			if len(pending) > 0 {
+				payload["pending_session_specific_rollouts"] = pending
+			}
+		}
+	}
+	scopeKind, scopeID := qualityKnowledgeScope(sess, nil)
+	if knowledgeState, err := s.knowledgeActiveStatePayload(ctx, scopeKind, scopeID); err == nil && knowledgeState != nil {
+		payload["knowledge_active_state"] = knowledgeState
+	}
+	return payload, nil
+}
+
 func (s *Server) latestPolicySnapshotForBundle(ctx context.Context, bundleID string) (policy.Snapshot, bool) {
 	bundleID = strings.TrimSpace(bundleID)
 	if bundleID == "" {
@@ -2711,6 +2834,346 @@ func knowledgeSnapshotPageChanges(pages []knowledge.Page) []map[string]any {
 		out = append(out, change)
 	}
 	return out
+}
+
+func knowledgePageSummary(item knowledge.Page) map[string]any {
+	out := map[string]any{
+		"id":        item.ID,
+		"title":     item.Title,
+		"checksum":  item.Checksum,
+		"source_id": item.SourceID,
+	}
+	if item.PageType != "" {
+		out["page_type"] = item.PageType
+	}
+	return out
+}
+
+func knowledgeSnapshotDiff(currentPages, previousPages []knowledge.Page) map[string]any {
+	prevByID := map[string]knowledge.Page{}
+	for _, item := range previousPages {
+		prevByID[item.ID] = item
+	}
+	currByID := map[string]knowledge.Page{}
+	for _, item := range currentPages {
+		currByID[item.ID] = item
+	}
+	var added []map[string]any
+	var changed []map[string]any
+	var removed []string
+	for _, item := range currentPages {
+		prev, ok := prevByID[item.ID]
+		if !ok {
+			added = append(added, knowledgePageSummary(item))
+			continue
+		}
+		if prev.Checksum != item.Checksum || prev.Title != item.Title {
+			changed = append(changed, map[string]any{
+				"id":                item.ID,
+				"title":             item.Title,
+				"checksum":          item.Checksum,
+				"previous_checksum": prev.Checksum,
+				"source_id":         item.SourceID,
+			})
+		}
+	}
+	for _, item := range previousPages {
+		if _, ok := currByID[item.ID]; !ok {
+			removed = append(removed, item.ID)
+		}
+	}
+	slices.Sort(removed)
+	return map[string]any{
+		"added_pages":      added,
+		"changed_pages":    changed,
+		"removed_page_ids": removed,
+	}
+}
+
+func (s *Server) knowledgeSnapshotPayload(ctx context.Context, snapshot knowledge.Snapshot, againstID string) (map[string]any, error) {
+	pages, err := s.store.ListKnowledgePages(ctx, knowledge.PageQuery{
+		ScopeKind:  snapshot.ScopeKind,
+		ScopeID:    snapshot.ScopeID,
+		SnapshotID: snapshot.ID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{
+		"snapshot":     snapshot,
+		"pages":        pages,
+		"page_changes": knowledgeSnapshotPageChanges(pages),
+	}
+	diff, err := s.knowledgeSnapshotDiffPayload(ctx, snapshot, againstID)
+	if err != nil {
+		return nil, err
+	}
+	payload["diff"] = diff
+	if proposalID := strings.TrimSpace(fmt.Sprint(snapshot.Metadata["proposal_id"])); proposalID != "" {
+		payload["lineage"] = mustGraphLineagePayload(ctx, s.store, proposalID)
+	}
+	return payload, nil
+}
+
+func (s *Server) knowledgeSnapshotDiffPayload(ctx context.Context, snapshot knowledge.Snapshot, againstID string) (map[string]any, error) {
+	currentPages, err := s.store.ListKnowledgePages(ctx, knowledge.PageQuery{
+		ScopeKind:  snapshot.ScopeKind,
+		ScopeID:    snapshot.ScopeID,
+		SnapshotID: snapshot.ID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var previous knowledge.Snapshot
+	var previousPages []knowledge.Page
+	if againstID != "" {
+		previous, err = s.store.GetKnowledgeSnapshot(ctx, againstID)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		items, err := s.store.ListKnowledgeSnapshots(ctx, knowledge.SnapshotQuery{ScopeKind: snapshot.ScopeKind, ScopeID: snapshot.ScopeID, Limit: 100})
+		if err == nil {
+			for _, item := range items {
+				if item.ID == snapshot.ID {
+					continue
+				}
+				if item.CreatedAt.Before(snapshot.CreatedAt) && (previous.ID == "" || item.CreatedAt.After(previous.CreatedAt)) {
+					previous = item
+				}
+			}
+		}
+	}
+	if previous.ID != "" {
+		previousPages, err = s.store.ListKnowledgePages(ctx, knowledge.PageQuery{
+			ScopeKind:  previous.ScopeKind,
+			ScopeID:    previous.ScopeID,
+			SnapshotID: previous.ID,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	payload := map[string]any{
+		"current_snapshot": snapshot,
+		"source_ids":       snapshotSourceIDs(currentPages),
+	}
+	if previous.ID != "" {
+		payload["previous_snapshot"] = previous
+	}
+	for key, value := range knowledgeSnapshotDiff(currentPages, previousPages) {
+		payload[key] = value
+	}
+	if proposalID := strings.TrimSpace(fmt.Sprint(snapshot.Metadata["proposal_id"])); proposalID != "" {
+		payload["lineage"] = mustGraphLineagePayload(ctx, s.store, proposalID)
+	}
+	return payload, nil
+}
+
+func snapshotSourceIDs(pages []knowledge.Page) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, item := range pages {
+		sourceID := strings.TrimSpace(item.SourceID)
+		if sourceID == "" {
+			continue
+		}
+		if _, ok := seen[sourceID]; ok {
+			continue
+		}
+		seen[sourceID] = struct{}{}
+		out = append(out, sourceID)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func (s *Server) knowledgeActiveStatePayload(ctx context.Context, scopeKind string, scopeID string) (map[string]any, error) {
+	scopeKind = strings.TrimSpace(scopeKind)
+	scopeID = strings.TrimSpace(scopeID)
+	if scopeKind == "" || scopeID == "" {
+		return nil, errors.New("scope_kind and scope_id are required")
+	}
+	sources, err := s.store.ListKnowledgeSources(ctx, scopeKind, scopeID)
+	if err != nil {
+		return nil, err
+	}
+	snapshots, err := s.store.ListKnowledgeSnapshots(ctx, knowledge.SnapshotQuery{ScopeKind: scopeKind, ScopeID: scopeID, Limit: 100})
+	if err != nil {
+		return nil, err
+	}
+	proposals, err := s.store.ListKnowledgeUpdateProposals(ctx, scopeKind, scopeID)
+	if err != nil {
+		return nil, err
+	}
+	findings, err := s.store.ListKnowledgeLintFindings(ctx, knowledge.LintQuery{ScopeKind: scopeKind, ScopeID: scopeID, Limit: 1000})
+	if err != nil {
+		return nil, err
+	}
+	jobs, err := s.store.ListKnowledgeSyncJobs(ctx, knowledge.SyncJobQuery{Limit: 1000})
+	if err != nil {
+		return nil, err
+	}
+	var scopedJobs []knowledge.SyncJob
+	sourceIDs := map[string]struct{}{}
+	for _, source := range sources {
+		sourceIDs[source.ID] = struct{}{}
+	}
+	for _, job := range jobs {
+		if _, ok := sourceIDs[job.SourceID]; ok {
+			scopedJobs = append(scopedJobs, job)
+		}
+	}
+	payload := map[string]any{
+		"scope_kind":    scopeKind,
+		"scope_id":      scopeID,
+		"sources":       sources,
+		"proposals":     proposals,
+		"lint_findings": findings,
+		"sync_jobs":     scopedJobs,
+	}
+	if len(snapshots) > 0 {
+		payload["latest_snapshot"] = snapshots[0]
+		diff, err := s.knowledgeSnapshotDiffPayload(ctx, snapshots[0], "")
+		if err == nil {
+			payload["diff"] = diff
+		}
+		if lineage, err := s.graphLineagePayload(ctx, snapshots[0].ID); err == nil {
+			payload["lineage"] = lineage
+		}
+	}
+	return payload, nil
+}
+
+func (s *Server) knowledgeProposalPreviewPayload(ctx context.Context, item knowledge.UpdateProposal) (map[string]any, error) {
+	findings, err := s.lintKnowledgeProposal(ctx, item, true)
+	if err != nil {
+		return nil, err
+	}
+	blocked, warnings := lintApplyState(findings)
+	payload := map[string]any{
+		"proposal":        item,
+		"lint_findings":   findings,
+		"apply_blocked":   blocked,
+		"apply_warnings":  warnings,
+		"blocked_reasons": lintMessages(findings, true),
+	}
+	if _, ok := item.Payload["page"].(map[string]any); ok {
+		currentPage, proposedPage := s.proposalPages(ctx, item)
+		var current map[string]any
+		if currentPage != nil {
+			current = map[string]any{
+				"id":       currentPage.ID,
+				"title":    currentPage.Title,
+				"body":     currentPage.Body,
+				"checksum": currentPage.Checksum,
+			}
+		}
+		payload["preview"] = map[string]any{
+			"current":  current,
+			"proposed": proposedPage,
+			"changes": map[string]any{
+				"title_changed": current == nil || fmt.Sprint(current["title"]) != fmt.Sprint(proposedPage["title"]),
+				"body_changed":  current == nil || fmt.Sprint(current["body"]) != fmt.Sprint(proposedPage["final_body"]),
+				"conflict":      proposalConflict(currentPage, proposedPage),
+			},
+		}
+	}
+	if sections := s.proposalSectionPreviews(ctx, item); len(sections) > 0 {
+		payload["sections"] = sections
+	}
+	if active, err := s.knowledgeActiveStatePayload(ctx, item.ScopeKind, item.ScopeID); err == nil {
+		payload["active_state"] = active
+	}
+	if lineage, err := s.graphLineagePayload(ctx, item.ID); err == nil {
+		payload["lineage"] = lineage
+	}
+	return payload, nil
+}
+
+func (s *Server) feedbackOutputsSummary(ctx context.Context, item feedback.Record) (map[string][]any, error) {
+	out := map[string][]any{
+		"preferences":         {},
+		"preference_events":   {},
+		"knowledge_proposals": {},
+		"policy_proposals":    {},
+		"regression_fixtures": {},
+	}
+	for _, id := range item.Outputs.PreferenceIDs {
+		if artifact, err := s.store.GetPolicyArtifact(ctx, id); err == nil {
+			out["preferences"] = append(out["preferences"], artifact.Payload["preference"])
+		}
+	}
+	for _, id := range item.Outputs.PreferenceEventIDs {
+		if artifact, err := s.store.GetPolicyArtifact(ctx, id); err == nil {
+			out["preference_events"] = append(out["preference_events"], artifact.Payload["preference_event"])
+		}
+	}
+	for _, id := range item.Outputs.KnowledgeProposalIDs {
+		if proposal, err := s.store.GetKnowledgeUpdateProposal(ctx, id); err == nil {
+			out["knowledge_proposals"] = append(out["knowledge_proposals"], map[string]any{
+				"proposal": proposal,
+				"lineage":  mustGraphLineagePayload(ctx, s.store, id),
+			})
+		}
+	}
+	for _, id := range item.Outputs.PolicyProposalIDs {
+		if proposal, err := s.store.GetProposal(ctx, id); err == nil {
+			out["policy_proposals"] = append(out["policy_proposals"], map[string]any{
+				"proposal":     proposal,
+				"active_state": s.proposalActiveStateSummary(ctx, proposal, nil),
+				"lineage":      mustGraphLineagePayload(ctx, s.store, id),
+			})
+		}
+	}
+	if lineage, err := s.graphLineagePayload(ctx, item.ID); err == nil {
+		related, _ := lineage["related_artifacts"].([]policy.GraphArtifact)
+		for _, artifact := range related {
+			if artifact.Kind == "regression_fixture" {
+				out["regression_fixtures"] = append(out["regression_fixtures"], artifact.Payload["fixture"])
+			}
+		}
+	}
+	return out, nil
+}
+
+func (s *Server) proposalActiveStateSummary(ctx context.Context, item rollout.Proposal, filteredRollouts []rollout.Record) map[string]any {
+	payload := map[string]any{
+		"proposal_state": item.State,
+	}
+	if len(filteredRollouts) == 0 {
+		rollouts, err := s.store.ListRollouts(ctx)
+		if err == nil {
+			for _, record := range rollouts {
+				if record.ProposalID == item.ID {
+					filteredRollouts = append(filteredRollouts, record)
+				}
+			}
+		}
+	}
+	if len(filteredRollouts) > 0 {
+		payload["rollouts"] = filteredRollouts
+	}
+	if snapshot, ok := s.latestPolicySnapshotForBundle(ctx, item.SourceBundleID); ok {
+		payload["source_snapshot"] = s.policySnapshotView(ctx, snapshot)
+	}
+	if snapshot, ok := s.latestPolicySnapshotForBundle(ctx, item.CandidateBundleID); ok {
+		payload["candidate_snapshot"] = s.policySnapshotView(ctx, snapshot)
+	}
+	return payload
+}
+
+func (s *Server) rolloutSummaryPayload(ctx context.Context, item rollout.Record) (map[string]any, error) {
+	proposal, err := s.store.GetProposal(ctx, item.ProposalID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"rollout":      item,
+		"proposal":     proposal,
+		"lineage":      mustGraphLineagePayload(ctx, s.store, item.ID),
+		"active_state": s.proposalActiveStateSummary(ctx, proposal, []rollout.Record{item}),
+	}, nil
 }
 
 func uniqueSortedQualityDimensions(dimensions map[string]any) []string {
@@ -3484,20 +3947,39 @@ func (s *Server) operatorGetKnowledgeSnapshot(w http.ResponseWriter, r *http.Req
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	pages, _ := s.store.ListKnowledgePages(r.Context(), knowledge.PageQuery{
-		ScopeKind:  snapshot.ScopeKind,
-		ScopeID:    snapshot.ScopeID,
-		SnapshotID: snapshot.ID,
-	})
-	payload := map[string]any{
-		"snapshot": snapshot,
-		"pages":    pages,
+	payload, err := s.knowledgeSnapshotPayload(r.Context(), snapshot, "")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-	if proposalID := strings.TrimSpace(fmt.Sprint(snapshot.Metadata["proposal_id"])); proposalID != "" {
-		payload["lineage"] = mustGraphLineagePayload(r.Context(), s.store, proposalID)
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) operatorGetKnowledgeSnapshotDiff(w http.ResponseWriter, r *http.Request) {
+	snapshot, err := s.store.GetKnowledgeSnapshot(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
 	}
-	if changes := knowledgeSnapshotPageChanges(pages); len(changes) > 0 {
-		payload["page_changes"] = changes
+	payload, err := s.knowledgeSnapshotDiffPayload(r.Context(), snapshot, strings.TrimSpace(r.URL.Query().Get("against")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) operatorGetKnowledgeActiveState(w http.ResponseWriter, r *http.Request) {
+	scopeKind := strings.TrimSpace(r.URL.Query().Get("scope_kind"))
+	scopeID := strings.TrimSpace(r.URL.Query().Get("scope_id"))
+	payload, err := s.knowledgeActiveStatePayload(r.Context(), scopeKind, scopeID)
+	if err != nil {
+		if strings.Contains(err.Error(), "required") {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	writeJSON(w, http.StatusOK, payload)
 }
@@ -3538,7 +4020,17 @@ func (s *Server) operatorGetKnowledgeProposal(w http.ResponseWriter, r *http.Req
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	writeJSON(w, http.StatusOK, item)
+	payload := map[string]any{"proposal": item}
+	if lineage, err := s.graphLineagePayload(r.Context(), item.ID); err == nil {
+		payload["lineage"] = lineage
+	}
+	if active, err := s.knowledgeActiveStatePayload(r.Context(), item.ScopeKind, item.ScopeID); err == nil {
+		payload["active_state"] = active
+	}
+	if preview, err := s.knowledgeProposalPreviewPayload(r.Context(), item); err == nil {
+		payload["preview"] = preview
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) operatorGetKnowledgeProposalLineage(w http.ResponseWriter, r *http.Request) {
@@ -3556,45 +4048,10 @@ func (s *Server) operatorPreviewKnowledgeProposal(w http.ResponseWriter, r *http
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	findings, err := s.lintKnowledgeProposal(r.Context(), item, true)
+	payload, err := s.knowledgeProposalPreviewPayload(r.Context(), item)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
-	}
-	blocked, warnings := lintApplyState(findings)
-	payload := map[string]any{
-		"proposal":        item,
-		"lint_findings":   findings,
-		"apply_blocked":   blocked,
-		"apply_warnings":  warnings,
-		"blocked_reasons": lintMessages(findings, true),
-	}
-	if _, ok := item.Payload["page"].(map[string]any); ok {
-		currentPage, proposedPage := s.proposalPages(r.Context(), item)
-		var current map[string]any
-		if currentPage != nil {
-			current = map[string]any{
-				"id":       currentPage.ID,
-				"title":    currentPage.Title,
-				"body":     currentPage.Body,
-				"checksum": currentPage.Checksum,
-			}
-		}
-		payload["preview"] = map[string]any{
-			"current":  current,
-			"proposed": proposedPage,
-			"changes": map[string]any{
-				"title_changed": current == nil || fmt.Sprint(current["title"]) != fmt.Sprint(proposedPage["title"]),
-				"body_changed":  current == nil || fmt.Sprint(current["body"]) != fmt.Sprint(proposedPage["final_body"]),
-				"conflict":      proposalConflict(currentPage, proposedPage),
-			},
-		}
-	}
-	if sections := s.proposalSectionPreviews(r.Context(), item); len(sections) > 0 {
-		payload["sections"] = sections
-	}
-	if lineage, err := s.graphLineagePayload(r.Context(), item.ID); err == nil {
-		payload["lineage"] = lineage
 	}
 	writeJSON(w, http.StatusOK, payload)
 }

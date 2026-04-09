@@ -1440,6 +1440,21 @@ func (s *Store) SaveKnowledgePage(_ context.Context, page knowledge.Page, chunks
 		}
 	}
 	s.knowledgeChunks = append(filtered, chunks...)
+	var snapshotIDs []string
+	for _, snap := range s.knowledgeSnapshots {
+		if snap.ScopeKind != page.ScopeKind || snap.ScopeID != page.ScopeID {
+			continue
+		}
+		for _, pageID := range snap.PageIDs {
+			if pageID == page.ID {
+				snapshotIDs = append(snapshotIDs, snap.ID)
+				break
+			}
+		}
+	}
+	artifacts, edges := controlgraph.KnowledgePage(page, snapshotIDs)
+	s.savePolicyArtifactsLocked(artifacts)
+	s.savePolicyEdgesLocked(edges)
 	return nil
 }
 
@@ -1609,17 +1624,28 @@ func sqrt(v float64) float64 {
 func (s *Store) SaveKnowledgeSnapshot(_ context.Context, snapshot knowledge.Snapshot) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var previousSnapshotID string
+	var previousSnapshotAt time.Time
+	for _, item := range s.knowledgeSnapshots {
+		if item.ScopeKind != snapshot.ScopeKind || item.ScopeID != snapshot.ScopeID || item.ID == snapshot.ID {
+			continue
+		}
+		if previousSnapshotID == "" || item.CreatedAt.After(previousSnapshotAt) {
+			previousSnapshotID = item.ID
+			previousSnapshotAt = item.CreatedAt
+		}
+	}
 	for i, item := range s.knowledgeSnapshots {
 		if item.ID == snapshot.ID {
 			s.knowledgeSnapshots[i] = snapshot
-			artifacts, edges := controlgraph.KnowledgeSnapshot(snapshot)
+			artifacts, edges := controlgraph.KnowledgeSnapshotPrevious(snapshot, previousSnapshotID)
 			s.savePolicyArtifactsLocked(artifacts)
 			s.savePolicyEdgesLocked(edges)
 			return nil
 		}
 	}
 	s.knowledgeSnapshots = append(s.knowledgeSnapshots, snapshot)
-	artifacts, edges := controlgraph.KnowledgeSnapshot(snapshot)
+	artifacts, edges := controlgraph.KnowledgeSnapshotPrevious(snapshot, previousSnapshotID)
 	s.savePolicyArtifactsLocked(artifacts)
 	s.savePolicyEdgesLocked(edges)
 	return nil

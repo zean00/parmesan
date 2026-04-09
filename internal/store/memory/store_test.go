@@ -230,6 +230,88 @@ func TestSaveKnowledgeSnapshotProjectsProposalLineage(t *testing.T) {
 	}
 }
 
+func TestSaveKnowledgePageProjectsSnapshotAndSourceLineage(t *testing.T) {
+	store := New()
+	now := time.Now().UTC()
+	snapshot := knowledge.Snapshot{
+		ID:        "ksnap_page",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		PageIDs:   []string{"page_1"},
+		CreatedAt: now,
+	}
+	if err := store.SaveKnowledgeSnapshot(context.Background(), snapshot); err != nil {
+		t.Fatalf("SaveKnowledgeSnapshot() error = %v", err)
+	}
+	page := knowledge.Page{
+		ID:        "page_1",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		SourceID:  "src_1",
+		Title:     "Returns",
+		Body:      "Return policy",
+		Checksum:  "sum_1",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := store.SaveKnowledgePage(context.Background(), page, nil); err != nil {
+		t.Fatalf("SaveKnowledgePage() error = %v", err)
+	}
+	edges, err := store.ListPolicyEdges(context.Background(), policy.EdgeQuery{BundleID: "knowledge:agent:agent_1", TargetID: "page_1"})
+	if err != nil {
+		t.Fatalf("ListPolicyEdges() error = %v", err)
+	}
+	var foundSnapshot, foundSource bool
+	for _, item := range edges {
+		if item.Kind == "contains_page" && item.SourceID == "ksnap_page" {
+			foundSnapshot = true
+		}
+		if item.Kind == "contains_page" && item.SourceID == "src_1" {
+			foundSource = true
+		}
+	}
+	if !foundSnapshot || !foundSource {
+		t.Fatalf("edges = %#v, want snapshot and source contains_page edges", edges)
+	}
+}
+
+func TestSaveKnowledgeSnapshotProjectsSupersedesEdge(t *testing.T) {
+	store := New()
+	now := time.Now().UTC()
+	first := knowledge.Snapshot{
+		ID:        "ksnap_old",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		CreatedAt: now,
+	}
+	second := knowledge.Snapshot{
+		ID:        "ksnap_new",
+		ScopeKind: "agent",
+		ScopeID:   "agent_1",
+		CreatedAt: now.Add(time.Second),
+	}
+	if err := store.SaveKnowledgeSnapshot(context.Background(), first); err != nil {
+		t.Fatalf("SaveKnowledgeSnapshot(first) error = %v", err)
+	}
+	if err := store.SaveKnowledgeSnapshot(context.Background(), second); err != nil {
+		t.Fatalf("SaveKnowledgeSnapshot(second) error = %v", err)
+	}
+	edges, err := store.ListPolicyEdges(context.Background(), policy.EdgeQuery{BundleID: "knowledge:agent:agent_1", SourceID: "ksnap_new"})
+	if err != nil {
+		t.Fatalf("ListPolicyEdges() error = %v", err)
+	}
+	var found bool
+	for _, item := range edges {
+		if item.Kind == "supersedes" && item.TargetID == "ksnap_old" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("edges = %#v, want supersedes edge to prior snapshot", edges)
+	}
+}
+
 func TestSaveFeedbackRecordProjectsRegressionFixtureArtifact(t *testing.T) {
 	store := New()
 	now := time.Now().UTC()

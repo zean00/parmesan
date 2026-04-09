@@ -1393,6 +1393,37 @@ func (c *Client) SaveKnowledgePage(ctx context.Context, page knowledge.Page, chu
 			return err
 		}
 	}
+	var snapshotIDs []string
+	rows, err := tx.Query(ctx, `
+		SELECT id
+		FROM knowledge_snapshots
+		WHERE scope_kind = $1
+		  AND scope_id = $2
+		  AND page_ids_json ? $3
+	`, page.ScopeKind, page.ScopeID, page.ID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var snapshotID string
+		if err := rows.Scan(&snapshotID); err != nil {
+			rows.Close()
+			return err
+		}
+		snapshotIDs = append(snapshotIDs, snapshotID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	artifacts, edges := controlgraph.KnowledgePage(page, snapshotIDs)
+	if err := c.savePolicyArtifactsQuery(ctx, tx, artifacts); err != nil {
+		return err
+	}
+	if err := c.savePolicyEdgesQuery(ctx, tx, edges); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -1545,7 +1576,20 @@ func (c *Client) SaveKnowledgeSnapshot(ctx context.Context, snapshot knowledge.S
 	if err != nil {
 		return err
 	}
-	artifacts, edges := controlgraph.KnowledgeSnapshot(snapshot)
+	var previousSnapshotID string
+	row := c.sessionQuery().QueryRow(ctx, `
+		SELECT id
+		FROM knowledge_snapshots
+		WHERE scope_kind = $1
+		  AND scope_id = $2
+		  AND id <> $3
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, snapshot.ScopeKind, snapshot.ScopeID, snapshot.ID)
+	if err := row.Scan(&previousSnapshotID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	artifacts, edges := controlgraph.KnowledgeSnapshotPrevious(snapshot, previousSnapshotID)
 	if err := c.savePolicyArtifactsQuery(ctx, c.sessionQuery(), artifacts); err != nil {
 		return err
 	}

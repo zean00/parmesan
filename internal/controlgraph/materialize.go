@@ -49,6 +49,33 @@ func KnowledgeSnapshot(snapshot knowledge.Snapshot) ([]policy.GraphArtifact, []p
 	return artifacts, edges
 }
 
+func KnowledgeSnapshotPrevious(snapshot knowledge.Snapshot, previousSnapshotID string) ([]policy.GraphArtifact, []policy.GraphEdge) {
+	artifacts, edges := KnowledgeSnapshot(snapshot)
+	if previousSnapshotID != "" {
+		groupID := knowledgeGroupID(snapshot.ScopeKind, snapshot.ScopeID)
+		edges = append(edges, edge(groupID, snapshot.ID, "supersedes", previousSnapshotID, nil, snapshot.ArtifactMeta, snapshot.CreatedAt))
+	}
+	return artifacts, edges
+}
+
+func KnowledgePage(page knowledge.Page, snapshotIDs []string) ([]policy.GraphArtifact, []policy.GraphEdge) {
+	groupID := knowledgeGroupID(page.ScopeKind, page.ScopeID)
+	artifacts := []policy.GraphArtifact{
+		artifact(page.ID, groupID, "knowledge_page", versionOrTimestamp(page.ArtifactMeta, page.UpdatedAt, page.CreatedAt), map[string]any{"page": page}, page.ArtifactMeta, page.CreatedAt),
+	}
+	var edges []policy.GraphEdge
+	if page.SourceID != "" {
+		edges = append(edges, edge(groupID, page.SourceID, "contains_page", page.ID, nil, page.ArtifactMeta, page.CreatedAt))
+	}
+	for _, snapshotID := range snapshotIDs {
+		if strings.TrimSpace(snapshotID) == "" {
+			continue
+		}
+		edges = append(edges, edge(groupID, snapshotID, "contains_page", page.ID, nil, page.ArtifactMeta, page.CreatedAt))
+	}
+	return artifacts, edges
+}
+
 func KnowledgeUpdateProposal(item knowledge.UpdateProposal) ([]policy.GraphArtifact, []policy.GraphEdge) {
 	groupID := knowledgeGroupID(item.ScopeKind, item.ScopeID)
 	artifacts := []policy.GraphArtifact{
