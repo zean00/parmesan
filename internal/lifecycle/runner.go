@@ -17,6 +17,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/tool"
 	knowledgelearning "github.com/sahal/parmesan/internal/knowledge/learning"
 	"github.com/sahal/parmesan/internal/model"
+	"github.com/sahal/parmesan/internal/observability"
 	"github.com/sahal/parmesan/internal/sessionsvc"
 	"github.com/sahal/parmesan/internal/sessionwatch"
 	"github.com/sahal/parmesan/internal/store"
@@ -68,8 +69,11 @@ func (r *Runner) runOnce(ctx context.Context) {
 }
 
 func (r *Runner) processIdleSessions(ctx context.Context, now time.Time) {
+	ctx, done := observability.Current().StartSpan(ctx, "lifecycle", "process_idle_sessions")
+	defer done("ok")
 	sessions, err := r.repo.ListSessions(ctx)
 	if err != nil {
+		done("error")
 		return
 	}
 	execs, _ := r.repo.ListExecutions(ctx)
@@ -444,8 +448,11 @@ func latestAppointmentTime(events []session.Event, now time.Time) (time.Time, bo
 }
 
 func (r *Runner) processWatch(ctx context.Context, watch session.Watch, now time.Time) error {
+	ctx, done := observability.Current().StartSpan(ctx, "lifecycle", "process_watch")
+	defer done("ok")
 	sess, err := r.repo.GetSession(ctx, watch.SessionID)
 	if err != nil {
+		done("error")
 		return err
 	}
 	if sess.Status == session.StatusClosed {

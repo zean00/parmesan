@@ -1,6 +1,10 @@
 package replay
 
-import "time"
+import (
+	"time"
+
+	"github.com/sahal/parmesan/internal/domain/artifactmeta"
+)
 
 type Status string
 
@@ -19,16 +23,17 @@ const (
 )
 
 type Run struct {
-	ID             string    `json:"id"`
-	Type           RunType   `json:"type"`
-	SourceExecutionID string  `json:"source_execution_id"`
-	ProposalID     string    `json:"proposal_id,omitempty"`
-	ActiveBundleID string    `json:"active_bundle_id,omitempty"`
-	ShadowBundleID string    `json:"shadow_bundle_id,omitempty"`
-	Status         Status    `json:"status"`
-	ResultJSON     string    `json:"result_json,omitempty"`
-	DiffJSON       string    `json:"diff_json,omitempty"`
-	LastError      string    `json:"last_error,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID                string            `json:"id"`
+	ArtifactMeta      artifactmeta.Meta `json:"artifact_meta,omitempty"`
+	Type              RunType           `json:"type"`
+	SourceExecutionID string            `json:"source_execution_id"`
+	ProposalID        string            `json:"proposal_id,omitempty"`
+	ActiveBundleID    string            `json:"active_bundle_id,omitempty"`
+	ShadowBundleID    string            `json:"shadow_bundle_id,omitempty"`
+	Status            Status            `json:"status"`
+	ResultJSON        string            `json:"result_json,omitempty"`
+	DiffJSON          string            `json:"diff_json,omitempty"`
+	LastError         string            `json:"last_error,omitempty"`
+	CreatedAt         time.Time         `json:"created_at"`
+	UpdatedAt         time.Time         `json:"updated_at"`
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/sahal/parmesan/internal/api/sse"
 	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
+	"github.com/sahal/parmesan/internal/domain/artifactmeta"
 	"github.com/sahal/parmesan/internal/domain/audit"
 	"github.com/sahal/parmesan/internal/domain/customer"
 	"github.com/sahal/parmesan/internal/domain/execution"
@@ -43,6 +44,7 @@ import (
 	knowledgelearning "github.com/sahal/parmesan/internal/knowledge/learning"
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/moderation"
+	"github.com/sahal/parmesan/internal/observability"
 	"github.com/sahal/parmesan/internal/policyyaml"
 	"github.com/sahal/parmesan/internal/quality"
 	rolloutengine "github.com/sahal/parmesan/internal/rollout"
@@ -98,29 +100,30 @@ type sessionSummary struct {
 }
 
 type sessionView struct {
-	ID                     string         `json:"id"`
-	Channel                string         `json:"channel"`
-	CustomerID             string         `json:"customer_id,omitempty"`
-	AgentID                string         `json:"agent_id,omitempty"`
-	Mode                   string         `json:"mode,omitempty"`
-	Status                 string         `json:"status,omitempty"`
-	Title                  string         `json:"title,omitempty"`
-	Metadata               map[string]any `json:"metadata,omitempty"`
-	Labels                 []string       `json:"labels,omitempty"`
-	Summary                sessionSummary `json:"summary"`
-	CreatedAt              time.Time      `json:"created_at"`
-	AssignedOperatorID     string         `json:"assigned_operator_id,omitempty"`
-	LastActivityAt         time.Time      `json:"last_activity_at,omitempty"`
-	IdleCheckedAt          time.Time      `json:"idle_checked_at,omitempty"`
-	AwaitingCustomerSince  time.Time      `json:"awaiting_customer_since,omitempty"`
-	ClosedAt               time.Time      `json:"closed_at,omitempty"`
-	CloseReason            string         `json:"close_reason,omitempty"`
-	KeepReason             string         `json:"keep_reason,omitempty"`
-	FollowupCount          int            `json:"followup_count,omitempty"`
-	PendingApprovalCount   int            `json:"pending_approval_count,omitempty"`
-	FailedMediaCount       int            `json:"failed_media_count,omitempty"`
-	UnresolvedLintCount    int            `json:"unresolved_lint_count,omitempty"`
-	PendingPreferenceCount int            `json:"pending_preference_count,omitempty"`
+	ID                     string            `json:"id"`
+	ArtifactMeta           artifactmeta.Meta `json:"artifact_meta,omitempty"`
+	Channel                string            `json:"channel"`
+	CustomerID             string            `json:"customer_id,omitempty"`
+	AgentID                string            `json:"agent_id,omitempty"`
+	Mode                   string            `json:"mode,omitempty"`
+	Status                 string            `json:"status,omitempty"`
+	Title                  string            `json:"title,omitempty"`
+	Metadata               map[string]any    `json:"metadata,omitempty"`
+	Labels                 []string          `json:"labels,omitempty"`
+	Summary                sessionSummary    `json:"summary"`
+	CreatedAt              time.Time         `json:"created_at"`
+	AssignedOperatorID     string            `json:"assigned_operator_id,omitempty"`
+	LastActivityAt         time.Time         `json:"last_activity_at,omitempty"`
+	IdleCheckedAt          time.Time         `json:"idle_checked_at,omitempty"`
+	AwaitingCustomerSince  time.Time         `json:"awaiting_customer_since,omitempty"`
+	ClosedAt               time.Time         `json:"closed_at,omitempty"`
+	CloseReason            string            `json:"close_reason,omitempty"`
+	KeepReason             string            `json:"keep_reason,omitempty"`
+	FollowupCount          int               `json:"followup_count,omitempty"`
+	PendingApprovalCount   int               `json:"pending_approval_count,omitempty"`
+	FailedMediaCount       int               `json:"failed_media_count,omitempty"`
+	UnresolvedLintCount    int               `json:"unresolved_lint_count,omitempty"`
+	PendingPreferenceCount int               `json:"pending_preference_count,omitempty"`
 }
 
 type traceTimelineEntry struct {
@@ -141,46 +144,48 @@ type traceTimelineResponse struct {
 }
 
 type responseView struct {
-	ID               string          `json:"id"`
-	SessionID        string          `json:"session_id"`
-	ExecutionID      string          `json:"execution_id"`
-	TraceID          string          `json:"trace_id,omitempty"`
-	TriggerEventIDs  []string        `json:"trigger_event_ids,omitempty"`
-	TriggerSource    string          `json:"trigger_source,omitempty"`
-	TriggerReason    string          `json:"trigger_reason,omitempty"`
-	DedupeKey        string          `json:"dedupe_key,omitempty"`
-	Status           string          `json:"status"`
-	Reason           string          `json:"reason,omitempty"`
-	IterationCount   int             `json:"iteration_count,omitempty"`
-	MaxIterations    int             `json:"max_iterations,omitempty"`
-	StabilityReached bool            `json:"stability_reached,omitempty"`
-	GenerationMode   string          `json:"generation_mode,omitempty"`
-	PreambleEventID  string          `json:"preamble_event_id,omitempty"`
-	MessageEventIDs  []string        `json:"message_event_ids,omitempty"`
-	ToolInsights     []string        `json:"tool_insights,omitempty"`
-	GlossaryTerms    []string        `json:"glossary_terms,omitempty"`
-	StartedAt        time.Time       `json:"started_at,omitempty"`
-	CompletedAt      time.Time       `json:"completed_at,omitempty"`
-	CanceledAt       time.Time       `json:"canceled_at,omitempty"`
-	CreatedAt        time.Time       `json:"created_at"`
-	UpdatedAt        time.Time       `json:"updated_at"`
-	TraceSpans       []traceSpanView `json:"trace_spans,omitempty"`
+	ID               string            `json:"id"`
+	ArtifactMeta     artifactmeta.Meta `json:"artifact_meta,omitempty"`
+	SessionID        string            `json:"session_id"`
+	ExecutionID      string            `json:"execution_id"`
+	TraceID          string            `json:"trace_id,omitempty"`
+	TriggerEventIDs  []string          `json:"trigger_event_ids,omitempty"`
+	TriggerSource    string            `json:"trigger_source,omitempty"`
+	TriggerReason    string            `json:"trigger_reason,omitempty"`
+	DedupeKey        string            `json:"dedupe_key,omitempty"`
+	Status           string            `json:"status"`
+	Reason           string            `json:"reason,omitempty"`
+	IterationCount   int               `json:"iteration_count,omitempty"`
+	MaxIterations    int               `json:"max_iterations,omitempty"`
+	StabilityReached bool              `json:"stability_reached,omitempty"`
+	GenerationMode   string            `json:"generation_mode,omitempty"`
+	PreambleEventID  string            `json:"preamble_event_id,omitempty"`
+	MessageEventIDs  []string          `json:"message_event_ids,omitempty"`
+	ToolInsights     []string          `json:"tool_insights,omitempty"`
+	GlossaryTerms    []string          `json:"glossary_terms,omitempty"`
+	StartedAt        time.Time         `json:"started_at,omitempty"`
+	CompletedAt      time.Time         `json:"completed_at,omitempty"`
+	CanceledAt       time.Time         `json:"canceled_at,omitempty"`
+	CreatedAt        time.Time         `json:"created_at"`
+	UpdatedAt        time.Time         `json:"updated_at"`
+	TraceSpans       []traceSpanView   `json:"trace_spans,omitempty"`
 }
 
 type traceSpanView struct {
-	ID          string         `json:"id"`
-	ResponseID  string         `json:"response_id,omitempty"`
-	SessionID   string         `json:"session_id,omitempty"`
-	ExecutionID string         `json:"execution_id,omitempty"`
-	TraceID     string         `json:"trace_id,omitempty"`
-	ParentID    string         `json:"parent_id,omitempty"`
-	Kind        string         `json:"kind"`
-	Name        string         `json:"name,omitempty"`
-	Iteration   int            `json:"iteration,omitempty"`
-	Status      string         `json:"status,omitempty"`
-	Fields      map[string]any `json:"fields,omitempty"`
-	StartedAt   time.Time      `json:"started_at"`
-	FinishedAt  time.Time      `json:"finished_at,omitempty"`
+	ID           string            `json:"id"`
+	ArtifactMeta artifactmeta.Meta `json:"artifact_meta,omitempty"`
+	ResponseID   string            `json:"response_id,omitempty"`
+	SessionID    string            `json:"session_id,omitempty"`
+	ExecutionID  string            `json:"execution_id,omitempty"`
+	TraceID      string            `json:"trace_id,omitempty"`
+	ParentID     string            `json:"parent_id,omitempty"`
+	Kind         string            `json:"kind"`
+	Name         string            `json:"name,omitempty"`
+	Iteration    int               `json:"iteration,omitempty"`
+	Status       string            `json:"status,omitempty"`
+	Fields       map[string]any    `json:"fields,omitempty"`
+	StartedAt    time.Time         `json:"started_at"`
+	FinishedAt   time.Time         `json:"finished_at,omitempty"`
 }
 
 type responseTriggerView struct {
@@ -233,6 +238,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
+	mux.Handle("GET /metrics", observability.Current().MetricsHandler())
 	mux.HandleFunc("GET /v1/info", s.info)
 	mux.HandleFunc("GET /v1/models/providers", s.listModelProviders)
 	mux.HandleFunc("POST /v1/policy/validate", s.validatePolicy)
@@ -353,7 +359,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 
 	s.httpServer = &http.Server{
 		Addr:              addr,
-		Handler:           loggingMiddleware(s.operatorAuthMiddleware(mux)),
+		Handler:           observability.Current().HTTPMiddleware(loggingMiddleware(s.operatorAuthMiddleware(mux))),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -856,6 +862,7 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 func responseViewFromDomain(record responsedomain.Response, spans []responsedomain.TraceSpan) responseView {
 	view := responseView{
 		ID:               record.ID,
+		ArtifactMeta:     record.ArtifactMeta,
 		SessionID:        record.SessionID,
 		ExecutionID:      record.ExecutionID,
 		TraceID:          record.TraceID,
@@ -881,19 +888,20 @@ func responseViewFromDomain(record responsedomain.Response, spans []responsedoma
 	}
 	for _, span := range spans {
 		view.TraceSpans = append(view.TraceSpans, traceSpanView{
-			ID:          span.ID,
-			ResponseID:  span.ResponseID,
-			SessionID:   span.SessionID,
-			ExecutionID: span.ExecutionID,
-			TraceID:     span.TraceID,
-			ParentID:    span.ParentID,
-			Kind:        span.Kind,
-			Name:        span.Name,
-			Iteration:   span.Iteration,
-			Status:      span.Status,
-			Fields:      span.Fields,
-			StartedAt:   span.StartedAt,
-			FinishedAt:  span.FinishedAt,
+			ID:           span.ID,
+			ArtifactMeta: span.ArtifactMeta,
+			ResponseID:   span.ResponseID,
+			SessionID:    span.SessionID,
+			ExecutionID:  span.ExecutionID,
+			TraceID:      span.TraceID,
+			ParentID:     span.ParentID,
+			Kind:         span.Kind,
+			Name:         span.Name,
+			Iteration:    span.Iteration,
+			Status:       span.Status,
+			Fields:       span.Fields,
+			StartedAt:    span.StartedAt,
+			FinishedAt:   span.FinishedAt,
 		})
 	}
 	return view
@@ -6227,6 +6235,7 @@ func (s *Server) sessionSummaryFor(ctx context.Context, sess session.Session) se
 func sessionViewFromDomain(sess session.Session, summary sessionSummary) sessionView {
 	return sessionView{
 		ID:                    sess.ID,
+		ArtifactMeta:          sess.ArtifactMeta,
 		Channel:               sess.Channel,
 		CustomerID:            sess.CustomerID,
 		AgentID:               sess.AgentID,

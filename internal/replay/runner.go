@@ -11,6 +11,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/policy"
 	replaydomain "github.com/sahal/parmesan/internal/domain/replay"
 	"github.com/sahal/parmesan/internal/domain/session"
+	"github.com/sahal/parmesan/internal/observability"
 	"github.com/sahal/parmesan/internal/quality"
 	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
 	"github.com/sahal/parmesan/internal/store"
@@ -59,12 +60,15 @@ func (r *Runner) runOnce(ctx context.Context) {
 }
 
 func (r *Runner) process(ctx context.Context, run replaydomain.Run) error {
+	ctx, done := observability.Current().StartSpan(ctx, "replay", "process_eval_run")
+	defer done("ok")
 	if run.Status == replaydomain.StatusSucceeded || run.Status == replaydomain.StatusFailed {
 		return nil
 	}
 	run.Status = replaydomain.StatusRunning
 	run.UpdatedAt = time.Now().UTC()
 	if err := r.repo.UpdateEvalRun(ctx, run); err != nil {
+		done("error")
 		return err
 	}
 

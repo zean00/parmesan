@@ -1,6 +1,10 @@
 package session
 
-import "time"
+import (
+	"time"
+
+	"github.com/sahal/parmesan/internal/domain/artifactmeta"
+)
 
 type Status string
 
@@ -35,23 +39,24 @@ type Event struct {
 }
 
 type Session struct {
-	ID                    string         `json:"id"`
-	Channel               string         `json:"channel"`
-	CustomerID            string         `json:"customer_id,omitempty"`
-	AgentID               string         `json:"agent_id,omitempty"`
-	Mode                  string         `json:"mode,omitempty"`
-	Status                Status         `json:"status,omitempty"`
-	Title                 string         `json:"title,omitempty"`
-	Metadata              map[string]any `json:"metadata,omitempty"`
-	Labels                []string       `json:"labels,omitempty"`
-	LastActivityAt        time.Time      `json:"last_activity_at,omitempty"`
-	IdleCheckedAt         time.Time      `json:"idle_checked_at,omitempty"`
-	AwaitingCustomerSince time.Time      `json:"awaiting_customer_since,omitempty"`
-	ClosedAt              time.Time      `json:"closed_at,omitempty"`
-	CloseReason           string         `json:"close_reason,omitempty"`
-	KeepReason            string         `json:"keep_reason,omitempty"`
-	FollowupCount         int            `json:"followup_count,omitempty"`
-	CreatedAt             time.Time      `json:"created_at"`
+	ID                    string            `json:"id"`
+	ArtifactMeta          artifactmeta.Meta `json:"artifact_meta,omitempty"`
+	Channel               string            `json:"channel"`
+	CustomerID            string            `json:"customer_id,omitempty"`
+	AgentID               string            `json:"agent_id,omitempty"`
+	Mode                  string            `json:"mode,omitempty"`
+	Status                Status            `json:"status,omitempty"`
+	Title                 string            `json:"title,omitempty"`
+	Metadata              map[string]any    `json:"metadata,omitempty"`
+	Labels                []string          `json:"labels,omitempty"`
+	LastActivityAt        time.Time         `json:"last_activity_at,omitempty"`
+	IdleCheckedAt         time.Time         `json:"idle_checked_at,omitempty"`
+	AwaitingCustomerSince time.Time         `json:"awaiting_customer_since,omitempty"`
+	ClosedAt              time.Time         `json:"closed_at,omitempty"`
+	CloseReason           string            `json:"close_reason,omitempty"`
+	KeepReason            string            `json:"keep_reason,omitempty"`
+	FollowupCount         int               `json:"followup_count,omitempty"`
+	CreatedAt             time.Time         `json:"created_at"`
 }
 
 type EventQuery struct {
@@ -73,22 +78,23 @@ const (
 )
 
 type Watch struct {
-	ID             string         `json:"id"`
-	SessionID      string         `json:"session_id"`
-	Kind           string         `json:"kind"`
-	Status         WatchStatus    `json:"status"`
-	Source         string         `json:"source,omitempty"`
-	SubjectRef     string         `json:"subject_ref,omitempty"`
-	ToolID         string         `json:"tool_id,omitempty"`
-	Arguments      map[string]any `json:"arguments,omitempty"`
-	PollInterval   time.Duration  `json:"poll_interval,omitempty"`
-	NextRunAt      time.Time      `json:"next_run_at,omitempty"`
-	StopCondition  string         `json:"stop_condition,omitempty"`
-	DedupeKey      string         `json:"dedupe_key,omitempty"`
-	LastResultHash string         `json:"last_result_hash,omitempty"`
-	LastCheckedAt  time.Time      `json:"last_checked_at,omitempty"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ID             string            `json:"id"`
+	ArtifactMeta   artifactmeta.Meta `json:"artifact_meta,omitempty"`
+	SessionID      string            `json:"session_id"`
+	Kind           string            `json:"kind"`
+	Status         WatchStatus       `json:"status"`
+	Source         string            `json:"source,omitempty"`
+	SubjectRef     string            `json:"subject_ref,omitempty"`
+	ToolID         string            `json:"tool_id,omitempty"`
+	Arguments      map[string]any    `json:"arguments,omitempty"`
+	PollInterval   time.Duration     `json:"poll_interval,omitempty"`
+	NextRunAt      time.Time         `json:"next_run_at,omitempty"`
+	StopCondition  string            `json:"stop_condition,omitempty"`
+	DedupeKey      string            `json:"dedupe_key,omitempty"`
+	LastResultHash string            `json:"last_result_hash,omitempty"`
+	LastCheckedAt  time.Time         `json:"last_checked_at,omitempty"`
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
 }
 
 type WatchQuery struct {

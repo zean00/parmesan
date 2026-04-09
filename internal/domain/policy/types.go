@@ -1,6 +1,10 @@
 package policy
 
-import "time"
+import (
+	"time"
+
+	"github.com/sahal/parmesan/internal/domain/artifactmeta"
+)
 
 type ArtifactKind string
 
@@ -15,6 +19,7 @@ const (
 
 type Bundle struct {
 	ID                        string                     `json:"id" yaml:"id"`
+	ArtifactMeta              artifactmeta.Meta          `json:"artifact_meta,omitempty" yaml:"-"`
 	Version                   string                     `json:"version" yaml:"version"`
 	CompositionMode           string                     `json:"composition_mode,omitempty" yaml:"composition_mode,omitempty"`
 	PerceivedPerformance      PerceivedPerformancePolicy `json:"perceived_performance,omitempty" yaml:"perceived_performance,omitempty"`
@@ -42,13 +47,13 @@ type GlossaryTerm struct {
 }
 
 type PerceivedPerformancePolicy struct {
-	Mode                     string   `json:"mode,omitempty" yaml:"mode,omitempty"`
-	ProcessingIndicator      bool     `json:"processing_indicator_enabled,omitempty" yaml:"processing_indicator_enabled,omitempty"`
-	PreambleEnabled          bool     `json:"preamble_enabled,omitempty" yaml:"preamble_enabled,omitempty"`
-	PreambleDelayMS          int      `json:"preamble_delay_ms,omitempty" yaml:"preamble_delay_ms,omitempty"`
-	ProcessingUpdateDelayMS  int      `json:"processing_update_delay_ms,omitempty" yaml:"processing_update_delay_ms,omitempty"`
-	Preambles                []string `json:"preambles,omitempty" yaml:"preambles,omitempty"`
-	AllowedRiskTiers         []string `json:"allowed_risk_tiers,omitempty" yaml:"allowed_risk_tiers,omitempty"`
+	Mode                    string   `json:"mode,omitempty" yaml:"mode,omitempty"`
+	ProcessingIndicator     bool     `json:"processing_indicator_enabled,omitempty" yaml:"processing_indicator_enabled,omitempty"`
+	PreambleEnabled         bool     `json:"preamble_enabled,omitempty" yaml:"preamble_enabled,omitempty"`
+	PreambleDelayMS         int      `json:"preamble_delay_ms,omitempty" yaml:"preamble_delay_ms,omitempty"`
+	ProcessingUpdateDelayMS int      `json:"processing_update_delay_ms,omitempty" yaml:"processing_update_delay_ms,omitempty"`
+	Preambles               []string `json:"preambles,omitempty" yaml:"preambles,omitempty"`
+	AllowedRiskTiers        []string `json:"allowed_risk_tiers,omitempty" yaml:"allowed_risk_tiers,omitempty"`
 }
 
 type DomainBoundary struct {
@@ -84,100 +89,109 @@ type MCPRef struct {
 }
 
 type Observation struct {
-	ID          string   `json:"id" yaml:"id"`
-	When        string   `json:"when" yaml:"when"`
-	Tools       []string `json:"tools,omitempty" yaml:"tools,omitempty"`
-	MCP         *MCPRef  `json:"mcp,omitempty" yaml:"mcp,omitempty"`
-	Matcher     string   `json:"matcher,omitempty" yaml:"matcher,omitempty"`
-	Criticality string   `json:"criticality,omitempty" yaml:"criticality,omitempty"`
-	Tags        []string `json:"tags,omitempty" yaml:"tags,omitempty"`
-	Priority    int      `json:"priority,omitempty" yaml:"priority,omitempty"`
+	ID           string            `json:"id" yaml:"id"`
+	ArtifactMeta artifactmeta.Meta `json:"artifact_meta,omitempty" yaml:"-"`
+	When         string            `json:"when" yaml:"when"`
+	Tools        []string          `json:"tools,omitempty" yaml:"tools,omitempty"`
+	MCP          *MCPRef           `json:"mcp,omitempty" yaml:"mcp,omitempty"`
+	Matcher      string            `json:"matcher,omitempty" yaml:"matcher,omitempty"`
+	Criticality  string            `json:"criticality,omitempty" yaml:"criticality,omitempty"`
+	Tags         []string          `json:"tags,omitempty" yaml:"tags,omitempty"`
+	Priority     int               `json:"priority,omitempty" yaml:"priority,omitempty"`
 }
 
 type Guideline struct {
-	ID          string   `json:"id" yaml:"id"`
-	When        string   `json:"when" yaml:"when"`
-	Then        string   `json:"then" yaml:"then"`
-	Tools       []string `json:"tools,omitempty" yaml:"tools,omitempty"`
-	MCP         *MCPRef  `json:"mcp,omitempty" yaml:"mcp,omitempty"`
-	Scope       string   `json:"scope,omitempty" yaml:"scope,omitempty"`
-	Matcher     string   `json:"matcher,omitempty" yaml:"matcher,omitempty"`
-	Criticality string   `json:"criticality,omitempty" yaml:"criticality,omitempty"`
-	Tags        []string `json:"tags,omitempty" yaml:"tags,omitempty"`
-	Track       bool     `json:"track,omitempty" yaml:"track,omitempty"`
-	Continuous  bool     `json:"continuous,omitempty" yaml:"continuous,omitempty"`
-	Priority    int      `json:"priority,omitempty" yaml:"priority,omitempty"`
+	ID           string            `json:"id" yaml:"id"`
+	ArtifactMeta artifactmeta.Meta `json:"artifact_meta,omitempty" yaml:"-"`
+	When         string            `json:"when" yaml:"when"`
+	Then         string            `json:"then" yaml:"then"`
+	Tools        []string          `json:"tools,omitempty" yaml:"tools,omitempty"`
+	MCP          *MCPRef           `json:"mcp,omitempty" yaml:"mcp,omitempty"`
+	Scope        string            `json:"scope,omitempty" yaml:"scope,omitempty"`
+	Matcher      string            `json:"matcher,omitempty" yaml:"matcher,omitempty"`
+	Criticality  string            `json:"criticality,omitempty" yaml:"criticality,omitempty"`
+	Tags         []string          `json:"tags,omitempty" yaml:"tags,omitempty"`
+	Track        bool              `json:"track,omitempty" yaml:"track,omitempty"`
+	Continuous   bool              `json:"continuous,omitempty" yaml:"continuous,omitempty"`
+	Priority     int               `json:"priority,omitempty" yaml:"priority,omitempty"`
 }
 
 type Relationship struct {
-	Source string `json:"source" yaml:"source"`
-	Kind   string `json:"kind" yaml:"kind"`
-	Target string `json:"target" yaml:"target"`
+	ArtifactMeta artifactmeta.Meta `json:"artifact_meta,omitempty" yaml:"-"`
+	Source       string            `json:"source" yaml:"source"`
+	Kind         string            `json:"kind" yaml:"kind"`
+	Target       string            `json:"target" yaml:"target"`
 }
 
 type Journey struct {
-	ID              string         `json:"id" yaml:"id"`
-	When            []string       `json:"when" yaml:"when"`
-	RootID          string         `json:"root_id,omitempty" yaml:"root_id,omitempty"`
-	States          []JourneyNode  `json:"states" yaml:"states"`
-	Edges           []JourneyEdge  `json:"edges,omitempty" yaml:"edges,omitempty"`
-	Guidelines      []Guideline    `json:"guidelines,omitempty" yaml:"guidelines,omitempty"`
-	Templates       []Template     `json:"templates,omitempty" yaml:"templates,omitempty"`
-	Tags            []string       `json:"tags,omitempty" yaml:"tags,omitempty"`
-	Labels          []string       `json:"labels,omitempty" yaml:"labels,omitempty"`
-	Metadata        map[string]any `json:"metadata,omitempty" yaml:"metadata,omitempty"`
-	CompositionMode string         `json:"composition_mode,omitempty" yaml:"composition_mode,omitempty"`
-	Priority        int            `json:"priority,omitempty" yaml:"priority,omitempty"`
+	ID              string            `json:"id" yaml:"id"`
+	ArtifactMeta    artifactmeta.Meta `json:"artifact_meta,omitempty" yaml:"-"`
+	When            []string          `json:"when" yaml:"when"`
+	RootID          string            `json:"root_id,omitempty" yaml:"root_id,omitempty"`
+	States          []JourneyNode     `json:"states" yaml:"states"`
+	Edges           []JourneyEdge     `json:"edges,omitempty" yaml:"edges,omitempty"`
+	Guidelines      []Guideline       `json:"guidelines,omitempty" yaml:"guidelines,omitempty"`
+	Templates       []Template        `json:"templates,omitempty" yaml:"templates,omitempty"`
+	Tags            []string          `json:"tags,omitempty" yaml:"tags,omitempty"`
+	Labels          []string          `json:"labels,omitempty" yaml:"labels,omitempty"`
+	Metadata        map[string]any    `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	CompositionMode string            `json:"composition_mode,omitempty" yaml:"composition_mode,omitempty"`
+	Priority        int               `json:"priority,omitempty" yaml:"priority,omitempty"`
 }
 
 type JourneyNode struct {
-	ID              string         `json:"id" yaml:"id"`
-	Type            string         `json:"type" yaml:"type"`
-	Instruction     string         `json:"instruction,omitempty" yaml:"instruction,omitempty"`
-	Description     string         `json:"description,omitempty" yaml:"description,omitempty"`
-	Tool            string         `json:"tool,omitempty" yaml:"tool,omitempty"`
-	MCP             *MCPRef        `json:"mcp,omitempty" yaml:"mcp,omitempty"`
-	When            []string       `json:"when,omitempty" yaml:"when,omitempty"`
-	Next            []string       `json:"next,omitempty" yaml:"next,omitempty"`
-	Mode            string         `json:"mode,omitempty" yaml:"mode,omitempty"`
-	Kind            string         `json:"kind,omitempty" yaml:"kind,omitempty"`
-	Labels          []string       `json:"labels,omitempty" yaml:"labels,omitempty"`
-	Metadata        map[string]any `json:"metadata,omitempty" yaml:"metadata,omitempty"`
-	CompositionMode string         `json:"composition_mode,omitempty" yaml:"composition_mode,omitempty"`
-	Priority        int            `json:"priority,omitempty" yaml:"priority,omitempty"`
+	ID              string            `json:"id" yaml:"id"`
+	ArtifactMeta    artifactmeta.Meta `json:"artifact_meta,omitempty" yaml:"-"`
+	Type            string            `json:"type" yaml:"type"`
+	Instruction     string            `json:"instruction,omitempty" yaml:"instruction,omitempty"`
+	Description     string            `json:"description,omitempty" yaml:"description,omitempty"`
+	Tool            string            `json:"tool,omitempty" yaml:"tool,omitempty"`
+	MCP             *MCPRef           `json:"mcp,omitempty" yaml:"mcp,omitempty"`
+	When            []string          `json:"when,omitempty" yaml:"when,omitempty"`
+	Next            []string          `json:"next,omitempty" yaml:"next,omitempty"`
+	Mode            string            `json:"mode,omitempty" yaml:"mode,omitempty"`
+	Kind            string            `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Labels          []string          `json:"labels,omitempty" yaml:"labels,omitempty"`
+	Metadata        map[string]any    `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	CompositionMode string            `json:"composition_mode,omitempty" yaml:"composition_mode,omitempty"`
+	Priority        int               `json:"priority,omitempty" yaml:"priority,omitempty"`
 }
 
 type JourneyEdge struct {
-	ID        string         `json:"id" yaml:"id"`
-	Source    string         `json:"source" yaml:"source"`
-	Target    string         `json:"target" yaml:"target"`
-	Condition string         `json:"condition,omitempty" yaml:"condition,omitempty"`
-	Metadata  map[string]any `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	ID           string            `json:"id" yaml:"id"`
+	ArtifactMeta artifactmeta.Meta `json:"artifact_meta,omitempty" yaml:"-"`
+	Source       string            `json:"source" yaml:"source"`
+	Target       string            `json:"target" yaml:"target"`
+	Condition    string            `json:"condition,omitempty" yaml:"condition,omitempty"`
+	Metadata     map[string]any    `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 
 type Template struct {
-	ID       string   `json:"id" yaml:"id"`
-	Mode     string   `json:"mode" yaml:"mode"`
-	Text     string   `json:"text,omitempty" yaml:"text,omitempty"`
-	Messages []string `json:"messages,omitempty" yaml:"messages,omitempty"`
-	When     string   `json:"when,omitempty" yaml:"when,omitempty"`
+	ID           string            `json:"id" yaml:"id"`
+	ArtifactMeta artifactmeta.Meta `json:"artifact_meta,omitempty" yaml:"-"`
+	Mode         string            `json:"mode" yaml:"mode"`
+	Text         string            `json:"text,omitempty" yaml:"text,omitempty"`
+	Messages     []string          `json:"messages,omitempty" yaml:"messages,omitempty"`
+	When         string            `json:"when,omitempty" yaml:"when,omitempty"`
 }
 
 type ToolPolicy struct {
-	ID       string   `json:"id" yaml:"id"`
-	ToolIDs  []string `json:"tool_ids" yaml:"tool_ids"`
-	Exposure string   `json:"exposure" yaml:"exposure"`
-	Approval string   `json:"approval,omitempty" yaml:"approval,omitempty"`
+	ID           string            `json:"id" yaml:"id"`
+	ArtifactMeta artifactmeta.Meta `json:"artifact_meta,omitempty" yaml:"-"`
+	ToolIDs      []string          `json:"tool_ids" yaml:"tool_ids"`
+	Exposure     string            `json:"exposure" yaml:"exposure"`
+	Approval     string            `json:"approval,omitempty" yaml:"approval,omitempty"`
 }
 
 type RetrieverBinding struct {
-	ID         string         `json:"id" yaml:"id"`
-	Kind       string         `json:"kind" yaml:"kind"`
-	Scope      string         `json:"scope" yaml:"scope"`
-	TargetID   string         `json:"target_id,omitempty" yaml:"target_id,omitempty"`
-	Mode       string         `json:"mode,omitempty" yaml:"mode,omitempty"`
-	MaxResults int            `json:"max_results,omitempty" yaml:"max_results,omitempty"`
-	Config     map[string]any `json:"config,omitempty" yaml:"config,omitempty"`
+	ID           string            `json:"id" yaml:"id"`
+	ArtifactMeta artifactmeta.Meta `json:"artifact_meta,omitempty" yaml:"-"`
+	Kind         string            `json:"kind" yaml:"kind"`
+	Scope        string            `json:"scope" yaml:"scope"`
+	TargetID     string            `json:"target_id,omitempty" yaml:"target_id,omitempty"`
+	Mode         string            `json:"mode,omitempty" yaml:"mode,omitempty"`
+	MaxResults   int               `json:"max_results,omitempty" yaml:"max_results,omitempty"`
+	Config       map[string]any    `json:"config,omitempty" yaml:"config,omitempty"`
 }
 
 type GuidelineToolAssociation struct {

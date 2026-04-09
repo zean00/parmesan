@@ -32,6 +32,7 @@ import (
 	knowledgeenrichment "github.com/sahal/parmesan/internal/knowledge/enrichment"
 	knowledgelearning "github.com/sahal/parmesan/internal/knowledge/learning"
 	"github.com/sahal/parmesan/internal/model"
+	"github.com/sahal/parmesan/internal/observability"
 	"github.com/sahal/parmesan/internal/quality"
 	rolloutengine "github.com/sahal/parmesan/internal/rollout"
 	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
@@ -189,8 +190,11 @@ func (r *Runner) processKnowledgeSyncJob(ctx context.Context, jobID string) erro
 }
 
 func (r *Runner) processExecution(ctx context.Context, executionID string) error {
+	ctx, done := observability.Current().StartSpan(ctx, "runner", "process_execution")
+	defer done("ok")
 	exec, steps, err := r.repo.GetExecution(ctx, executionID)
 	if err != nil {
+		done("error")
 		return err
 	}
 	responseRecord, _ := r.ensureResponseRecord(ctx, exec)
@@ -199,6 +203,7 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 	}
 	events, err := r.repo.ListEvents(ctx, exec.SessionID)
 	if err != nil {
+		done("error")
 		return err
 	}
 	if !hasEvent(events, exec.TriggerEventID) {
@@ -216,6 +221,7 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 	exec.ResumeSignal = ""
 	exec.UpdatedAt = now
 	if err := r.repo.UpdateExecution(ctx, exec); err != nil {
+		done("error")
 		return err
 	}
 	_ = r.updateResponseState(ctx, responseRecord, responsedomain.StatusProcessing, "", func(record *responsedomain.Response) {

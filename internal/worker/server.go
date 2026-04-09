@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"time"
+
+	"github.com/sahal/parmesan/internal/observability"
 )
 
 type Server struct {
@@ -16,11 +18,12 @@ func New(addr string) *Server {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok","service":"worker","queue":"postgres-jobs"}`))
 	})
+	mux.Handle("GET /metrics", observability.Current().MetricsHandler())
 
 	return &Server{
 		httpServer: &http.Server{
 			Addr:              addr,
-			Handler:           mux,
+			Handler:           observability.Current().HTTPMiddleware(mux),
 			ReadHeaderTimeout: 5 * time.Second,
 		},
 	}

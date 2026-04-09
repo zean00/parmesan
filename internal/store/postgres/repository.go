@@ -13,6 +13,7 @@ import (
 
 	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
+	"github.com/sahal/parmesan/internal/domain/artifactmeta"
 	"github.com/sahal/parmesan/internal/domain/audit"
 	"github.com/sahal/parmesan/internal/domain/customer"
 	"github.com/sahal/parmesan/internal/domain/delivery"
@@ -275,10 +276,7 @@ func (c *Client) SaveCustomerPreference(ctx context.Context, pref customer.Prefe
 	if err != nil {
 		return err
 	}
-	metadata, err := json.Marshal(pref.Metadata)
-	if err != nil {
-		return err
-	}
+	metadata := metadataJSON(pref.Metadata, pref.ArtifactMeta)
 	_, err = db.Exec(ctx, `
 		INSERT INTO customer_preferences (id, agent_id, customer_id, key, value, source, confidence, status, evidence_refs_json, metadata_json, last_confirmed_at, expires_at, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
@@ -318,7 +316,7 @@ func (c *Client) GetCustomerPreference(ctx context.Context, agentID string, cust
 		return customer.Preference{}, err
 	}
 	_ = json.Unmarshal(evidence, &pref.EvidenceRefs)
-	_ = json.Unmarshal(metadata, &pref.Metadata)
+	pref.ArtifactMeta, pref.Metadata, _ = decodeMetadata(metadata)
 	return pref, nil
 }
 
@@ -349,7 +347,7 @@ func (c *Client) ListCustomerPreferences(ctx context.Context, query customer.Pre
 			return nil, err
 		}
 		_ = json.Unmarshal(evidence, &pref.EvidenceRefs)
-		_ = json.Unmarshal(metadata, &pref.Metadata)
+		pref.ArtifactMeta, pref.Metadata, _ = decodeMetadata(metadata)
 		out = append(out, pref)
 	}
 	return out, rows.Err()
@@ -361,10 +359,7 @@ func (c *Client) AppendCustomerPreferenceEvent(ctx context.Context, event custom
 	if err != nil {
 		return err
 	}
-	metadata, err := json.Marshal(event.Metadata)
-	if err != nil {
-		return err
-	}
+	metadata := metadataJSON(event.Metadata, event.ArtifactMeta)
 	_, err = db.Exec(ctx, `
 		INSERT INTO customer_preference_events (id, preference_id, agent_id, customer_id, key, value, action, source, confidence, evidence_refs_json, metadata_json, created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
@@ -396,7 +391,7 @@ func (c *Client) ListCustomerPreferenceEvents(ctx context.Context, query custome
 			return nil, err
 		}
 		_ = json.Unmarshal(evidence, &item.EvidenceRefs)
-		_ = json.Unmarshal(metadata, &item.Metadata)
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
 		out = append(out, item)
 	}
 	return out, rows.Err()
@@ -412,10 +407,7 @@ func (c *Client) SaveFeedbackRecord(ctx context.Context, record feedback.Record)
 	if err != nil {
 		return err
 	}
-	metadata, err := json.Marshal(record.Metadata)
-	if err != nil {
-		return err
-	}
+	metadata := metadataJSON(record.Metadata, record.ArtifactMeta)
 	outputs, err := json.Marshal(record.Outputs)
 	if err != nil {
 		return err
@@ -498,17 +490,14 @@ func scanFeedbackRecord(row rowScanner) (feedback.Record, error) {
 	}
 	_ = json.Unmarshal(labels, &item.Labels)
 	_ = json.Unmarshal(targets, &item.TargetEventIDs)
-	_ = json.Unmarshal(metadata, &item.Metadata)
+	item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
 	_ = json.Unmarshal(outputs, &item.Outputs)
 	return item, nil
 }
 
 func (c *Client) CreateSession(ctx context.Context, sess session.Session) error {
 	db := c.sessionQuery()
-	metadata, err := json.Marshal(sess.Metadata)
-	if err != nil {
-		return err
-	}
+	metadata := metadataJSON(sess.Metadata, sess.ArtifactMeta)
 	labels, err := json.Marshal(sess.Labels)
 	if err != nil {
 		return err
@@ -540,9 +529,7 @@ func (c *Client) GetSession(ctx context.Context, sessionID string) (session.Sess
 		return session.Session{}, err
 	}
 	sess.Status = session.Status(status)
-	if len(metadata) > 0 {
-		_ = json.Unmarshal(metadata, &sess.Metadata)
-	}
+	sess.ArtifactMeta, sess.Metadata, _ = decodeMetadata(metadata)
 	if len(labels) > 0 {
 		_ = json.Unmarshal(labels, &sess.Labels)
 	}
@@ -551,10 +538,7 @@ func (c *Client) GetSession(ctx context.Context, sessionID string) (session.Sess
 
 func (c *Client) UpdateSession(ctx context.Context, sess session.Session) error {
 	db := c.sessionQuery()
-	metadata, err := json.Marshal(sess.Metadata)
-	if err != nil {
-		return err
-	}
+	metadata := metadataJSON(sess.Metadata, sess.ArtifactMeta)
 	labels, err := json.Marshal(sess.Labels)
 	if err != nil {
 		return err
@@ -597,9 +581,7 @@ func (c *Client) ListSessions(ctx context.Context) ([]session.Session, error) {
 			return nil, err
 		}
 		sess.Status = session.Status(status)
-		if len(metadata) > 0 {
-			_ = json.Unmarshal(metadata, &sess.Metadata)
-		}
+		sess.ArtifactMeta, sess.Metadata, _ = decodeMetadata(metadata)
 		if len(labels) > 0 {
 			_ = json.Unmarshal(labels, &sess.Labels)
 		}
@@ -873,7 +855,7 @@ func (c *Client) GetKnowledgeSource(ctx context.Context, sourceID string) (knowl
 		}
 		return knowledge.Source{}, err
 	}
-	_ = json.Unmarshal(metadata, &out.Metadata)
+	out.ArtifactMeta, out.Metadata, _ = decodeMetadata(metadata)
 	return out, nil
 }
 
@@ -895,18 +877,15 @@ func (c *Client) ListKnowledgeSources(ctx context.Context, scopeKind string, sco
 		if err := rows.Scan(&item.ID, &item.ScopeKind, &item.ScopeID, &item.Kind, &item.URI, &item.Checksum, &item.Status, &metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal(metadata, &item.Metadata)
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
 		out = append(out, item)
 	}
 	return out, rows.Err()
 }
 
 func (c *Client) SaveKnowledgeSyncJob(ctx context.Context, job knowledge.SyncJob) error {
-	metadata, err := json.Marshal(job.Metadata)
-	if err != nil {
-		return err
-	}
-	_, err = c.sessionQuery().Exec(ctx, `
+	metadata := metadataJSON(job.Metadata, job.ArtifactMeta)
+	_, err := c.sessionQuery().Exec(ctx, `
 		INSERT INTO knowledge_source_sync_jobs (id, source_id, status, force, requested_by, error, old_checksum, new_checksum, snapshot_id, changed, metadata_json, created_at, started_at, finished_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		ON CONFLICT (id) DO UPDATE
@@ -938,7 +917,7 @@ func (c *Client) GetKnowledgeSyncJob(ctx context.Context, jobID string) (knowled
 		}
 		return knowledge.SyncJob{}, err
 	}
-	_ = json.Unmarshal(metadata, &item.Metadata)
+	item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
 	return item, nil
 }
 
@@ -966,7 +945,7 @@ func (c *Client) ListKnowledgeSyncJobs(ctx context.Context, query knowledge.Sync
 		if err := rows.Scan(&item.ID, &item.SourceID, &item.Status, &item.Force, &item.RequestedBy, &item.Error, &item.OldChecksum, &item.NewChecksum, &item.SnapshotID, &item.Changed, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal(metadata, &item.Metadata)
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
 		out = append(out, item)
 	}
 	return out, rows.Err()
@@ -990,7 +969,7 @@ func (c *Client) ListRunnableKnowledgeSyncJobs(ctx context.Context) ([]knowledge
 		if err := rows.Scan(&item.ID, &item.SourceID, &item.Status, &item.Force, &item.RequestedBy, &item.Error, &item.OldChecksum, &item.NewChecksum, &item.SnapshotID, &item.Changed, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal(metadata, &item.Metadata)
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
 		out = append(out, item)
 	}
 	return out, rows.Err()
@@ -1001,10 +980,7 @@ func (c *Client) SaveKnowledgePage(ctx context.Context, page knowledge.Page, chu
 	if err != nil {
 		return err
 	}
-	metadata, err := json.Marshal(page.Metadata)
-	if err != nil {
-		return err
-	}
+	metadata := metadataJSON(page.Metadata, page.ArtifactMeta)
 	tx, err := c.Pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -1040,10 +1016,7 @@ func (c *Client) SaveKnowledgePage(ctx context.Context, page knowledge.Page, chu
 		if err != nil {
 			return err
 		}
-		metadata, err := json.Marshal(chunk.Metadata)
-		if err != nil {
-			return err
-		}
+		metadata := metadataJSON(chunk.Metadata, chunk.ArtifactMeta)
 		embedding := nullString(vectorLiteral(chunk.Vector))
 		if _, err = tx.Exec(ctx, `
 			INSERT INTO knowledge_chunks (id, page_id, scope_kind, scope_id, text, embedding, embedding_json, citations_json, metadata_json, created_at)
@@ -1083,7 +1056,7 @@ func (c *Client) ListKnowledgePages(ctx context.Context, query knowledge.PageQue
 			return nil, err
 		}
 		_ = json.Unmarshal(citations, &item.Citations)
-		_ = json.Unmarshal(metadata, &item.Metadata)
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
 		out = append(out, item)
 	}
 	return out, rows.Err()
@@ -1118,7 +1091,7 @@ func (c *Client) ListKnowledgeChunks(ctx context.Context, query knowledge.ChunkQ
 		}
 		_ = json.Unmarshal(vector, &item.Vector)
 		_ = json.Unmarshal(citations, &item.Citations)
-		_ = json.Unmarshal(metadata, &item.Metadata)
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
 		out = append(out, item)
 	}
 	return out, rows.Err()
@@ -1167,7 +1140,7 @@ func (c *Client) SearchKnowledgeChunks(ctx context.Context, query knowledge.Chun
 		}
 		_ = json.Unmarshal(vector, &item.Vector)
 		_ = json.Unmarshal(citations, &item.Citations)
-		_ = json.Unmarshal(metadata, &item.Metadata)
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
 		out = append(out, item)
 	}
 	if len(out) > 0 || rows.Err() == nil {
@@ -1190,10 +1163,7 @@ func (c *Client) SaveKnowledgeSnapshot(ctx context.Context, snapshot knowledge.S
 	if err != nil {
 		return err
 	}
-	metadata, err := json.Marshal(snapshot.Metadata)
-	if err != nil {
-		return err
-	}
+	metadata := metadataJSON(snapshot.Metadata, snapshot.ArtifactMeta)
 	_, err = c.sessionQuery().Exec(ctx, `
 		INSERT INTO knowledge_snapshots (id, scope_kind, scope_id, page_ids_json, chunk_ids_json, metadata_json, created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7)
@@ -1222,7 +1192,7 @@ func (c *Client) GetKnowledgeSnapshot(ctx context.Context, snapshotID string) (k
 	}
 	_ = json.Unmarshal(pageIDs, &out.PageIDs)
 	_ = json.Unmarshal(chunkIDs, &out.ChunkIDs)
-	_ = json.Unmarshal(metadata, &out.Metadata)
+	out.ArtifactMeta, out.Metadata, _ = decodeMetadata(metadata)
 	return out, nil
 }
 
@@ -1251,7 +1221,7 @@ func (c *Client) ListKnowledgeSnapshots(ctx context.Context, query knowledge.Sna
 		}
 		_ = json.Unmarshal(pageIDs, &item.PageIDs)
 		_ = json.Unmarshal(chunkIDs, &item.ChunkIDs)
-		_ = json.Unmarshal(metadata, &item.Metadata)
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
 		out = append(out, item)
 	}
 	return out, rows.Err()
@@ -1329,10 +1299,7 @@ func (c *Client) SaveKnowledgeLintFinding(ctx context.Context, finding knowledge
 	if err != nil {
 		return err
 	}
-	metadata, err := json.Marshal(finding.Metadata)
-	if err != nil {
-		return err
-	}
+	metadata := metadataJSON(finding.Metadata, finding.ArtifactMeta)
 	_, err = c.sessionQuery().Exec(ctx, `
 		INSERT INTO knowledge_lint_findings (id, scope_kind, scope_id, proposal_id, page_id, source_id, kind, severity, status, message, evidence_json, metadata_json, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
@@ -1372,18 +1339,15 @@ func (c *Client) ListKnowledgeLintFindings(ctx context.Context, query knowledge.
 			return nil, err
 		}
 		_ = json.Unmarshal(evidence, &item.Evidence)
-		_ = json.Unmarshal(metadata, &item.Metadata)
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
 		out = append(out, item)
 	}
 	return out, rows.Err()
 }
 
 func (c *Client) SaveMediaAsset(ctx context.Context, asset media.Asset) error {
-	metadata, err := json.Marshal(asset.Metadata)
-	if err != nil {
-		return err
-	}
-	_, err = c.sessionQuery().Exec(ctx, `
+	metadata := metadataJSON(asset.Metadata, asset.ArtifactMeta)
+	_, err := c.sessionQuery().Exec(ctx, `
 		INSERT INTO media_assets (id, session_id, event_id, part_index, type, url, mime_type, checksum, status, retention, metadata_json, created_at, enriched_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (id) DO UPDATE
@@ -1412,18 +1376,15 @@ func (c *Client) ListMediaAssets(ctx context.Context, sessionID string) ([]media
 		if err := rows.Scan(&item.ID, &item.SessionID, &item.EventID, &item.PartIndex, &item.Type, &item.URL, &item.MimeType, &item.Checksum, &item.Status, &item.Retention, &metadata, &item.CreatedAt, &item.EnrichedAt); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal(metadata, &item.Metadata)
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
 		out = append(out, item)
 	}
 	return out, rows.Err()
 }
 
 func (c *Client) SaveDerivedSignal(ctx context.Context, signal media.DerivedSignal) error {
-	metadata, err := json.Marshal(signal.Metadata)
-	if err != nil {
-		return err
-	}
-	_, err = c.sessionQuery().Exec(ctx, `
+	metadata := metadataJSON(signal.Metadata, signal.ArtifactMeta)
+	_, err := c.sessionQuery().Exec(ctx, `
 		INSERT INTO derived_signals (id, asset_id, session_id, event_id, kind, value, confidence, metadata_json, extractor, created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		ON CONFLICT (id) DO UPDATE
@@ -1454,7 +1415,7 @@ func (c *Client) ListDerivedSignals(ctx context.Context, sessionID string) ([]me
 		if err := rows.Scan(&item.ID, &item.AssetID, &item.SessionID, &item.EventID, &item.Kind, &item.Value, &item.Confidence, &metadata, &item.Extractor, &item.CreatedAt); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal(metadata, &item.Metadata)
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
 		out = append(out, item)
 	}
 	return out, rows.Err()
@@ -1563,7 +1524,7 @@ func (c *Client) CreateOrCoalesceExecution(ctx context.Context, exec execution.T
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	row := tx.QueryRow(ctx, `
-		SELECT id, session_id, trigger_event_id, trigger_event_ids, COALESCE(policy_bundle_id,''), COALESCE(proposal_id,''), COALESCE(rollout_id,''), COALESCE(selection_reason,''), COALESCE(trace_id,''), status, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), created_at, updated_at
+		SELECT id, session_id, trigger_event_id, trigger_event_ids, COALESCE(policy_bundle_id,''), COALESCE(proposal_id,''), COALESCE(rollout_id,''), COALESCE(selection_reason,''), COALESCE(trace_id,''), status, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), created_at, updated_at, metadata_json
 		FROM turn_executions
 		WHERE session_id = $1
 		  AND status IN ('pending','waiting')
@@ -1585,8 +1546,10 @@ func (c *Client) CreateOrCoalesceExecution(ctx context.Context, exec execution.T
 	`, exec.SessionID)
 	var existing execution.TurnExecution
 	var raw []byte
-	if err := row.Scan(&existing.ID, &existing.SessionID, &existing.TriggerEventID, &raw, &existing.PolicyBundleID, &existing.ProposalID, &existing.RolloutID, &existing.SelectionReason, &existing.TraceID, &existing.Status, &existing.LeaseOwner, &existing.LeaseExpiresAt, &existing.BlockedReason, &existing.ResumeSignal, &existing.CreatedAt, &existing.UpdatedAt); err == nil {
+	var metadata []byte
+	if err := row.Scan(&existing.ID, &existing.SessionID, &existing.TriggerEventID, &raw, &existing.PolicyBundleID, &existing.ProposalID, &existing.RolloutID, &existing.SelectionReason, &existing.TraceID, &existing.Status, &existing.LeaseOwner, &existing.LeaseExpiresAt, &existing.BlockedReason, &existing.ResumeSignal, &existing.CreatedAt, &existing.UpdatedAt, &metadata); err == nil {
 		_ = json.Unmarshal(raw, &existing.TriggerEventIDs)
+		existing.ArtifactMeta, _, _ = decodeMetadata(metadata)
 		existing.TriggerEventIDs = appendUniqueString(triggerEventIDs(existing), triggerEventID)
 		existing.LeaseExpiresAt = coalesceUntil
 		if existing.Status != execution.StatusRunning {
@@ -1629,18 +1592,18 @@ func (c *Client) CreateOrCoalesceExecution(ctx context.Context, exec execution.T
 	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO turn_executions (
-			id, session_id, trigger_event_id, trigger_event_ids, policy_bundle_id, proposal_id, rollout_id, selection_reason, trace_id, status, lease_owner, lease_expires_at, blocked_reason, resume_signal, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-	`, exec.ID, exec.SessionID, exec.TriggerEventID, mustJSONValue(triggerEventIDs(exec)), nullString(exec.PolicyBundleID), nullString(exec.ProposalID), nullString(exec.RolloutID), nullString(exec.SelectionReason), nullString(exec.TraceID), exec.Status, nullString(exec.LeaseOwner), nullTime(exec.LeaseExpiresAt), nullString(exec.BlockedReason), nullString(exec.ResumeSignal), exec.CreatedAt, exec.UpdatedAt)
+			id, session_id, trigger_event_id, trigger_event_ids, policy_bundle_id, proposal_id, rollout_id, selection_reason, trace_id, status, lease_owner, lease_expires_at, blocked_reason, resume_signal, created_at, updated_at, metadata_json
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+	`, exec.ID, exec.SessionID, exec.TriggerEventID, mustJSONValue(triggerEventIDs(exec)), nullString(exec.PolicyBundleID), nullString(exec.ProposalID), nullString(exec.RolloutID), nullString(exec.SelectionReason), nullString(exec.TraceID), exec.Status, nullString(exec.LeaseOwner), nullTime(exec.LeaseExpiresAt), nullString(exec.BlockedReason), nullString(exec.ResumeSignal), exec.CreatedAt, exec.UpdatedAt, metadataJSON(nil, exec.ArtifactMeta))
 	if err != nil {
 		return execution.TurnExecution{}, nil, false, err
 	}
 	for _, step := range steps {
 		_, err = tx.Exec(ctx, `
 			INSERT INTO execution_steps (
-				id, execution_id, name, status, attempt, recomputable, lease_owner, lease_expires_at, idempotency_key, last_error, next_attempt_at, max_attempts, max_elapsed_seconds, backoff_seconds, retry_reason, blocked_reason, resume_signal, started_at, finished_at, created_at, updated_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
-		`, step.ID, step.ExecutionID, step.Name, step.Status, step.Attempt, step.Recomputable, nullString(step.LeaseOwner), nullTime(step.LeaseExpiresAt), step.IdempotencyKey, nullString(step.LastError), nullTime(step.NextAttemptAt), stepMaxAttemptsForStore(step), step.MaxElapsedSeconds, stepBackoffSecondsForStore(step), nullString(step.RetryReason), nullString(step.BlockedReason), nullString(step.ResumeSignal), nullTime(step.StartedAt), nullTime(step.FinishedAt), step.CreatedAt, step.UpdatedAt)
+				id, execution_id, name, status, attempt, recomputable, lease_owner, lease_expires_at, idempotency_key, last_error, next_attempt_at, max_attempts, max_elapsed_seconds, backoff_seconds, retry_reason, blocked_reason, resume_signal, started_at, finished_at, created_at, updated_at, metadata_json
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+		`, step.ID, step.ExecutionID, step.Name, step.Status, step.Attempt, step.Recomputable, nullString(step.LeaseOwner), nullTime(step.LeaseExpiresAt), step.IdempotencyKey, nullString(step.LastError), nullTime(step.NextAttemptAt), stepMaxAttemptsForStore(step), step.MaxElapsedSeconds, stepBackoffSecondsForStore(step), nullString(step.RetryReason), nullString(step.BlockedReason), nullString(step.ResumeSignal), nullTime(step.StartedAt), nullTime(step.FinishedAt), step.CreatedAt, step.UpdatedAt, metadataJSON(nil, step.ArtifactMeta))
 		if err != nil {
 			return execution.TurnExecution{}, nil, false, err
 		}
@@ -1650,7 +1613,7 @@ func (c *Client) CreateOrCoalesceExecution(ctx context.Context, exec execution.T
 
 func (c *Client) ListExecutions(ctx context.Context) ([]execution.TurnExecution, error) {
 	rows, err := c.Pool.Query(ctx, `
-		SELECT id, session_id, trigger_event_id, trigger_event_ids, COALESCE(policy_bundle_id,''), COALESCE(proposal_id,''), COALESCE(rollout_id,''), COALESCE(selection_reason,''), COALESCE(trace_id,''), status, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), created_at, updated_at
+		SELECT id, session_id, trigger_event_id, trigger_event_ids, COALESCE(policy_bundle_id,''), COALESCE(proposal_id,''), COALESCE(rollout_id,''), COALESCE(selection_reason,''), COALESCE(trace_id,''), status, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), created_at, updated_at, metadata_json
 		FROM turn_executions
 		ORDER BY created_at DESC
 	`)
@@ -1662,10 +1625,12 @@ func (c *Client) ListExecutions(ctx context.Context) ([]execution.TurnExecution,
 	for rows.Next() {
 		var exec execution.TurnExecution
 		var raw []byte
-		if err := rows.Scan(&exec.ID, &exec.SessionID, &exec.TriggerEventID, &raw, &exec.PolicyBundleID, &exec.ProposalID, &exec.RolloutID, &exec.SelectionReason, &exec.TraceID, &exec.Status, &exec.LeaseOwner, &exec.LeaseExpiresAt, &exec.BlockedReason, &exec.ResumeSignal, &exec.CreatedAt, &exec.UpdatedAt); err != nil {
+		var metadata []byte
+		if err := rows.Scan(&exec.ID, &exec.SessionID, &exec.TriggerEventID, &raw, &exec.PolicyBundleID, &exec.ProposalID, &exec.RolloutID, &exec.SelectionReason, &exec.TraceID, &exec.Status, &exec.LeaseOwner, &exec.LeaseExpiresAt, &exec.BlockedReason, &exec.ResumeSignal, &exec.CreatedAt, &exec.UpdatedAt, &metadata); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(raw, &exec.TriggerEventIDs)
+		exec.ArtifactMeta, _, _ = decodeMetadata(metadata)
 		out = append(out, exec)
 	}
 	return out, rows.Err()
@@ -1673,22 +1638,24 @@ func (c *Client) ListExecutions(ctx context.Context) ([]execution.TurnExecution,
 
 func (c *Client) GetExecution(ctx context.Context, executionID string) (execution.TurnExecution, []execution.ExecutionStep, error) {
 	row := c.Pool.QueryRow(ctx, `
-		SELECT id, session_id, trigger_event_id, trigger_event_ids, COALESCE(policy_bundle_id,''), COALESCE(proposal_id,''), COALESCE(rollout_id,''), COALESCE(selection_reason,''), COALESCE(trace_id,''), status, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), created_at, updated_at
+		SELECT id, session_id, trigger_event_id, trigger_event_ids, COALESCE(policy_bundle_id,''), COALESCE(proposal_id,''), COALESCE(rollout_id,''), COALESCE(selection_reason,''), COALESCE(trace_id,''), status, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), created_at, updated_at, metadata_json
 		FROM turn_executions
 		WHERE id = $1
 	`, executionID)
 	var exec execution.TurnExecution
 	var raw []byte
-	if err := row.Scan(&exec.ID, &exec.SessionID, &exec.TriggerEventID, &raw, &exec.PolicyBundleID, &exec.ProposalID, &exec.RolloutID, &exec.SelectionReason, &exec.TraceID, &exec.Status, &exec.LeaseOwner, &exec.LeaseExpiresAt, &exec.BlockedReason, &exec.ResumeSignal, &exec.CreatedAt, &exec.UpdatedAt); err != nil {
+	var metadata []byte
+	if err := row.Scan(&exec.ID, &exec.SessionID, &exec.TriggerEventID, &raw, &exec.PolicyBundleID, &exec.ProposalID, &exec.RolloutID, &exec.SelectionReason, &exec.TraceID, &exec.Status, &exec.LeaseOwner, &exec.LeaseExpiresAt, &exec.BlockedReason, &exec.ResumeSignal, &exec.CreatedAt, &exec.UpdatedAt, &metadata); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return execution.TurnExecution{}, nil, errors.New("execution not found")
 		}
 		return execution.TurnExecution{}, nil, err
 	}
 	_ = json.Unmarshal(raw, &exec.TriggerEventIDs)
+	exec.ArtifactMeta, _, _ = decodeMetadata(metadata)
 
 	rows, err := c.Pool.Query(ctx, `
-		SELECT id, execution_id, name, status, attempt, recomputable, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), idempotency_key, COALESCE(last_error,''), COALESCE(next_attempt_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(max_attempts, 0), COALESCE(max_elapsed_seconds, 0), COALESCE(backoff_seconds, 0), COALESCE(retry_reason,''), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), COALESCE(started_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(finished_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at
+		SELECT id, execution_id, name, status, attempt, recomputable, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), idempotency_key, COALESCE(last_error,''), COALESCE(next_attempt_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(max_attempts, 0), COALESCE(max_elapsed_seconds, 0), COALESCE(backoff_seconds, 0), COALESCE(retry_reason,''), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), COALESCE(started_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(finished_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at, metadata_json
 		FROM execution_steps
 		WHERE execution_id = $1
 		ORDER BY created_at ASC
@@ -1700,9 +1667,11 @@ func (c *Client) GetExecution(ctx context.Context, executionID string) (executio
 	var steps []execution.ExecutionStep
 	for rows.Next() {
 		var step execution.ExecutionStep
-		if err := rows.Scan(&step.ID, &step.ExecutionID, &step.Name, &step.Status, &step.Attempt, &step.Recomputable, &step.LeaseOwner, &step.LeaseExpiresAt, &step.IdempotencyKey, &step.LastError, &step.NextAttemptAt, &step.MaxAttempts, &step.MaxElapsedSeconds, &step.BackoffSeconds, &step.RetryReason, &step.BlockedReason, &step.ResumeSignal, &step.StartedAt, &step.FinishedAt, &step.CreatedAt, &step.UpdatedAt); err != nil {
+		var metadata []byte
+		if err := rows.Scan(&step.ID, &step.ExecutionID, &step.Name, &step.Status, &step.Attempt, &step.Recomputable, &step.LeaseOwner, &step.LeaseExpiresAt, &step.IdempotencyKey, &step.LastError, &step.NextAttemptAt, &step.MaxAttempts, &step.MaxElapsedSeconds, &step.BackoffSeconds, &step.RetryReason, &step.BlockedReason, &step.ResumeSignal, &step.StartedAt, &step.FinishedAt, &step.CreatedAt, &step.UpdatedAt, &metadata); err != nil {
 			return execution.TurnExecution{}, nil, err
 		}
+		step.ArtifactMeta, _, _ = decodeMetadata(metadata)
 		steps = append(steps, step)
 	}
 	return exec, steps, rows.Err()
@@ -1724,9 +1693,10 @@ func (c *Client) UpdateExecution(ctx context.Context, exec execution.TurnExecuti
 		    lease_expires_at = $12,
 		    blocked_reason = $13,
 		    resume_signal = $14,
-		    updated_at = $15
+		    updated_at = $15,
+		    metadata_json = $16
 		WHERE id = $1
-	`, exec.ID, exec.SessionID, exec.TriggerEventID, mustJSONValue(triggerEventIDs(exec)), nullString(exec.PolicyBundleID), nullString(exec.ProposalID), nullString(exec.RolloutID), nullString(exec.SelectionReason), nullString(exec.TraceID), exec.Status, nullString(exec.LeaseOwner), nullTime(exec.LeaseExpiresAt), nullString(exec.BlockedReason), nullString(exec.ResumeSignal), exec.UpdatedAt)
+	`, exec.ID, exec.SessionID, exec.TriggerEventID, mustJSONValue(triggerEventIDs(exec)), nullString(exec.PolicyBundleID), nullString(exec.ProposalID), nullString(exec.RolloutID), nullString(exec.SelectionReason), nullString(exec.TraceID), exec.Status, nullString(exec.LeaseOwner), nullTime(exec.LeaseExpiresAt), nullString(exec.BlockedReason), nullString(exec.ResumeSignal), exec.UpdatedAt, metadataJSON(nil, exec.ArtifactMeta))
 	return err
 }
 
@@ -1749,15 +1719,16 @@ func (c *Client) UpdateExecutionStep(ctx context.Context, step execution.Executi
 		    resume_signal = $15,
 		    started_at = $16,
 		    finished_at = $17,
-		    updated_at = $18
+		    updated_at = $18,
+		    metadata_json = $19
 		WHERE id = $1
-	`, step.ID, step.Status, step.Attempt, step.Recomputable, nullString(step.LeaseOwner), nullTime(step.LeaseExpiresAt), step.IdempotencyKey, nullString(step.LastError), nullTime(step.NextAttemptAt), stepMaxAttemptsForStore(step), step.MaxElapsedSeconds, stepBackoffSecondsForStore(step), nullString(step.RetryReason), nullString(step.BlockedReason), nullString(step.ResumeSignal), nullTime(step.StartedAt), nullTime(step.FinishedAt), step.UpdatedAt)
+	`, step.ID, step.Status, step.Attempt, step.Recomputable, nullString(step.LeaseOwner), nullTime(step.LeaseExpiresAt), step.IdempotencyKey, nullString(step.LastError), nullTime(step.NextAttemptAt), stepMaxAttemptsForStore(step), step.MaxElapsedSeconds, stepBackoffSecondsForStore(step), nullString(step.RetryReason), nullString(step.BlockedReason), nullString(step.ResumeSignal), nullTime(step.StartedAt), nullTime(step.FinishedAt), step.UpdatedAt, metadataJSON(nil, step.ArtifactMeta))
 	return err
 }
 
 func (c *Client) ListRunnableExecutions(ctx context.Context, now time.Time) ([]execution.TurnExecution, error) {
 	rows, err := c.Pool.Query(ctx, `
-		SELECT id, session_id, trigger_event_id, trigger_event_ids, COALESCE(policy_bundle_id,''), COALESCE(proposal_id,''), COALESCE(rollout_id,''), COALESCE(selection_reason,''), COALESCE(trace_id,''), status, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), created_at, updated_at
+		SELECT id, session_id, trigger_event_id, trigger_event_ids, COALESCE(policy_bundle_id,''), COALESCE(proposal_id,''), COALESCE(rollout_id,''), COALESCE(selection_reason,''), COALESCE(trace_id,''), status, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), created_at, updated_at, metadata_json
 		FROM turn_executions
 		WHERE (
 			(status IN ('pending', 'running') AND (lease_expires_at IS NULL OR lease_expires_at < $1 OR lease_owner = ''))
@@ -1773,10 +1744,12 @@ func (c *Client) ListRunnableExecutions(ctx context.Context, now time.Time) ([]e
 	for rows.Next() {
 		var exec execution.TurnExecution
 		var raw []byte
-		if err := rows.Scan(&exec.ID, &exec.SessionID, &exec.TriggerEventID, &raw, &exec.PolicyBundleID, &exec.ProposalID, &exec.RolloutID, &exec.SelectionReason, &exec.TraceID, &exec.Status, &exec.LeaseOwner, &exec.LeaseExpiresAt, &exec.BlockedReason, &exec.ResumeSignal, &exec.CreatedAt, &exec.UpdatedAt); err != nil {
+		var metadata []byte
+		if err := rows.Scan(&exec.ID, &exec.SessionID, &exec.TriggerEventID, &raw, &exec.PolicyBundleID, &exec.ProposalID, &exec.RolloutID, &exec.SelectionReason, &exec.TraceID, &exec.Status, &exec.LeaseOwner, &exec.LeaseExpiresAt, &exec.BlockedReason, &exec.ResumeSignal, &exec.CreatedAt, &exec.UpdatedAt, &metadata); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(raw, &exec.TriggerEventIDs)
+		exec.ArtifactMeta, _, _ = decodeMetadata(metadata)
 		out = append(out, exec)
 	}
 	return out, rows.Err()
@@ -2010,8 +1983,8 @@ func (c *Client) SaveResponse(ctx context.Context, record responsedomain.Respons
 		INSERT INTO responses (
 			id, session_id, execution_id, trace_id, trigger_event_ids, trigger_source, trigger_reason, dedupe_key, status, reason, iteration_count, max_iterations,
 			stability_reached, generation_mode, preamble_event_id, message_event_ids, tool_insights, glossary_terms,
-			started_at, completed_at, canceled_at, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+			started_at, completed_at, canceled_at, created_at, updated_at, metadata_json
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
 		ON CONFLICT (id) DO UPDATE
 		SET session_id = EXCLUDED.session_id,
 		    execution_id = EXCLUDED.execution_id,
@@ -2033,8 +2006,9 @@ func (c *Client) SaveResponse(ctx context.Context, record responsedomain.Respons
 		    started_at = EXCLUDED.started_at,
 		    completed_at = EXCLUDED.completed_at,
 		    canceled_at = EXCLUDED.canceled_at,
-		    updated_at = EXCLUDED.updated_at
-	`, record.ID, record.SessionID, record.ExecutionID, nullString(record.TraceID), mustJSONValue(record.TriggerEventIDs), nullString(record.TriggerSource), nullString(record.TriggerReason), nullString(record.DedupeKey), record.Status, nullString(record.Reason), record.IterationCount, record.MaxIterations, record.StabilityReached, nullString(record.GenerationMode), nullString(record.PreambleEventID), mustJSONValue(record.MessageEventIDs), mustJSONValue(record.ToolInsights), mustJSONValue(record.GlossaryTerms), nullTime(record.StartedAt), nullTime(record.CompletedAt), nullTime(record.CanceledAt), record.CreatedAt, record.UpdatedAt)
+		    updated_at = EXCLUDED.updated_at,
+		    metadata_json = EXCLUDED.metadata_json
+	`, record.ID, record.SessionID, record.ExecutionID, nullString(record.TraceID), mustJSONValue(record.TriggerEventIDs), nullString(record.TriggerSource), nullString(record.TriggerReason), nullString(record.DedupeKey), record.Status, nullString(record.Reason), record.IterationCount, record.MaxIterations, record.StabilityReached, nullString(record.GenerationMode), nullString(record.PreambleEventID), mustJSONValue(record.MessageEventIDs), mustJSONValue(record.ToolInsights), mustJSONValue(record.GlossaryTerms), nullTime(record.StartedAt), nullTime(record.CompletedAt), nullTime(record.CanceledAt), record.CreatedAt, record.UpdatedAt, metadataJSON(nil, record.ArtifactMeta))
 	return err
 }
 
@@ -2044,12 +2018,12 @@ func (c *Client) GetResponse(ctx context.Context, responseID string) (responsedo
 		       COALESCE(trigger_source,''), COALESCE(trigger_reason,''), COALESCE(dedupe_key,''), max_iterations, stability_reached, COALESCE(generation_mode,''), COALESCE(preamble_event_id,''), message_event_ids,
 		       tool_insights, glossary_terms, COALESCE(started_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
 		       COALESCE(completed_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
-		       COALESCE(canceled_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at
+		       COALESCE(canceled_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at, metadata_json
 		FROM responses WHERE id = $1
 	`, responseID)
 	var record responsedomain.Response
-	var triggerIDs, messageIDs, toolInsights, glossary []byte
-	if err := row.Scan(&record.ID, &record.SessionID, &record.ExecutionID, &record.TraceID, &triggerIDs, &record.Status, &record.Reason, &record.IterationCount, &record.TriggerSource, &record.TriggerReason, &record.DedupeKey, &record.MaxIterations, &record.StabilityReached, &record.GenerationMode, &record.PreambleEventID, &messageIDs, &toolInsights, &glossary, &record.StartedAt, &record.CompletedAt, &record.CanceledAt, &record.CreatedAt, &record.UpdatedAt); err != nil {
+	var triggerIDs, messageIDs, toolInsights, glossary, metadata []byte
+	if err := row.Scan(&record.ID, &record.SessionID, &record.ExecutionID, &record.TraceID, &triggerIDs, &record.Status, &record.Reason, &record.IterationCount, &record.TriggerSource, &record.TriggerReason, &record.DedupeKey, &record.MaxIterations, &record.StabilityReached, &record.GenerationMode, &record.PreambleEventID, &messageIDs, &toolInsights, &glossary, &record.StartedAt, &record.CompletedAt, &record.CanceledAt, &record.CreatedAt, &record.UpdatedAt, &metadata); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return responsedomain.Response{}, errors.New("response not found")
 		}
@@ -2059,6 +2033,7 @@ func (c *Client) GetResponse(ctx context.Context, responseID string) (responsedo
 	_ = json.Unmarshal(messageIDs, &record.MessageEventIDs)
 	_ = json.Unmarshal(toolInsights, &record.ToolInsights)
 	_ = json.Unmarshal(glossary, &record.GlossaryTerms)
+	record.ArtifactMeta, _, _ = decodeMetadata(metadata)
 	return record, nil
 }
 
@@ -2068,7 +2043,7 @@ func (c *Client) ListResponses(ctx context.Context, query responsedomain.Query) 
 		       COALESCE(trigger_source,''), COALESCE(trigger_reason,''), COALESCE(dedupe_key,''), max_iterations, stability_reached, COALESCE(generation_mode,''), COALESCE(preamble_event_id,''), message_event_ids,
 		       tool_insights, glossary_terms, COALESCE(started_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
 		       COALESCE(completed_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'),
-		       COALESCE(canceled_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at
+		       COALESCE(canceled_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at, metadata_json
 		FROM responses WHERE 1=1`
 	var args []any
 	idx := 1
@@ -2100,14 +2075,15 @@ func (c *Client) ListResponses(ctx context.Context, query responsedomain.Query) 
 	var out []responsedomain.Response
 	for rows.Next() {
 		var record responsedomain.Response
-		var triggerIDs, messageIDs, toolInsights, glossary []byte
-		if err := rows.Scan(&record.ID, &record.SessionID, &record.ExecutionID, &record.TraceID, &triggerIDs, &record.Status, &record.Reason, &record.IterationCount, &record.TriggerSource, &record.TriggerReason, &record.DedupeKey, &record.MaxIterations, &record.StabilityReached, &record.GenerationMode, &record.PreambleEventID, &messageIDs, &toolInsights, &glossary, &record.StartedAt, &record.CompletedAt, &record.CanceledAt, &record.CreatedAt, &record.UpdatedAt); err != nil {
+		var triggerIDs, messageIDs, toolInsights, glossary, metadata []byte
+		if err := rows.Scan(&record.ID, &record.SessionID, &record.ExecutionID, &record.TraceID, &triggerIDs, &record.Status, &record.Reason, &record.IterationCount, &record.TriggerSource, &record.TriggerReason, &record.DedupeKey, &record.MaxIterations, &record.StabilityReached, &record.GenerationMode, &record.PreambleEventID, &messageIDs, &toolInsights, &glossary, &record.StartedAt, &record.CompletedAt, &record.CanceledAt, &record.CreatedAt, &record.UpdatedAt, &metadata); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(triggerIDs, &record.TriggerEventIDs)
 		_ = json.Unmarshal(messageIDs, &record.MessageEventIDs)
 		_ = json.Unmarshal(toolInsights, &record.ToolInsights)
 		_ = json.Unmarshal(glossary, &record.GlossaryTerms)
+		record.ArtifactMeta, _, _ = decodeMetadata(metadata)
 		out = append(out, record)
 	}
 	return out, rows.Err()
@@ -2119,8 +2095,8 @@ func (c *Client) SaveResponseTraceSpan(ctx context.Context, span responsedomain.
 		return err
 	}
 	_, err = c.Pool.Exec(ctx, `
-		INSERT INTO response_trace_spans (id, response_id, session_id, execution_id, trace_id, parent_id, kind, name, iteration, status, fields, started_at, finished_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		INSERT INTO response_trace_spans (id, response_id, session_id, execution_id, trace_id, parent_id, kind, name, iteration, status, fields, started_at, finished_at, metadata_json)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		ON CONFLICT (id) DO UPDATE
 		SET response_id = EXCLUDED.response_id,
 		    session_id = EXCLUDED.session_id,
@@ -2133,15 +2109,16 @@ func (c *Client) SaveResponseTraceSpan(ctx context.Context, span responsedomain.
 		    status = EXCLUDED.status,
 		    fields = EXCLUDED.fields,
 		    started_at = EXCLUDED.started_at,
-		    finished_at = EXCLUDED.finished_at
-	`, span.ID, nullString(span.ResponseID), nullString(span.SessionID), nullString(span.ExecutionID), nullString(span.TraceID), nullString(span.ParentID), span.Kind, nullString(span.Name), span.Iteration, nullString(span.Status), fields, span.StartedAt, nullTime(span.FinishedAt))
+		    finished_at = EXCLUDED.finished_at,
+		    metadata_json = EXCLUDED.metadata_json
+	`, span.ID, nullString(span.ResponseID), nullString(span.SessionID), nullString(span.ExecutionID), nullString(span.TraceID), nullString(span.ParentID), span.Kind, nullString(span.Name), span.Iteration, nullString(span.Status), fields, span.StartedAt, nullTime(span.FinishedAt), metadataJSON(nil, span.ArtifactMeta))
 	return err
 }
 
 func (c *Client) ListResponseTraceSpans(ctx context.Context, query responsedomain.TraceSpanQuery) ([]responsedomain.TraceSpan, error) {
 	sql := `
 		SELECT id, COALESCE(response_id,''), COALESCE(session_id,''), COALESCE(execution_id,''), COALESCE(trace_id,''), COALESCE(parent_id,''),
-		       kind, COALESCE(name,''), iteration, COALESCE(status,''), fields, started_at, COALESCE(finished_at, TIMESTAMPTZ '0001-01-01 00:00:00+00')
+		       kind, COALESCE(name,''), iteration, COALESCE(status,''), fields, started_at, COALESCE(finished_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), metadata_json
 		FROM response_trace_spans WHERE 1=1`
 	var args []any
 	idx := 1
@@ -2173,8 +2150,8 @@ func (c *Client) ListResponseTraceSpans(ctx context.Context, query responsedomai
 	var out []responsedomain.TraceSpan
 	for rows.Next() {
 		var span responsedomain.TraceSpan
-		var fields []byte
-		if err := rows.Scan(&span.ID, &span.ResponseID, &span.SessionID, &span.ExecutionID, &span.TraceID, &span.ParentID, &span.Kind, &span.Name, &span.Iteration, &span.Status, &fields, &span.StartedAt, &span.FinishedAt); err != nil {
+		var fields, metadata []byte
+		if err := rows.Scan(&span.ID, &span.ResponseID, &span.SessionID, &span.ExecutionID, &span.TraceID, &span.ParentID, &span.Kind, &span.Name, &span.Iteration, &span.Status, &fields, &span.StartedAt, &span.FinishedAt, &metadata); err != nil {
 			return nil, err
 		}
 		if len(fields) > 0 {
@@ -2182,6 +2159,7 @@ func (c *Client) ListResponseTraceSpans(ctx context.Context, query responsedomai
 				return nil, err
 			}
 		}
+		span.ArtifactMeta, _, _ = decodeMetadata(metadata)
 		out = append(out, span)
 	}
 	return out, rows.Err()
@@ -2189,36 +2167,39 @@ func (c *Client) ListResponseTraceSpans(ctx context.Context, query responsedomai
 
 func (c *Client) SaveApprovalSession(ctx context.Context, session approval.Session) error {
 	_, err := c.Pool.Exec(ctx, `
-		INSERT INTO approval_sessions (id, session_id, execution_id, tool_id, status, request_text, decision, expires_at, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		INSERT INTO approval_sessions (id, session_id, execution_id, tool_id, status, request_text, decision, expires_at, created_at, updated_at, metadata_json)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		ON CONFLICT (id) DO UPDATE
 		SET status = EXCLUDED.status,
 		    request_text = EXCLUDED.request_text,
 		    decision = EXCLUDED.decision,
 		    expires_at = EXCLUDED.expires_at,
-		    updated_at = EXCLUDED.updated_at
-	`, session.ID, session.SessionID, session.ExecutionID, session.ToolID, session.Status, session.RequestText, nullString(session.Decision), nullTime(session.ExpiresAt), session.CreatedAt, session.UpdatedAt)
+		    updated_at = EXCLUDED.updated_at,
+		    metadata_json = EXCLUDED.metadata_json
+	`, session.ID, session.SessionID, session.ExecutionID, session.ToolID, session.Status, session.RequestText, nullString(session.Decision), nullTime(session.ExpiresAt), session.CreatedAt, session.UpdatedAt, metadataJSON(nil, session.ArtifactMeta))
 	return err
 }
 
 func (c *Client) GetApprovalSession(ctx context.Context, approvalID string) (approval.Session, error) {
 	row := c.Pool.QueryRow(ctx, `
-		SELECT id, session_id, execution_id, tool_id, status, request_text, COALESCE(decision,''), COALESCE(expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at
+		SELECT id, session_id, execution_id, tool_id, status, request_text, COALESCE(decision,''), COALESCE(expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at, metadata_json
 		FROM approval_sessions WHERE id = $1
 	`, approvalID)
 	var item approval.Session
-	if err := row.Scan(&item.ID, &item.SessionID, &item.ExecutionID, &item.ToolID, &item.Status, &item.RequestText, &item.Decision, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	var metadata []byte
+	if err := row.Scan(&item.ID, &item.SessionID, &item.ExecutionID, &item.ToolID, &item.Status, &item.RequestText, &item.Decision, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt, &metadata); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return approval.Session{}, errors.New("approval session not found")
 		}
 		return approval.Session{}, err
 	}
+	item.ArtifactMeta, _, _ = decodeMetadata(metadata)
 	return item, nil
 }
 
 func (c *Client) ListApprovalSessions(ctx context.Context, sessionID string) ([]approval.Session, error) {
 	rows, err := c.Pool.Query(ctx, `
-		SELECT id, session_id, execution_id, tool_id, status, request_text, COALESCE(decision,''), COALESCE(expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at
+		SELECT id, session_id, execution_id, tool_id, status, request_text, COALESCE(decision,''), COALESCE(expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at, metadata_json
 		FROM approval_sessions WHERE session_id = $1 ORDER BY created_at DESC
 	`, sessionID)
 	if err != nil {
@@ -2228,9 +2209,11 @@ func (c *Client) ListApprovalSessions(ctx context.Context, sessionID string) ([]
 	var out []approval.Session
 	for rows.Next() {
 		var item approval.Session
-		if err := rows.Scan(&item.ID, &item.SessionID, &item.ExecutionID, &item.ToolID, &item.Status, &item.RequestText, &item.Decision, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		var metadata []byte
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.ExecutionID, &item.ToolID, &item.Status, &item.RequestText, &item.Decision, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt, &metadata); err != nil {
 			return nil, err
 		}
+		item.ArtifactMeta, _, _ = decodeMetadata(metadata)
 		out = append(out, item)
 	}
 	return out, rows.Err()
@@ -2246,19 +2229,20 @@ func (c *Client) SaveToolRun(ctx context.Context, run toolrun.Run) error {
 		return err
 	}
 	_, err = c.Pool.Exec(ctx, `
-		INSERT INTO tool_runs (id, execution_id, tool_id, status, idempotency_key, input_json, output_json, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		INSERT INTO tool_runs (id, execution_id, tool_id, status, idempotency_key, input_json, output_json, created_at, metadata_json)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 		ON CONFLICT (id) DO UPDATE
 		SET status = EXCLUDED.status,
 		    input_json = EXCLUDED.input_json,
-		    output_json = EXCLUDED.output_json
-	`, run.ID, run.ExecutionID, run.ToolID, run.Status, run.IdempotencyKey, input, output, run.CreatedAt)
+		    output_json = EXCLUDED.output_json,
+		    metadata_json = EXCLUDED.metadata_json
+	`, run.ID, run.ExecutionID, run.ToolID, run.Status, run.IdempotencyKey, input, output, run.CreatedAt, metadataJSON(nil, run.ArtifactMeta))
 	return err
 }
 
 func (c *Client) ListToolRuns(ctx context.Context, executionID string) ([]toolrun.Run, error) {
 	rows, err := c.Pool.Query(ctx, `
-		SELECT id, execution_id, tool_id, status, idempotency_key, input_json::text, output_json::text, created_at
+		SELECT id, execution_id, tool_id, status, idempotency_key, input_json::text, output_json::text, created_at, metadata_json
 		FROM tool_runs WHERE execution_id = $1 ORDER BY created_at ASC
 	`, executionID)
 	if err != nil {
@@ -2268,9 +2252,11 @@ func (c *Client) ListToolRuns(ctx context.Context, executionID string) ([]toolru
 	var out []toolrun.Run
 	for rows.Next() {
 		var run toolrun.Run
-		if err := rows.Scan(&run.ID, &run.ExecutionID, &run.ToolID, &run.Status, &run.IdempotencyKey, &run.InputJSON, &run.OutputJSON, &run.CreatedAt); err != nil {
+		var metadata []byte
+		if err := rows.Scan(&run.ID, &run.ExecutionID, &run.ToolID, &run.Status, &run.IdempotencyKey, &run.InputJSON, &run.OutputJSON, &run.CreatedAt, &metadata); err != nil {
 			return nil, err
 		}
+		run.ArtifactMeta, _, _ = decodeMetadata(metadata)
 		out = append(out, run)
 	}
 	return out, rows.Err()
@@ -2278,17 +2264,18 @@ func (c *Client) ListToolRuns(ctx context.Context, executionID string) ([]toolru
 
 func (c *Client) SaveDeliveryAttempt(ctx context.Context, attempt delivery.Attempt) error {
 	_, err := c.Pool.Exec(ctx, `
-		INSERT INTO delivery_attempts (id, session_id, execution_id, event_id, channel, status, idempotency_key, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		INSERT INTO delivery_attempts (id, session_id, execution_id, event_id, channel, status, idempotency_key, created_at, metadata_json)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 		ON CONFLICT (id) DO UPDATE
-		SET status = EXCLUDED.status
-	`, attempt.ID, attempt.SessionID, attempt.ExecutionID, attempt.EventID, attempt.Channel, attempt.Status, attempt.IdempotencyKey, attempt.CreatedAt)
+		SET status = EXCLUDED.status,
+		    metadata_json = EXCLUDED.metadata_json
+	`, attempt.ID, attempt.SessionID, attempt.ExecutionID, attempt.EventID, attempt.Channel, attempt.Status, attempt.IdempotencyKey, attempt.CreatedAt, metadataJSON(nil, attempt.ArtifactMeta))
 	return err
 }
 
 func (c *Client) ListDeliveryAttempts(ctx context.Context, executionID string) ([]delivery.Attempt, error) {
 	rows, err := c.Pool.Query(ctx, `
-		SELECT id, session_id, execution_id, event_id, channel, status, idempotency_key, created_at
+		SELECT id, session_id, execution_id, event_id, channel, status, idempotency_key, created_at, metadata_json
 		FROM delivery_attempts WHERE execution_id = $1 ORDER BY created_at ASC
 	`, executionID)
 	if err != nil {
@@ -2298,9 +2285,11 @@ func (c *Client) ListDeliveryAttempts(ctx context.Context, executionID string) (
 	var out []delivery.Attempt
 	for rows.Next() {
 		var attempt delivery.Attempt
-		if err := rows.Scan(&attempt.ID, &attempt.SessionID, &attempt.ExecutionID, &attempt.EventID, &attempt.Channel, &attempt.Status, &attempt.IdempotencyKey, &attempt.CreatedAt); err != nil {
+		var metadata []byte
+		if err := rows.Scan(&attempt.ID, &attempt.SessionID, &attempt.ExecutionID, &attempt.EventID, &attempt.Channel, &attempt.Status, &attempt.IdempotencyKey, &attempt.CreatedAt, &metadata); err != nil {
 			return nil, err
 		}
+		attempt.ArtifactMeta, _, _ = decodeMetadata(metadata)
 		out = append(out, attempt)
 	}
 	return out, rows.Err()
@@ -2308,10 +2297,10 @@ func (c *Client) ListDeliveryAttempts(ctx context.Context, executionID string) (
 
 func (c *Client) CreateEvalRun(ctx context.Context, run replay.Run) error {
 	_, err := c.Pool.Exec(ctx, `
-		INSERT INTO eval_runs (id, type, source_execution_id, proposal_id, active_bundle_id, shadow_bundle_id, status, result_json, diff_json, last_error, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		INSERT INTO eval_runs (id, type, source_execution_id, proposal_id, active_bundle_id, shadow_bundle_id, status, result_json, diff_json, last_error, created_at, updated_at, metadata_json)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (id) DO NOTHING
-	`, run.ID, run.Type, run.SourceExecutionID, nullString(run.ProposalID), nullString(run.ActiveBundleID), nullString(run.ShadowBundleID), run.Status, mustJSON(run.ResultJSON), mustJSON(run.DiffJSON), nullString(run.LastError), run.CreatedAt, run.UpdatedAt)
+	`, run.ID, run.Type, run.SourceExecutionID, nullString(run.ProposalID), nullString(run.ActiveBundleID), nullString(run.ShadowBundleID), run.Status, mustJSON(run.ResultJSON), mustJSON(run.DiffJSON), nullString(run.LastError), run.CreatedAt, run.UpdatedAt, metadataJSON(nil, run.ArtifactMeta))
 	return err
 }
 
@@ -2325,30 +2314,33 @@ func (c *Client) UpdateEvalRun(ctx context.Context, run replay.Run) error {
 		    result_json = $6,
 		    diff_json = $7,
 		    last_error = $8,
-		    updated_at = $9
+		    updated_at = $9,
+		    metadata_json = $10
 		WHERE id = $1
-	`, run.ID, nullString(run.ProposalID), nullString(run.ActiveBundleID), nullString(run.ShadowBundleID), run.Status, mustJSON(run.ResultJSON), mustJSON(run.DiffJSON), nullString(run.LastError), run.UpdatedAt)
+	`, run.ID, nullString(run.ProposalID), nullString(run.ActiveBundleID), nullString(run.ShadowBundleID), run.Status, mustJSON(run.ResultJSON), mustJSON(run.DiffJSON), nullString(run.LastError), run.UpdatedAt, metadataJSON(nil, run.ArtifactMeta))
 	return err
 }
 
 func (c *Client) GetEvalRun(ctx context.Context, runID string) (replay.Run, error) {
 	row := c.Pool.QueryRow(ctx, `
-		SELECT id, type, source_execution_id, COALESCE(proposal_id,''), COALESCE(active_bundle_id,''), COALESCE(shadow_bundle_id,''), status, result_json::text, diff_json::text, COALESCE(last_error,''), created_at, updated_at
+		SELECT id, type, source_execution_id, COALESCE(proposal_id,''), COALESCE(active_bundle_id,''), COALESCE(shadow_bundle_id,''), status, result_json::text, diff_json::text, COALESCE(last_error,''), created_at, updated_at, metadata_json
 		FROM eval_runs WHERE id = $1
 	`, runID)
 	var run replay.Run
-	if err := row.Scan(&run.ID, &run.Type, &run.SourceExecutionID, &run.ProposalID, &run.ActiveBundleID, &run.ShadowBundleID, &run.Status, &run.ResultJSON, &run.DiffJSON, &run.LastError, &run.CreatedAt, &run.UpdatedAt); err != nil {
+	var metadata []byte
+	if err := row.Scan(&run.ID, &run.Type, &run.SourceExecutionID, &run.ProposalID, &run.ActiveBundleID, &run.ShadowBundleID, &run.Status, &run.ResultJSON, &run.DiffJSON, &run.LastError, &run.CreatedAt, &run.UpdatedAt, &metadata); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return replay.Run{}, errors.New("eval run not found")
 		}
 		return replay.Run{}, err
 	}
+	run.ArtifactMeta, _, _ = decodeMetadata(metadata)
 	return run, nil
 }
 
 func (c *Client) ListEvalRuns(ctx context.Context) ([]replay.Run, error) {
 	rows, err := c.Pool.Query(ctx, `
-		SELECT id, type, source_execution_id, COALESCE(proposal_id,''), COALESCE(active_bundle_id,''), COALESCE(shadow_bundle_id,''), status, result_json::text, diff_json::text, COALESCE(last_error,''), created_at, updated_at
+		SELECT id, type, source_execution_id, COALESCE(proposal_id,''), COALESCE(active_bundle_id,''), COALESCE(shadow_bundle_id,''), status, result_json::text, diff_json::text, COALESCE(last_error,''), created_at, updated_at, metadata_json
 		FROM eval_runs ORDER BY created_at DESC
 	`)
 	if err != nil {
@@ -2358,9 +2350,11 @@ func (c *Client) ListEvalRuns(ctx context.Context) ([]replay.Run, error) {
 	var out []replay.Run
 	for rows.Next() {
 		var run replay.Run
-		if err := rows.Scan(&run.ID, &run.Type, &run.SourceExecutionID, &run.ProposalID, &run.ActiveBundleID, &run.ShadowBundleID, &run.Status, &run.ResultJSON, &run.DiffJSON, &run.LastError, &run.CreatedAt, &run.UpdatedAt); err != nil {
+		var metadata []byte
+		if err := rows.Scan(&run.ID, &run.Type, &run.SourceExecutionID, &run.ProposalID, &run.ActiveBundleID, &run.ShadowBundleID, &run.Status, &run.ResultJSON, &run.DiffJSON, &run.LastError, &run.CreatedAt, &run.UpdatedAt, &metadata); err != nil {
 			return nil, err
 		}
+		run.ArtifactMeta, _, _ = decodeMetadata(metadata)
 		out = append(out, run)
 	}
 	return out, rows.Err()
@@ -2369,7 +2363,7 @@ func (c *Client) ListEvalRuns(ctx context.Context) ([]replay.Run, error) {
 func (c *Client) ListRunnableEvalRuns(ctx context.Context, now time.Time) ([]replay.Run, error) {
 	_ = now
 	rows, err := c.Pool.Query(ctx, `
-		SELECT id, type, source_execution_id, COALESCE(proposal_id,''), COALESCE(active_bundle_id,''), COALESCE(shadow_bundle_id,''), status, result_json::text, diff_json::text, COALESCE(last_error,''), created_at, updated_at
+		SELECT id, type, source_execution_id, COALESCE(proposal_id,''), COALESCE(active_bundle_id,''), COALESCE(shadow_bundle_id,''), status, result_json::text, diff_json::text, COALESCE(last_error,''), created_at, updated_at, metadata_json
 		FROM eval_runs
 		WHERE status IN ('pending', 'running')
 		ORDER BY created_at ASC
@@ -2381,9 +2375,11 @@ func (c *Client) ListRunnableEvalRuns(ctx context.Context, now time.Time) ([]rep
 	var out []replay.Run
 	for rows.Next() {
 		var run replay.Run
-		if err := rows.Scan(&run.ID, &run.Type, &run.SourceExecutionID, &run.ProposalID, &run.ActiveBundleID, &run.ShadowBundleID, &run.Status, &run.ResultJSON, &run.DiffJSON, &run.LastError, &run.CreatedAt, &run.UpdatedAt); err != nil {
+		var metadata []byte
+		if err := rows.Scan(&run.ID, &run.Type, &run.SourceExecutionID, &run.ProposalID, &run.ActiveBundleID, &run.ShadowBundleID, &run.Status, &run.ResultJSON, &run.DiffJSON, &run.LastError, &run.CreatedAt, &run.UpdatedAt, &metadata); err != nil {
 			return nil, err
 		}
+		run.ArtifactMeta, _, _ = decodeMetadata(metadata)
 		out = append(out, run)
 	}
 	return out, rows.Err()
@@ -2399,8 +2395,8 @@ func (c *Client) SaveProposal(ctx context.Context, proposal rollout.Proposal) er
 		return err
 	}
 	_, err = c.Pool.Exec(ctx, `
-		INSERT INTO policy_proposals (id, source_bundle_id, candidate_bundle_id, state, rationale, evidence_refs, replay_score, safety_score, risk_flags, requires_manual_approval, eval_summary_json, origin, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		INSERT INTO policy_proposals (id, source_bundle_id, candidate_bundle_id, state, rationale, evidence_refs, replay_score, safety_score, risk_flags, requires_manual_approval, eval_summary_json, origin, created_at, updated_at, metadata_json)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 		ON CONFLICT (id) DO UPDATE
 		SET state = EXCLUDED.state,
 		    rationale = EXCLUDED.rationale,
@@ -2411,19 +2407,21 @@ func (c *Client) SaveProposal(ctx context.Context, proposal rollout.Proposal) er
 		    requires_manual_approval = EXCLUDED.requires_manual_approval,
 		    eval_summary_json = EXCLUDED.eval_summary_json,
 		    origin = EXCLUDED.origin,
-		    updated_at = EXCLUDED.updated_at
-	`, proposal.ID, proposal.SourceBundleID, proposal.CandidateBundleID, proposal.State, proposal.Rationale, evidence, proposal.ReplayScore, proposal.SafetyScore, risks, proposal.RequiresManualApproval, mustJSON(proposal.EvalSummaryJSON), nullString(proposal.Origin), proposal.CreatedAt, proposal.UpdatedAt)
+		    updated_at = EXCLUDED.updated_at,
+		    metadata_json = EXCLUDED.metadata_json
+	`, proposal.ID, proposal.SourceBundleID, proposal.CandidateBundleID, proposal.State, proposal.Rationale, evidence, proposal.ReplayScore, proposal.SafetyScore, risks, proposal.RequiresManualApproval, mustJSON(proposal.EvalSummaryJSON), nullString(proposal.Origin), proposal.CreatedAt, proposal.UpdatedAt, metadataJSON(nil, proposal.ArtifactMeta))
 	return err
 }
 
 func (c *Client) GetProposal(ctx context.Context, proposalID string) (rollout.Proposal, error) {
 	row := c.Pool.QueryRow(ctx, `
-		SELECT id, source_bundle_id, candidate_bundle_id, state, rationale, evidence_refs, replay_score, safety_score, risk_flags, requires_manual_approval, eval_summary_json::text, COALESCE(origin,''), created_at, updated_at
+		SELECT id, source_bundle_id, candidate_bundle_id, state, rationale, evidence_refs, replay_score, safety_score, risk_flags, requires_manual_approval, eval_summary_json::text, COALESCE(origin,''), created_at, updated_at, metadata_json
 		FROM policy_proposals WHERE id = $1
 	`, proposalID)
 	var item rollout.Proposal
 	var evidence, risks []byte
-	if err := row.Scan(&item.ID, &item.SourceBundleID, &item.CandidateBundleID, &item.State, &item.Rationale, &evidence, &item.ReplayScore, &item.SafetyScore, &risks, &item.RequiresManualApproval, &item.EvalSummaryJSON, &item.Origin, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	var metadata []byte
+	if err := row.Scan(&item.ID, &item.SourceBundleID, &item.CandidateBundleID, &item.State, &item.Rationale, &evidence, &item.ReplayScore, &item.SafetyScore, &risks, &item.RequiresManualApproval, &item.EvalSummaryJSON, &item.Origin, &item.CreatedAt, &item.UpdatedAt, &metadata); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return rollout.Proposal{}, errors.New("proposal not found")
 		}
@@ -2431,12 +2429,13 @@ func (c *Client) GetProposal(ctx context.Context, proposalID string) (rollout.Pr
 	}
 	_ = json.Unmarshal(evidence, &item.EvidenceRefs)
 	_ = json.Unmarshal(risks, &item.RiskFlags)
+	item.ArtifactMeta, _, _ = decodeMetadata(metadata)
 	return item, nil
 }
 
 func (c *Client) ListProposals(ctx context.Context) ([]rollout.Proposal, error) {
 	rows, err := c.Pool.Query(ctx, `
-		SELECT id, source_bundle_id, candidate_bundle_id, state, rationale, evidence_refs, replay_score, safety_score, risk_flags, requires_manual_approval, eval_summary_json::text, COALESCE(origin,''), created_at, updated_at
+		SELECT id, source_bundle_id, candidate_bundle_id, state, rationale, evidence_refs, replay_score, safety_score, risk_flags, requires_manual_approval, eval_summary_json::text, COALESCE(origin,''), created_at, updated_at, metadata_json
 		FROM policy_proposals ORDER BY created_at DESC
 	`)
 	if err != nil {
@@ -2447,11 +2446,13 @@ func (c *Client) ListProposals(ctx context.Context) ([]rollout.Proposal, error) 
 	for rows.Next() {
 		var item rollout.Proposal
 		var evidence, risks []byte
-		if err := rows.Scan(&item.ID, &item.SourceBundleID, &item.CandidateBundleID, &item.State, &item.Rationale, &evidence, &item.ReplayScore, &item.SafetyScore, &risks, &item.RequiresManualApproval, &item.EvalSummaryJSON, &item.Origin, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		var metadata []byte
+		if err := rows.Scan(&item.ID, &item.SourceBundleID, &item.CandidateBundleID, &item.State, &item.Rationale, &evidence, &item.ReplayScore, &item.SafetyScore, &risks, &item.RequiresManualApproval, &item.EvalSummaryJSON, &item.Origin, &item.CreatedAt, &item.UpdatedAt, &metadata); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(evidence, &item.EvidenceRefs)
 		_ = json.Unmarshal(risks, &item.RiskFlags)
+		item.ArtifactMeta, _, _ = decodeMetadata(metadata)
 		out = append(out, item)
 	}
 	return out, rows.Err()
@@ -2463,38 +2464,41 @@ func (c *Client) SaveRollout(ctx context.Context, record rollout.Record) error {
 		return err
 	}
 	_, err = c.Pool.Exec(ctx, `
-		INSERT INTO policy_rollouts (id, proposal_id, status, channel, percentage, include_session_ids, previous_bundle_id, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		INSERT INTO policy_rollouts (id, proposal_id, status, channel, percentage, include_session_ids, previous_bundle_id, created_at, updated_at, metadata_json)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		ON CONFLICT (id) DO UPDATE
 		SET status = EXCLUDED.status,
 		    percentage = EXCLUDED.percentage,
 		    include_session_ids = EXCLUDED.include_session_ids,
 		    previous_bundle_id = EXCLUDED.previous_bundle_id,
-		    updated_at = EXCLUDED.updated_at
-	`, record.ID, record.ProposalID, record.Status, record.Channel, record.Percentage, includeRaw, nullString(record.PreviousBundleID), record.CreatedAt, record.UpdatedAt)
+		    updated_at = EXCLUDED.updated_at,
+		    metadata_json = EXCLUDED.metadata_json
+	`, record.ID, record.ProposalID, record.Status, record.Channel, record.Percentage, includeRaw, nullString(record.PreviousBundleID), record.CreatedAt, record.UpdatedAt, metadataJSON(nil, record.ArtifactMeta))
 	return err
 }
 
 func (c *Client) GetRollout(ctx context.Context, rolloutID string) (rollout.Record, error) {
 	row := c.Pool.QueryRow(ctx, `
-		SELECT id, proposal_id, status, channel, percentage, include_session_ids, COALESCE(previous_bundle_id,''), created_at, updated_at
+		SELECT id, proposal_id, status, channel, percentage, include_session_ids, COALESCE(previous_bundle_id,''), created_at, updated_at, metadata_json
 		FROM policy_rollouts WHERE id = $1
 	`, rolloutID)
 	var item rollout.Record
 	var includeRaw []byte
-	if err := row.Scan(&item.ID, &item.ProposalID, &item.Status, &item.Channel, &item.Percentage, &includeRaw, &item.PreviousBundleID, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	var metadata []byte
+	if err := row.Scan(&item.ID, &item.ProposalID, &item.Status, &item.Channel, &item.Percentage, &includeRaw, &item.PreviousBundleID, &item.CreatedAt, &item.UpdatedAt, &metadata); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return rollout.Record{}, errors.New("rollout not found")
 		}
 		return rollout.Record{}, err
 	}
 	_ = json.Unmarshal(includeRaw, &item.IncludeSessionIDs)
+	item.ArtifactMeta, _, _ = decodeMetadata(metadata)
 	return item, nil
 }
 
 func (c *Client) ListRollouts(ctx context.Context) ([]rollout.Record, error) {
 	rows, err := c.Pool.Query(ctx, `
-		SELECT id, proposal_id, status, channel, percentage, include_session_ids, COALESCE(previous_bundle_id,''), created_at, updated_at
+		SELECT id, proposal_id, status, channel, percentage, include_session_ids, COALESCE(previous_bundle_id,''), created_at, updated_at, metadata_json
 		FROM policy_rollouts ORDER BY created_at DESC
 	`)
 	if err != nil {
@@ -2505,10 +2509,12 @@ func (c *Client) ListRollouts(ctx context.Context) ([]rollout.Record, error) {
 	for rows.Next() {
 		var item rollout.Record
 		var includeRaw []byte
-		if err := rows.Scan(&item.ID, &item.ProposalID, &item.Status, &item.Channel, &item.Percentage, &includeRaw, &item.PreviousBundleID, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		var metadata []byte
+		if err := rows.Scan(&item.ID, &item.ProposalID, &item.Status, &item.Channel, &item.Percentage, &includeRaw, &item.PreviousBundleID, &item.CreatedAt, &item.UpdatedAt, &metadata); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(includeRaw, &item.IncludeSessionIDs)
+		item.ArtifactMeta, _, _ = decodeMetadata(metadata)
 		out = append(out, item)
 	}
 	return out, rows.Err()
@@ -2607,4 +2613,20 @@ func mustJSONValue(v any) []byte {
 		return []byte(`null`)
 	}
 	return raw
+}
+
+func metadataJSON(metadata map[string]any, meta artifactmeta.Meta) []byte {
+	return mustJSONValue(artifactmeta.Merge(metadata, meta))
+}
+
+func decodeMetadata(raw []byte) (artifactmeta.Meta, map[string]any, error) {
+	if len(raw) == 0 {
+		return artifactmeta.Meta{}, map[string]any{}, nil
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return artifactmeta.Meta{}, nil, err
+	}
+	meta, metadata := artifactmeta.Extract(metadata)
+	return meta, metadata, nil
 }

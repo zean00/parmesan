@@ -15,6 +15,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/execution"
 	gatewaydomain "github.com/sahal/parmesan/internal/domain/gateway"
 	"github.com/sahal/parmesan/internal/domain/session"
+	"github.com/sahal/parmesan/internal/observability"
 	"github.com/sahal/parmesan/internal/sessionsvc"
 	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
@@ -37,6 +38,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue) *Server {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
+	mux.Handle("GET /metrics", observability.Current().MetricsHandler())
 	mux.HandleFunc("POST /v1/web/messages", s.inboundMessage)
 	mux.HandleFunc("GET /v1/web/conversations/{id}/events/stream", s.streamConversation)
 	mux.HandleFunc("GET /v1/web/conversations/{id}/approvals", s.listApprovals)
@@ -44,7 +46,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue) *Server {
 
 	s.httpServer = &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           observability.Current().HTTPMiddleware(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	return s

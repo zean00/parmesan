@@ -3,7 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 
 	httpapi "github.com/sahal/parmesan/internal/api/http"
@@ -12,6 +12,7 @@ import (
 	"github.com/sahal/parmesan/internal/gateway"
 	"github.com/sahal/parmesan/internal/lifecycle"
 	"github.com/sahal/parmesan/internal/model"
+	"github.com/sahal/parmesan/internal/observability"
 	replayrunner "github.com/sahal/parmesan/internal/replay"
 	"github.com/sahal/parmesan/internal/runtime/runner"
 	"github.com/sahal/parmesan/internal/secrets"
@@ -25,6 +26,7 @@ import (
 
 func RunAPI(ctx context.Context) error {
 	cfg := config.Load("api")
+	logger := slog.Default().With("service", cfg.ServiceName)
 	var repo store.Repository = memory.New()
 	var postgresClient *postgres.Client
 	var err error
@@ -32,17 +34,22 @@ func RunAPI(ctx context.Context) error {
 	broker := sse.NewBroker()
 	router := model.NewRouter(cfg.Provider)
 	syncer := toolsync.New()
+	shutdownObs, err := observability.Init(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = shutdownObs(context.Background()) }()
 
 	if cfg.DatabaseURL != "" {
 		postgresClient, err = postgres.Connect(ctx, cfg.DatabaseURL)
 		if err != nil {
-			log.Printf("postgres unavailable, continuing with memory store: %v", err)
+			logger.Warn("postgres unavailable, continuing with memory store", "error", err)
 		} else {
 			postgresClient.Crypter = secrets.New(cfg.SecretsMasterKey)
 			repo = postgresClient
 			writes = asyncwrite.New(repo, cfg.AsyncWriteQueueSize)
 			defer postgresClient.Close()
-			log.Printf("postgres connected")
+			logger.Info("postgres connected")
 		}
 	}
 	writes.Start(ctx, 1)
@@ -54,6 +61,11 @@ func RunAPI(ctx context.Context) error {
 
 func RunGateway(ctx context.Context) error {
 	cfg := config.Load("gateway")
+	if shutdownObs, err := observability.Init(ctx, cfg); err == nil {
+		defer func() { _ = shutdownObs(context.Background()) }()
+	} else {
+		return err
+	}
 	if cfg.DatabaseURL == "" {
 		return errDatabaseRequired("gateway")
 	}
@@ -65,7 +77,7 @@ func RunGateway(ctx context.Context) error {
 	repo := store.Repository(client)
 	writes := asyncwrite.New(repo, cfg.AsyncWriteQueueSize)
 	defer client.Close()
-	log.Printf("gateway postgres connected")
+	slog.Info("gateway postgres connected", "service", cfg.ServiceName)
 	writes.Start(ctx, 1)
 	defer writes.Stop()
 	return gateway.New(cfg.HTTP.Address, repo, writes).Run(ctx)
@@ -73,6 +85,11 @@ func RunGateway(ctx context.Context) error {
 
 func RunWorker(ctx context.Context) error {
 	cfg := config.Load("worker")
+	if shutdownObs, err := observability.Init(ctx, cfg); err == nil {
+		defer func() { _ = shutdownObs(context.Background()) }()
+	} else {
+		return err
+	}
 	if cfg.DatabaseURL == "" {
 		return errDatabaseRequired("worker")
 	}
@@ -86,7 +103,7 @@ func RunWorker(ctx context.Context) error {
 	router := model.NewRouter(cfg.Provider)
 	broker := sse.NewBroker()
 	defer client.Close()
-	log.Printf("worker postgres connected")
+	slog.Info("worker postgres connected", "service", cfg.ServiceName)
 	writes.Start(ctx, 1)
 	defer writes.Stop()
 	runner.New(repo, writes, broker, router, "worker-"+hostname()).Start(ctx)
