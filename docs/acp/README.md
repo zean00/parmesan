@@ -3,6 +3,14 @@
 ACP is exposed as a path-versioned public contract under `/v1/acp/...`.
 
 Supported routes:
+- `POST /v1/acp/agents/{agent_id}/sessions`
+- `GET /v1/acp/agents/{agent_id}/sessions/{id}`
+- `POST /v1/acp/agents/{agent_id}/sessions/{id}/messages`
+- `POST /v1/acp/agents/{agent_id}/sessions/{id}/events`
+- `GET /v1/acp/agents/{agent_id}/sessions/{id}/events`
+- `GET /v1/acp/agents/{agent_id}/sessions/{id}/events/stream`
+- `GET /v1/acp/agents/{agent_id}/sessions/{id}/approvals`
+- `POST /v1/acp/agents/{agent_id}/sessions/{id}/approvals/{approval_id}`
 - `POST /v1/acp/sessions`
 - `GET /v1/acp/sessions/{id}`
 - `POST /v1/acp/sessions/{id}/messages`
@@ -13,6 +21,8 @@ Supported routes:
 - `POST /v1/acp/sessions/{id}/approvals/{approval_id}`
 
 Conversation-edge rules:
+- Agent-scoped routes are the preferred multi-profile ACP surface. The path `{agent_id}` is authoritative; a mismatched body `agent_id` is rejected, and existing session reads/writes return not found if the persisted session belongs to another agent.
+- Agent-scoped session creation assigns a stable anonymous `customer_id` when the client omits customer identity, preserving customer-scoped context without requiring a Parmesan-specific ACP field.
 - `POST /v1/acp/sessions/{id}/messages` is the primary turn-ingress endpoint and creates or coalesces a durable execution plus the trigger event.
 - Quick successive customer messages are coalesced for `ACP_RESPONSE_COALESCE_MS` milliseconds (default `1500`, set `0` to disable) while the execution is still safe to merge before response composition.
 - One execution can emit multiple ordered `ai_agent` message events when a strict template defines `messages: [...]` or generation returns a bounded JSON `messages` array; each event carries response-batch metadata while compatibility status events keep the first `event_id`.

@@ -3579,6 +3579,72 @@ func TestACPGetSessionReturnsTypedSummary(t *testing.T) {
 	}
 }
 
+func TestACPAgentScopedCreateSessionSetsAgentAndAnonymousCustomer(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/agents/agent_1/sessions", strings.NewReader(`{"id":"sess_agent_scoped","channel":"acp"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create scoped session status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	sess, err := repo.GetSession(context.Background(), "sess_agent_scoped")
+	if err != nil {
+		t.Fatalf("GetSession() error = %v", err)
+	}
+	if sess.AgentID != "agent_1" {
+		t.Fatalf("AgentID = %q, want agent_1", sess.AgentID)
+	}
+	if sess.CustomerID != "anon_sess_agent_scoped" {
+		t.Fatalf("CustomerID = %q, want anonymous session customer", sess.CustomerID)
+	}
+}
+
+func TestACPAgentScopedCreateSessionRejectsAgentMismatch(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/agents/agent_1/sessions", strings.NewReader(`{"id":"sess_agent_scoped","agent_id":"agent_2"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create scoped session status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestACPAgentScopedRoutesHideOtherAgentSessions(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_agent_scoped", Channel: "acp", AgentID: "agent_1", CustomerID: "cust_1", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/acp/agents/agent_2/sessions/sess_agent_scoped", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("get wrong scoped session status = %d, want %d body=%s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/acp/agents/agent_1/sessions/sess_agent_scoped/messages", strings.NewReader(`{"id":"evt_agent_scoped","text":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("message scoped session status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+}
+
 func TestGetSessionFallsBackToLatestExecutionWhenLastTraceIsStale(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)

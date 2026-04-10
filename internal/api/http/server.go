@@ -271,6 +271,14 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/sessions/{id}/events", s.listEvents)
 	mux.HandleFunc("POST /v1/sessions/{id}/events", s.appendEvent)
 	mux.HandleFunc("GET /v1/sessions/{id}/events/stream", s.streamEvents)
+	mux.HandleFunc("POST /v1/acp/agents/{agent_id}/sessions", s.acpCreateAgentSession)
+	mux.HandleFunc("GET /v1/acp/agents/{agent_id}/sessions/{id}", s.acpGetSession)
+	mux.HandleFunc("POST /v1/acp/agents/{agent_id}/sessions/{id}/messages", s.acpCreateMessage)
+	mux.HandleFunc("GET /v1/acp/agents/{agent_id}/sessions/{id}/events", s.acpListEvents)
+	mux.HandleFunc("POST /v1/acp/agents/{agent_id}/sessions/{id}/events", s.acpAppendEvent)
+	mux.HandleFunc("GET /v1/acp/agents/{agent_id}/sessions/{id}/events/stream", s.acpStreamEvents)
+	mux.HandleFunc("GET /v1/acp/agents/{agent_id}/sessions/{id}/approvals", s.acpListApprovals)
+	mux.HandleFunc("POST /v1/acp/agents/{agent_id}/sessions/{id}/approvals/{approval_id}", s.acpRespondApproval)
 	mux.HandleFunc("POST /v1/acp/sessions", s.acpCreateSession)
 	mux.HandleFunc("GET /v1/acp/sessions/{id}", s.acpGetSession)
 	mux.HandleFunc("POST /v1/acp/sessions/{id}/messages", s.acpCreateMessage)
@@ -1451,6 +1459,9 @@ func (s *Server) acpCreateMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	if !s.allowACPScopedSession(w, r, sess) {
+		return
+	}
 	if sessionMode(sess) == "manual" {
 		metadata = cloneMap(metadata)
 		metadata["automation_skipped"] = true
@@ -1533,14 +1544,33 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) acpCreateSession(w http.ResponseWriter, r *http.Request) {
+	s.acpCreateSessionWithAgent(w, r, "")
+}
+
+func (s *Server) acpCreateAgentSession(w http.ResponseWriter, r *http.Request) {
+	s.acpCreateSessionWithAgent(w, r, r.PathValue("agent_id"))
+}
+
+func (s *Server) acpCreateSessionWithAgent(w http.ResponseWriter, r *http.Request, scopedAgentID string) {
 	service := acp.NewService(s.sessions)
 	var req acp.Session
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	scopedAgentID = strings.TrimSpace(scopedAgentID)
+	if scopedAgentID != "" {
+		if strings.TrimSpace(req.AgentID) != "" && strings.TrimSpace(req.AgentID) != scopedAgentID {
+			http.Error(w, "agent_id does not match scoped ACP route", http.StatusBadRequest)
+			return
+		}
+		req.AgentID = scopedAgentID
+	}
 	if strings.TrimSpace(req.ID) == "" {
 		req.ID = fmt.Sprintf("sess_%d", time.Now().UnixNano())
+	}
+	if scopedAgentID != "" && strings.TrimSpace(req.CustomerID) == "" {
+		req.CustomerID = anonymousACPCustomerID(req.ID)
 	}
 	if strings.TrimSpace(req.Channel) == "" {
 		req.Channel = "web"
@@ -1556,10 +1586,46 @@ func (s *Server) acpCreateSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, created)
 }
 
+func (s *Server) allowACPScopedSessionID(w http.ResponseWriter, r *http.Request, sessionID string) bool {
+	agentID := strings.TrimSpace(r.PathValue("agent_id"))
+	if agentID == "" {
+		return true
+	}
+	sess, err := s.store.GetSession(r.Context(), sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return false
+	}
+	return s.allowACPScopedSession(w, r, sess)
+}
+
+func (s *Server) allowACPScopedSession(w http.ResponseWriter, r *http.Request, sess session.Session) bool {
+	agentID := strings.TrimSpace(r.PathValue("agent_id"))
+	if agentID == "" {
+		return true
+	}
+	if strings.TrimSpace(sess.AgentID) != agentID {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return false
+	}
+	return true
+}
+
+func anonymousACPCustomerID(sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return "anon_" + sessionID
+}
+
 func (s *Server) acpGetSession(w http.ResponseWriter, r *http.Request) {
 	sess, err := s.store.GetSession(r.Context(), r.PathValue("id"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if !s.allowACPScopedSession(w, r, sess) {
 		return
 	}
 	summary := s.sessionSummaryFor(r.Context(), sess)
@@ -1580,6 +1646,9 @@ func (s *Server) acpGetSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) acpAppendEvent(w http.ResponseWriter, r *http.Request) {
+	if !s.allowACPScopedSessionID(w, r, r.PathValue("id")) {
+		return
+	}
 	service := acp.NewService(s.sessions)
 	var req acp.Event
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1613,6 +1682,9 @@ func (s *Server) acpAppendEvent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) acpListEvents(w http.ResponseWriter, r *http.Request) {
+	if !s.allowACPScopedSessionID(w, r, r.PathValue("id")) {
+		return
+	}
 	service := acp.NewService(s.sessions)
 	minOffset := int64(0)
 	if raw := strings.TrimSpace(r.URL.Query().Get("min_offset")); raw != "" {
@@ -1631,6 +1703,9 @@ func (s *Server) acpListEvents(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) acpStreamEvents(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
+	if !s.allowACPScopedSessionID(w, r, sessionID) {
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1689,6 +1764,9 @@ func (s *Server) acpStreamEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) acpListApprovals(w http.ResponseWriter, r *http.Request) {
+	if !s.allowACPScopedSessionID(w, r, r.PathValue("id")) {
+		return
+	}
 	items, err := s.store.ListApprovalSessions(r.Context(), r.PathValue("id"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1709,6 +1787,9 @@ func (s *Server) acpListApprovals(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) acpRespondApproval(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
+	if !s.allowACPScopedSessionID(w, r, sessionID) {
+		return
+	}
 	var req struct {
 		Decision string `json:"decision"`
 	}

@@ -139,13 +139,21 @@ tokens or trusted identity headers via `OPERATOR_TRUSTED_ID_HEADER` and
 - `GET /v1/sessions/{id}/events`
 - `GET /v1/sessions/{id}/events/stream`
 - `POST /v1/acp/sessions`
+- `POST /v1/acp/agents/{agent_id}/sessions`
 - `GET /v1/acp/sessions/{id}`
+- `GET /v1/acp/agents/{agent_id}/sessions/{id}`
 - `POST /v1/acp/sessions/{id}/messages`
+- `POST /v1/acp/agents/{agent_id}/sessions/{id}/messages`
 - `POST /v1/acp/sessions/{id}/events`
+- `POST /v1/acp/agents/{agent_id}/sessions/{id}/events`
 - `GET /v1/acp/sessions/{id}/events`
+- `GET /v1/acp/agents/{agent_id}/sessions/{id}/events`
 - `GET /v1/acp/sessions/{id}/events/stream`
+- `GET /v1/acp/agents/{agent_id}/sessions/{id}/events/stream`
 - `GET /v1/acp/sessions/{id}/approvals`
+- `GET /v1/acp/agents/{agent_id}/sessions/{id}/approvals`
 - `POST /v1/acp/sessions/{id}/approvals/{approval_id}`
+- `POST /v1/acp/agents/{agent_id}/sessions/{id}/approvals/{approval_id}`
 - `GET /v1/operator/sessions` with optional `customer_id`, `agent_id`, `mode`, `label`, `operator_id`, `assigned_operator_id`, `unassigned=true`, `active=true`, `pending_approval=true`, `failed_media=true`, `unresolved_lint=true`, `last_activity_after`, `last_activity_before`, `view`, `cursor`, and `limit` filters
 - `GET /v1/operator/queue/summary`
 - `GET /v1/operator/sessions/{id}`
