@@ -258,22 +258,26 @@ func TestSaveCustomerPreferenceAndFeedbackRecord(t *testing.T) {
 		ID: "feedback_1", SessionID: "sess_1", OperatorID: "op_1", Category: "preference", Text: "I prefer email.", Outputs: feedback.Outputs{PreferenceIDs: []string{"pref_1"}}, CreatedAt: now, UpdatedAt: now,
 	}
 	mock.ExpectExec(regexp.QuoteMeta(`
-		INSERT INTO operator_feedback (id, session_id, execution_id, trace_id, operator_id, rating, category, text, labels_json, target_event_ids_json, metadata_json, outputs_json, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		INSERT INTO operator_feedback (id, session_id, response_id, execution_id, trace_id, operator_id, rating, score, category, text, comment, correction, labels_json, target_event_ids_json, metadata_json, outputs_json, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		ON CONFLICT (id) DO UPDATE
-		SET execution_id = EXCLUDED.execution_id,
+		SET response_id = EXCLUDED.response_id,
+		    execution_id = EXCLUDED.execution_id,
 		    trace_id = EXCLUDED.trace_id,
 		    operator_id = EXCLUDED.operator_id,
 		    rating = EXCLUDED.rating,
+		    score = EXCLUDED.score,
 		    category = EXCLUDED.category,
 		    text = EXCLUDED.text,
+		    comment = EXCLUDED.comment,
+		    correction = EXCLUDED.correction,
 		    labels_json = EXCLUDED.labels_json,
 		    target_event_ids_json = EXCLUDED.target_event_ids_json,
 		    metadata_json = EXCLUDED.metadata_json,
 		    outputs_json = EXCLUDED.outputs_json,
 		    updated_at = EXCLUDED.updated_at
 	`)).
-		WithArgs(record.ID, record.SessionID, nil, nil, record.OperatorID, record.Rating, record.Category, record.Text, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), record.CreatedAt, record.UpdatedAt).
+		WithArgs(record.ID, record.SessionID, nil, nil, nil, record.OperatorID, record.Rating, nil, record.Category, record.Text, nil, nil, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), record.CreatedAt, record.UpdatedAt).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	expectGraphArtifactExec(mock)
 	expectGraphEdgeExec(mock)

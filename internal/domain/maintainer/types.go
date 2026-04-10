@@ -57,6 +57,7 @@ type Job struct {
 	SourceID     string            `json:"source_id,omitempty"`
 	SessionID    string            `json:"session_id,omitempty"`
 	FeedbackID   string            `json:"feedback_id,omitempty"`
+	ResponseID   string            `json:"response_id,omitempty"`
 	RunID        string            `json:"run_id,omitempty"`
 	Error        string            `json:"error,omitempty"`
 	Metadata     map[string]any    `json:"metadata,omitempty"`
@@ -77,6 +78,7 @@ type Run struct {
 	Mode          string            `json:"mode"`
 	Trigger       string            `json:"trigger"`
 	Status        string            `json:"status"`
+	ResponseID    string            `json:"response_id,omitempty"`
 	Provider      string            `json:"provider,omitempty"`
 	TraceID       string            `json:"trace_id,omitempty"`
 	InputSummary  map[string]any    `json:"input_summary,omitempty"`

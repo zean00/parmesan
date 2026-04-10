@@ -109,9 +109,12 @@ func (s *Service) QueueBootstrap(ctx context.Context, profile agent.Profile, req
 }
 
 func (s *Service) QueueFeedback(ctx context.Context, sess session.Session, record feedback.Record) (maintainerdomain.Job, error) {
+	if !shouldQueueMaintainerFeedback(record) {
+		return maintainerdomain.Job{}, nil
+	}
 	mode := maintainerdomain.ModeSharedWiki
 	scopeKind, scopeID := sharedScopeForSession(sess)
-	if strings.TrimSpace(sess.CustomerID) != "" && !looksSharedKnowledgeFeedback(record) {
+	if strings.TrimSpace(sess.CustomerID) != "" && !shouldUseSharedWikiFeedback(record) {
 		mode = maintainerdomain.ModeCustomerMemory
 		scopeKind, scopeID = customerMemoryScopeForSession(sess)
 	}
@@ -133,9 +136,11 @@ func (s *Service) QueueFeedback(ctx context.Context, sess session.Session, recor
 		RequestedBy: record.OperatorID,
 		SessionID:   record.SessionID,
 		FeedbackID:  record.ID,
+		ResponseID:  record.ResponseID,
 		Metadata: map[string]any{
-			"category": record.Category,
-			"labels":   append([]string(nil), record.Labels...),
+			"category":    record.Category,
+			"labels":      append([]string(nil), record.Labels...),
+			"response_id": record.ResponseID,
 		},
 		CreatedAt: now,
 	}
@@ -370,10 +375,24 @@ func (r *Runner) processFeedbackJob(ctx context.Context, job maintainerdomain.Jo
 	if err != nil {
 		return nil, err
 	}
-	if job.Mode == maintainerdomain.ModeCustomerMemory {
-		return r.applyCustomerMemory(ctx, workspace, job, record.Text, "feedback", run)
+	sessionContext := responseScopedFeedbackText(record)
+	if record.IsResponseScoped() && job.SessionID != "" {
+		if events, err := r.repo.ListEvents(ctx, job.SessionID); err == nil {
+			sessionContext = feedbackMaintainerContext(record, events)
+		}
 	}
-	update, provider := r.sharedFeedbackPlan(ctx, workspace, record)
+	run.ResponseID = record.ResponseID
+	run.InputSummary = map[string]any{
+		"feedback_id":  record.ID,
+		"response_id":  record.ResponseID,
+		"session_id":   record.SessionID,
+		"execution_id": record.ExecutionID,
+		"trace_id":     record.TraceID,
+	}
+	if job.Mode == maintainerdomain.ModeCustomerMemory {
+		return r.applyCustomerMemory(ctx, workspace, job, sessionContext, "feedback", run)
+	}
+	update, provider := r.sharedFeedbackPlan(ctx, workspace, record, sessionContext)
 	run.Provider = provider
 	if update.NeedsReview {
 		proposalID, err := r.saveKnowledgeProposal(ctx, workspace, record, update)
@@ -384,6 +403,7 @@ func (r *Runner) processFeedbackJob(ctx context.Context, job maintainerdomain.Jo
 			"proposal_id":   proposalID,
 			"produced_ids":  []string{proposalID},
 			"review_needed": true,
+			"response_id":   record.ResponseID,
 		}, nil
 	}
 	pages, pageIDs, err := r.applyWorkspacePages(ctx, workspace, "", update.Pages, "feedback")
@@ -402,7 +422,7 @@ func (r *Runner) processFeedbackJob(ctx context.Context, job maintainerdomain.Jo
 	workspace.UpdatedAt = time.Now().UTC()
 	_ = r.repo.SaveMaintainerWorkspace(ctx, workspace)
 	produced := append(append([]string(nil), pageIDs...), snapshot.ID)
-	return map[string]any{"snapshot_id": snapshot.ID, "produced_ids": produced}, nil
+	return map[string]any{"snapshot_id": snapshot.ID, "produced_ids": produced, "response_id": record.ResponseID}, nil
 }
 
 func (r *Runner) processSessionJob(ctx context.Context, job maintainerdomain.Job, run *maintainerdomain.Run) (map[string]any, error) {
@@ -611,7 +631,7 @@ Pages must include an overview, an index, and a log page.`, profile.Name, profil
 	}, provider
 }
 
-func (r *Runner) sharedFeedbackPlan(ctx context.Context, workspace maintainerdomain.Workspace, record feedback.Record) (wikiUpdate, string) {
+func (r *Runner) sharedFeedbackPlan(ctx context.Context, workspace maintainerdomain.Workspace, record feedback.Record, contextText string) (wikiUpdate, string) {
 	type structuredFeedback struct {
 		NeedsReview bool       `json:"needs_review"`
 		Rationale   string     `json:"rationale"`
@@ -621,7 +641,7 @@ func (r *Runner) sharedFeedbackPlan(ctx context.Context, workspace maintainerdom
 Use this operator feedback to update shared wiki pages if it is factual knowledge.
 If it implies risky or unclear edits, set needs_review true.
 Feedback category: %s
-Feedback text: %s`, record.Category, record.Text)
+Feedback text: %s`, record.Category, contextText)
 	var out structuredFeedback
 	provider := ""
 	if resp, ok := generateStructured(ctx, r.router, prompt, &out); ok {
@@ -637,11 +657,11 @@ Feedback text: %s`, record.Category, record.Text)
 			Pages: []pageEdit{{
 				Title:    "Operator Feedback Review",
 				PageType: "review_note",
-				Body:     "# Operator Feedback Review\n\n" + strings.TrimSpace(record.Text),
+				Body:     "# Operator Feedback Review\n\n" + strings.TrimSpace(contextText),
 			}},
 		}, provider
 	}
-	return wikiUpdate{Pages: []pageEdit{{Title: "Customer Support Notes", PageType: "feedback_note", Body: "# Customer Support Notes\n\n" + strings.TrimSpace(record.Text)}}}, provider
+	return wikiUpdate{Pages: []pageEdit{{Title: "Customer Support Notes", PageType: "feedback_note", Body: "# Customer Support Notes\n\n" + strings.TrimSpace(contextText)}}}, provider
 }
 
 func (r *Runner) customerMemoryPlan(ctx context.Context, workspace maintainerdomain.Workspace, sourceText string) (wikiUpdate, string) {
@@ -967,8 +987,88 @@ func customerMemoryScopeForSession(sess session.Session) (string, string) {
 }
 
 func looksSharedKnowledgeFeedback(record feedback.Record) bool {
-	text := strings.ToLower(strings.TrimSpace(record.Category + " " + record.Text + " " + strings.Join(record.Labels, " ")))
+	text := strings.ToLower(strings.TrimSpace(record.Category + " " + responseScopedFeedbackText(record) + " " + strings.Join(record.Labels, " ")))
 	return strings.Contains(text, "knowledge") || strings.Contains(text, "factual") || strings.Contains(text, "policy")
+}
+
+func shouldUseSharedWikiFeedback(record feedback.Record) bool {
+	if looksSharedKnowledgeFeedback(record) {
+		return true
+	}
+	if record.IsResponseScoped() && strings.TrimSpace(record.Correction) != "" && !hasPreferenceSignal(record) {
+		return true
+	}
+	return false
+}
+
+func shouldQueueMaintainerFeedback(record feedback.Record) bool {
+	if !record.IsResponseScoped() {
+		return strings.TrimSpace(record.LearningText()) != ""
+	}
+	if strings.TrimSpace(record.Text) != "" || strings.TrimSpace(record.Comment) != "" || strings.TrimSpace(record.Correction) != "" {
+		return true
+	}
+	return false
+}
+
+func hasPreferenceSignal(record feedback.Record) bool {
+	text := strings.ToLower(strings.TrimSpace(record.LearningText()))
+	return strings.Contains(text, "i prefer ") ||
+		strings.Contains(text, "call me ") ||
+		strings.Contains(text, "my name is ") ||
+		strings.Contains(text, "reply in ") ||
+		strings.Contains(text, "respond in ") ||
+		strings.Contains(text, "send me updates") ||
+		strings.Contains(text, "contact me") ||
+		strings.Contains(text, "reach me")
+}
+
+func responseScopedFeedbackText(record feedback.Record) string {
+	text := strings.TrimSpace(record.LearningText())
+	if !record.IsResponseScoped() {
+		return text
+	}
+	var parts []string
+	if text != "" {
+		parts = append(parts, text)
+	}
+	if record.ResponseID != "" {
+		parts = append(parts, "Target response: "+record.ResponseID)
+	}
+	if record.Score != nil {
+		parts = append(parts, fmt.Sprintf("Score: %d", *record.Score))
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n\n"))
+}
+
+func feedbackMaintainerContext(record feedback.Record, events []session.Event) string {
+	base := responseScopedFeedbackText(record)
+	if !record.IsResponseScoped() || len(record.TargetEventIDs) == 0 {
+		return base
+	}
+	byID := map[string]session.Event{}
+	for _, item := range events {
+		byID[item.ID] = item
+	}
+	var snippets []string
+	for _, eventID := range record.TargetEventIDs {
+		item, ok := byID[eventID]
+		if !ok {
+			continue
+		}
+		text := strings.TrimSpace(sessionEventText(item))
+		if text == "" {
+			continue
+		}
+		snippets = append(snippets, fmt.Sprintf("%s event %s: %s", item.Source, item.ID, text))
+	}
+	if len(snippets) == 0 {
+		return base
+	}
+	if base == "" {
+		return "Targeted response context:\n" + strings.Join(snippets, "\n")
+	}
+	return base + "\n\nTargeted response context:\n" + strings.Join(snippets, "\n")
 }
 
 func truncateForPrompt(text string, max int) string {

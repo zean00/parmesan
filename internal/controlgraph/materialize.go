@@ -55,6 +55,9 @@ func MaintainerJob(item maintainer.Job) ([]policy.GraphArtifact, []policy.GraphE
 	if item.FeedbackID != "" {
 		edges = append(edges, edge(groupID, item.FeedbackID, "derived_from", item.ID, map[string]any{"trigger": item.Trigger}, item.ArtifactMeta, item.CreatedAt))
 	}
+	if item.ResponseID != "" {
+		edges = append(edges, edge(groupID, item.ResponseID, "derived_from", item.ID, map[string]any{"trigger": item.Trigger}, item.ArtifactMeta, item.CreatedAt))
+	}
 	if item.RunID != "" {
 		edges = append(edges, edge(groupID, item.ID, "produced", item.RunID, nil, item.ArtifactMeta, item.CreatedAt))
 	}
@@ -72,6 +75,9 @@ func MaintainerRun(item maintainer.Run) ([]policy.GraphArtifact, []policy.GraphE
 	}
 	if item.WorkspaceID != "" {
 		edges = append(edges, edge(groupID, item.ID, "maintains", item.WorkspaceID, map[string]any{"mode": item.Mode}, item.ArtifactMeta, item.CreatedAt))
+	}
+	if item.ResponseID != "" {
+		edges = append(edges, edge(groupID, item.ID, "derived_from", item.ResponseID, nil, item.ArtifactMeta, item.CreatedAt))
 	}
 	for _, producedID := range stringsSlice(item.OutputSummary["produced_ids"]) {
 		edges = append(edges, edge(groupID, item.ID, "produced", producedID, nil, item.ArtifactMeta, item.CreatedAt))
@@ -199,6 +205,9 @@ func FeedbackRecord(record feedback.Record) ([]policy.GraphArtifact, []policy.Gr
 		artifact(record.ID, groupID, "operator_feedback", versionOrTimestamp(record.ArtifactMeta, record.UpdatedAt, record.CreatedAt), map[string]any{"feedback": record}, record.ArtifactMeta, record.CreatedAt),
 	}
 	var edges []policy.GraphEdge
+	if record.ResponseID != "" {
+		edges = append(edges, edge(groupID, record.ID, "applies_to", record.ResponseID, map[string]any{"scope": "response_feedback"}, record.ArtifactMeta, record.CreatedAt))
+	}
 	for _, targetID := range record.Outputs.PreferenceIDs {
 		edges = append(edges, edge(groupID, record.ID, "derived_from", targetID, map[string]any{"output_kind": "customer_preference"}, record.ArtifactMeta, record.CreatedAt))
 	}

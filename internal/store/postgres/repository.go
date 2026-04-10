@@ -751,21 +751,25 @@ func (c *Client) SaveFeedbackRecord(ctx context.Context, record feedback.Record)
 		return err
 	}
 	_, err = db.Exec(ctx, `
-		INSERT INTO operator_feedback (id, session_id, execution_id, trace_id, operator_id, rating, category, text, labels_json, target_event_ids_json, metadata_json, outputs_json, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		INSERT INTO operator_feedback (id, session_id, response_id, execution_id, trace_id, operator_id, rating, score, category, text, comment, correction, labels_json, target_event_ids_json, metadata_json, outputs_json, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		ON CONFLICT (id) DO UPDATE
-		SET execution_id = EXCLUDED.execution_id,
+		SET response_id = EXCLUDED.response_id,
+		    execution_id = EXCLUDED.execution_id,
 		    trace_id = EXCLUDED.trace_id,
 		    operator_id = EXCLUDED.operator_id,
 		    rating = EXCLUDED.rating,
+		    score = EXCLUDED.score,
 		    category = EXCLUDED.category,
 		    text = EXCLUDED.text,
+		    comment = EXCLUDED.comment,
+		    correction = EXCLUDED.correction,
 		    labels_json = EXCLUDED.labels_json,
 		    target_event_ids_json = EXCLUDED.target_event_ids_json,
 		    metadata_json = EXCLUDED.metadata_json,
 		    outputs_json = EXCLUDED.outputs_json,
 		    updated_at = EXCLUDED.updated_at
-	`, record.ID, record.SessionID, nullString(record.ExecutionID), nullString(record.TraceID), nullString(record.OperatorID), record.Rating, record.Category, record.Text, labels, targets, metadata, outputs, record.CreatedAt, record.UpdatedAt)
+	`, record.ID, record.SessionID, nullString(record.ResponseID), nullString(record.ExecutionID), nullString(record.TraceID), nullString(record.OperatorID), record.Rating, nullInt(record.Score), record.Category, record.Text, nullString(record.Comment), nullString(record.Correction), labels, targets, metadata, outputs, record.CreatedAt, record.UpdatedAt)
 	if err != nil {
 		return err
 	}
@@ -779,7 +783,7 @@ func (c *Client) SaveFeedbackRecord(ctx context.Context, record feedback.Record)
 func (c *Client) GetFeedbackRecord(ctx context.Context, feedbackID string) (feedback.Record, error) {
 	db := c.sessionQuery()
 	row := db.QueryRow(ctx, `
-		SELECT id, session_id, COALESCE(execution_id,''), COALESCE(trace_id,''), COALESCE(operator_id,''), rating, COALESCE(category,''), text, labels_json, target_event_ids_json, metadata_json, outputs_json, created_at, updated_at
+		SELECT id, session_id, COALESCE(response_id,''), COALESCE(execution_id,''), COALESCE(trace_id,''), COALESCE(operator_id,''), rating, COALESCE(score,-1), COALESCE(category,''), text, COALESCE(comment,''), COALESCE(correction,''), labels_json, target_event_ids_json, metadata_json, outputs_json, created_at, updated_at
 		FROM operator_feedback
 		WHERE id = $1
 	`, feedbackID)
@@ -800,7 +804,7 @@ func (c *Client) ListFeedbackRecords(ctx context.Context, query feedback.Query) 
 		limit = 1000
 	}
 	rows, err := db.Query(ctx, `
-		SELECT id, session_id, COALESCE(execution_id,''), COALESCE(trace_id,''), COALESCE(operator_id,''), rating, COALESCE(category,''), text, labels_json, target_event_ids_json, metadata_json, outputs_json, created_at, updated_at
+		SELECT id, session_id, COALESCE(response_id,''), COALESCE(execution_id,''), COALESCE(trace_id,''), COALESCE(operator_id,''), rating, COALESCE(score,-1), COALESCE(category,''), text, COALESCE(comment,''), COALESCE(correction,''), labels_json, target_event_ids_json, metadata_json, outputs_json, created_at, updated_at
 		FROM operator_feedback
 		WHERE ($1 = '' OR session_id = $1)
 		  AND ($2 = '' OR operator_id = $2)
@@ -830,8 +834,12 @@ type rowScanner interface {
 func scanFeedbackRecord(row rowScanner) (feedback.Record, error) {
 	var item feedback.Record
 	var labels, targets, metadata, outputs []byte
-	if err := row.Scan(&item.ID, &item.SessionID, &item.ExecutionID, &item.TraceID, &item.OperatorID, &item.Rating, &item.Category, &item.Text, &labels, &targets, &metadata, &outputs, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	var score int
+	if err := row.Scan(&item.ID, &item.SessionID, &item.ResponseID, &item.ExecutionID, &item.TraceID, &item.OperatorID, &item.Rating, &score, &item.Category, &item.Text, &item.Comment, &item.Correction, &labels, &targets, &metadata, &outputs, &item.CreatedAt, &item.UpdatedAt); err != nil {
 		return feedback.Record{}, err
+	}
+	if score >= 0 {
+		item.Score = &score
 	}
 	_ = json.Unmarshal(labels, &item.Labels)
 	_ = json.Unmarshal(targets, &item.TargetEventIDs)
@@ -1330,18 +1338,19 @@ func (c *Client) ListMaintainerWorkspaces(ctx context.Context, query maintainer.
 func (c *Client) SaveMaintainerJob(ctx context.Context, item maintainer.Job) error {
 	metadata := metadataJSON(item.Metadata, item.ArtifactMeta)
 	_, err := c.sessionQuery().Exec(ctx, `
-		INSERT INTO knowledge_maintainer_jobs (id, workspace_id, scope_kind, scope_id, agent_id, customer_id, mode, trigger, status, requested_by, source_id, session_id, feedback_id, run_id, error, metadata_json, created_at, started_at, finished_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+		INSERT INTO knowledge_maintainer_jobs (id, workspace_id, scope_kind, scope_id, agent_id, customer_id, mode, trigger, status, requested_by, source_id, session_id, feedback_id, response_id, run_id, error, metadata_json, created_at, started_at, finished_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
 		ON CONFLICT (id) DO UPDATE
 		SET workspace_id = EXCLUDED.workspace_id,
 		    status = EXCLUDED.status,
 		    requested_by = EXCLUDED.requested_by,
+		    response_id = EXCLUDED.response_id,
 		    run_id = EXCLUDED.run_id,
 		    error = EXCLUDED.error,
 		    metadata_json = EXCLUDED.metadata_json,
 		    started_at = EXCLUDED.started_at,
 		    finished_at = EXCLUDED.finished_at
-	`, item.ID, nullString(item.WorkspaceID), item.ScopeKind, item.ScopeID, nullString(item.AgentID), nullString(item.CustomerID), item.Mode, item.Trigger, item.Status, nullString(item.RequestedBy), nullString(item.SourceID), nullString(item.SessionID), nullString(item.FeedbackID), nullString(item.RunID), nullString(item.Error), metadata, item.CreatedAt, item.StartedAt, item.FinishedAt)
+	`, item.ID, nullString(item.WorkspaceID), item.ScopeKind, item.ScopeID, nullString(item.AgentID), nullString(item.CustomerID), item.Mode, item.Trigger, item.Status, nullString(item.RequestedBy), nullString(item.SourceID), nullString(item.SessionID), nullString(item.FeedbackID), nullString(item.ResponseID), nullString(item.RunID), nullString(item.Error), metadata, item.CreatedAt, item.StartedAt, item.FinishedAt)
 	if err != nil {
 		return err
 	}
@@ -1354,12 +1363,12 @@ func (c *Client) SaveMaintainerJob(ctx context.Context, item maintainer.Job) err
 
 func (c *Client) GetMaintainerJob(ctx context.Context, jobID string) (maintainer.Job, error) {
 	row := c.sessionQuery().QueryRow(ctx, `
-		SELECT id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(requested_by,''), COALESCE(source_id,''), COALESCE(session_id,''), COALESCE(feedback_id,''), COALESCE(run_id,''), COALESCE(error,''), metadata_json, created_at, started_at, finished_at
+		SELECT id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(requested_by,''), COALESCE(source_id,''), COALESCE(session_id,''), COALESCE(feedback_id,''), COALESCE(response_id,''), COALESCE(run_id,''), COALESCE(error,''), metadata_json, created_at, started_at, finished_at
 		FROM knowledge_maintainer_jobs WHERE id = $1
 	`, jobID)
 	var item maintainer.Job
 	var metadata []byte
-	if err := row.Scan(&item.ID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.RequestedBy, &item.SourceID, &item.SessionID, &item.FeedbackID, &item.RunID, &item.Error, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+	if err := row.Scan(&item.ID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.RequestedBy, &item.SourceID, &item.SessionID, &item.FeedbackID, &item.ResponseID, &item.RunID, &item.Error, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return maintainer.Job{}, errors.New("maintainer job not found")
 		}
@@ -1375,7 +1384,7 @@ func (c *Client) ListMaintainerJobs(ctx context.Context, query maintainer.JobQue
 		limit = 1000
 	}
 	rows, err := c.sessionQuery().Query(ctx, `
-		SELECT id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(requested_by,''), COALESCE(source_id,''), COALESCE(session_id,''), COALESCE(feedback_id,''), COALESCE(run_id,''), COALESCE(error,''), metadata_json, created_at, started_at, finished_at
+		SELECT id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(requested_by,''), COALESCE(source_id,''), COALESCE(session_id,''), COALESCE(feedback_id,''), COALESCE(response_id,''), COALESCE(run_id,''), COALESCE(error,''), metadata_json, created_at, started_at, finished_at
 		FROM knowledge_maintainer_jobs
 		WHERE ($1 = '' OR scope_kind = $1)
 		  AND ($2 = '' OR scope_id = $2)
@@ -1395,7 +1404,7 @@ func (c *Client) ListMaintainerJobs(ctx context.Context, query maintainer.JobQue
 	for rows.Next() {
 		var item maintainer.Job
 		var metadata []byte
-		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.RequestedBy, &item.SourceID, &item.SessionID, &item.FeedbackID, &item.RunID, &item.Error, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.RequestedBy, &item.SourceID, &item.SessionID, &item.FeedbackID, &item.ResponseID, &item.RunID, &item.Error, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
 			return nil, err
 		}
 		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
@@ -1406,7 +1415,7 @@ func (c *Client) ListMaintainerJobs(ctx context.Context, query maintainer.JobQue
 
 func (c *Client) ListRunnableMaintainerJobs(ctx context.Context) ([]maintainer.Job, error) {
 	rows, err := c.sessionQuery().Query(ctx, `
-		SELECT id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(requested_by,''), COALESCE(source_id,''), COALESCE(session_id,''), COALESCE(feedback_id,''), COALESCE(run_id,''), COALESCE(error,''), metadata_json, created_at, started_at, finished_at
+		SELECT id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(requested_by,''), COALESCE(source_id,''), COALESCE(session_id,''), COALESCE(feedback_id,''), COALESCE(response_id,''), COALESCE(run_id,''), COALESCE(error,''), metadata_json, created_at, started_at, finished_at
 		FROM knowledge_maintainer_jobs
 		WHERE status IN ('queued','running')
 		ORDER BY created_at ASC
@@ -1419,7 +1428,7 @@ func (c *Client) ListRunnableMaintainerJobs(ctx context.Context) ([]maintainer.J
 	for rows.Next() {
 		var item maintainer.Job
 		var metadata []byte
-		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.RequestedBy, &item.SourceID, &item.SessionID, &item.FeedbackID, &item.RunID, &item.Error, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.RequestedBy, &item.SourceID, &item.SessionID, &item.FeedbackID, &item.ResponseID, &item.RunID, &item.Error, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
 			return nil, err
 		}
 		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
@@ -1439,11 +1448,12 @@ func (c *Client) SaveMaintainerRun(ctx context.Context, item maintainer.Run) err
 	}
 	metadata := metadataJSON(item.Metadata, item.ArtifactMeta)
 	_, err = c.sessionQuery().Exec(ctx, `
-		INSERT INTO knowledge_maintainer_runs (id, job_id, workspace_id, scope_kind, scope_id, agent_id, customer_id, mode, trigger, status, provider, trace_id, input_summary_json, output_summary_json, metadata_json, created_at, started_at, finished_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+		INSERT INTO knowledge_maintainer_runs (id, job_id, workspace_id, scope_kind, scope_id, agent_id, customer_id, mode, trigger, status, response_id, provider, trace_id, input_summary_json, output_summary_json, metadata_json, created_at, started_at, finished_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 		ON CONFLICT (id) DO UPDATE
 		SET workspace_id = EXCLUDED.workspace_id,
 		    status = EXCLUDED.status,
+		    response_id = EXCLUDED.response_id,
 		    provider = EXCLUDED.provider,
 		    trace_id = EXCLUDED.trace_id,
 		    input_summary_json = EXCLUDED.input_summary_json,
@@ -1451,7 +1461,7 @@ func (c *Client) SaveMaintainerRun(ctx context.Context, item maintainer.Run) err
 		    metadata_json = EXCLUDED.metadata_json,
 		    started_at = EXCLUDED.started_at,
 		    finished_at = EXCLUDED.finished_at
-	`, item.ID, item.JobID, nullString(item.WorkspaceID), item.ScopeKind, item.ScopeID, nullString(item.AgentID), nullString(item.CustomerID), item.Mode, item.Trigger, item.Status, nullString(item.Provider), nullString(item.TraceID), inputSummary, outputSummary, metadata, item.CreatedAt, item.StartedAt, item.FinishedAt)
+	`, item.ID, item.JobID, nullString(item.WorkspaceID), item.ScopeKind, item.ScopeID, nullString(item.AgentID), nullString(item.CustomerID), item.Mode, item.Trigger, item.Status, nullString(item.ResponseID), nullString(item.Provider), nullString(item.TraceID), inputSummary, outputSummary, metadata, item.CreatedAt, item.StartedAt, item.FinishedAt)
 	if err != nil {
 		return err
 	}
@@ -1464,14 +1474,14 @@ func (c *Client) SaveMaintainerRun(ctx context.Context, item maintainer.Run) err
 
 func (c *Client) GetMaintainerRun(ctx context.Context, runID string) (maintainer.Run, error) {
 	row := c.sessionQuery().QueryRow(ctx, `
-		SELECT id, job_id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(provider,''), COALESCE(trace_id,''), input_summary_json, output_summary_json, metadata_json, created_at, started_at, finished_at
+		SELECT id, job_id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(response_id,''), COALESCE(provider,''), COALESCE(trace_id,''), input_summary_json, output_summary_json, metadata_json, created_at, started_at, finished_at
 		FROM knowledge_maintainer_runs WHERE id = $1
 	`, runID)
 	var item maintainer.Run
 	var inputSummary []byte
 	var outputSummary []byte
 	var metadata []byte
-	if err := row.Scan(&item.ID, &item.JobID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.Provider, &item.TraceID, &inputSummary, &outputSummary, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+	if err := row.Scan(&item.ID, &item.JobID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.ResponseID, &item.Provider, &item.TraceID, &inputSummary, &outputSummary, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return maintainer.Run{}, errors.New("maintainer run not found")
 		}
@@ -1489,7 +1499,7 @@ func (c *Client) ListMaintainerRuns(ctx context.Context, query maintainer.RunQue
 		limit = 1000
 	}
 	rows, err := c.sessionQuery().Query(ctx, `
-		SELECT id, job_id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(provider,''), COALESCE(trace_id,''), input_summary_json, output_summary_json, metadata_json, created_at, started_at, finished_at
+		SELECT id, job_id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(response_id,''), COALESCE(provider,''), COALESCE(trace_id,''), input_summary_json, output_summary_json, metadata_json, created_at, started_at, finished_at
 		FROM knowledge_maintainer_runs
 		WHERE ($1 = '' OR job_id = $1)
 		  AND ($2 = '' OR workspace_id = $2)
@@ -1509,7 +1519,7 @@ func (c *Client) ListMaintainerRuns(ctx context.Context, query maintainer.RunQue
 		var inputSummary []byte
 		var outputSummary []byte
 		var metadata []byte
-		if err := rows.Scan(&item.ID, &item.JobID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.Provider, &item.TraceID, &inputSummary, &outputSummary, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.JobID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.ResponseID, &item.Provider, &item.TraceID, &inputSummary, &outputSummary, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(inputSummary, &item.InputSummary)
@@ -3256,6 +3266,13 @@ func nullString(v string) any {
 		return nil
 	}
 	return v
+}
+
+func nullInt(v *int) any {
+	if v == nil {
+		return nil
+	}
+	return *v
 }
 
 func nullTime(v time.Time) any {

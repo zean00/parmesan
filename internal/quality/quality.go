@@ -87,25 +87,29 @@ type EvidenceMatch struct {
 }
 
 type ScenarioExpectation struct {
-	ID                        string   `json:"id"`
-	Domain                    string   `json:"domain"`
-	Category                  string   `json:"category"`
-	Input                     string   `json:"input"`
-	ExpectedQuality           []string `json:"expected_quality,omitempty"`
-	Risk                      string   `json:"risk,omitempty"`
-	RiskTier                  string   `json:"risk_tier,omitempty"`
-	ExpectedScope             string   `json:"expected_scope,omitempty"`
-	ExpectedLanguage          string   `json:"expected_language,omitempty"`
-	RequiredClaims            []string `json:"required_claims,omitempty"`
-	ForbiddenClaims           []string `json:"forbidden_claims,omitempty"`
-	RequiredEvidenceKinds     []string `json:"required_evidence_kinds,omitempty"`
-	RequiredEvidenceClasses   []string `json:"required_evidence_classes,omitempty"`
-	RequiredVerificationSteps []string `json:"required_verification_steps,omitempty"`
-	AllowedCommitments        []string `json:"allowed_commitments,omitempty"`
-	ExpectedRetrievalRequired bool     `json:"expected_retrieval_required,omitempty"`
-	ExpectedRefusalMode       string   `json:"expected_refusal_mode,omitempty"`
-	MinimumOverall            float64  `json:"minimum_overall,omitempty"`
-	LiveGate                  bool     `json:"live_gate,omitempty"`
+	ID                        string             `json:"id"`
+	Domain                    string             `json:"domain"`
+	Category                  string             `json:"category"`
+	Input                     string             `json:"input"`
+	ExpectedQuality           []string           `json:"expected_quality,omitempty"`
+	Risk                      string             `json:"risk,omitempty"`
+	RiskTier                  string             `json:"risk_tier,omitempty"`
+	ExpectedScope             string             `json:"expected_scope,omitempty"`
+	ExpectedLanguage          string             `json:"expected_language,omitempty"`
+	RequiredClaims            []string           `json:"required_claims,omitempty"`
+	ForbiddenClaims           []string           `json:"forbidden_claims,omitempty"`
+	RequiredEvidenceKinds     []string           `json:"required_evidence_kinds,omitempty"`
+	RequiredEvidenceClasses   []string           `json:"required_evidence_classes,omitempty"`
+	RequiredVerificationSteps []string           `json:"required_verification_steps,omitempty"`
+	AllowedCommitments        []string           `json:"allowed_commitments,omitempty"`
+	ExpectedRetrievalRequired bool               `json:"expected_retrieval_required,omitempty"`
+	ExpectedRefusalMode       string             `json:"expected_refusal_mode,omitempty"`
+	MinimumOverall            float64            `json:"minimum_overall,omitempty"`
+	LiveGate                  bool               `json:"live_gate,omitempty"`
+	ExecutionMode             string             `json:"execution_mode,omitempty"`
+	PlatformFlowKind          string             `json:"platform_flow_kind,omitempty"`
+	MinimumDimensions         map[string]float64 `json:"minimum_dimensions,omitempty"`
+	RequiredRuntimeAssertions []string           `json:"required_runtime_assertions,omitempty"`
 }
 
 var failureLabelDimensions = map[string]string{
@@ -1030,7 +1034,70 @@ func builtInProductionReadinessScenarios() []ScenarioExpectation {
 			out = append(out, scenario)
 		}
 	}
+	out = append(out, closedLoopLiveGateScenarios()...)
 	return out
+}
+
+func closedLoopLiveGateScenarios() []ScenarioExpectation {
+	return []ScenarioExpectation{
+		{
+			ID:               "support_closed_loop_maintainer_bootstrap_ingest_retrieve",
+			Domain:           "support",
+			Category:         "closed_loop_maintainer",
+			Input:            "What timeline is listed on the SolarBlue Kettle policy page?",
+			ExpectedQuality:  []string{"knowledge_grounding", "retrieval_quality"},
+			Risk:             "high",
+			RiskTier:         "high",
+			ExpectedScope:    "in_scope",
+			ExpectedLanguage: "en",
+			MinimumOverall:   minimumOverallForRisk("high"),
+			LiveGate:         true,
+			ExecutionMode:    "platform_flow",
+			PlatformFlowKind: "maintainer_shared_bootstrap_ingest_retrieve",
+			MinimumDimensions: map[string]float64{
+				"knowledge_grounding": 0.85,
+				"retrieval_quality":   0.85,
+			},
+			RequiredRuntimeAssertions: []string{"bootstrap_workspace", "source_sync_run", "shared_snapshot", "retrieval_citations"},
+		},
+		{
+			ID:               "support_closed_loop_maintainer_feedback_shared_update_retrieve",
+			Domain:           "support",
+			Category:         "closed_loop_maintainer",
+			Input:            "What timeline is listed for Emerald Mixer returns now?",
+			ExpectedQuality:  []string{"knowledge_grounding", "retrieval_quality"},
+			Risk:             "high",
+			RiskTier:         "high",
+			ExpectedScope:    "in_scope",
+			ExpectedLanguage: "en",
+			MinimumOverall:   minimumOverallForRisk("high"),
+			LiveGate:         true,
+			ExecutionMode:    "platform_flow",
+			PlatformFlowKind: "maintainer_feedback_shared_update_retrieve",
+			MinimumDimensions: map[string]float64{
+				"knowledge_grounding": 0.85,
+				"retrieval_quality":   0.85,
+			},
+			RequiredRuntimeAssertions: []string{"feedback_run", "knowledge_proposal", "applied_snapshot", "post_apply_retrieval"},
+		},
+		{
+			ID:                        "support_closed_loop_maintainer_customer_memory_learn_retrieve",
+			Domain:                    "support",
+			Category:                  "closed_loop_maintainer",
+			Input:                     "What update channel should you use for me?",
+			ExpectedQuality:           []string{"customer_preference", "knowledge_grounding"},
+			Risk:                      "medium",
+			RiskTier:                  "medium",
+			ExpectedScope:             "in_scope",
+			ExpectedLanguage:          "en",
+			MinimumOverall:            0.70,
+			LiveGate:                  true,
+			ExecutionMode:             "platform_flow",
+			PlatformFlowKind:          "maintainer_customer_memory_learn_retrieve",
+			MinimumDimensions:         map[string]float64{"customer_preference": 0.85},
+			RequiredRuntimeAssertions: []string{"customer_memory_workspace", "session_learning_run", "customer_memory_snapshot", "same_customer_memory_only"},
+		},
+	}
 }
 
 func FindScenarioByID(id string) (ScenarioExpectation, bool) {
@@ -1259,6 +1326,9 @@ func normalizeScenarioSeed(seed ScenarioExpectation) ScenarioExpectation {
 	}
 	if len(seed.RequiredEvidenceClasses) == 0 {
 		seed.RequiredEvidenceClasses = append([]string(nil), seed.RequiredEvidenceKinds...)
+	}
+	if strings.TrimSpace(seed.ExecutionMode) == "" {
+		seed.ExecutionMode = "fixture"
 	}
 	return seed
 }

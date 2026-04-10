@@ -1667,6 +1667,90 @@ func TestOperatorFeedbackCompilesPreferenceAndKnowledgeProposal(t *testing.T) {
 	}
 }
 
+func TestOperatorFeedbackTargetsResponseAndDerivesLinkage(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_resp_feedback", Channel: "acp", AgentID: "agent_1", CustomerID: "cust_1", Status: session.StatusClosed, ClosedAt: now, CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []session.Event{
+		{ID: "evt_customer", SessionID: "sess_resp_feedback", Source: "customer", Kind: "message", TraceID: "trace_resp", CreatedAt: now, Content: []session.ContentPart{{Type: "text", Text: "What's the return window?"}}},
+		{ID: "evt_assistant", SessionID: "sess_resp_feedback", Source: "assistant", Kind: "message", TraceID: "trace_resp", ExecutionID: "exec_resp", CreatedAt: now, Content: []session.ContentPart{{Type: "text", Text: "The return window is 14 days."}}},
+	} {
+		if err := repo.AppendEvent(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := repo.SaveResponse(context.Background(), responsedomain.Response{
+		ID:              "resp_target",
+		SessionID:       "sess_resp_feedback",
+		ExecutionID:     "exec_resp",
+		TraceID:         "trace_resp",
+		MessageEventIDs: []string{"evt_assistant"},
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_resp_feedback/feedback", strings.NewReader(`{
+		"id":"feedback_response_1",
+		"response_id":"resp_target",
+		"score":2,
+		"comment":"This answer used the old return window.",
+		"correction":"The correct return window is 30 days."
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("feedback status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var item feedback.Record
+	if err := json.Unmarshal(rec.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	if item.ResponseID != "resp_target" || item.ExecutionID != "exec_resp" || item.TraceID != "trace_resp" {
+		t.Fatalf("feedback = %#v, want response linkage derived", item)
+	}
+	if len(item.TargetEventIDs) != 1 || item.TargetEventIDs[0] != "evt_assistant" {
+		t.Fatalf("feedback target events = %#v, want assistant message event", item.TargetEventIDs)
+	}
+	if scope := fmt.Sprint(item.Metadata["feedback_scope"]); scope != "response" {
+		t.Fatalf("feedback metadata = %#v, want response scope", item.Metadata)
+	}
+	if len(item.Outputs.KnowledgeProposalIDs) != 1 {
+		t.Fatalf("feedback outputs = %#v, want one knowledge proposal from correction", item.Outputs)
+	}
+}
+
+func TestOperatorFeedbackRejectsDetailedFieldsWithoutResponseTarget(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_invalid_feedback", Channel: "acp", AgentID: "agent_1", Status: session.StatusClosed, ClosedAt: now, CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_invalid_feedback/feedback", strings.NewReader(`{
+		"id":"feedback_invalid",
+		"score":1,
+		"comment":"bad answer"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("feedback status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
 func TestOperatorFeedbackDoesNotRoutePreferenceOnlyMediaSessionToKnowledge(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)

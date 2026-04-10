@@ -46,11 +46,15 @@ func (l *Learner) CompileFeedback(ctx context.Context, record feedback.Record, s
 		return out, nil
 	}
 	record.Text = strings.TrimSpace(record.Text)
-	if record.Text == "" {
+	learningText := strings.TrimSpace(feedbackLearningFocus(record))
+	if learningText == "" {
+		if record.Score != nil {
+			return out, nil
+		}
 		out.Unclassified = append(out.Unclassified, "empty feedback")
 		return out, nil
 	}
-	for _, finding := range preferenceFindings(record.Text) {
+	for _, finding := range preferenceFindings(learningText) {
 		pref, event, err := l.preferenceRecord(ctx, sess, record.ExecutionID, record.TraceID, "operator_feedback", finding)
 		if err != nil {
 			return out, err
@@ -72,7 +76,7 @@ func (l *Learner) CompileFeedback(ctx context.Context, record feedback.Record, s
 		out.PreferenceIDs = append(out.PreferenceIDs, pref.ID)
 		out.PreferenceEventIDs = append(out.PreferenceEventIDs, event.ID)
 	}
-	category := strings.ToLower(strings.TrimSpace(record.Category + " " + strings.Join(record.Labels, " ") + " " + record.Text))
+	category := strings.ToLower(strings.TrimSpace(record.Category + " " + strings.Join(record.Labels, " ") + " " + learningText))
 	switch {
 	case isSoulFeedback(category):
 		proposalID, err := l.proposePolicyChange(ctx, sess, record, true)
@@ -99,6 +103,16 @@ func (l *Learner) CompileFeedback(ctx context.Context, record feedback.Record, s
 			out.KnowledgeProposalIDs = append(out.KnowledgeProposalIDs, proposalID)
 		}
 	default:
+		if record.IsResponseScoped() && strings.TrimSpace(record.Correction) != "" && len(out.PreferenceIDs) == 0 {
+			proposalID, err := l.proposeKnowledgeFromFeedback(ctx, sess, record, signals)
+			if err != nil {
+				return out, err
+			}
+			if proposalID != "" {
+				out.KnowledgeProposalIDs = append(out.KnowledgeProposalIDs, proposalID)
+				break
+			}
+		}
 		if len(out.PreferenceIDs) == 0 {
 			out.Unclassified = append(out.Unclassified, "feedback did not match preference, knowledge, policy, or soul compiler rules")
 		}
@@ -397,11 +411,12 @@ func (l *Learner) proposeKnowledgeFromFeedback(ctx context.Context, sess session
 		return "", nil
 	}
 	now := time.Now().UTC()
-	id := stableID("kprop", scopeKind, scopeID, record.ID, record.Text)
-	pageTitle := feedbackKnowledgeTitle(record.Text)
+	learningText := strings.TrimSpace(feedbackLearningFocus(record))
+	id := stableID("kprop", scopeKind, scopeID, record.ID, learningText)
+	pageTitle := feedbackKnowledgeTitle(learningText)
 	pagePayload := map[string]any{
 		"title":     pageTitle,
-		"body":      record.Text,
+		"body":      learningText,
 		"operation": "append",
 		"citations": []map[string]any{{
 			"uri":    "session:" + sess.ID,
@@ -423,7 +438,10 @@ func (l *Learner) proposeKnowledgeFromFeedback(ctx context.Context, sess session
 			"trace_id":          record.TraceID,
 			"feedback_id":       record.ID,
 			"operator_id":       record.OperatorID,
-			"operator_feedback": record.Text,
+			"operator_feedback": learningText,
+			"response_id":       record.ResponseID,
+			"comment":           record.Comment,
+			"correction":        record.Correction,
 			"signals":           signalPayloads(signals),
 			"title":             pagePayload["title"],
 			"body":              pagePayload["body"],
@@ -432,6 +450,9 @@ func (l *Learner) proposeKnowledgeFromFeedback(ctx context.Context, sess session
 		},
 		CreatedAt: now,
 		UpdatedAt: now,
+	}
+	if strings.TrimSpace(record.ResponseID) != "" {
+		item.Evidence = append(item.Evidence, knowledge.Citation{URI: "response:" + record.ResponseID, Anchor: record.TraceID, Title: pageTitle})
 	}
 	return id, l.repo.SaveKnowledgeUpdateProposal(ctx, item)
 }
@@ -454,25 +475,42 @@ func feedbackKnowledgeTitle(text string) string {
 	return text + " [" + stableChecksum(text)[:8] + "]"
 }
 
+func feedbackLearningFocus(record feedback.Record) string {
+	if text := strings.TrimSpace(record.Correction); text != "" {
+		if comment := strings.TrimSpace(record.Comment); comment != "" {
+			return text + "\n\nComment: " + comment
+		}
+		return text
+	}
+	if text := strings.TrimSpace(record.Comment); text != "" {
+		if body := strings.TrimSpace(record.Text); body != "" {
+			return body + "\n\nComment: " + text
+		}
+		return text
+	}
+	return strings.TrimSpace(record.LearningText())
+}
+
 func (l *Learner) proposePolicyChange(ctx context.Context, sess session.Session, record feedback.Record, soulOnly bool) (string, error) {
 	base, ok := l.baseBundle(ctx, sess)
 	if !ok {
 		return "", nil
 	}
 	now := time.Now().UTC()
-	short := stableChecksum(record.ID + "\x00" + record.Text)[:12]
+	learningText := strings.TrimSpace(feedbackLearningFocus(record))
+	short := stableChecksum(record.ID + "\x00" + learningText)[:12]
 	candidate := base
 	candidate.ID = base.ID + "_feedback_" + short
 	candidate.Version = strings.TrimSpace(base.Version + "+feedback." + short)
 	candidate.ImportedAt = now
 	candidate.SourceYAML = base.SourceYAML
 	if soulOnly {
-		applySoulFeedback(&candidate.Soul, record.Text)
+		applySoulFeedback(&candidate.Soul, learningText)
 	} else {
 		candidate.Guidelines = append(candidate.Guidelines, policy.Guideline{
 			ID:          "feedback_" + short,
 			When:        "feedback:" + record.ID,
-			Then:        record.Text,
+			Then:        learningText,
 			Scope:       "operator_feedback",
 			Criticality: "high",
 		})
@@ -496,6 +534,9 @@ func (l *Learner) proposePolicyChange(ctx context.Context, sess session.Session,
 	}
 	if strings.TrimSpace(record.TraceID) != "" {
 		proposal.EvidenceRefs = append(proposal.EvidenceRefs, "trace:"+record.TraceID)
+	}
+	if strings.TrimSpace(record.ResponseID) != "" {
+		proposal.EvidenceRefs = append(proposal.EvidenceRefs, "response:"+record.ResponseID)
 	}
 	return proposalID, l.repo.SaveProposal(ctx, proposal)
 }

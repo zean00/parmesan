@@ -61,6 +61,54 @@ func TestCompileFeedbackCreatesDistinctKnowledgePageTitles(t *testing.T) {
 	}
 }
 
+func TestCompileFeedbackUsesResponseCorrectionText(t *testing.T) {
+	repo := memory.New()
+	learner := New(repo)
+	sess := session.Session{ID: "sess_1", AgentID: "agent_1", Channel: "acp"}
+
+	outputs, err := learner.CompileFeedback(context.Background(), feedback.Record{
+		ID:         "fb_response_1",
+		ResponseID: "resp_1",
+		Category:   "knowledge",
+		Comment:    "The answer used stale information.",
+		Correction: "Knowledge: returns now take 30 days after verification.",
+	}, sess, nil, nil)
+	if err != nil {
+		t.Fatalf("CompileFeedback() error = %v", err)
+	}
+	if len(outputs.KnowledgeProposalIDs) != 1 {
+		t.Fatalf("outputs = %#v, want one knowledge proposal", outputs)
+	}
+	item, err := repo.GetKnowledgeUpdateProposal(context.Background(), outputs.KnowledgeProposalIDs[0])
+	if err != nil {
+		t.Fatalf("GetKnowledgeUpdateProposal() error = %v", err)
+	}
+	if got := proposalPageTitle(item.Payload); got == "" || got == "Operator feedback" {
+		t.Fatalf("proposal title = %q, want title derived from correction text", got)
+	}
+	if item.Payload["response_id"] != "resp_1" {
+		t.Fatalf("payload = %#v, want response_id", item.Payload)
+	}
+}
+
+func TestCompileFeedbackScoreOnlyDoesNotCreateLearningOutputs(t *testing.T) {
+	repo := memory.New()
+	learner := New(repo)
+	sess := session.Session{ID: "sess_1", AgentID: "agent_1", Channel: "acp"}
+	score := 2
+	outputs, err := learner.CompileFeedback(context.Background(), feedback.Record{
+		ID:         "fb_score_only",
+		ResponseID: "resp_1",
+		Score:      &score,
+	}, sess, nil, nil)
+	if err != nil {
+		t.Fatalf("CompileFeedback() error = %v", err)
+	}
+	if len(outputs.PreferenceIDs) != 0 || len(outputs.KnowledgeProposalIDs) != 0 || len(outputs.PolicyProposalIDs) != 0 || len(outputs.Unclassified) != 0 {
+		t.Fatalf("outputs = %#v, want score-only feedback to skip learning outputs", outputs)
+	}
+}
+
 func proposalPageTitle(payload map[string]any) string {
 	page, _ := payload["page"].(map[string]any)
 	title, _ := page["title"].(string)

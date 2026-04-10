@@ -10,6 +10,7 @@ import (
 	"github.com/sahal/parmesan/internal/config"
 	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/customer"
+	"github.com/sahal/parmesan/internal/domain/feedback"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/maintainer"
 	"github.com/sahal/parmesan/internal/domain/session"
@@ -153,5 +154,78 @@ func TestSessionLearningCreatesCustomerMemoryAndPreferences(t *testing.T) {
 	prefs, err := repo.ListCustomerPreferences(ctx, customer.PreferenceQuery{AgentID: "agent_1", CustomerID: "cust_1", Limit: 100})
 	if err != nil || len(prefs) == 0 {
 		t.Fatalf("ListCustomerPreferences() = %v, %v; want learned preferences", prefs, err)
+	}
+}
+
+func TestQueueFeedbackRoutesResponseCorrectionToSharedWiki(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.New()
+	svc := NewService(repo)
+	now := time.Now().UTC()
+	sess := session.Session{
+		ID:         "sess_feedback_scope",
+		AgentID:    "agent_1",
+		CustomerID: "cust_1",
+		Channel:    "web",
+		Status:     session.StatusClosed,
+		CreatedAt:  now,
+	}
+	if err := repo.CreateSession(ctx, sess); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	record := feedback.Record{
+		ID:         "fb_response_scope",
+		SessionID:  sess.ID,
+		ResponseID: "resp_1",
+		Correction: "The return window is 30 days.",
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	job, err := svc.QueueFeedback(ctx, sess, record)
+	if err != nil {
+		t.Fatalf("QueueFeedback() error = %v", err)
+	}
+	if job.Mode != maintainer.ModeSharedWiki || job.ScopeKind != "agent" || job.ScopeID != "agent_1" {
+		t.Fatalf("job = %#v, want shared wiki scope for response correction", job)
+	}
+}
+
+func TestQueueFeedbackSkipsScoreOnlyResponseFeedback(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.New()
+	svc := NewService(repo)
+	now := time.Now().UTC()
+	sess := session.Session{
+		ID:         "sess_feedback_score_only",
+		AgentID:    "agent_1",
+		CustomerID: "cust_1",
+		Channel:    "web",
+		Status:     session.StatusClosed,
+		CreatedAt:  now,
+	}
+	if err := repo.CreateSession(ctx, sess); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	score := 1
+	job, err := svc.QueueFeedback(ctx, sess, feedback.Record{
+		ID:         "fb_score_only",
+		SessionID:  sess.ID,
+		ResponseID: "resp_1",
+		Score:      &score,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	})
+	if err != nil {
+		t.Fatalf("QueueFeedback() error = %v", err)
+	}
+	if job.ID != "" {
+		t.Fatalf("job = %#v, want score-only feedback to skip maintainer queue", job)
+	}
+	jobs, err := repo.ListMaintainerJobs(ctx, maintainer.JobQuery{SessionID: sess.ID, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMaintainerJobs() error = %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("jobs = %#v, want no maintainer jobs for score-only feedback", jobs)
 	}
 }

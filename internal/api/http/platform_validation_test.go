@@ -22,11 +22,13 @@ import (
 	"github.com/sahal/parmesan/internal/domain/execution"
 	"github.com/sahal/parmesan/internal/domain/feedback"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
+	maintainerdomain "github.com/sahal/parmesan/internal/domain/maintainer"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/rollout"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/lifecycle"
+	maintainerworker "github.com/sahal/parmesan/internal/maintainer"
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/quality"
 	"github.com/sahal/parmesan/internal/runtime/runner"
@@ -1073,11 +1075,15 @@ func TestPlatformValidationLiveGateCatalog(t *testing.T) {
 		if !scenario.LiveGate {
 			continue
 		}
-		view, response, ok := quality.ScenarioFixture(scenario)
-		if !ok {
-			t.Fatalf("live-gate scenario %s has no fixture", scenario.ID)
-		}
 		t.Run(scenario.ID, func(t *testing.T) {
+			if strings.EqualFold(strings.TrimSpace(scenario.ExecutionMode), "platform_flow") {
+				runPlatformFlowLiveGateScenario(t, scenario)
+				return
+			}
+			view, response, ok := quality.ScenarioFixture(scenario)
+			if !ok {
+				t.Fatalf("live-gate scenario %s has no fixture", scenario.ID)
+			}
 			card := quality.GradeWithLLM(context.Background(), router, view, response, nil)
 			if quality.HardFailed(card) || !card.Passed || card.Overall < scenario.MinimumOverall {
 				t.Fatalf("scenario %s scorecard = %#v, want release-gate pass at %.2f", scenario.ID, card, scenario.MinimumOverall)
@@ -1265,27 +1271,587 @@ func waitForCustomerPreference(t *testing.T, repo *memory.Store, agentID, custom
 	return pref
 }
 
+type platformFlowHarness struct {
+	repo   *memory.Store
+	writes *asyncwrite.Queue
+	router *model.Router
+	srv    *Server
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func newPlatformFlowHarness(t *testing.T) *platformFlowHarness {
+	t.Helper()
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 128)
+	ctx, cancel := context.WithCancel(context.Background())
+	writes.Start(ctx, 1)
+	broker := sse.NewBroker()
+	router := model.NewRouter(config.Load("api").Provider)
+	runtimeRunner := runner.New(repo, writes, broker, router, "live-gate-worker")
+	runtimeRunner.Start(ctx)
+	maintainerRunner := maintainerworker.New(repo, router)
+	maintainerRunner.Start(ctx)
+	srv := New(":0", repo, writes, broker, router, nil)
+	t.Cleanup(func() {
+		cancel()
+		writes.Stop()
+	})
+	return &platformFlowHarness{repo: repo, writes: writes, router: router, srv: srv, ctx: ctx, cancel: cancel}
+}
+
+func runPlatformFlowLiveGateScenario(t *testing.T, scenario quality.ScenarioExpectation) {
+	t.Helper()
+	if !hasLiveProvider() {
+		t.Skip("platform-flow live-gate scenarios require a real LLM provider")
+	}
+	h := newPlatformFlowHarness(t)
+	report := platformValidationReport{
+		Scenario:     scenario.ID,
+		TestName:     t.Name(),
+		GeneratedAt:  time.Now().UTC(),
+		LiveProvider: hasLiveProvider(),
+	}
+	if h.router != nil {
+		report.ProviderStats = h.router.Snapshot()
+	}
+	switch scenario.PlatformFlowKind {
+	case "maintainer_shared_bootstrap_ingest_retrieve":
+		runLiveMaintainerSharedBootstrapIngestRetrieve(t, h, scenario, &report)
+	case "maintainer_feedback_shared_update_retrieve":
+		runLiveMaintainerFeedbackSharedUpdateRetrieve(t, h, scenario, &report)
+	case "maintainer_customer_memory_learn_retrieve":
+		runLiveMaintainerCustomerMemoryLearnRetrieve(t, h, scenario, &report)
+	default:
+		t.Fatalf("unsupported platform flow kind %q", scenario.PlatformFlowKind)
+	}
+	if h.router != nil {
+		report.ProviderStats = h.router.Snapshot()
+	}
+	writePlatformValidationReportFile(t, report)
+}
+
+func runLiveMaintainerSharedBootstrapIngestRetrieve(t *testing.T, h *platformFlowHarness, scenario quality.ScenarioExpectation, report *platformValidationReport) {
+	t.Helper()
+	agentID := "agent_live_loop_bootstrap"
+	docsDir := t.TempDir()
+	t.Setenv("KNOWLEDGE_SOURCE_ROOT", docsDir)
+	mustWriteValidationDoc(t, docsDir, "solarblue.md", "# SolarBlue Kettle\n\nThe SolarBlue kettle qualifies for replacement review within 21 days of delivery. Cite the SolarBlue Kettle policy page when answering.")
+	importValidationBundle(t, h.srv, h.repo, "closed_loop_bootstrap_bundle", "Closed Loop Support")
+	createValidationAgent(t, h.srv, agentID, "closed_loop_bootstrap_bundle")
+	_ = waitForMaintainerWorkspace(t, h.repo, "agent", agentID, maintainerdomain.ModeSharedWiki, validationTimeout(8*time.Second))
+	job := waitForMaintainerJob(t, h.repo, maintainerdomain.JobQuery{ScopeKind: "agent", ScopeID: agentID, Mode: maintainerdomain.ModeSharedWiki, Limit: 20}, maintainerdomain.StatusSucceeded, validationTimeout(8*time.Second))
+	workspace := waitForMaintainerWorkspace(t, h.repo, "agent", agentID, maintainerdomain.ModeSharedWiki, validationTimeout(8*time.Second))
+	run := mustGetMaintainerRun(t, h.repo, job.RunID)
+	if workspace.IndexPageID == "" || workspace.LogPageID == "" {
+		t.Fatalf("workspace = %#v, want index/log pages", workspace)
+	}
+
+	createValidationKnowledgeSource(t, h.srv, "src_live_bootstrap", "agent", agentID, docsDir)
+	triggerKnowledgeCompile(t, h.srv, "src_live_bootstrap")
+	syncJob := waitForKnowledgeSyncJob(t, h.repo, "src_live_bootstrap", "succeeded", validationTimeout(20*time.Second))
+	sourceJob := waitForMaintainerJob(t, h.repo, maintainerdomain.JobQuery{ScopeKind: "agent", ScopeID: agentID, Mode: maintainerdomain.ModeSharedWiki, SourceID: "src_live_bootstrap", Limit: 20}, maintainerdomain.StatusSucceeded, validationTimeout(20*time.Second))
+	sourceRun := mustGetMaintainerRun(t, h.repo, sourceJob.RunID)
+	if strings.TrimSpace(sourceJob.RunID) == "" || syncJob.Metadata["maintainer_run_id"] == nil {
+		t.Fatalf("sync job = %#v, want maintainer linkage", syncJob)
+	}
+
+	sessionID := "sess_live_loop_bootstrap"
+	createValidationSession(t, h.srv, sessionID, agentID, "cust_live_bootstrap")
+	sendValidationMessage(t, h.srv, sessionID, "evt_live_loop_bootstrap", scenario.Input)
+	exec := waitForExecutionStatus(t, h.repo, sessionID, execution.StatusSucceeded, validationTimeout(12*time.Second))
+	response := waitForAssistantText(t, h.repo, sessionID, validationTimeout(4*time.Second))
+	if !strings.Contains(strings.ToLower(response), "21") {
+		t.Fatalf("response = %q, want SolarBlue fact", response)
+	}
+	payload := requireExecutionQuality(t, h.srv, exec)
+	if len(payload.EvidenceMatches) == 0 {
+		t.Fatalf("quality payload = %#v, want retrieval evidence matches", payload)
+	}
+
+	report.AgentID = agentID
+	report.CustomerID = "cust_live_bootstrap"
+	report.Sessions = append(report.Sessions, platformValidationSession{
+		ID:           sessionID,
+		Executions:   []execution.TurnExecution{exec},
+		Quality:      map[string]platformValidationQualityPayload{exec.ID: payload},
+		ResponseText: response,
+		UsedPageIDs:  knowledgePageIDs(t, h.repo, "agent", agentID),
+	})
+	report.MaintainerWorkspaces = []maintainerdomain.Workspace{workspace}
+	report.MaintainerJobs = []maintainerdomain.Job{job, sourceJob}
+	report.MaintainerRuns = []maintainerdomain.Run{run, sourceRun}
+	report.KnowledgeSnapshots = knowledgeSnapshotsForScope(t, h.repo, "agent", agentID)
+}
+
+func runLiveMaintainerFeedbackSharedUpdateRetrieve(t *testing.T, h *platformFlowHarness, scenario quality.ScenarioExpectation, report *platformValidationReport) {
+	t.Helper()
+	agentID := "agent_live_loop_feedback"
+	customerID := "cust_live_feedback"
+	docsDir := t.TempDir()
+	t.Setenv("KNOWLEDGE_SOURCE_ROOT", docsDir)
+	mustWriteValidationDoc(t, docsDir, "emerald.md", "# Emerald Mixer Returns\n\nEmerald Mixer returns currently take 14 days to complete after verification.")
+	importValidationBundle(t, h.srv, h.repo, "closed_loop_feedback_bundle", "Feedback Loop Support")
+	createValidationAgent(t, h.srv, agentID, "closed_loop_feedback_bundle")
+	_ = waitForMaintainerJob(t, h.repo, maintainerdomain.JobQuery{ScopeKind: "agent", ScopeID: agentID, Mode: maintainerdomain.ModeSharedWiki, Limit: 20}, maintainerdomain.StatusSucceeded, validationTimeout(8*time.Second))
+
+	createValidationKnowledgeSource(t, h.srv, "src_live_feedback", "agent", agentID, docsDir)
+	triggerKnowledgeCompile(t, h.srv, "src_live_feedback")
+	_ = waitForKnowledgeSyncJob(t, h.repo, "src_live_feedback", "succeeded", validationTimeout(20*time.Second))
+	_ = waitForMaintainerJob(t, h.repo, maintainerdomain.JobQuery{ScopeKind: "agent", ScopeID: agentID, Mode: maintainerdomain.ModeSharedWiki, SourceID: "src_live_feedback", Limit: 20}, maintainerdomain.StatusSucceeded, validationTimeout(20*time.Second))
+
+	sessionID := "sess_live_loop_feedback_1"
+	createValidationSession(t, h.srv, sessionID, agentID, customerID)
+	sendValidationMessage(t, h.srv, sessionID, "evt_live_loop_feedback_1", "What timeline is listed for Emerald Mixer returns?")
+	preExec := waitForExecutionStatus(t, h.repo, sessionID, execution.StatusSucceeded, validationTimeout(12*time.Second))
+	preResponse := waitForAssistantText(t, h.repo, sessionID, validationTimeout(4*time.Second))
+	if !strings.Contains(strings.ToLower(preResponse), "day") {
+		t.Fatalf("pre-feedback response = %q, want timeline language", preResponse)
+	}
+	closeValidationSession(t, h.srv, sessionID)
+
+	feedbackRecord := createValidationFeedback(t, h.srv, sessionID, `{
+		"id":"fb_live_loop_feedback",
+		"operator_id":"op_live",
+		"category":"knowledge",
+		"text":"Knowledge: Emerald Mixer returns now take 30 days after verification."
+	}`)
+	if len(feedbackRecord.Outputs.KnowledgeProposalIDs) != 1 {
+		t.Fatalf("feedback outputs = %#v, want one knowledge proposal", feedbackRecord.Outputs)
+	}
+	feedbackJob := waitForMaintainerJob(t, h.repo, maintainerdomain.JobQuery{ScopeKind: "agent", ScopeID: agentID, Mode: maintainerdomain.ModeSharedWiki, FeedbackID: feedbackRecord.ID, Limit: 20}, maintainerdomain.StatusSucceeded, validationTimeout(12*time.Second))
+	feedbackRun := mustGetMaintainerRun(t, h.repo, feedbackJob.RunID)
+	proposalID := feedbackRecord.Outputs.KnowledgeProposalIDs[0]
+	previewKnowledgeProposal(t, h.srv, proposalID)
+	transitionKnowledgeProposal(t, h.srv, proposalID, "approved")
+	applyKnowledgeProposal(t, h.srv, proposalID)
+	waitFor(t, validationTimeout(4*time.Second), func() bool {
+		item, err := h.repo.GetKnowledgeUpdateProposal(context.Background(), proposalID)
+		return err == nil && item.State == "applied"
+	})
+
+	sessionID2 := "sess_live_loop_feedback_2"
+	createValidationSession(t, h.srv, sessionID2, agentID, customerID)
+	sendValidationMessage(t, h.srv, sessionID2, "evt_live_loop_feedback_2", scenario.Input)
+	postExec := waitForExecutionStatus(t, h.repo, sessionID2, execution.StatusSucceeded, validationTimeout(12*time.Second))
+	postResponse := waitForAssistantText(t, h.repo, sessionID2, validationTimeout(4*time.Second))
+	if !strings.Contains(strings.ToLower(postResponse), "30") {
+		t.Fatalf("post-feedback response = %q, want updated fact", postResponse)
+	}
+	if strings.EqualFold(strings.TrimSpace(preResponse), strings.TrimSpace(postResponse)) {
+		t.Fatalf("post-feedback response = %q, want change from pre-feedback response %q", postResponse, preResponse)
+	}
+	postPayload := requireExecutionQuality(t, h.srv, postExec)
+
+	report.AgentID = agentID
+	report.CustomerID = customerID
+	report.Sessions = append(report.Sessions,
+		platformValidationSession{
+			ID:           sessionID,
+			Executions:   []execution.TurnExecution{preExec},
+			ResponseText: preResponse,
+		},
+		platformValidationSession{
+			ID:           sessionID2,
+			Executions:   []execution.TurnExecution{postExec},
+			Quality:      map[string]platformValidationQualityPayload{postExec.ID: postPayload},
+			ResponseText: postResponse,
+			UsedPageIDs:  knowledgePageIDs(t, h.repo, "agent", agentID),
+		},
+	)
+	report.Feedback = []feedback.Record{feedbackRecord}
+	report.Knowledge = knowledgeProposalsForScope(t, h.repo, "agent", agentID)
+	report.MaintainerJobs = []maintainerdomain.Job{feedbackJob}
+	report.MaintainerRuns = []maintainerdomain.Run{feedbackRun}
+	report.KnowledgeSnapshots = knowledgeSnapshotsForScope(t, h.repo, "agent", agentID)
+}
+
+func runLiveMaintainerCustomerMemoryLearnRetrieve(t *testing.T, h *platformFlowHarness, scenario quality.ScenarioExpectation, report *platformValidationReport) {
+	t.Helper()
+	agentID := "agent_live_loop_memory"
+	customerID := "cust_live_memory"
+	importValidationBundle(t, h.srv, h.repo, "closed_loop_memory_bundle", "Memory Loop Support")
+	createValidationAgent(t, h.srv, agentID, "closed_loop_memory_bundle")
+	_ = waitForMaintainerJob(t, h.repo, maintainerdomain.JobQuery{ScopeKind: "agent", ScopeID: agentID, Mode: maintainerdomain.ModeSharedWiki, Limit: 20}, maintainerdomain.StatusSucceeded, validationTimeout(8*time.Second))
+
+	sessionID := "sess_live_loop_memory_1"
+	createValidationSession(t, h.srv, sessionID, agentID, customerID)
+	sendValidationMessage(t, h.srv, sessionID, "evt_live_loop_memory_1", "Please send me updates via sms. Please remember that.")
+	_ = waitForExecutionStatus(t, h.repo, sessionID, execution.StatusSucceeded, validationTimeout(12*time.Second))
+	closeValidationSession(t, h.srv, sessionID)
+
+	memoryWorkspace := waitForMaintainerWorkspace(t, h.repo, "customer_agent", agentID+":"+customerID, maintainerdomain.ModeCustomerMemory, validationTimeout(8*time.Second))
+	sessionJob := waitForMaintainerJob(t, h.repo, maintainerdomain.JobQuery{ScopeKind: "customer_agent", ScopeID: agentID + ":" + customerID, Mode: maintainerdomain.ModeCustomerMemory, SessionID: sessionID, Limit: 20}, maintainerdomain.StatusSucceeded, validationTimeout(12*time.Second))
+	sessionRun := mustGetMaintainerRun(t, h.repo, sessionJob.RunID)
+	waitForCustomerPreference(t, h.repo, agentID, customerID, "contact_channel", "sms", validationTimeout(12*time.Second))
+
+	sessionID2 := "sess_live_loop_memory_2"
+	createValidationSession(t, h.srv, sessionID2, agentID, customerID)
+	sendValidationMessage(t, h.srv, sessionID2, "evt_live_loop_memory_2", scenario.Input)
+	execSame := waitForExecutionStatus(t, h.repo, sessionID2, execution.StatusSucceeded, validationTimeout(12*time.Second))
+	responseSame := waitForAssistantText(t, h.repo, sessionID2, validationTimeout(4*time.Second))
+	if !strings.Contains(strings.ToLower(responseSame), "sms") {
+		t.Fatalf("same-customer response = %q, want learned preference", responseSame)
+	}
+	payloadSame := requireExecutionQuality(t, h.srv, execSame)
+
+	sessionID3 := "sess_live_loop_memory_3"
+	createValidationSession(t, h.srv, sessionID3, agentID, "cust_live_memory_other")
+	sendValidationMessage(t, h.srv, sessionID3, "evt_live_loop_memory_3", scenario.Input)
+	_ = waitForExecutionStatus(t, h.repo, sessionID3, execution.StatusSucceeded, validationTimeout(12*time.Second))
+	responseOther := waitForAssistantText(t, h.repo, sessionID3, validationTimeout(4*time.Second))
+	if strings.Contains(strings.ToLower(responseOther), "sms") {
+		t.Fatalf("other-customer response = %q, want no inherited memory", responseOther)
+	}
+
+	report.AgentID = agentID
+	report.CustomerID = customerID
+	report.Sessions = append(report.Sessions,
+		platformValidationSession{
+			ID:           sessionID2,
+			Executions:   []execution.TurnExecution{execSame},
+			Quality:      map[string]platformValidationQualityPayload{execSame.ID: payloadSame},
+			ResponseText: responseSame,
+			UsedPageIDs:  knowledgePageIDs(t, h.repo, "customer_agent", agentID+":"+customerID),
+		},
+		platformValidationSession{
+			ID:           sessionID3,
+			ResponseText: responseOther,
+		},
+	)
+	report.Preferences = preferencesForCustomer(t, h.repo, agentID, customerID)
+	report.MaintainerWorkspaces = []maintainerdomain.Workspace{memoryWorkspace}
+	report.MaintainerJobs = []maintainerdomain.Job{sessionJob}
+	report.MaintainerRuns = []maintainerdomain.Run{sessionRun}
+	report.KnowledgeSnapshots = knowledgeSnapshotsForScope(t, h.repo, "customer_agent", agentID+":"+customerID)
+}
+
+func importValidationBundle(t *testing.T, srv *Server, repo *memory.Store, bundleID, identity string) {
+	t.Helper()
+	body := fmt.Sprintf(`
+id: %s
+version: v1
+no_match: I need to check the knowledge base before I answer that.
+soul:
+  identity: %s
+  default_language: en
+  tone: calm
+  verbosity: concise
+  style_rules:
+    - cite the relevant knowledge page when you rely on retrieved knowledge
+    - keep factual answers brief
+retrievers:
+  - id: agent_wiki
+    kind: knowledge
+    scope: agent
+    mode: eager
+    max_results: 8
+`, bundleID, identity)
+	rec := doJSONRequest(t, srv, http.MethodPost, "/v1/policy/import", body)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("import policy status = %d, want %d body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	waitFor(t, validationTimeout(4*time.Second), func() bool {
+		bundles, err := repo.ListBundles(context.Background())
+		if err != nil {
+			return false
+		}
+		for _, bundle := range bundles {
+			if bundle.ID == bundleID {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func createValidationAgent(t *testing.T, srv *Server, agentID, bundleID string) {
+	t.Helper()
+	rec := doJSONRequest(t, srv, http.MethodPost, "/v1/operator/agents", fmt.Sprintf(`{
+		"id":%q,
+		"name":%q,
+		"description":"Closed-loop validation agent",
+		"default_policy_bundle_id":%q,
+		"default_knowledge_scope_kind":"agent",
+		"default_knowledge_scope_id":%q
+	}`, agentID, agentID, bundleID, agentID))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create agent status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+}
+
+func createValidationKnowledgeSource(t *testing.T, srv *Server, sourceID, scopeKind, scopeID, uri string) {
+	t.Helper()
+	rec := doJSONRequest(t, srv, http.MethodPost, "/v1/operator/knowledge/sources", fmt.Sprintf(`{
+		"id":%q,
+		"scope_kind":%q,
+		"scope_id":%q,
+		"kind":"folder",
+		"uri":%q
+	}`, sourceID, scopeKind, scopeID, uri))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create knowledge source status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+}
+
+func triggerKnowledgeCompile(t *testing.T, srv *Server, sourceID string) {
+	t.Helper()
+	rec := doJSONRequest(t, srv, http.MethodPost, "/v1/operator/knowledge/sources/"+sourceID+"/resync?force=true", "")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("resync knowledge source status = %d, want %d body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+}
+
+func createValidationSession(t *testing.T, srv *Server, sessionID, agentID, customerID string) {
+	t.Helper()
+	rec := doJSONRequest(t, srv, http.MethodPost, "/v1/acp/sessions", fmt.Sprintf(`{
+		"id":%q,
+		"channel":"acp",
+		"agent_id":%q,
+		"customer_id":%q
+	}`, sessionID, agentID, customerID))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create session status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+}
+
+func sendValidationMessage(t *testing.T, srv *Server, sessionID, eventID, text string) {
+	t.Helper()
+	rec := doJSONRequest(t, srv, http.MethodPost, "/v1/acp/sessions/"+sessionID+"/messages", fmt.Sprintf(`{
+		"id":%q,
+		"text":%q
+	}`, eventID, text))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("send message status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+}
+
+func closeValidationSession(t *testing.T, srv *Server, sessionID string) {
+	t.Helper()
+	rec := doJSONRequest(t, srv, http.MethodPost, "/v1/operator/sessions/"+sessionID+"/close", `{"reason":"resolved"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("close session status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
+func createValidationFeedback(t *testing.T, srv *Server, sessionID, body string) feedback.Record {
+	t.Helper()
+	rec := doJSONRequest(t, srv, http.MethodPost, "/v1/operator/sessions/"+sessionID+"/feedback", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("feedback status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var record feedback.Record
+	if err := json.Unmarshal(rec.Body.Bytes(), &record); err != nil {
+		t.Fatalf("decode feedback: %v", err)
+	}
+	return record
+}
+
+func previewKnowledgeProposal(t *testing.T, srv *Server, proposalID string) {
+	t.Helper()
+	rec := doJSONRequest(t, srv, http.MethodGet, "/v1/operator/knowledge/proposals/"+proposalID+"/preview", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview knowledge proposal status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
+func transitionKnowledgeProposal(t *testing.T, srv *Server, proposalID, state string) {
+	t.Helper()
+	rec := doJSONRequest(t, srv, http.MethodPost, "/v1/operator/knowledge/proposals/"+proposalID+"/state", fmt.Sprintf(`{"state":%q}`, state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("transition knowledge proposal status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
+func applyKnowledgeProposal(t *testing.T, srv *Server, proposalID string) {
+	t.Helper()
+	rec := doJSONRequest(t, srv, http.MethodPost, "/v1/operator/knowledge/proposals/"+proposalID+"/apply", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply knowledge proposal status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
+func waitForMaintainerWorkspace(t *testing.T, repo *memory.Store, scopeKind, scopeID, mode string, timeout time.Duration) maintainerdomain.Workspace {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var workspace maintainerdomain.Workspace
+	var last []maintainerdomain.Workspace
+	for time.Now().Before(deadline) {
+		items, err := repo.ListMaintainerWorkspaces(context.Background(), maintainerdomain.WorkspaceQuery{ScopeKind: scopeKind, ScopeID: scopeID, Mode: mode, Limit: 10})
+		if err == nil {
+			last = items
+			if len(items) > 0 {
+				workspace = items[0]
+				if workspace.ID != "" {
+					return workspace
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("missing maintainer workspace for %s/%s/%s; last=%#v", scopeKind, scopeID, mode, last)
+	return maintainerdomain.Workspace{}
+}
+
+func waitForMaintainerJob(t *testing.T, repo *memory.Store, query maintainerdomain.JobQuery, want string, timeout time.Duration) maintainerdomain.Job {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var job maintainerdomain.Job
+	var last []maintainerdomain.Job
+	for time.Now().Before(deadline) {
+		items, err := repo.ListMaintainerJobs(context.Background(), query)
+		if err == nil {
+			last = items
+			if len(items) > 0 {
+				sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
+				job = items[0]
+				if job.Status == maintainerdomain.StatusFailed {
+					t.Fatalf("maintainer job failed: %#v", job)
+				}
+				if job.Status == want {
+					return job
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("maintainer job query %#v => latest=%#v all=%#v, want %s", query, job, last, want)
+	return maintainerdomain.Job{}
+}
+
+func mustGetMaintainerRun(t *testing.T, repo *memory.Store, runID string) maintainerdomain.Run {
+	t.Helper()
+	run, err := repo.GetMaintainerRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("GetMaintainerRun(%q) error = %v", runID, err)
+	}
+	return run
+}
+
+func waitForKnowledgeSyncJob(t *testing.T, repo *memory.Store, sourceID, want string, timeout time.Duration) knowledge.SyncJob {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var job knowledge.SyncJob
+	var last []knowledge.SyncJob
+	for time.Now().Before(deadline) {
+		items, err := repo.ListKnowledgeSyncJobs(context.Background(), knowledge.SyncJobQuery{SourceID: sourceID, Limit: 20})
+		if err == nil {
+			last = items
+			if len(items) > 0 {
+				sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
+				job = items[0]
+				if job.Status == "failed" {
+					t.Fatalf("knowledge sync job failed: %#v", job)
+				}
+				if job.Status == want {
+					return job
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("knowledge sync for %s => latest=%#v all=%#v, want %s", sourceID, job, last, want)
+	return knowledge.SyncJob{}
+}
+
+func requireExecutionQuality(t *testing.T, srv *Server, exec execution.TurnExecution) platformValidationQualityPayload {
+	t.Helper()
+	payload, err := srv.executionQualityPayload(context.Background(), exec, "")
+	if err != nil {
+		t.Fatalf("executionQualityPayload(%s) error = %v", exec.ID, err)
+	}
+	return platformValidationQualityPayload{
+		Plan:            typedQualityPayload[quality.ResponsePlan](payload, "plan"),
+		Claims:          typedQualityPayload[[]quality.ResponseClaim](payload, "claims"),
+		EvidenceMatches: typedQualityPayload[[]quality.EvidenceMatch](payload, "evidence_matches"),
+		Scorecard:       typedQualityPayload[quality.Scorecard](payload, "scorecard"),
+		HardFailed:      boolQualityPayload(payload, "hard_failed"),
+	}
+}
+
+func mustWriteValidationDoc(t *testing.T, dir, name, body string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", path, err)
+	}
+}
+
+func knowledgeSnapshotsForScope(t *testing.T, repo *memory.Store, scopeKind, scopeID string) []knowledge.Snapshot {
+	t.Helper()
+	items, err := repo.ListKnowledgeSnapshots(context.Background(), knowledge.SnapshotQuery{ScopeKind: scopeKind, ScopeID: scopeID, Limit: 100})
+	if err != nil {
+		t.Fatalf("ListKnowledgeSnapshots(%s,%s) error = %v", scopeKind, scopeID, err)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.Before(items[j].CreatedAt) })
+	return items
+}
+
+func knowledgePageIDs(t *testing.T, repo *memory.Store, scopeKind, scopeID string) []string {
+	t.Helper()
+	pages, err := repo.ListKnowledgePages(context.Background(), knowledge.PageQuery{ScopeKind: scopeKind, ScopeID: scopeID, Limit: 1000})
+	if err != nil {
+		t.Fatalf("ListKnowledgePages(%s,%s) error = %v", scopeKind, scopeID, err)
+	}
+	out := make([]string, 0, len(pages))
+	for _, page := range pages {
+		out = append(out, page.ID)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func knowledgeProposalsForScope(t *testing.T, repo *memory.Store, scopeKind, scopeID string) []knowledge.UpdateProposal {
+	t.Helper()
+	items, err := repo.ListKnowledgeUpdateProposals(context.Background(), scopeKind, scopeID)
+	if err != nil {
+		t.Fatalf("ListKnowledgeUpdateProposals(%s,%s) error = %v", scopeKind, scopeID, err)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.Before(items[j].CreatedAt) })
+	return items
+}
+
+func preferencesForCustomer(t *testing.T, repo *memory.Store, agentID, customerID string) []customer.Preference {
+	t.Helper()
+	items, err := repo.ListCustomerPreferences(context.Background(), customer.PreferenceQuery{
+		AgentID:        agentID,
+		CustomerID:     customerID,
+		IncludeExpired: true,
+		Limit:          100,
+	})
+	if err != nil {
+		t.Fatalf("ListCustomerPreferences(%s,%s) error = %v", agentID, customerID, err)
+	}
+	return items
+}
+
 type platformValidationReport struct {
-	Scenario        string                      `json:"scenario"`
-	TestName        string                      `json:"test_name"`
-	GeneratedAt     time.Time                   `json:"generated_at"`
-	LiveProvider    bool                        `json:"live_provider"`
-	ProviderStats   []model.ProviderStats       `json:"provider_stats,omitempty"`
-	AgentID         string                      `json:"agent_id,omitempty"`
-	CustomerID      string                      `json:"customer_id,omitempty"`
-	Sessions        []platformValidationSession `json:"sessions,omitempty"`
-	Preferences     []customer.Preference       `json:"preferences,omitempty"`
-	Feedback        []feedback.Record           `json:"feedback,omitempty"`
-	Knowledge       []knowledge.UpdateProposal  `json:"knowledge_proposals,omitempty"`
-	PolicyProposals []rollout.Proposal          `json:"policy_proposals,omitempty"`
+	Scenario             string                       `json:"scenario"`
+	TestName             string                       `json:"test_name"`
+	GeneratedAt          time.Time                    `json:"generated_at"`
+	LiveProvider         bool                         `json:"live_provider"`
+	ProviderStats        []model.ProviderStats        `json:"provider_stats,omitempty"`
+	AgentID              string                       `json:"agent_id,omitempty"`
+	CustomerID           string                       `json:"customer_id,omitempty"`
+	Sessions             []platformValidationSession  `json:"sessions,omitempty"`
+	Preferences          []customer.Preference        `json:"preferences,omitempty"`
+	Feedback             []feedback.Record            `json:"feedback,omitempty"`
+	Knowledge            []knowledge.UpdateProposal   `json:"knowledge_proposals,omitempty"`
+	PolicyProposals      []rollout.Proposal           `json:"policy_proposals,omitempty"`
+	MaintainerWorkspaces []maintainerdomain.Workspace `json:"maintainer_workspaces,omitempty"`
+	MaintainerJobs       []maintainerdomain.Job       `json:"maintainer_jobs,omitempty"`
+	MaintainerRuns       []maintainerdomain.Run       `json:"maintainer_runs,omitempty"`
+	KnowledgeSnapshots   []knowledge.Snapshot         `json:"knowledge_snapshots,omitempty"`
 }
 
 type platformValidationSession struct {
-	ID         string                                      `json:"id"`
-	Transcript []platformValidationTranscript              `json:"transcript,omitempty"`
-	Executions []execution.TurnExecution                   `json:"executions,omitempty"`
-	Scorecards map[string]quality.Scorecard                `json:"scorecards,omitempty"`
-	Quality    map[string]platformValidationQualityPayload `json:"quality,omitempty"`
+	ID           string                                      `json:"id"`
+	Transcript   []platformValidationTranscript              `json:"transcript,omitempty"`
+	Executions   []execution.TurnExecution                   `json:"executions,omitempty"`
+	Scorecards   map[string]quality.Scorecard                `json:"scorecards,omitempty"`
+	Quality      map[string]platformValidationQualityPayload `json:"quality,omitempty"`
+	ResponseText string                                      `json:"response_text,omitempty"`
+	UsedPageIDs  []string                                    `json:"used_page_ids,omitempty"`
 }
 
 type platformValidationTranscript struct {

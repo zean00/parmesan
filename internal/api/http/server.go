@@ -2204,8 +2204,16 @@ func (s *Server) operatorCreateFeedback(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(record.Text) == "" {
+	if record.ResponseID == "" && strings.TrimSpace(record.Text) == "" {
 		http.Error(w, "text is required", http.StatusBadRequest)
+		return
+	}
+	if record.ResponseID != "" && strings.TrimSpace(record.Text) == "" && record.Score == nil && strings.TrimSpace(record.Comment) == "" && strings.TrimSpace(record.Correction) == "" {
+		http.Error(w, "response feedback requires score, comment, correction, or text", http.StatusBadRequest)
+		return
+	}
+	if record.ResponseID == "" && (record.Score != nil || strings.TrimSpace(record.Comment) != "" || strings.TrimSpace(record.Correction) != "") {
+		http.Error(w, "response_id is required for score, comment, or correction", http.StatusBadRequest)
 		return
 	}
 	now := time.Now().UTC()
@@ -2216,6 +2224,29 @@ func (s *Server) operatorCreateFeedback(w http.ResponseWriter, r *http.Request) 
 	record.OperatorID = requestOperatorID(r, record.OperatorID)
 	if record.Metadata == nil {
 		record.Metadata = map[string]any{}
+	}
+	if strings.TrimSpace(record.ResponseID) != "" {
+		resp, err := s.store.GetResponse(r.Context(), record.ResponseID)
+		if err != nil {
+			http.Error(w, "response not found", http.StatusBadRequest)
+			return
+		}
+		if resp.SessionID != sessionID {
+			http.Error(w, "response_id must belong to the session", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(record.ExecutionID) == "" {
+			record.ExecutionID = resp.ExecutionID
+		}
+		if strings.TrimSpace(record.TraceID) == "" {
+			record.TraceID = resp.TraceID
+		}
+		if len(record.TargetEventIDs) == 0 {
+			record.TargetEventIDs = append(record.TargetEventIDs, feedbackTargetEventIDs(resp)...)
+		}
+		record.Metadata["feedback_scope"] = "response"
+	} else {
+		record.Metadata["feedback_scope"] = "session"
 	}
 	if dimensions := quality.FailureLabelDimensions(record.Labels); len(dimensions) > 0 {
 		var labels []string
@@ -2282,6 +2313,7 @@ func (s *Server) operatorCreateFeedback(w http.ResponseWriter, r *http.Request) 
 	change := controlChangeRequest("feedback:"+sessionID, "teaching", "feedback_compile", changeStatus, record.OperatorID, targetIDs, map[string]any{
 		"feedback_id":  record.ID,
 		"session_id":   record.SessionID,
+		"response_id":  record.ResponseID,
 		"execution_id": record.ExecutionID,
 		"category":     record.Category,
 	}, now)
@@ -2303,10 +2335,17 @@ func (s *Server) operatorCreateFeedback(w http.ResponseWriter, r *http.Request) 
 		ExecutionID: record.ExecutionID,
 		TraceID:     record.TraceID,
 		Message:     "operator feedback compiled",
-		Fields:      map[string]any{"feedback_id": record.ID, "outputs": record.Outputs, "category": record.Category},
+		Fields:      map[string]any{"feedback_id": record.ID, "response_id": record.ResponseID, "outputs": record.Outputs, "category": record.Category},
 		CreatedAt:   now,
 	})
 	writeJSON(w, http.StatusCreated, record)
+}
+
+func feedbackTargetEventIDs(item responsedomain.Response) []string {
+	if len(item.MessageEventIDs) > 0 {
+		return append([]string(nil), item.MessageEventIDs...)
+	}
+	return append([]string(nil), item.TriggerEventIDs...)
 }
 
 func qualityRegressionFixtureCandidate(record feedback.Record, sess session.Session, events []session.Event) map[string]any {
@@ -2328,6 +2367,7 @@ func qualityRegressionFixtureCandidate(record feedback.Record, sess session.Sess
 		"scenario_id":        scenarioID,
 		"feedback_id":        record.ID,
 		"session_id":         record.SessionID,
+		"response_id":        record.ResponseID,
 		"execution_id":       record.ExecutionID,
 		"trace_id":           record.TraceID,
 		"agent_id":           sess.AgentID,
