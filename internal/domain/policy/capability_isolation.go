@@ -14,6 +14,10 @@ func (c CapabilityIsolation) AllowsTool(toolID string) bool {
 	return stringAllowed(c.AllowedToolIDs, toolID)
 }
 
+func (c CapabilityIsolation) AllowsAgent(agentID string) bool {
+	return stringAllowed(c.AllowedAgentIDs, agentID)
+}
+
 func (c CapabilityIsolation) AllowsRetriever(retrieverID string) bool {
 	return stringAllowed(c.AllowedRetrieverIDs, retrieverID)
 }

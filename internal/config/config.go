@@ -39,7 +39,8 @@ type KnowledgeConfig struct {
 }
 
 type ACPConfig struct {
-	ResponseCoalesceMS int
+	ResponseCoalesceMS    int
+	DelegationTimeoutSecs int
 }
 
 type BootstrapConfig struct {
@@ -48,6 +49,14 @@ type BootstrapConfig struct {
 
 type MCPConfig struct {
 	Providers []MCPProviderConfig `yaml:"providers" json:"providers,omitempty"`
+}
+
+type AgentServerConfig struct {
+	Command               string            `yaml:"command" json:"command"`
+	Args                  []string          `yaml:"args" json:"args,omitempty"`
+	Env                   map[string]string `yaml:"env" json:"env,omitempty"`
+	StartupTimeoutSeconds int               `yaml:"startup_timeout_seconds" json:"startup_timeout_seconds,omitempty"`
+	RequestTimeoutSeconds int               `yaml:"request_timeout_seconds" json:"request_timeout_seconds,omitempty"`
 }
 
 type MCPProviderConfig struct {
@@ -78,6 +87,7 @@ type Config struct {
 	ACP                 ACPConfig
 	Bootstrap           BootstrapConfig
 	MCP                 MCPConfig
+	AgentServers        map[string]AgentServerConfig
 	AsyncWriteQueueSize int
 	RequestTimeout      time.Duration
 }
@@ -121,12 +131,14 @@ func Load(service string) Config {
 			Root: env("KNOWLEDGE_SOURCE_ROOT", fileCfg.Knowledge.Root),
 		},
 		ACP: ACPConfig{
-			ResponseCoalesceMS: intEnvAllowZero("ACP_RESPONSE_COALESCE_MS", intPointerDefault(fileCfg.ACP.ResponseCoalesceMS, 1500)),
+			ResponseCoalesceMS:    intEnvAllowZero("ACP_RESPONSE_COALESCE_MS", intPointerDefault(fileCfg.ACP.ResponseCoalesceMS, 1500)),
+			DelegationTimeoutSecs: intEnv("ACP_DELEGATION_TIMEOUT_SECONDS", defaultInt(fileCfg.ACP.DelegationTimeoutSeconds, 30)),
 		},
 		Bootstrap: BootstrapConfig{
 			AgentsDir: env("PARMESAN_AGENTS_DIR", fileCfg.Bootstrap.AgentsDir),
 		},
 		MCP:                 MCPConfig{Providers: fileCfg.MCP.Providers},
+		AgentServers:        fileCfg.AgentServers,
 		AsyncWriteQueueSize: intEnv("ASYNC_WRITE_QUEUE_SIZE", 256),
 		RequestTimeout:      durationEnv("REQUEST_TIMEOUT_SECONDS", 15),
 	}
@@ -164,12 +176,14 @@ type fileConfig struct {
 		Root string `yaml:"root"`
 	} `yaml:"knowledge"`
 	ACP struct {
-		ResponseCoalesceMS *int `yaml:"response_coalesce_ms"`
+		ResponseCoalesceMS       *int `yaml:"response_coalesce_ms"`
+		DelegationTimeoutSeconds int  `yaml:"delegation_timeout_seconds"`
 	} `yaml:"acp"`
 	Bootstrap struct {
 		AgentsDir string `yaml:"agents_dir"`
 	} `yaml:"bootstrap"`
-	MCP           MCPConfig `yaml:"mcp"`
+	MCP           MCPConfig                    `yaml:"mcp"`
+	AgentServers  map[string]AgentServerConfig `yaml:"agent_servers"`
 	Observability struct {
 		MetricsAddress string `yaml:"metrics_address"`
 		OTLPEndpoint   string `yaml:"otlp_endpoint"`
@@ -230,6 +244,9 @@ func applyFileEnv(cfg fileConfig) {
 	}
 	if cfg.ACP.ResponseCoalesceMS != nil {
 		setEnvDefault("ACP_RESPONSE_COALESCE_MS", strconv.Itoa(*cfg.ACP.ResponseCoalesceMS))
+	}
+	if cfg.ACP.DelegationTimeoutSeconds > 0 {
+		setEnvDefault("ACP_DELEGATION_TIMEOUT_SECONDS", strconv.Itoa(cfg.ACP.DelegationTimeoutSeconds))
 	}
 	if cfg.Runtime.AsyncWriteQueueSize > 0 {
 		setEnvDefault("ASYNC_WRITE_QUEUE_SIZE", strconv.Itoa(cfg.Runtime.AsyncWriteQueueSize))

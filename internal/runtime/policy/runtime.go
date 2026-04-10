@@ -74,11 +74,19 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	}
 	exposedTools, toolApprovals := resolveToolExposure(bundle.GuidelineToolAssociations, state.observationStage.Observations, state.matchFinalizeStage.MatchedGuidelines, state.activeJourneyState, bundle.ToolPolicies, catalog)
 	ToolExposureStageResult{ExposedTools: exposedTools, ToolApprovals: toolApprovals}.Apply(state)
+	exposedAgents := resolveAgentExposure(bundle.GuidelineAgentAssociations, state.matchFinalizeStage.MatchedGuidelines, state.activeJourneyState, bundle.CapabilityIsolation)
+	AgentExposureStageResult{ExposedAgents: exposedAgents}.Apply(state)
 	toolPlanResult, toolDecisionResult := buildToolStageResults(ctx, options.Router, state.context, state, bundle.Relationships, catalog)
 	toolPlanResult.Apply(state)
 	toolDecisionResult.Apply(state)
+	agentDecisionResult := buildAgentStageResults(ctx, options.Router, state.context, state)
+	agentDecisionResult.Apply(state)
+	capabilityDecisionResult := buildCapabilityDecisionStageResult(ctx, options.Router, state.context, state)
+	capabilityDecisionResult.Apply(state)
 	toolPlanOutput := toolPlanResult.BatchOutput()
 	toolDecisionOutput := toolDecisionResult.BatchOutput()
+	agentDecisionOutput := agentDecisionResult.BatchOutput()
+	capabilityDecisionOutput := capabilityDecisionResult.BatchOutput()
 	updateIntents := buildUpdateIntentArtifacts(bundle, state.context, toolPlanResult.Plan)
 
 	mode := strings.ToLower(strings.TrimSpace(bundle.CompositionMode))
@@ -93,6 +101,8 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	arqs = append(arqs,
 		ARQResult{Name: "tool_plan", Version: promptVersion("tool_plan"), Output: toolPlanOutput},
 		ARQResult{Name: "tool_decision", Version: promptVersion("tool_decision"), Output: toolDecisionOutput},
+		ARQResult{Name: "agent_decision", Version: promptVersion("tool_decision"), Output: agentDecisionOutput},
+		ARQResult{Name: "capability_decision", Version: promptVersion("tool_decision"), Output: capabilityDecisionOutput},
 		ARQResult{Name: "update_intents", Version: promptVersion("tool_plan"), Output: map[string]any{"update_intents": updateIntents}},
 	)
 	state.batchResults = append(state.batchResults, BatchResult{
@@ -105,6 +115,16 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 		Strategy:      "generic",
 		PromptVersion: promptVersion("tool_decision"),
 		Output:        toolDecisionOutput,
+	}, BatchResult{
+		Name:          "agent_decision",
+		Strategy:      "generic",
+		PromptVersion: promptVersion("tool_decision"),
+		Output:        agentDecisionOutput,
+	}, BatchResult{
+		Name:          "capability_decision",
+		Strategy:      "generic",
+		PromptVersion: promptVersion("tool_decision"),
+		Output:        capabilityDecisionOutput,
 	}, BatchResult{
 		Name:          "update_intents",
 		Strategy:      "generic",
@@ -252,6 +272,9 @@ func resolvedViewFromState(bundle policy.Bundle, state *matchingState, mode stri
 		ToolExposureStage:           state.toolExposureStage,
 		ToolPlanStage:               state.toolPlanStage,
 		ToolDecisionStage:           state.toolDecisionStage,
+		AgentExposureStage:          state.agentExposureStage,
+		AgentDecisionStage:          state.agentDecisionStage,
+		CapabilityDecisionStage:     state.capabilityDecisionStage,
 		UpdateIntents:               append([]UpdateIntentArtifact(nil), updateIntents...),
 		WatchCapabilities:           append([]policy.WatchCapability(nil), bundle.WatchCapabilities...),
 		SemanticsPolicy:             bundle.Semantics,

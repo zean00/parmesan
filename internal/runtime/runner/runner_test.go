@@ -1,13 +1,17 @@
 package runner
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sahal/parmesan/internal/acppeer"
 	"github.com/sahal/parmesan/internal/api/sse"
 	"github.com/sahal/parmesan/internal/config"
 	"github.com/sahal/parmesan/internal/domain/agent"
@@ -947,8 +951,8 @@ func TestResolveViewFiltersCatalogByCapabilityIsolation(t *testing.T) {
 	now := time.Now().UTC()
 
 	if err := repo.SaveBundle(ctx, policy.Bundle{
-		ID:      "bundle_capability_isolation",
-		Version: "v1",
+		ID:         "bundle_capability_isolation",
+		Version:    "v1",
 		ImportedAt: now,
 		CapabilityIsolation: policy.CapabilityIsolation{
 			AllowedProviderIDs: []string{"commerce"},
@@ -1234,6 +1238,115 @@ func TestMaybeEmitPerceivedPerformanceEmitsPreambleAndStatus(t *testing.T) {
 	if !hasPreamble || !hasProcessingStatus {
 		t.Fatalf("events = %#v, want preamble and processing status", events)
 	}
+}
+
+func TestRunnerDelegatesToExternalAgentPeer(t *testing.T) {
+	if os.Getenv("PARMESAN_TEST_RUNNER_ACP_HELPER") == "1" {
+		runRunnerACPHelperProcess()
+		return
+	}
+
+	repo := memory.New()
+	r := New(repo, nil, nil, nil, "test-runner").WithAgentPeers(acppeer.NewManager(map[string]config.AgentServerConfig{
+		"OpenCode": {
+			Command: os.Args[0],
+			Args:    []string{"-test.run=TestRunnerDelegatesToExternalAgentPeer"},
+			Env: map[string]string{
+				"PARMESAN_TEST_RUNNER_ACP_HELPER": "1",
+			},
+			StartupTimeoutSeconds: 2,
+			RequestTimeoutSeconds: 2,
+		},
+	}))
+
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID:        "sess_delegate",
+		Channel:   "acp",
+		AgentID:   "parent_agent",
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID:        "evt_1",
+		SessionID: "sess_delegate",
+		Source:    "customer",
+		Kind:      "message",
+		TraceID:   "trace_1",
+		CreatedAt: now,
+		Content:   []session.ContentPart{{Type: "text", Text: "Please orchestrate the workflow."}},
+	}); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	output, err := r.maybeRunCapability(context.Background(), execution.TurnExecution{
+		ID:        "exec_delegate",
+		SessionID: "sess_delegate",
+		TraceID:   "trace_1",
+	}, resolvedView{
+		AgentDecisionStage: policyruntime.AgentDecisionStageResult{
+			Decision: policyruntime.AgentDecision{
+				SelectedAgent: "OpenCode",
+				CanRun:        true,
+				Rationale:     "delegate",
+				Grounded:      true,
+			},
+		},
+		CapabilityDecisionStage: policyruntime.CapabilityDecisionStageResult{
+			Decision: policyruntime.CapabilityDecision{
+				Kind:     "agent",
+				TargetID: "OpenCode",
+			},
+		},
+		MatchFinalizeStage: policyruntime.FinalizeStageResult{
+			MatchedGuidelines: []policy.Guideline{{ID: "delegate", Then: "delegate the workflow"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("maybeRunCapability() error = %v", err)
+	}
+	delegated, ok := output["delegated_agent"].(map[string]any)
+	if !ok {
+		t.Fatalf("output = %#v, want delegated_agent payload", output)
+	}
+	if delegated["result_text"] != "Delegated runner answer" {
+		t.Fatalf("delegated output = %#v, want delegated answer text", delegated)
+	}
+}
+
+func runRunnerACPHelperProcess() {
+	scanner := bufio.NewScanner(os.Stdin)
+	writer := bufio.NewWriter(os.Stdout)
+	defer writer.Flush()
+	for scanner.Scan() {
+		var msg map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
+			continue
+		}
+		method, _ := msg["method"].(string)
+		id, _ := msg["id"].(float64)
+		switch method {
+		case "initialize":
+			writeRunnerHelperJSON(writer, map[string]any{"jsonrpc": "2.0", "id": int(id), "result": map[string]any{"ok": true}})
+		case "session/new":
+			writeRunnerHelperJSON(writer, map[string]any{"jsonrpc": "2.0", "id": int(id), "result": map[string]any{"ok": true}})
+		case "session/prompt":
+			params, _ := msg["params"].(map[string]any)
+			sessionID, _ := params["sessionId"].(string)
+			writeRunnerHelperJSON(writer, map[string]any{"jsonrpc": "2.0", "id": int(id), "result": map[string]any{"ok": true}})
+			writeRunnerHelperJSON(writer, map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": sessionID, "update": map[string]any{"type": "agent_message_chunk", "text": "Delegated runner answer"}}})
+			writeRunnerHelperJSON(writer, map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": sessionID, "update": map[string]any{"type": "agent_turn_complete"}}})
+		default:
+			writeRunnerHelperJSON(writer, map[string]any{"jsonrpc": "2.0", "id": int(id), "error": map[string]any{"code": -32601, "message": "unsupported"}})
+		}
+	}
+}
+
+func writeRunnerHelperJSON(writer *bufio.Writer, value map[string]any) {
+	raw, _ := json.Marshal(value)
+	_, _ = writer.Write(append(raw, '\n'))
+	_ = writer.Flush()
 }
 
 func step(execID, name string, recomputable bool) execution.ExecutionStep {

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sahal/parmesan/internal/acppeer"
 	"github.com/sahal/parmesan/internal/api/sse"
 	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
@@ -49,6 +50,7 @@ type Runner struct {
 	broker     *sse.Broker
 	router     *model.Router
 	invoker    *toolruntime.Invoker
+	agentPeers *acppeer.Manager
 	sessions   *sessionsvc.Service
 	leaseOwner string
 	leaseTTL   time.Duration
@@ -73,6 +75,11 @@ func New(repo store.Repository, writes *asyncwrite.Queue, broker *sse.Broker, ro
 		interval:   500 * time.Millisecond,
 		responses:  map[string]responsedomain.Response{},
 	}
+}
+
+func (r *Runner) WithAgentPeers(peers *acppeer.Manager) *Runner {
+	r.agentPeers = peers
+	return r
 }
 
 type resolvedView = policyruntime.EngineResult
@@ -780,14 +787,14 @@ func (r *Runner) prepareResponse(ctx context.Context, exec execution.TurnExecuti
 			StartedAt:   started,
 			FinishedAt:  time.Now().UTC(),
 		})
-		if !needsToolPreparation(view) {
+		if !needsCapabilityPreparation(view) {
 			record.StabilityReached = true
 			_ = r.updateResponseState(ctx, record, responsedomain.StatusProcessing, "", func(item *responsedomain.Response) {
 				item.StabilityReached = true
 			})
 			return view, events, toolOutput, record, nil
 		}
-		toolOutput, err = r.maybeRunTool(ctx, exec, view)
+		toolOutput, err = r.maybeRunCapability(ctx, exec, view)
 		if err != nil {
 			return resolvedView{}, nil, nil, record, err
 		}
@@ -803,6 +810,13 @@ func (r *Runner) prepareResponse(ctx context.Context, exec execution.TurnExecuti
 			StartedAt:   started,
 			FinishedAt:  time.Now().UTC(),
 		})
+		if strings.EqualFold(view.CapabilityDecisionStage.Decision.Kind, "agent") && toolOutput != nil {
+			record.StabilityReached = true
+			_ = r.updateResponseState(ctx, record, responsedomain.StatusProcessing, "", func(item *responsedomain.Response) {
+				item.StabilityReached = true
+			})
+			return view, events, toolOutput, record, nil
+		}
 		if toolOutput == nil || iteration == maxResponsePreparationIterations {
 			if iteration == maxResponsePreparationIterations {
 				record.Reason = "response_preparation_iteration_exhausted"
@@ -822,7 +836,10 @@ func (r *Runner) prepareResponse(ctx context.Context, exec execution.TurnExecuti
 	return resolvedView{}, nil, nil, record, errResponsePreparationExhausted
 }
 
-func needsToolPreparation(view resolvedView) bool {
+func needsCapabilityPreparation(view resolvedView) bool {
+	if strings.EqualFold(view.CapabilityDecisionStage.Decision.Kind, "agent") {
+		return strings.TrimSpace(view.AgentDecisionStage.Decision.SelectedAgent) != ""
+	}
 	plan := view.ToolPlanStage.Plan
 	for _, candidate := range plan.Candidates {
 		if candidate.AlreadySatisfied || candidate.AlreadyStaged {
@@ -1637,6 +1654,102 @@ func (r *Runner) maybeRunTool(ctx context.Context, exec execution.TurnExecution,
 	return map[string]any{"tools": outputs}, nil
 }
 
+func (r *Runner) maybeRunCapability(ctx context.Context, exec execution.TurnExecution, view resolvedView) (map[string]any, error) {
+	if strings.EqualFold(view.CapabilityDecisionStage.Decision.Kind, "agent") {
+		return r.maybeDelegateAgent(ctx, exec, view)
+	}
+	return r.maybeRunTool(ctx, exec, view)
+}
+
+func (r *Runner) maybeDelegateAgent(ctx context.Context, exec execution.TurnExecution, view resolvedView) (map[string]any, error) {
+	decision := view.AgentDecisionStage.Decision
+	serverID := strings.TrimSpace(decision.SelectedAgent)
+	if serverID == "" || !decision.CanRun {
+		return nil, nil
+	}
+	if r.agentPeers == nil || !r.agentPeers.Has(serverID) {
+		return map[string]any{
+			"delegated_agent": map[string]any{
+				"server_id": serverID,
+				"status":    "failed",
+				"error":     "delegated agent server is not configured",
+			},
+		}, nil
+	}
+
+	sess, err := r.repo.GetSession(ctx, exec.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	events, err := r.repo.ListEvents(ctx, exec.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	childSessionID := stableID("delegate", exec.SessionID, exec.ID, serverID)
+	req := acppeer.Request{
+		SessionID: childSessionID,
+		CWD:       currentWorkingDirectory(),
+		Prompt:    delegatedAgentPrompt(exec, view, events),
+		Metadata: map[string]any{
+			"delegation_parent_session_id":   exec.SessionID,
+			"delegation_parent_execution_id": exec.ID,
+			"delegation_parent_agent_id":     sess.AgentID,
+			"delegation_server_id":           serverID,
+			"delegation_mode":                "sync",
+		},
+	}
+	result, err := r.agentPeers.Delegate(ctx, serverID, req)
+	status := result.Status
+	if status == "" {
+		status = "failed"
+	}
+	fields := map[string]any{
+		"server_id":  serverID,
+		"session_id": result.SessionID,
+		"status":     status,
+		"error":      result.Error,
+	}
+	if strings.TrimSpace(result.Text) != "" {
+		fields["result_text"] = result.Text
+	}
+	kind := "agent.completed"
+	if err != nil {
+		kind = "agent.failed"
+	}
+	_, _ = r.sessions.CreateEvent(ctx, sessionsvc.CreateEventParams{
+		SessionID:   exec.SessionID,
+		Source:      "runtime",
+		Kind:        kind,
+		Data:        fields,
+		Metadata:    map[string]any{"internal_only": true},
+		ExecutionID: exec.ID,
+		TraceID:     exec.TraceID,
+		CreatedAt:   time.Now().UTC(),
+		Async:       false,
+	})
+	r.appendTrace(ctx, audit.Record{
+		ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+		Kind:        kind,
+		SessionID:   exec.SessionID,
+		ExecutionID: exec.ID,
+		TraceID:     exec.TraceID,
+		Message:     delegatedAgentTraceMessage(kind),
+		Fields:      fields,
+		CreatedAt:   time.Now().UTC(),
+	})
+	if err != nil {
+		return map[string]any{"delegated_agent": fields}, nil
+	}
+	return map[string]any{
+		"delegated_agent": map[string]any{
+			"server_id":   serverID,
+			"session_id":  result.SessionID,
+			"status":      status,
+			"result_text": result.Text,
+		},
+	}, nil
+}
+
 type toolBatchItem struct {
 	key    string
 	output map[string]any
@@ -2257,6 +2370,9 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 	if toolDecision := view.ToolDecisionStage.Decision; toolDecision.SelectedTool != "" {
 		parts = append(parts, "Selected tool: "+toolDecision.SelectedTool)
 	}
+	if agentDecision := view.AgentDecisionStage.Decision; agentDecision.SelectedAgent != "" {
+		parts = append(parts, "Selected delegated agent: "+agentDecision.SelectedAgent)
+	}
 	if len(toolOutput) > 0 {
 		parts = append(parts, "Tool output: "+mustJSON(toolOutput))
 	}
@@ -2422,6 +2538,80 @@ func suppressedIDs(items []policyruntime.SuppressedGuideline) []string {
 		out = append(out, item.ID)
 	}
 	return out
+}
+
+func delegatedAgentPrompt(exec execution.TurnExecution, view resolvedView, events []session.Event) string {
+	var parts []string
+	if latest := latestText(events); latest != "" {
+		parts = append(parts, "Customer request: "+latest)
+	}
+	if history := compactConversationExcerpt(events); history != "" {
+		parts = append(parts, "Conversation excerpt:\n"+history)
+	}
+	if len(view.MatchFinalizeStage.MatchedGuidelines) > 0 {
+		parts = append(parts, "Matched guideline IDs: "+strings.Join(idsFromGuidelines(view.MatchFinalizeStage.MatchedGuidelines), ", "))
+	}
+	if view.ActiveJourney != nil {
+		parts = append(parts, "Active journey: "+view.ActiveJourney.ID)
+	}
+	if view.ActiveJourneyState != nil {
+		parts = append(parts, "Active journey state: "+view.ActiveJourneyState.ID)
+		if strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
+			parts = append(parts, "Journey instruction: "+view.ActiveJourneyState.Instruction)
+		}
+	}
+	parts = append(parts, "Parent execution ID: "+exec.ID)
+	parts = append(parts, "Solve the task and return a concise final answer for the parent agent. Do not ask the parent agent to inspect your internal process.")
+	return strings.Join(parts, "\n")
+}
+
+func compactConversationExcerpt(events []session.Event) string {
+	var parts []string
+	for _, item := range events {
+		text := strings.TrimSpace(eventText(item))
+		if text == "" {
+			continue
+		}
+		parts = append(parts, item.Source+": "+text)
+	}
+	if len(parts) > 6 {
+		parts = parts[len(parts)-6:]
+	}
+	return strings.Join(parts, "\n")
+}
+
+func eventText(item session.Event) string {
+	var parts []string
+	for _, part := range item.Content {
+		if strings.TrimSpace(part.Text) != "" {
+			parts = append(parts, strings.TrimSpace(part.Text))
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func delegatedAgentTraceMessage(kind string) string {
+	if kind == "agent.failed" {
+		return "delegated agent failed"
+	}
+	return "delegated agent completed"
+}
+
+func currentWorkingDirectory() string {
+	cwd, err := os.Getwd()
+	if err != nil || strings.TrimSpace(cwd) == "" {
+		return "."
+	}
+	return cwd
+}
+
+func stableID(prefix string, parts ...string) string {
+	h := sha1.New()
+	for _, part := range parts {
+		_, _ = h.Write([]byte(strings.TrimSpace(part)))
+		_, _ = h.Write([]byte{0})
+	}
+	return prefix + "_" + hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 func mustJSON(v any) string {

@@ -78,6 +78,24 @@ ACP is the primary public conversation interface. The separate `gateway`
 service remains available for legacy `/v1/web/...` clients while ACP-to-channel
 adapters migrate externally.
 
+External ACP agent peers can be registered in the global config and selected by
+policy as a delegated capability:
+
+```yaml
+agent_servers:
+  OpenCode:
+    command: opencode
+    args: ["acp", "--pure"]
+    startup_timeout_seconds: 10
+    request_timeout_seconds: 30
+```
+
+Policy bundles may expose a peer with `agents: [OpenCode]` on a guideline or
+journey guideline, or require it with `agent: OpenCode` on a journey node.
+`capability_isolation.allowed_agent_ids` can restrict which peers are eligible.
+At runtime Parmesan selects one capability kind for the turn, so an external
+agent peer competes with tools rather than running as an implicit workflow step.
+
 Example live support bundle:
 
 - [examples/live_support_policy.yaml](/home/sahal/workspace/agents/parmesan/examples/live_support_policy.yaml) is the strict customer-support bundle used for the validated Nexus to Parmesan ACP run.

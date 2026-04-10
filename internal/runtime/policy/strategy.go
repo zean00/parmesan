@@ -117,6 +117,9 @@ type matchingState struct {
 	toolExposureStage           ToolExposureStageResult
 	toolPlanStage               ToolPlanStageResult
 	toolDecisionStage           ToolDecisionStageResult
+	agentExposureStage          AgentExposureStageResult
+	agentDecisionStage          AgentDecisionStageResult
+	capabilityDecisionStage     CapabilityDecisionStageResult
 	batchResults                []BatchResult
 	promptSetVersions           map[string]string
 }
@@ -147,6 +150,9 @@ type matchingSnapshot struct {
 	toolExposureStage           ToolExposureStageResult
 	toolPlanStage               ToolPlanStageResult
 	toolDecisionStage           ToolDecisionStageResult
+	agentExposureStage          AgentExposureStageResult
+	agentDecisionStage          AgentDecisionStageResult
+	capabilityDecisionStage     CapabilityDecisionStageResult
 }
 
 func snapshotFromState(state *matchingState) matchingSnapshot {
@@ -181,6 +187,9 @@ func snapshotFromState(state *matchingState) matchingSnapshot {
 		toolExposureStage:           state.toolExposureStage,
 		toolPlanStage:               state.toolPlanStage,
 		toolDecisionStage:           state.toolDecisionStage,
+		agentExposureStage:          state.agentExposureStage,
+		agentDecisionStage:          state.agentDecisionStage,
+		capabilityDecisionStage:     state.capabilityDecisionStage,
 	}
 }
 
@@ -425,6 +434,20 @@ func cloneToolDecisionStageResult(src ToolDecisionStageResult) ToolDecisionStage
 	src.Evaluation.SelectedTools = append([]string(nil), src.Evaluation.SelectedTools...)
 	src.Evaluation.MissingIssues = append([]ToolArgumentIssue(nil), src.Evaluation.MissingIssues...)
 	src.Evaluation.InvalidIssues = append([]ToolArgumentIssue(nil), src.Evaluation.InvalidIssues...)
+	return src
+}
+
+func cloneAgentExposureStageResult(src AgentExposureStageResult) AgentExposureStageResult {
+	src.ExposedAgents = append([]string(nil), src.ExposedAgents...)
+	return src
+}
+
+func cloneAgentDecisionStageResult(src AgentDecisionStageResult) AgentDecisionStageResult {
+	src.Evaluation.ExposedAgents = append([]string(nil), src.Evaluation.ExposedAgents...)
+	return src
+}
+
+func cloneCapabilityDecisionStageResult(src CapabilityDecisionStageResult) CapabilityDecisionStageResult {
 	return src
 }
 

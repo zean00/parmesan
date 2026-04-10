@@ -207,6 +207,33 @@ type ToolDecision struct {
 	Grounded         bool                `json:"grounded"`
 }
 
+type AgentDecision struct {
+	SelectedAgent string `json:"selected_agent,omitempty"`
+	CanRun        bool   `json:"can_run"`
+	Rationale     string `json:"rationale,omitempty"`
+	Grounded      bool   `json:"grounded"`
+}
+
+type AgentDecisionEvaluation struct {
+	ExposedAgents []string `json:"exposed_agents,omitempty"`
+	SelectedAgent string   `json:"selected_agent,omitempty"`
+	FinalAgent    string   `json:"final_agent,omitempty"`
+	Rationale     string   `json:"rationale,omitempty"`
+	Grounded      bool     `json:"grounded"`
+}
+
+type CapabilityDecision struct {
+	Kind      string `json:"kind,omitempty"`
+	TargetID  string `json:"target_id,omitempty"`
+	Rationale string `json:"rationale,omitempty"`
+}
+
+type CapabilityDecisionEvaluation struct {
+	Kind      string `json:"kind,omitempty"`
+	TargetID  string `json:"target_id,omitempty"`
+	Rationale string `json:"rationale,omitempty"`
+}
+
 type ToolDecisionEvaluation struct {
 	PlannedSelectedTool string              `json:"planned_selected_tool,omitempty"`
 	SelectedTools       []string            `json:"selected_tools,omitempty"`
@@ -354,7 +381,7 @@ type BatchResult struct {
 }
 
 type UpdateIntentArtifact struct {
-	CapabilityID         string         `json:"capability_id,omitempty"`
+	CapabilityID        string         `json:"capability_id,omitempty"`
 	Kind                string         `json:"kind,omitempty"`
 	Source              string         `json:"source,omitempty"`
 	SubjectRef          string         `json:"subject_ref,omitempty"`
@@ -391,6 +418,9 @@ type EngineResult struct {
 	ToolExposureStage           ToolExposureStageResult
 	ToolPlanStage               ToolPlanStageResult
 	ToolDecisionStage           ToolDecisionStageResult
+	AgentExposureStage          AgentExposureStageResult
+	AgentDecisionStage          AgentDecisionStageResult
+	CapabilityDecisionStage     CapabilityDecisionStageResult
 	UpdateIntents               []UpdateIntentArtifact
 	WatchCapabilities           []policy.WatchCapability
 	SemanticsPolicy             policy.SemanticsPolicy

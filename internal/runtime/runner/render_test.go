@@ -73,3 +73,35 @@ func TestRenderResponseEmitsTemplateMessageSequence(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderResponsePrefersDelegatedAgentResultOverPolicyText(t *testing.T) {
+	view := resolvedView{
+		CompositionMode: "guided",
+		ResponseAnalysisStage: policyruntime.ResponseAnalysisStageResult{
+			CandidateTemplates: []policy.Template{{
+				ID:   "delegate_template",
+				Text: "delegate the workflow",
+			}},
+		},
+		MatchFinalizeStage: policyruntime.FinalizeStageResult{
+			MatchedGuidelines: []policy.Guideline{{
+				ID:   "delegate",
+				Then: "delegate the workflow",
+			}},
+		},
+	}
+
+	got := renderResponseMessages(view, map[string]any{
+		"delegated_agent": map[string]any{
+			"status":      "completed",
+			"result_text": "The delegated answer should reach the customer.",
+		},
+	})
+	want := []string{"The delegated answer should reach the customer."}
+	if len(got) != len(want) {
+		t.Fatalf("messages len = %d, want %d (%#v)", len(got), len(want), got)
+	}
+	if got[0] != want[0] {
+		t.Fatalf("message[0] = %q, want %q", got[0], want[0])
+	}
+}

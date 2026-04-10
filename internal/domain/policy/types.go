@@ -18,31 +18,32 @@ const (
 )
 
 type Bundle struct {
-	ID                        string                     `json:"id" yaml:"id"`
-	ArtifactMeta              artifactmeta.Meta          `json:"artifact_meta,omitempty" yaml:"-"`
-	Version                   string                     `json:"version" yaml:"version"`
-	CompositionMode           string                     `json:"composition_mode,omitempty" yaml:"composition_mode,omitempty"`
-	PerceivedPerformance      PerceivedPerformancePolicy `json:"perceived_performance,omitempty" yaml:"perceived_performance,omitempty"`
-	Semantics                 SemanticsPolicy            `json:"semantics,omitempty" yaml:"semantics,omitempty"`
-	WatchCapabilities         []WatchCapability          `json:"watch_capabilities,omitempty" yaml:"watch_capabilities,omitempty"`
-	QualityProfile            QualityProfile             `json:"quality_profile,omitempty" yaml:"quality_profile,omitempty"`
-	LifecyclePolicy           LifecyclePolicy            `json:"lifecycle_policy,omitempty" yaml:"lifecycle_policy,omitempty"`
-	CapabilityIsolation       CapabilityIsolation        `json:"capability_isolation,omitempty" yaml:"capability_isolation,omitempty"`
-	NoMatch                   string                     `json:"no_match,omitempty" yaml:"no_match,omitempty"`
-	DomainBoundary            DomainBoundary             `json:"domain_boundary,omitempty" yaml:"domain_boundary,omitempty"`
-	Soul                      Soul                       `json:"soul,omitempty" yaml:"soul,omitempty"`
-	SoulMarkdown              string                     `json:"soul_markdown,omitempty" yaml:"soul_markdown,omitempty"`
-	Glossary                  []GlossaryTerm             `json:"glossary,omitempty" yaml:"glossary,omitempty"`
-	ImportedAt                time.Time                  `json:"imported_at" yaml:"-"`
-	SourceYAML                string                     `json:"source_yaml" yaml:"-"`
-	Observations              []Observation              `json:"observations" yaml:"observations"`
-	Guidelines                []Guideline                `json:"guidelines" yaml:"guidelines"`
-	Relationships             []Relationship             `json:"relationships" yaml:"relationships"`
-	Journeys                  []Journey                  `json:"journeys" yaml:"journeys"`
-	Templates                 []Template                 `json:"templates" yaml:"templates"`
-	ToolPolicies              []ToolPolicy               `json:"tool_policies" yaml:"tool_policies"`
-	Retrievers                []RetrieverBinding         `json:"retrievers,omitempty" yaml:"retrievers,omitempty"`
-	GuidelineToolAssociations []GuidelineToolAssociation `json:"guideline_tool_associations,omitempty" yaml:"-"`
+	ID                         string                      `json:"id" yaml:"id"`
+	ArtifactMeta               artifactmeta.Meta           `json:"artifact_meta,omitempty" yaml:"-"`
+	Version                    string                      `json:"version" yaml:"version"`
+	CompositionMode            string                      `json:"composition_mode,omitempty" yaml:"composition_mode,omitempty"`
+	PerceivedPerformance       PerceivedPerformancePolicy  `json:"perceived_performance,omitempty" yaml:"perceived_performance,omitempty"`
+	Semantics                  SemanticsPolicy             `json:"semantics,omitempty" yaml:"semantics,omitempty"`
+	WatchCapabilities          []WatchCapability           `json:"watch_capabilities,omitempty" yaml:"watch_capabilities,omitempty"`
+	QualityProfile             QualityProfile              `json:"quality_profile,omitempty" yaml:"quality_profile,omitempty"`
+	LifecyclePolicy            LifecyclePolicy             `json:"lifecycle_policy,omitempty" yaml:"lifecycle_policy,omitempty"`
+	CapabilityIsolation        CapabilityIsolation         `json:"capability_isolation,omitempty" yaml:"capability_isolation,omitempty"`
+	NoMatch                    string                      `json:"no_match,omitempty" yaml:"no_match,omitempty"`
+	DomainBoundary             DomainBoundary              `json:"domain_boundary,omitempty" yaml:"domain_boundary,omitempty"`
+	Soul                       Soul                        `json:"soul,omitempty" yaml:"soul,omitempty"`
+	SoulMarkdown               string                      `json:"soul_markdown,omitempty" yaml:"soul_markdown,omitempty"`
+	Glossary                   []GlossaryTerm              `json:"glossary,omitempty" yaml:"glossary,omitempty"`
+	ImportedAt                 time.Time                   `json:"imported_at" yaml:"-"`
+	SourceYAML                 string                      `json:"source_yaml" yaml:"-"`
+	Observations               []Observation               `json:"observations" yaml:"observations"`
+	Guidelines                 []Guideline                 `json:"guidelines" yaml:"guidelines"`
+	Relationships              []Relationship              `json:"relationships" yaml:"relationships"`
+	Journeys                   []Journey                   `json:"journeys" yaml:"journeys"`
+	Templates                  []Template                  `json:"templates" yaml:"templates"`
+	ToolPolicies               []ToolPolicy                `json:"tool_policies" yaml:"tool_policies"`
+	Retrievers                 []RetrieverBinding          `json:"retrievers,omitempty" yaml:"retrievers,omitempty"`
+	GuidelineToolAssociations  []GuidelineToolAssociation  `json:"guideline_tool_associations,omitempty" yaml:"-"`
+	GuidelineAgentAssociations []GuidelineAgentAssociation `json:"guideline_agent_associations,omitempty" yaml:"-"`
 }
 
 type GlossaryTerm struct {
@@ -89,9 +90,10 @@ type SemanticSlot struct {
 }
 
 type CapabilityIsolation struct {
-	AllowedProviderIDs    []string             `json:"allowed_provider_ids,omitempty" yaml:"allowed_provider_ids,omitempty"`
-	AllowedToolIDs        []string             `json:"allowed_tool_ids,omitempty" yaml:"allowed_tool_ids,omitempty"`
-	AllowedRetrieverIDs   []string             `json:"allowed_retriever_ids,omitempty" yaml:"allowed_retriever_ids,omitempty"`
+	AllowedProviderIDs     []string            `json:"allowed_provider_ids,omitempty" yaml:"allowed_provider_ids,omitempty"`
+	AllowedToolIDs         []string            `json:"allowed_tool_ids,omitempty" yaml:"allowed_tool_ids,omitempty"`
+	AllowedAgentIDs        []string            `json:"allowed_agent_ids,omitempty" yaml:"allowed_agent_ids,omitempty"`
+	AllowedRetrieverIDs    []string            `json:"allowed_retriever_ids,omitempty" yaml:"allowed_retriever_ids,omitempty"`
 	AllowedKnowledgeScopes []KnowledgeScopeRef `json:"allowed_knowledge_scopes,omitempty" yaml:"allowed_knowledge_scopes,omitempty"`
 }
 
@@ -205,6 +207,7 @@ type Guideline struct {
 	When         string            `json:"when" yaml:"when"`
 	Then         string            `json:"then" yaml:"then"`
 	Tools        []string          `json:"tools,omitempty" yaml:"tools,omitempty"`
+	Agents       []string          `json:"agents,omitempty" yaml:"agents,omitempty"`
 	MCP          *MCPRef           `json:"mcp,omitempty" yaml:"mcp,omitempty"`
 	Scope        string            `json:"scope,omitempty" yaml:"scope,omitempty"`
 	Matcher      string            `json:"matcher,omitempty" yaml:"matcher,omitempty"`
@@ -245,6 +248,7 @@ type JourneyNode struct {
 	Instruction     string            `json:"instruction,omitempty" yaml:"instruction,omitempty"`
 	Description     string            `json:"description,omitempty" yaml:"description,omitempty"`
 	Tool            string            `json:"tool,omitempty" yaml:"tool,omitempty"`
+	Agent           string            `json:"agent,omitempty" yaml:"agent,omitempty"`
 	MCP             *MCPRef           `json:"mcp,omitempty" yaml:"mcp,omitempty"`
 	When            []string          `json:"when,omitempty" yaml:"when,omitempty"`
 	Next            []string          `json:"next,omitempty" yaml:"next,omitempty"`
@@ -296,4 +300,9 @@ type RetrieverBinding struct {
 type GuidelineToolAssociation struct {
 	GuidelineID string `json:"guideline_id"`
 	ToolID      string `json:"tool_id"`
+}
+
+type GuidelineAgentAssociation struct {
+	GuidelineID string `json:"guideline_id"`
+	AgentID     string `json:"agent_id"`
 }

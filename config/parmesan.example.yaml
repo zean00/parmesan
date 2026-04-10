@@ -30,6 +30,14 @@ bootstrap:
 
 acp:
   response_coalesce_ms: 1500
+  delegation_timeout_seconds: 30
+
+agent_servers:
+  # OpenCode:
+  #   command: opencode
+  #   args: ["acp", "--pure"]
+  #   startup_timeout_seconds: 10
+  #   request_timeout_seconds: 30
 
 mcp:
   providers: []

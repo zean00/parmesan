@@ -313,3 +313,54 @@ func (r ToolDecisionStageResult) BatchOutput() map[string]any {
 		"rationale":         r.Decision.Rationale,
 	}
 }
+
+type AgentExposureStageResult struct {
+	ExposedAgents []string
+}
+
+func (r AgentExposureStageResult) Apply(state *matchingState) {
+	state.agentExposureStage = cloneAgentExposureStageResult(r)
+}
+
+func (r AgentExposureStageResult) BatchOutput() map[string]any {
+	return map[string]any{
+		"exposed_agents": append([]string(nil), r.ExposedAgents...),
+	}
+}
+
+type AgentDecisionStageResult struct {
+	Decision   AgentDecision
+	Evaluation AgentDecisionEvaluation
+}
+
+func (r AgentDecisionStageResult) Apply(state *matchingState) {
+	state.agentDecisionStage = cloneAgentDecisionStageResult(r)
+}
+
+func (r AgentDecisionStageResult) BatchOutput() map[string]any {
+	return map[string]any{
+		"evaluation":     r.Evaluation,
+		"selected_agent": r.Decision.SelectedAgent,
+		"can_run":        r.Decision.CanRun,
+		"grounded":       r.Decision.Grounded,
+		"rationale":      r.Decision.Rationale,
+	}
+}
+
+type CapabilityDecisionStageResult struct {
+	Decision   CapabilityDecision
+	Evaluation CapabilityDecisionEvaluation
+}
+
+func (r CapabilityDecisionStageResult) Apply(state *matchingState) {
+	state.capabilityDecisionStage = cloneCapabilityDecisionStageResult(r)
+}
+
+func (r CapabilityDecisionStageResult) BatchOutput() map[string]any {
+	return map[string]any{
+		"evaluation": r.Evaluation,
+		"kind":       r.Decision.Kind,
+		"target_id":  r.Decision.TargetID,
+		"rationale":  r.Decision.Rationale,
+	}
+}

@@ -26,6 +26,7 @@ func ParseBundle(raw []byte) (policy.Bundle, error) {
 		return policy.Bundle{}, err
 	}
 	bundle.GuidelineToolAssociations = compileGuidelineToolAssociations(bundle)
+	bundle.GuidelineAgentAssociations = compileGuidelineAgentAssociations(bundle)
 
 	return bundle, nil
 }
@@ -81,6 +82,9 @@ func ValidateBundle(bundle policy.Bundle) error {
 		if strings.TrimSpace(item.When) == "" || strings.TrimSpace(item.Then) == "" {
 			return fmt.Errorf("guideline %q requires when and then", item.ID)
 		}
+		if err := validateNonEmptyUnique("guideline.agents", item.Agents); err != nil {
+			return fmt.Errorf("guideline %q: %w", item.ID, err)
+		}
 		if err := validateMCPRef(item.MCP); err != nil {
 			return fmt.Errorf("guideline %q: %w", item.ID, err)
 		}
@@ -104,6 +108,11 @@ func ValidateBundle(bundle policy.Bundle) error {
 				return fmt.Errorf("journey %q has invalid state", item.ID)
 			}
 			stateIDs[strings.TrimSpace(state.ID)] = struct{}{}
+			if strings.TrimSpace(state.Agent) != "" {
+				if err := validateNonEmptyUnique("journey.state.agent", []string{state.Agent}); err != nil {
+					return fmt.Errorf("journey %q state %q: %w", item.ID, state.ID, err)
+				}
+			}
 			if err := validateMCPRef(state.MCP); err != nil {
 				return fmt.Errorf("journey %q state %q: %w", item.ID, state.ID, err)
 			}
@@ -124,6 +133,9 @@ func ValidateBundle(bundle policy.Bundle) error {
 		for _, guideline := range item.Guidelines {
 			if err := validateID("journey guideline", guideline.ID, seen); err != nil {
 				return err
+			}
+			if err := validateNonEmptyUnique("journey guideline.agents", guideline.Agents); err != nil {
+				return fmt.Errorf("journey %q guideline %q: %w", item.ID, guideline.ID, err)
 			}
 		}
 		for _, template := range item.Templates {
@@ -208,6 +220,9 @@ func validateCapabilityIsolation(item policy.CapabilityIsolation) error {
 		return err
 	}
 	if err := validateNonEmptyUnique("capability_isolation.allowed_tool_ids", item.AllowedToolIDs); err != nil {
+		return err
+	}
+	if err := validateNonEmptyUnique("capability_isolation.allowed_agent_ids", item.AllowedAgentIDs); err != nil {
 		return err
 	}
 	if err := validateNonEmptyUnique("capability_isolation.allowed_retriever_ids", item.AllowedRetrieverIDs); err != nil {
@@ -732,6 +747,41 @@ func compileGuidelineToolAssociations(bundle policy.Bundle) []policy.GuidelineTo
 		for _, state := range flow.States {
 			projectedID := "journey_node:" + flow.ID + ":" + state.ID
 			addRefs(projectedID, []string{state.Tool}, state.MCP)
+		}
+	}
+	return out
+}
+
+func compileGuidelineAgentAssociations(bundle policy.Bundle) []policy.GuidelineAgentAssociation {
+	seen := map[string]struct{}{}
+	var out []policy.GuidelineAgentAssociation
+	add := func(guidelineID, agentID string) {
+		guidelineID = strings.TrimSpace(guidelineID)
+		agentID = strings.TrimSpace(agentID)
+		if guidelineID == "" || agentID == "" {
+			return
+		}
+		key := guidelineID + "::" + agentID
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, policy.GuidelineAgentAssociation{
+			GuidelineID: guidelineID,
+			AgentID:     agentID,
+		})
+	}
+
+	for _, guideline := range bundle.Guidelines {
+		for _, agentID := range guideline.Agents {
+			add(guideline.ID, agentID)
+		}
+	}
+	for _, flow := range bundle.Journeys {
+		for _, guideline := range flow.Guidelines {
+			for _, agentID := range guideline.Agents {
+				add(guideline.ID, agentID)
+			}
 		}
 	}
 	return out

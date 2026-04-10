@@ -41,6 +41,44 @@ journeys:
 	}
 }
 
+func TestParseBundleCompilesGuidelineAgentAssociations(t *testing.T) {
+	raw := []byte(`
+id: bundle-1
+version: v1
+guidelines:
+  - id: orchestrate
+    when: customer asks for a multi-step workflow
+    then: delegate the workflow
+    agents: [OpenCode]
+journeys:
+  - id: flow_1
+    when: [customer asks for help]
+    guidelines:
+      - id: orchestrate_more
+        when: customer needs deeper implementation
+        then: delegate deeper implementation
+        agents: [OpenCode]
+    states:
+      - id: orchestrate
+        type: agent
+        agent: OpenCode
+`)
+
+	bundle, err := ParseBundle(raw)
+	if err != nil {
+		t.Fatalf("ParseBundle() error = %v", err)
+	}
+	if len(bundle.GuidelineAgentAssociations) != 2 {
+		t.Fatalf("guideline agent associations = %#v, want 2 compiled associations", bundle.GuidelineAgentAssociations)
+	}
+	if bundle.GuidelineAgentAssociations[0].AgentID != "OpenCode" {
+		t.Fatalf("guideline agent associations = %#v, want OpenCode target", bundle.GuidelineAgentAssociations)
+	}
+	if bundle.Journeys[0].States[0].Agent != "OpenCode" {
+		t.Fatalf("journey state agent = %q, want OpenCode", bundle.Journeys[0].States[0].Agent)
+	}
+}
+
 func TestValidateBundleRejectsDuplicateIDs(t *testing.T) {
 	raw := []byte(`
 id: bundle-1

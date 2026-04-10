@@ -24,6 +24,9 @@ func renderResponseMessages(view resolvedView, toolOutput map[string]any) []stri
 	if view.DisambiguationPrompt != "" {
 		return []string{view.DisambiguationPrompt}
 	}
+	if text := delegatedAgentResultText(toolOutput); text != "" {
+		return []string{text}
+	}
 	if rendered := renderTemplateText(analysis.RecommendedTemplate, toolOutput); rendered != "" {
 		return []string{rendered}
 	}
@@ -59,6 +62,17 @@ func renderResponseMessages(view resolvedView, toolOutput map[string]any) []stri
 		return []string{fmt.Sprintf("I checked the tool result: %s", string(raw))}
 	}
 	return nil
+}
+
+func delegatedAgentResultText(toolOutput map[string]any) string {
+	delegated, _ := toolOutput["delegated_agent"].(map[string]any)
+	if delegated == nil {
+		return ""
+	}
+	if status := strings.TrimSpace(fmt.Sprint(delegated["status"])); status != "" && !strings.EqualFold(status, "completed") {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(delegated["result_text"]))
 }
 
 func renderTemplate(templates []policy.Template, toolOutput map[string]any) string {

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/sahal/parmesan/internal/acppeer"
 	httpapi "github.com/sahal/parmesan/internal/api/http"
 	"github.com/sahal/parmesan/internal/api/sse"
 	"github.com/sahal/parmesan/internal/config"
@@ -108,7 +109,8 @@ func RunWorker(ctx context.Context) error {
 	slog.Info("worker postgres connected", "service", cfg.ServiceName)
 	writes.Start(ctx, 1)
 	defer writes.Stop()
-	runner.New(repo, writes, broker, router, "worker-"+hostname()).Start(ctx)
+	peerManager := acppeer.NewManager(cfg.AgentServers)
+	runner.New(repo, writes, broker, router, "worker-"+hostname()).WithAgentPeers(peerManager).Start(ctx)
 	maintainerworker.New(repo, maintainerRouter).Start(ctx)
 	lifecycle.New(repo, writes, router).Start(ctx)
 	replayrunner.New(repo, writes).Start(ctx)
