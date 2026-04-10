@@ -39,7 +39,7 @@ function TokenGate({ onToken }: { onToken: (token: string) => void }) {
         <p className="brand-kicker">Parmesan</p>
         <h1>Operator Control Panel</h1>
         <p className="brand-copy">
-          Enter an operator bearer token to access session operations, live notifications, policy state, and the agent test console.
+          Enter an operator bearer token to inspect agents, review sessions, and submit learning feedback.
         </p>
         <form
           className="token-form"
@@ -77,8 +77,6 @@ function DashboardApp({ token, onSignOut }: { token: string; onSignOut: () => vo
     () => [
       { to: "/sessions", label: "Sessions" },
       { to: "/agents", label: "Agents" },
-      { to: "/notifications", label: "Notifications" },
-      { to: "/control", label: "Control" },
     ],
     [],
   );
@@ -89,7 +87,7 @@ function DashboardApp({ token, onSignOut }: { token: string; onSignOut: () => vo
         <div className="sidebar__brand">
           <p className="brand-kicker">Parmesan</p>
           <h1>Control Panel</h1>
-          <p className="brand-copy">Session operations first, with control-plane inspection alongside live operator workflows.</p>
+          <p className="brand-copy">Release dashboard for agent status, session review, read-only policy inspection, and feedback capture.</p>
         </div>
         <nav className="nav-list">
           {navItems.map((item) => (

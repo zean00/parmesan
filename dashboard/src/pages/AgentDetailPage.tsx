@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { JsonBlock } from "../components/JsonBlock";
 import { KeyValueList } from "../components/KeyValueList";
 import { PageHeader } from "../components/PageHeader";
@@ -57,9 +57,6 @@ export function AgentDetailPage({ token }: { token: string }) {
         actions={
           <>
             {loading ? <Pill label="Loading" tone="attention" /> : <Pill label={agent?.status || "ready"} tone="positive" />}
-            <Link className="button button--ghost" to={`/agents/${agentId}/test`}>
-              Open test console
-            </Link>
           </>
         }
       />

@@ -1,0 +1,13 @@
+id: agent_profile_live_support
+name: Live Support Agent
+description: Customer-facing support agent for orders, shipping, returns, refunds, and account help.
+status: active
+policy_bundle_path: ../examples/live_support_policy.yaml
+knowledge_seed_path: live_support
+knowledge_source_id: source_live_support_seed
+default_knowledge_scope:
+  kind: agent
+  id: agent_profile_live_support
+metadata:
+  release_sample: true
+  channel: acp

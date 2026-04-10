@@ -1,0 +1,6 @@
+.git
+artifacts
+dashboard/node_modules
+dashboard/dist
+tmp
+*.log

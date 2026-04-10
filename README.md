@@ -19,6 +19,33 @@ This repository currently contains the bootstrap implementation:
 
 ## Run
 
+Release-style Docker deployment:
+
+```bash
+cp .env.example .env
+# edit .env and set OPENROUTER_API_KEY before live LLM validation
+docker compose up --build
+```
+
+This starts Postgres, applies migrations, bootstraps the sample live-support
+agent from [agents/live_support.yaml](/home/sahal/workspace/agents/parmesan/agents/live_support.yaml),
+registers markdown knowledge from [knowledge/live_support](/home/sahal/workspace/agents/parmesan/knowledge/live_support),
+runs the API and worker, and serves the dashboard at `http://127.0.0.1:4173`.
+The dashboard token defaults to `dev-operator`.
+
+File-backed runtime configuration lives in
+[config/parmesan.yaml](/home/sahal/workspace/agents/parmesan/config/parmesan.yaml).
+Environment variables still override file values, and `${VAR}` interpolation is
+supported inside the config file.
+
+Nexus can be attached as an optional compose profile when an image is available:
+
+```bash
+NEXUS_IMAGE=your-nexus-image docker compose --profile nexus up --build
+```
+
+Manual local development:
+
 ```bash
 go run ./cmd/api
 go run ./cmd/worker
@@ -55,15 +82,13 @@ Example live support bundle:
 
 - [examples/live_support_policy.yaml](/home/sahal/workspace/agents/parmesan/examples/live_support_policy.yaml) is the strict customer-support bundle used for the validated Nexus to Parmesan ACP run.
 
-Minimal live setup used for Nexus validation:
+Manual live setup used for Nexus validation:
 
 ```bash
-OPENROUTER_API_KEY=... DATABASE_URL=postgres://midas:midas@localhost:5432/parmesan?sslmode=disable OPERATOR_API_KEY=dev-operator HTTP_ADDR=127.0.0.1:8090 go run ./cmd/api
-OPENROUTER_API_KEY=... DATABASE_URL=postgres://midas:midas@localhost:5432/parmesan?sslmode=disable OPERATOR_API_KEY=dev-operator HTTP_ADDR=127.0.0.1:8091 go run ./cmd/worker
-curl -X POST -H 'Content-Type: application/x-yaml' --data-binary @examples/live_support_policy.yaml http://127.0.0.1:8090/v1/policy/import
-curl -X POST -H 'Authorization: Bearer dev-operator' -H 'Content-Type: application/json' \
-  -d '{"id":"agent_profile_live_support","name":"Live Support Agent","status":"active","default_policy_bundle_id":"bundle_live_support_v2"}' \
-  http://127.0.0.1:8090/v1/operator/agents
+PARMESAN_CONFIG=config/parmesan.yaml DATABASE_URL=postgres://midas:midas@localhost:5432/parmesan?sslmode=disable OPENROUTER_API_KEY=... OPERATOR_API_KEY=dev-operator go run ./cmd/migrate
+PARMESAN_CONFIG=config/parmesan.yaml DATABASE_URL=postgres://midas:midas@localhost:5432/parmesan?sslmode=disable OPENROUTER_API_KEY=... OPERATOR_API_KEY=dev-operator PARMESAN_AGENTS_DIR=agents KNOWLEDGE_SOURCE_ROOT=knowledge go run ./cmd/bootstrap
+PARMESAN_CONFIG=config/parmesan.yaml DATABASE_URL=postgres://midas:midas@localhost:5432/parmesan?sslmode=disable OPENROUTER_API_KEY=... OPERATOR_API_KEY=dev-operator HTTP_ADDR=127.0.0.1:8090 go run ./cmd/api
+PARMESAN_CONFIG=config/parmesan.yaml DATABASE_URL=postgres://midas:midas@localhost:5432/parmesan?sslmode=disable OPENROUTER_API_KEY=... OPERATOR_API_KEY=dev-operator HTTP_ADDR=127.0.0.1:8091 go run ./cmd/worker
 ```
 
 Operator endpoints support single-tenant RBAC. `OPERATOR_API_KEY` remains a

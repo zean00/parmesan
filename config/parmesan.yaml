@@ -1,0 +1,43 @@
+http:
+  address: ":8080"
+
+database:
+  url: "${DATABASE_URL}"
+
+secrets:
+  master_key: "${SECRETS_MASTER_KEY}"
+
+providers:
+  openrouter_api_key: "${OPENROUTER_API_KEY}"
+  openrouter_base_url: "${OPENROUTER_BASE_URL}"
+  default_reasoning: openrouter
+  default_structured: openrouter
+  default_embedding: openrouter
+  maintainer_reasoning: openrouter
+  maintainer_structured: openrouter
+  maintainer_embedding: openrouter
+
+operator:
+  api_key: "${OPERATOR_API_KEY}"
+  default_operator_id: dev_operator
+  default_operator_roles: operator
+
+knowledge:
+  root: /knowledge
+
+bootstrap:
+  agents_dir: /agents
+
+acp:
+  response_coalesce_ms: 1500
+
+mcp:
+  providers: []
+
+observability:
+  metrics_address: ":9090"
+  org_id: default
+
+runtime:
+  async_write_queue_size: 256
+  request_timeout_seconds: 15
