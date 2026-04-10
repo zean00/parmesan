@@ -78,6 +78,11 @@ ACP is the primary public conversation interface. The separate `gateway`
 service remains available for legacy `/v1/web/...` clients while ACP-to-channel
 adapters migrate externally.
 
+ACP session extension metadata should be sent via `_meta`. Parmesan preserves
+that object and normalizes customer identity/details from `_meta.parmesan` or
+`_meta.customer` into durable session `customer_context`; the older top-level
+`metadata` field remains as a Parmesan compatibility alias.
+
 External ACP agent peers can be registered in the global config and selected by
 policy as a delegated capability:
 

@@ -3604,6 +3604,73 @@ func TestACPAgentScopedCreateSessionSetsAgentAndAnonymousCustomer(t *testing.T) 
 	}
 }
 
+func TestACPAgentScopedCreateSessionNormalizesACPMetaCustomerContext(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/agents/agent_1/sessions", strings.NewReader(`{
+		"id":"sess_meta",
+		"_meta":{
+			"parmesan":{
+				"customer_id":"cust_meta",
+				"customer":{"name":"Ada","tier":"vip","locale":"id-ID"}
+			}
+		}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create scoped session status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	sess, err := repo.GetSession(context.Background(), "sess_meta")
+	if err != nil {
+		t.Fatalf("GetSession() error = %v", err)
+	}
+	if sess.CustomerID != "cust_meta" {
+		t.Fatalf("CustomerID = %q, want customer from _meta", sess.CustomerID)
+	}
+	customerContext, _ := sess.Metadata["customer_context"].(map[string]any)
+	if customerContext["name"] != "Ada" || customerContext["tier"] != "vip" || customerContext["locale"] != "id-ID" || customerContext["customer_id"] != "cust_meta" {
+		t.Fatalf("customer_context = %#v, want normalized customer context from _meta", customerContext)
+	}
+	if _, ok := sess.Metadata["_meta"].(map[string]any); !ok {
+		t.Fatalf("metadata = %#v, want preserved _meta", sess.Metadata)
+	}
+}
+
+func TestACPCreateSessionExplicitCustomerIDOverridesMetaCustomerContext(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/agents/agent_1/sessions", strings.NewReader(`{
+		"id":"sess_meta_conflict",
+		"customer_id":"cust_explicit",
+		"_meta":{"parmesan":{"customer_id":"cust_meta","customer":{"name":"Ada"}}}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create scoped session status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	sess, err := repo.GetSession(context.Background(), "sess_meta_conflict")
+	if err != nil {
+		t.Fatalf("GetSession() error = %v", err)
+	}
+	customerContext, _ := sess.Metadata["customer_context"].(map[string]any)
+	if sess.CustomerID != "cust_explicit" {
+		t.Fatalf("CustomerID = %q, want explicit customer", sess.CustomerID)
+	}
+	if customerContext["customer_id"] != "cust_explicit" || customerContext["id"] != "cust_explicit" {
+		t.Fatalf("customer_context = %#v, want explicit customer identity", customerContext)
+	}
+}
+
 func TestACPAgentScopedCreateSessionRejectsAgentMismatch(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)

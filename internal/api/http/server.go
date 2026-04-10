@@ -1569,9 +1569,13 @@ func (s *Server) acpCreateSessionWithAgent(w http.ResponseWriter, r *http.Reques
 	if strings.TrimSpace(req.ID) == "" {
 		req.ID = fmt.Sprintf("sess_%d", time.Now().UnixNano())
 	}
+	if strings.TrimSpace(req.CustomerID) == "" {
+		req.CustomerID = acp.CustomerIDFromSessionContext("", req.Metadata, req.Meta)
+	}
 	if scopedAgentID != "" && strings.TrimSpace(req.CustomerID) == "" {
 		req.CustomerID = anonymousACPCustomerID(req.ID)
 	}
+	req.Metadata = acp.NormalizeSessionMetadataWithCustomerID(req.Metadata, req.Meta, req.CustomerID)
 	if strings.TrimSpace(req.Channel) == "" {
 		req.Channel = "web"
 	}

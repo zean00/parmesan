@@ -26,6 +26,7 @@ type Session struct {
 	AgentID    string          `json:"agent_id,omitempty"`
 	Mode       string          `json:"mode,omitempty"`
 	Title      string          `json:"title,omitempty"`
+	Meta       map[string]any  `json:"_meta,omitempty"`
 	Metadata   map[string]any  `json:"metadata,omitempty"`
 	Labels     []string        `json:"labels,omitempty"`
 	Summary    *SessionSummary `json:"summary,omitempty"`
@@ -185,6 +186,7 @@ func requireDataStrings(data map[string]any, keys ...string) error {
 }
 
 func SessionFromDomain(src session.Session) Session {
+	metadata := cloneAnyMap(src.Metadata)
 	return Session{
 		ID:         src.ID,
 		Channel:    src.Channel,
@@ -192,7 +194,8 @@ func SessionFromDomain(src session.Session) Session {
 		AgentID:    src.AgentID,
 		Mode:       src.Mode,
 		Title:      src.Title,
-		Metadata:   src.Metadata,
+		Meta:       mapField(metadata, "_meta"),
+		Metadata:   metadata,
 		Labels:     append([]string(nil), src.Labels...),
 		Summary:    nil,
 		CreatedAt:  src.CreatedAt,
@@ -200,17 +203,123 @@ func SessionFromDomain(src session.Session) Session {
 }
 
 func SessionToDomain(src Session) session.Session {
+	customerID := CustomerIDFromSessionContext(src.CustomerID, src.Metadata, src.Meta)
+	metadata := NormalizeSessionMetadataWithCustomerID(src.Metadata, src.Meta, customerID)
 	return session.Session{
 		ID:         src.ID,
 		Channel:    src.Channel,
-		CustomerID: src.CustomerID,
+		CustomerID: customerID,
 		AgentID:    src.AgentID,
 		Mode:       src.Mode,
 		Title:      src.Title,
-		Metadata:   src.Metadata,
+		Metadata:   metadata,
 		Labels:     append([]string(nil), src.Labels...),
 		CreatedAt:  src.CreatedAt,
 	}
+}
+
+func NormalizeSessionMetadata(metadata, meta map[string]any) map[string]any {
+	return NormalizeSessionMetadataWithCustomerID(metadata, meta, CustomerIDFromSessionContext("", metadata, meta))
+}
+
+func NormalizeSessionMetadataWithCustomerID(metadata, meta map[string]any, customerID string) map[string]any {
+	out := cloneAnyMap(metadata)
+	if out == nil {
+		out = map[string]any{}
+	}
+	if len(meta) > 0 {
+		out["_meta"] = cloneAnyMap(meta)
+	}
+	customerContext := mergeAnyMaps(
+		mapField(out, "customer_context"),
+		mapField(out, "customer"),
+		mapField(meta, "customer_context"),
+		mapField(meta, "customer"),
+		mapField(mapField(meta, "parmesan"), "customer_context"),
+		mapField(mapField(meta, "parmesan"), "customer"),
+	)
+	if customerID = strings.TrimSpace(customerID); customerID != "" {
+		customerContext["id"] = customerID
+		customerContext["customer_id"] = customerID
+	}
+	if len(customerContext) > 0 {
+		out["customer_context"] = customerContext
+	}
+	return out
+}
+
+func CustomerIDFromSessionContext(explicit string, metadata, meta map[string]any) string {
+	if value := strings.TrimSpace(explicit); value != "" {
+		return value
+	}
+	for _, candidate := range []any{
+		valueAt(meta, "parmesan", "customer_id"),
+		valueAt(meta, "customer_id"),
+		valueAt(meta, "parmesan", "customer", "id"),
+		valueAt(meta, "parmesan", "customer", "customer_id"),
+		valueAt(meta, "customer", "id"),
+		valueAt(meta, "customer", "customer_id"),
+		valueAt(metadata, "_meta", "parmesan", "customer_id"),
+		valueAt(metadata, "_meta", "customer_id"),
+		valueAt(metadata, "customer_id"),
+		valueAt(metadata, "customer_context", "id"),
+		valueAt(metadata, "customer_context", "customer_id"),
+		valueAt(metadata, "customer", "id"),
+		valueAt(metadata, "customer", "customer_id"),
+	} {
+		if value := strings.TrimSpace(fmt.Sprint(candidate)); value != "" && value != "<nil>" {
+			return value
+		}
+	}
+	return ""
+}
+
+func cloneAnyMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		if nested, ok := value.(map[string]any); ok {
+			out[key] = cloneAnyMap(nested)
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+func mergeAnyMaps(items ...map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, item := range items {
+		for key, value := range item {
+			if strings.TrimSpace(key) == "" {
+				continue
+			}
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func mapField(values map[string]any, key string) map[string]any {
+	raw, _ := values[key]
+	if typed, ok := raw.(map[string]any); ok {
+		return typed
+	}
+	return nil
+}
+
+func valueAt(values map[string]any, path ...string) any {
+	var current any = values
+	for _, key := range path {
+		mapped, ok := current.(map[string]any)
+		if !ok {
+			return nil
+		}
+		current = mapped[key]
+	}
+	return current
 }
 
 func EventFromDomain(src session.Event) Event {
