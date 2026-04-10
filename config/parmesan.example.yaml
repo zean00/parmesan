@@ -25,6 +25,13 @@ operator:
 knowledge:
   root: /knowledge
 
+customer_context:
+  enrichment:
+    enabled: false
+    timeout_seconds: 2
+    on_error: continue
+    sources: []
+
 bootstrap:
   agents_dir: /agents
 

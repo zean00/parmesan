@@ -423,6 +423,7 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 				"composition_mode":      view.CompositionMode,
 				"soul_hash":             bundleSoulHash(view.Bundle),
 				"preference_hash":       preferenceHash(view.CustomerPreferences),
+				"customer_context_hash": customerContextHash(view.CustomerContext),
 				"arq_results":           view.ARQResults,
 			},
 			CreatedAt: time.Now().UTC(),
@@ -436,6 +437,7 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			"knowledge_snapshot_id":   view.RetrieverStage.KnowledgeSnapshotID,
 			"soul_hash":               bundleSoulHash(view.Bundle),
 			"preference_hash":         preferenceHash(view.CustomerPreferences),
+			"customer_context_hash":   customerContextHash(view.CustomerContext),
 			"retriever_result_hashes": retrieverResultHashes(view),
 		})
 		if _, err := r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "policy.resolved", "completed", exec.ID, exec.TraceID, map[string]any{
@@ -572,17 +574,19 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			TraceID:     exec.TraceID,
 			Message:     "assistant response composed",
 			Fields: map[string]any{
-				"event_id":      firstString(eventIDs),
-				"event_ids":     eventIDs,
-				"journey_state": journeyStateID(view.ActiveJourneyState),
-				"tool_output":   toolOutput,
-				"verification":  verification,
+				"event_id":              firstString(eventIDs),
+				"event_ids":             eventIDs,
+				"journey_state":         journeyStateID(view.ActiveJourneyState),
+				"tool_output":           toolOutput,
+				"verification":          verification,
+				"customer_context_hash": customerContextHash(view.CustomerContext),
 			},
 			CreatedAt: time.Now().UTC(),
 		})
 		if _, err := r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "response.composed", "completed", exec.ID, exec.TraceID, map[string]any{
-			"event_id":  firstString(eventIDs),
-			"event_ids": eventIDs,
+			"event_id":              firstString(eventIDs),
+			"event_ids":             eventIDs,
+			"customer_context_hash": customerContextHash(view.CustomerContext),
 		}, nil, false); err != nil {
 			return err
 		}
@@ -691,6 +695,8 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 		return resolvedView{}, nil, err
 	}
 	view.CustomerPreferences = r.customerPreferences(ctx, sess)
+	view.CustomerContext = customerContextFromSession(sess)
+	view.CustomerContextPromptSafeFields = customerContextPromptSafeFields(sess)
 	resolvedBundleID := selection.BundleID
 	if resolvedBundleID == "" && len(selectedBundles) > 0 {
 		resolvedBundleID = selectedBundles[0].ID
@@ -2358,6 +2364,9 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 	if prefs := customerPreferenceText(view.CustomerPreferences); prefs != "" {
 		parts = append(parts, "Customer preferences (soft constraints):\n"+prefs)
 	}
+	if ctx := customerContextPromptText(view.CustomerContext, view.CustomerContextPromptSafeFields); ctx != "" {
+		parts = append(parts, "Customer context:\n"+ctx)
+	}
 	if soul := soulPrompt(bundleSoul(view.Bundle)); soul != "" {
 		parts = append(parts, "Agent SOUL style and brand rules:\n"+soul)
 	}
@@ -2389,6 +2398,76 @@ func customerPreferenceText(items []customer.Preference) string {
 		parts = append(parts, item.Key+": "+item.Value)
 	}
 	return strings.Join(parts, "\n")
+}
+
+func customerContextFromSession(sess session.Session) map[string]any {
+	raw, _ := sess.Metadata["customer_context"].(map[string]any)
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(raw))
+	for key, value := range raw {
+		out[key] = value
+	}
+	return out
+}
+
+func customerContextPromptSafeFields(sess session.Session) []string {
+	raw := sess.Metadata["customer_context_prompt_safe_fields"]
+	switch typed := raw.(type) {
+	case []string:
+		return append([]string(nil), typed...)
+	case []any:
+		var out []string
+		for _, item := range typed {
+			if text := strings.TrimSpace(fmt.Sprint(item)); text != "" {
+				out = append(out, text)
+			}
+		}
+		return dedupeStrings(out)
+	default:
+		return nil
+	}
+}
+
+func customerContextPromptText(ctx map[string]any, safeFields []string) string {
+	if len(ctx) == 0 || len(safeFields) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, key := range dedupeStrings(safeFields) {
+		value, ok := ctx[key]
+		if !ok || value == nil {
+			continue
+		}
+		text := strings.TrimSpace(fmt.Sprint(value))
+		if text == "" {
+			continue
+		}
+		parts = append(parts, key+": "+text)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func customerContextHash(ctx map[string]any) string {
+	if len(ctx) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(ctx))
+	for key := range ctx {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	ordered := make(map[string]any, len(keys))
+	for _, key := range keys {
+		ordered[key] = ctx[key]
+	}
+	raw, err := json.Marshal(ordered)
+	if err != nil {
+		return ""
+	}
+	sum := sha1.Sum(raw)
+	return hex.EncodeToString(sum[:8])
 }
 
 func preferenceHash(items []customer.Preference) string {

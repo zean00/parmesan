@@ -23,6 +23,7 @@ Supported routes:
 Conversation-edge rules:
 - Agent-scoped routes are the preferred multi-profile ACP surface. The path `{agent_id}` is authoritative; a mismatched body `agent_id` is rejected, and existing session reads/writes return not found if the persisted session belongs to another agent.
 - Session creation accepts ACP extension metadata through `_meta`. Parmesan preserves `_meta` in session metadata and normalizes `_meta.parmesan.customer`, `_meta.customer`, and related `customer_id` fields into `metadata.customer_context`.
+- Optional customer-context enrichment can run during session creation. Configured HTTP, SQL, or static sources can add CRM/customer fields, merge them by `overwrite`, `ignore`, or `keep_both`, and mark prompt-safe fields for runtime injection.
 - Agent-scoped session creation assigns a stable anonymous `customer_id` when `_meta` and Parmesan compatibility fields do not provide customer identity, preserving customer-scoped context without requiring a Parmesan-specific ACP field.
 - `POST /v1/acp/sessions/{id}/messages` is the primary turn-ingress endpoint and creates or coalesces a durable execution plus the trigger event.
 - Quick successive customer messages are coalesced for `ACP_RESPONSE_COALESCE_MS` milliseconds (default `1500`, set `0` to disable) while the execution is still safe to merge before response composition.

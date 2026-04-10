@@ -10,6 +10,7 @@ import (
 	httpapi "github.com/sahal/parmesan/internal/api/http"
 	"github.com/sahal/parmesan/internal/api/sse"
 	"github.com/sahal/parmesan/internal/config"
+	"github.com/sahal/parmesan/internal/customercontext"
 	"github.com/sahal/parmesan/internal/gateway"
 	"github.com/sahal/parmesan/internal/lifecycle"
 	maintainerworker "github.com/sahal/parmesan/internal/maintainer"
@@ -57,7 +58,7 @@ func RunAPI(ctx context.Context) error {
 	writes.Start(ctx, 1)
 	defer writes.Stop()
 
-	server := httpapi.New(cfg.HTTP.Address, repo, writes, broker, router, syncer)
+	server := httpapi.New(cfg.HTTP.Address, repo, writes, broker, router, syncer).WithCustomerContextEnricher(customercontext.New(cfg.CustomerContext))
 	return server.Run(ctx)
 }
 

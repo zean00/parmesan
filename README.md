@@ -82,6 +82,9 @@ ACP session extension metadata should be sent via `_meta`. Parmesan preserves
 that object and normalizes customer identity/details from `_meta.parmesan` or
 `_meta.customer` into durable session `customer_context`; the older top-level
 `metadata` field remains as a Parmesan compatibility alias.
+Optional `customer_context.enrichment` config can enrich that context during
+session creation from HTTP, PostgreSQL SQL, or static sources and inject only
+configured prompt-safe fields at runtime.
 
 External ACP agent peers can be registered in the global config and selected by
 policy as a delegated capability:

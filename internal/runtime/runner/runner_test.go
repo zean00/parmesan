@@ -913,6 +913,12 @@ func TestComposePromptIncludesSoulGuidance(t *testing.T) {
 			Key:   "preferred_name",
 			Value: "Alex",
 		}},
+		CustomerContext: map[string]any{
+			"name":  "Ada",
+			"tier":  "vip",
+			"email": "ada@example.com",
+		},
+		CustomerContextPromptSafeFields: []string{"name", "tier"},
 		RetrieverStage: policyruntime.RetrieverStageResult{Results: []knowledgeretriever.Result{{
 			RetrieverID: "wiki",
 			Data:        "Refund and replacement responses must cite kb://returns after verification.",
@@ -934,6 +940,8 @@ func TestComposePromptIncludesSoulGuidance(t *testing.T) {
 		!strings.Contains(prompt, "ask one question at a time") ||
 		!strings.Contains(prompt, "Avoid rules: unsupported promises") ||
 		!strings.Contains(prompt, "Customer preferences (soft constraints):\npreferred_name: Alex") ||
+		!strings.Contains(prompt, "Customer context:\nname: Ada\ntier: vip") ||
+		strings.Contains(prompt, "ada@example.com") ||
 		!strings.Contains(prompt, "Response quality plan:") ||
 		!strings.Contains(prompt, `"preference_hints":["preferred_name: Alex"]`) ||
 		!strings.Contains(prompt, "High-risk response blueprint:") ||

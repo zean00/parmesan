@@ -15,6 +15,7 @@ import (
 	"github.com/sahal/parmesan/internal/acp"
 	"github.com/sahal/parmesan/internal/api/sse"
 	"github.com/sahal/parmesan/internal/config"
+	"github.com/sahal/parmesan/internal/customercontext"
 	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
@@ -3668,6 +3669,79 @@ func TestACPCreateSessionExplicitCustomerIDOverridesMetaCustomerContext(t *testi
 	}
 	if customerContext["customer_id"] != "cust_explicit" || customerContext["id"] != "cust_explicit" {
 		t.Fatalf("customer_context = %#v, want explicit customer identity", customerContext)
+	}
+}
+
+func TestACPCreateSessionStripsClientPromptSafeCustomerContextFields(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/agents/agent_1/sessions", strings.NewReader(`{
+		"id":"sess_client_prompt_safe",
+		"customer_id":"cust_1",
+		"metadata":{
+			"customer_context":{"name":"Injected","email":"injected@example.com"},
+			"customer_context_prompt_safe_fields":["name","email"],
+			"customer_context_enrichment":{"status":"succeeded"},
+			"customer_context_alternates":{"tier":[{"value":"vip"}]}
+		}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create scoped session status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	sess, err := repo.GetSession(context.Background(), "sess_client_prompt_safe")
+	if err != nil {
+		t.Fatalf("GetSession() error = %v", err)
+	}
+	if _, ok := sess.Metadata["customer_context_prompt_safe_fields"]; ok {
+		t.Fatalf("metadata = %#v, want client prompt-safe fields stripped", sess.Metadata)
+	}
+	if _, ok := sess.Metadata["customer_context_enrichment"]; ok {
+		t.Fatalf("metadata = %#v, want client enrichment provenance stripped", sess.Metadata)
+	}
+	if _, ok := sess.Metadata["customer_context_alternates"]; ok {
+		t.Fatalf("metadata = %#v, want client alternates stripped", sess.Metadata)
+	}
+}
+
+func TestACPCreateSessionRunsCustomerContextEnricher(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil).WithCustomerContextEnricher(customercontext.New(config.CustomerContextConfig{
+		Enrichment: config.CustomerContextEnrichmentConfig{
+			Enabled: true,
+			Sources: []config.CustomerContextEnrichmentSourceConfig{{
+				ID:               "static",
+				Type:             "static",
+				MergeStrategy:    "overwrite",
+				PromptSafeFields: []string{"name", "tier"},
+				CustomerContext:  map[string]any{"name": "Ada", "tier": "vip"},
+			}},
+		},
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/agents/agent_1/sessions", strings.NewReader(`{"id":"sess_enriched","customer_id":"cust_1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create scoped session status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	sess, err := repo.GetSession(context.Background(), "sess_enriched")
+	if err != nil {
+		t.Fatalf("GetSession() error = %v", err)
+	}
+	customerContext, _ := sess.Metadata["customer_context"].(map[string]any)
+	if customerContext["name"] != "Ada" || customerContext["tier"] != "vip" {
+		t.Fatalf("customer_context = %#v, want enriched fields", customerContext)
+	}
+	if _, ok := sess.Metadata["customer_context_enrichment"].(map[string]any); !ok {
+		t.Fatalf("metadata = %#v, want enrichment provenance", sess.Metadata)
 	}
 }
 

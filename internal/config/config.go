@@ -59,6 +59,45 @@ type AgentServerConfig struct {
 	RequestTimeoutSeconds int               `yaml:"request_timeout_seconds" json:"request_timeout_seconds,omitempty"`
 }
 
+type CustomerContextConfig struct {
+	Enrichment CustomerContextEnrichmentConfig `yaml:"enrichment" json:"enrichment,omitempty"`
+}
+
+type CustomerContextEnrichmentConfig struct {
+	Enabled        bool                                    `yaml:"enabled" json:"enabled,omitempty"`
+	TimeoutSeconds int                                     `yaml:"timeout_seconds" json:"timeout_seconds,omitempty"`
+	OnError        string                                  `yaml:"on_error" json:"on_error,omitempty"`
+	Sources        []CustomerContextEnrichmentSourceConfig `yaml:"sources" json:"sources,omitempty"`
+}
+
+type CustomerContextEnrichmentSourceConfig struct {
+	ID               string                           `yaml:"id" json:"id"`
+	Type             string                           `yaml:"type" json:"type"`
+	Enabled          *bool                            `yaml:"enabled" json:"enabled,omitempty"`
+	MergeStrategy    string                           `yaml:"merge_strategy" json:"merge_strategy,omitempty"`
+	FieldMerge       map[string]string                `yaml:"field_merge" json:"field_merge,omitempty"`
+	PromptSafeFields []string                         `yaml:"prompt_safe_fields" json:"prompt_safe_fields,omitempty"`
+	Request          CustomerContextHTTPRequestConfig `yaml:"request" json:"request,omitempty"`
+	ResponseMapping  CustomerContextMappingConfig     `yaml:"response_mapping" json:"response_mapping,omitempty"`
+	DatabaseURL      string                           `yaml:"database_url" json:"database_url,omitempty"`
+	Query            string                           `yaml:"query" json:"query,omitempty"`
+	Args             []string                         `yaml:"args" json:"args,omitempty"`
+	CustomerID       string                           `yaml:"customer_id" json:"customer_id,omitempty"`
+	CustomerContext  map[string]any                   `yaml:"customer_context" json:"customer_context,omitempty"`
+}
+
+type CustomerContextHTTPRequestConfig struct {
+	Method       string            `yaml:"method" json:"method,omitempty"`
+	URL          string            `yaml:"url" json:"url,omitempty"`
+	Headers      map[string]string `yaml:"headers" json:"headers,omitempty"`
+	BodyTemplate string            `yaml:"body_template" json:"body_template,omitempty"`
+}
+
+type CustomerContextMappingConfig struct {
+	CustomerID      string            `yaml:"customer_id" json:"customer_id,omitempty"`
+	CustomerContext map[string]string `yaml:"customer_context" json:"customer_context,omitempty"`
+}
+
 type MCPProviderConfig struct {
 	ID       string            `yaml:"id" json:"id"`
 	Name     string            `yaml:"name" json:"name"`
@@ -88,6 +127,7 @@ type Config struct {
 	Bootstrap           BootstrapConfig
 	MCP                 MCPConfig
 	AgentServers        map[string]AgentServerConfig
+	CustomerContext     CustomerContextConfig
 	AsyncWriteQueueSize int
 	RequestTimeout      time.Duration
 }
@@ -139,6 +179,7 @@ func Load(service string) Config {
 		},
 		MCP:                 MCPConfig{Providers: fileCfg.MCP.Providers},
 		AgentServers:        fileCfg.AgentServers,
+		CustomerContext:     fileCfg.CustomerContext,
 		AsyncWriteQueueSize: intEnv("ASYNC_WRITE_QUEUE_SIZE", 256),
 		RequestTimeout:      durationEnv("REQUEST_TIMEOUT_SECONDS", 15),
 	}
@@ -182,9 +223,10 @@ type fileConfig struct {
 	Bootstrap struct {
 		AgentsDir string `yaml:"agents_dir"`
 	} `yaml:"bootstrap"`
-	MCP           MCPConfig                    `yaml:"mcp"`
-	AgentServers  map[string]AgentServerConfig `yaml:"agent_servers"`
-	Observability struct {
+	MCP             MCPConfig                    `yaml:"mcp"`
+	AgentServers    map[string]AgentServerConfig `yaml:"agent_servers"`
+	CustomerContext CustomerContextConfig        `yaml:"customer_context"`
+	Observability   struct {
 		MetricsAddress string `yaml:"metrics_address"`
 		OTLPEndpoint   string `yaml:"otlp_endpoint"`
 		OTLPInsecure   *bool  `yaml:"otlp_insecure"`

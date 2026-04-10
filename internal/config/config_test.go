@@ -74,3 +74,60 @@ agent_servers:
 		t.Fatalf("timeouts = %d/%d, want 7/11", server.StartupTimeoutSeconds, server.RequestTimeoutSeconds)
 	}
 }
+
+func TestLoadCustomerContextEnrichmentFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "parmesan.yaml")
+	raw := []byte(`
+customer_context:
+  enrichment:
+    enabled: true
+    timeout_seconds: 3
+    on_error: continue
+    sources:
+      - id: crm_http
+        type: http
+        merge_strategy: overwrite
+        prompt_safe_fields: [name, tier]
+        request:
+          method: POST
+          url: "${CRM_URL}/lookup"
+          headers:
+            Authorization: "Bearer ${CRM_TOKEN}"
+          body_template: |
+            {"customer_id":"{{ .customer_id }}"}
+        response_mapping:
+          customer_id: "$.id"
+          customer_context:
+            name: "$.profile.name"
+            tier: "$.profile.tier"
+      - id: crm_sql
+        type: sql
+        database_url: "${CRM_DATABASE_URL}"
+        query: "select id, name from customers where id = $1"
+        args: ["{{ .customer_id }}"]
+        response_mapping:
+          customer_id: "id"
+          customer_context:
+            name: "name"
+`)
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("PARMESAN_CONFIG", path)
+	t.Setenv("CRM_URL", "https://crm.example")
+	t.Setenv("CRM_TOKEN", "secret")
+	t.Setenv("CRM_DATABASE_URL", "postgres://crm")
+
+	cfg := Load("api")
+	enrichment := cfg.CustomerContext.Enrichment
+	if !enrichment.Enabled || enrichment.TimeoutSeconds != 3 || len(enrichment.Sources) != 2 {
+		t.Fatalf("enrichment = %#v, want enabled with two sources", enrichment)
+	}
+	if enrichment.Sources[0].Request.URL != "https://crm.example/lookup" || enrichment.Sources[0].Request.Headers["Authorization"] != "Bearer secret" {
+		t.Fatalf("http source = %#v, want env-expanded request", enrichment.Sources[0].Request)
+	}
+	if enrichment.Sources[1].DatabaseURL != "postgres://crm" || enrichment.Sources[1].Args[0] != "{{ .customer_id }}" {
+		t.Fatalf("sql source = %#v, want sql config", enrichment.Sources[1])
+	}
+}

@@ -25,6 +25,7 @@ import (
 
 	"github.com/sahal/parmesan/internal/acp"
 	"github.com/sahal/parmesan/internal/api/sse"
+	customercontext "github.com/sahal/parmesan/internal/customercontext"
 	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/artifactmeta"
@@ -68,6 +69,7 @@ type Server struct {
 	syncer                     *toolsync.Syncer
 	sessions                   *sessionsvc.Service
 	moderator                  *moderation.Service
+	customerEnricher           *customercontext.Enricher
 	listener                   *sessionsvc.Listener
 	operatorAPIKey             string
 	trustedOperatorIDHeader    string
@@ -408,6 +410,11 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	return s
+}
+
+func (s *Server) WithCustomerContextEnricher(enricher *customercontext.Enricher) *Server {
+	s.customerEnricher = enricher
 	return s
 }
 
@@ -1576,11 +1583,20 @@ func (s *Server) acpCreateSessionWithAgent(w http.ResponseWriter, r *http.Reques
 		req.CustomerID = anonymousACPCustomerID(req.ID)
 	}
 	req.Metadata = acp.NormalizeSessionMetadataWithCustomerID(req.Metadata, req.Meta, req.CustomerID)
+	stripClientCustomerContextServerFields(req.Metadata)
 	if strings.TrimSpace(req.Channel) == "" {
 		req.Channel = "web"
 	}
 	if req.CreatedAt.IsZero() {
 		req.CreatedAt = time.Now().UTC()
+	}
+	if s.customerEnricher != nil {
+		enriched, err := s.customerEnricher.Enrich(r.Context(), acp.SessionToDomain(req))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		req = acp.SessionFromDomain(enriched)
 	}
 	created, err := service.OpenSession(r.Context(), req)
 	if err != nil {
@@ -1588,6 +1604,12 @@ func (s *Server) acpCreateSessionWithAgent(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)
+}
+
+func stripClientCustomerContextServerFields(metadata map[string]any) {
+	delete(metadata, "customer_context_prompt_safe_fields")
+	delete(metadata, "customer_context_enrichment")
+	delete(metadata, "customer_context_alternates")
 }
 
 func (s *Server) allowACPScopedSessionID(w http.ResponseWriter, r *http.Request, sessionID string) bool {
