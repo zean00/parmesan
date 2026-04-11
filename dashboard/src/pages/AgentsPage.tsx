@@ -32,7 +32,7 @@ export function AgentsPage({ token }: { token: string }) {
       <PageHeader
         eyebrow="Agents"
         title="Agent profiles"
-        summary="Browse available agents, inspect their default policy and knowledge scopes, and jump into live testing."
+        summary="Browse active profiles, inspect their operating boundaries, and open either the detail view or live test console."
         actions={
           <>
             {loading ? <Pill label="Loading" tone="attention" /> : <Pill label={`${agents.length} agents`} tone="positive" />}
@@ -52,8 +52,8 @@ export function AgentsPage({ token }: { token: string }) {
           </div>
         </header>
         <div className="section__body">
-          <div className="data-table">
-            <div className="data-table__head">
+          <div className="data-list">
+            <div className="data-list__head">
               <span>Name</span>
               <span>Status</span>
               <span>Policy bundle</span>
@@ -62,21 +62,43 @@ export function AgentsPage({ token }: { token: string }) {
               <span>Updated</span>
             </div>
             {agents.map((agent) => (
-              <Link className="data-table__row" key={agent.id} to={`/agents/${agent.id}`}>
-                <span>
+              <div className="data-list__row" key={agent.id}>
+                <div className="data-list__cell data-list__title">
+                  <span className="data-list__label">Name</span>
                   <strong>{agent.name}</strong>
                   <small>{agent.id}</small>
-                </span>
-                <span>
-                  <Pill label={agent.status || "unknown"} />
-                </span>
-                <span>{agent.default_policy_bundle_id || "n/a"}</span>
-                <span>{[agent.default_knowledge_scope_kind, agent.default_knowledge_scope_id].filter(Boolean).join(":") || "n/a"}</span>
-                <span>{agent.active_session_count ?? 0}</span>
-                <span>{formatDate(agent.updated_at)}</span>
-              </Link>
+                </div>
+                <div className="data-list__cell">
+                  <span className="data-list__label">Status</span>
+                  <Pill label={agent.status || "unknown"} tone={agent.status === "ready" ? "positive" : "attention"} />
+                </div>
+                <div className="data-list__cell">
+                  <span className="data-list__label">Policy bundle</span>
+                  <span>{agent.default_policy_bundle_id || "n/a"}</span>
+                </div>
+                <div className="data-list__cell">
+                  <span className="data-list__label">Knowledge scope</span>
+                  <span>{[agent.default_knowledge_scope_kind, agent.default_knowledge_scope_id].filter(Boolean).join(":") || "n/a"}</span>
+                </div>
+                <div className="data-list__cell">
+                  <span className="data-list__label">Active sessions</span>
+                  <span>{agent.active_session_count ?? 0}</span>
+                </div>
+                <div className="data-list__cell">
+                  <span className="data-list__label">Actions</span>
+                  <div className="inline-actions">
+                    <Link className="button button--ghost" to={`/agents/${agent.id}`}>
+                      Inspect
+                    </Link>
+                    <Link className="button button--primary" to={`/agents/${agent.id}/test`}>
+                      Test
+                    </Link>
+                  </div>
+                  <span className="data-list__meta">{formatDate(agent.updated_at)}</span>
+                </div>
+              </div>
             ))}
-            {agents.length === 0 ? <div className="data-table__empty">No agents available.</div> : null}
+            {agents.length === 0 ? <div className="data-list__empty">No agents available.</div> : null}
           </div>
         </div>
       </section>

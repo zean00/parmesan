@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { InspectPanel } from "../components/InspectPanel";
 import { useParams } from "react-router-dom";
-import { JsonBlock } from "../components/JsonBlock";
 import { KeyValueList } from "../components/KeyValueList";
 import { PageHeader } from "../components/PageHeader";
 import { Pill } from "../components/Pill";
@@ -57,6 +58,11 @@ export function AgentDetailPage({ token }: { token: string }) {
         actions={
           <>
             {loading ? <Pill label="Loading" tone="attention" /> : <Pill label={agent?.status || "ready"} tone="positive" />}
+            {agentId ? (
+              <Link className="button button--primary" to={`/agents/${agentId}/test`}>
+                Open test console
+              </Link>
+            ) : null}
           </>
         }
       />
@@ -73,7 +79,7 @@ export function AgentDetailPage({ token }: { token: string }) {
                 ["Soul hash", agent?.soul_hash || "n/a"],
               ]}
             />
-            <JsonBlock value={agent?.metadata ?? {}} />
+            <InspectPanel title="Profile metadata" summary="Raw attached metadata for debugging and audit." value={agent?.metadata ?? {}} />
           </div>
         </Section>
         <Section
@@ -115,7 +121,7 @@ export function AgentDetailPage({ token }: { token: string }) {
                 ["Reason", selection.reason ?? "n/a"],
               ]}
             />
-            <JsonBlock value={composedState} />
+            <InspectPanel title="Composed state payload" summary="Resolved state as returned by the operator API." value={composedState} />
           </div>
         </Section>
         <Section eyebrow="Isolation" title="Capability boundary" summary="Allowed providers, tools, retrievers, and knowledge scopes after bundle-level isolation.">
@@ -125,10 +131,20 @@ export function AgentDetailPage({ token }: { token: string }) {
             <Metric label="Retrievers" value={arrayOfStrings(capabilityIsolation.allowed_retriever_ids).length} />
             <Metric label="Knowledge scopes" value={Array.isArray(capabilityIsolation.allowed_knowledge_scopes) ? capabilityIsolation.allowed_knowledge_scopes.length : 0} />
           </div>
-          <JsonBlock value={capabilityIsolation} />
+          <InspectPanel title="Capability isolation payload" summary="Raw isolation data for provider/tool/retriever auditing." value={capabilityIsolation} />
         </Section>
         <Section eyebrow="Control" title="Agent control-state" summary="Scope-level summary across policy, rollouts, knowledge, and pending changes for this agent.">
-          <JsonBlock value={controlState} />
+          <div className="section-grid">
+            <KeyValueList
+              entries={[
+                ["Pending changes", Array.isArray((controlState.recent_changes as unknown[]) ?? null) ? ((controlState.recent_changes as unknown[]) ?? []).length : 0],
+                ["Control groups", Object.keys((controlState.control_groups as Record<string, unknown> | undefined) ?? {}).length],
+                ["Knowledge snapshot", ((controlState.knowledge as Record<string, unknown> | undefined)?.snapshot as Record<string, unknown> | undefined)?.id?.toString() ?? "n/a"],
+                ["Teaching outputs", Object.keys((((controlState.teaching as Record<string, unknown> | undefined)?.aggregated_outputs as Record<string, unknown> | undefined) ?? {})).length],
+              ]}
+            />
+            <InspectPanel title="Control-state payload" summary="Raw control-state for scope debugging and governance review." value={controlState} />
+          </div>
         </Section>
       </div>
     </>

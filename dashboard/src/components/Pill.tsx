@@ -1,6 +1,6 @@
 type PillProps = {
   label: string;
-  tone?: "neutral" | "positive" | "attention";
+  tone?: "neutral" | "positive" | "attention" | "danger";
 };
 
 export function Pill({ label, tone = "neutral" }: PillProps) {

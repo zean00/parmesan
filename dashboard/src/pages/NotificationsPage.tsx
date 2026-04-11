@@ -66,7 +66,7 @@ export function NotificationsPage({ token }: { token: string }) {
       <PageHeader
         eyebrow="Notifications"
         title="Operator attention feed"
-        summary="Approvals, failed executions, lifecycle alerts, and takeover events stream into a single operator inbox."
+        summary="Approvals, failed executions, lifecycle alerts, and takeovers in one operator feed."
         actions={
           <>
             <Pill label={status === "live" ? "Live stream" : status === "connecting" ? "Connecting" : "Stream error"} tone={status === "error" ? "attention" : status === "live" ? "positive" : "neutral"} />
@@ -92,11 +92,11 @@ export function NotificationsPage({ token }: { token: string }) {
                 {notifications.map((item) => (
                   <div className="notification-card" key={item.id}>
                     <div className="notification-card__meta">
-                      <Pill label={item.severity || "info"} tone={item.severity === "error" ? "attention" : item.severity === "warning" ? "attention" : "positive"} />
+                      <Pill label={item.severity || "info"} tone={item.severity === "error" ? "danger" : item.severity === "warning" ? "attention" : "positive"} />
+                      <Pill label={item.kind} tone="neutral" />
                       <span>{formatDate(item.created_at)}</span>
                     </div>
                     <h3>{item.title}</h3>
-                    <p className="muted">{item.kind}</p>
                     <div className="notification-card__links">
                       {item.session_id ? (
                         <Link className="button button--ghost" to={`/sessions/${item.session_id}`}>

@@ -64,7 +64,7 @@ export function SessionsPage({ token }: { token: string }) {
       <PageHeader
         eyebrow="Session ops"
         title="Session inbox"
-        summary="Filter live sessions, jump into failures, approvals, and handovers, and open the detail workspace for intervention."
+        summary="Monitor the active queue, narrow the operator inbox, and open a live session workspace when intervention is needed."
         actions={
           <>
             {loading ? <Pill label="Loading" tone="attention" /> : <Pill label={`${sessions.length} sessions`} tone="positive" />}
@@ -74,17 +74,15 @@ export function SessionsPage({ token }: { token: string }) {
           </>
         }
       />
-      <div className="workspace-grid">
+      <div className="page-stack">
         {error ? <div className="banner banner--error">{error}</div> : null}
-        <section className="section">
-          <header className="section__header">
-            <div>
-              <p className="section__eyebrow">Filters</p>
-              <h2>Inbox filters</h2>
-              <p className="section__summary">Narrow by agent, customer, assignment, and operational attention flags.</p>
+        <div className="page-band">
+          <section className="panel-form">
+            <div className="stack-heading">
+              <p className="stack-heading__eyebrow">Filters</p>
+              <h3>Queue filters</h3>
+              <p>Agent, customer, assignment, and operational attention flags.</p>
             </div>
-          </header>
-          <div className="section__body">
             <div className="filters-grid">
               <label>
                 <span>Agent</span>
@@ -145,38 +143,33 @@ export function SessionsPage({ token }: { token: string }) {
                 Reset
               </button>
             </div>
-          </div>
-        </section>
+          </section>
 
-        <section className="section">
-          <header className="section__header">
-            <div>
-              <p className="section__eyebrow">Queue</p>
-              <h2>Operator summary</h2>
+          <section className="section">
+            <div className="section__body">
+              <div className="metric-strip">
+                {Object.entries(queue).map(([key, value]) => (
+                  <div className="metric" key={key}>
+                    <span>{key.split("_").join(" ")}</span>
+                    <strong>{value}</strong>
+                  </div>
+                ))}
+              </div>
             </div>
-          </header>
-          <div className="section__body">
-            <div className="metric-strip">
-              {Object.entries(queue).map(([key, value]) => (
-                <div className="metric" key={key}>
-                  <span>{key.split("_").join(" ")}</span>
-                  <strong>{value}</strong>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
+          </section>
+        </div>
 
         <section className="section">
           <header className="section__header">
             <div>
               <p className="section__eyebrow">Sessions</p>
               <h2>Live inbox</h2>
+              <p className="section__summary">Open the session workspace when a thread needs approval handling, takeover, or recovery.</p>
             </div>
           </header>
           <div className="section__body">
-            <div className="data-table">
-              <div className="data-table__head">
+            <div className="data-list">
+              <div className="data-list__head">
                 <span>Session</span>
                 <span>Agent</span>
                 <span>Customer</span>
@@ -185,30 +178,64 @@ export function SessionsPage({ token }: { token: string }) {
                 <span>Last activity</span>
               </div>
               {sessions.map((item) => {
-                const attention = [item.pending_approval_count ? "approval" : "", item.failed_media_count ? "media" : "", item.unresolved_lint_count ? "lint" : ""]
-                  .filter(Boolean)
-                  .join(", ");
+                const attention = attentionFlags(item);
                 return (
-                  <Link className="data-table__row" key={item.id} to={`/sessions/${item.id}`}>
-                    <span>
+                  <Link className="data-list__row" key={item.id} to={`/sessions/${item.id}`}>
+                    <div className="data-list__cell data-list__title">
+                      <span className="data-list__label">Session</span>
                       <strong>{item.title || item.id}</strong>
                       <small>{item.id}</small>
-                    </span>
-                    <span>{item.agent_id || "n/a"}</span>
-                    <span>{item.customer_id || "n/a"}</span>
-                    <span>
-                      <Pill label={item.status || "unknown"} />
-                    </span>
-                    <span>{attention || "clear"}</span>
-                    <span>{formatDate(item.last_activity_at)}</span>
+                    </div>
+                    <div className="data-list__cell">
+                      <span className="data-list__label">Agent</span>
+                      <span>{item.agent_id || "n/a"}</span>
+                    </div>
+                    <div className="data-list__cell">
+                      <span className="data-list__label">Customer</span>
+                      <span>{item.customer_id || "n/a"}</span>
+                    </div>
+                    <div className="data-list__cell">
+                      <span className="data-list__label">Status</span>
+                      <Pill label={item.status || "unknown"} tone={item.status === "failed" ? "danger" : item.status === "closed" ? "neutral" : "positive"} />
+                    </div>
+                    <div className="data-list__cell attention-cell">
+                      <span className="data-list__label">Attention</span>
+                      {attention.length ? (
+                        <div className="pill-group">
+                          {attention.map((flag) => (
+                            <Pill key={flag.label} label={flag.label} tone={flag.tone} />
+                          ))}
+                        </div>
+                      ) : (
+                        <Pill label="Clear" tone="neutral" />
+                      )}
+                    </div>
+                    <div className="data-list__cell">
+                      <span className="data-list__label">Last activity</span>
+                      <span>{formatDate(item.last_activity_at)}</span>
+                    </div>
                   </Link>
                 );
               })}
-              {sessions.length === 0 ? <div className="data-table__empty">No sessions matched the current filter set.</div> : null}
+              {sessions.length === 0 ? <div className="data-list__empty">No sessions matched the current filter set.</div> : null}
             </div>
           </div>
         </section>
       </div>
     </>
   );
+}
+
+function attentionFlags(item: SessionView): Array<{ label: string; tone: "neutral" | "positive" | "attention" | "danger" }> {
+  const flags: Array<{ label: string; tone: "neutral" | "positive" | "attention" | "danger" }> = [];
+  if (item.pending_approval_count) {
+    flags.push({ label: `${item.pending_approval_count} approval`, tone: "attention" });
+  }
+  if (item.failed_media_count) {
+    flags.push({ label: `${item.failed_media_count} media`, tone: "danger" });
+  }
+  if (item.unresolved_lint_count) {
+    flags.push({ label: `${item.unresolved_lint_count} lint`, tone: "attention" });
+  }
+  return flags;
 }

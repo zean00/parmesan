@@ -75,8 +75,10 @@ function TokenGate({ onToken }: { onToken: (token: string) => void }) {
 function DashboardApp({ token, onSignOut }: { token: string; onSignOut: () => void }) {
   const navItems = useMemo(
     () => [
-      { to: "/sessions", label: "Sessions" },
-      { to: "/agents", label: "Agents" },
+      { to: "/sessions", label: "Sessions", detail: "Live inbox and intervention" },
+      { to: "/agents", label: "Agents", detail: "Profiles, scopes, and test entry" },
+      { to: "/notifications", label: "Notifications", detail: "Approvals, failures, and alerts" },
+      { to: "/control", label: "Control", detail: "Policy, knowledge, and governance state" },
     ],
     [],
   );
@@ -87,7 +89,7 @@ function DashboardApp({ token, onSignOut }: { token: string; onSignOut: () => vo
         <div className="sidebar__brand">
           <p className="brand-kicker">Parmesan</p>
           <h1>Control Panel</h1>
-          <p className="brand-copy">Release dashboard for agent status, session review, read-only policy inspection, and feedback capture.</p>
+          <p className="brand-copy">Operator console for live intervention, runtime inspection, learning feedback, and governance review.</p>
         </div>
         <nav className="nav-list">
           {navItems.map((item) => (
@@ -96,18 +98,23 @@ function DashboardApp({ token, onSignOut }: { token: string; onSignOut: () => vo
               to={item.to}
               className={({ isActive }) => `nav-list__item${isActive ? " nav-list__item--active" : ""}`}
             >
-              {item.label}
+              <span>{item.label}</span>
+              <small>{item.detail}</small>
             </NavLink>
           ))}
         </nav>
         <div className="sidebar__meta">
           <div>
             <span>Auth</span>
-            <strong>Operator token</strong>
+            <strong>Operator token loaded</strong>
           </div>
           <div>
             <span>Mode</span>
             <strong>Live</strong>
+          </div>
+          <div>
+            <span>Routes</span>
+            <strong>{navItems.length}</strong>
           </div>
         </div>
         <button className="button button--ghost" onClick={onSignOut} type="button">

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { getJSON } from "../lib/api";
 import { arrayOfStrings } from "../lib/format";
 import type { JSONObject } from "../types";
-import { JsonBlock } from "../components/JsonBlock";
+import { InspectPanel } from "../components/InspectPanel";
 import { KeyValueList } from "../components/KeyValueList";
 import { PageHeader } from "../components/PageHeader";
 import { Pill } from "../components/Pill";
@@ -113,6 +113,11 @@ export function ControlPage({ token }: { token: string }) {
         }
       />
       <div className="panel-form">
+        <div className="stack-heading">
+          <p className="stack-heading__eyebrow">Scope</p>
+          <h3>Resolve a runtime scope</h3>
+          <p>Use any combination of agent, session, customer, or scope keys to inspect the active control state.</p>
+        </div>
         <form
           className="query-form query-form--inline"
           onSubmit={(event) => {
@@ -145,6 +150,27 @@ export function ControlPage({ token }: { token: string }) {
             Refresh
           </button>
         </form>
+        <div className="filters-grid">
+          <label>
+            <span>Session key</span>
+            <input value={form.sessionKey} onChange={(event) => setForm((current) => ({ ...current, sessionKey: event.target.value }))} />
+          </label>
+          <label>
+            <span>Scope kind</span>
+            <input value={form.scopeKind} onChange={(event) => setForm((current) => ({ ...current, scopeKind: event.target.value }))} />
+          </label>
+          <label>
+            <span>Scope id</span>
+            <input value={form.scopeId} onChange={(event) => setForm((current) => ({ ...current, scopeId: event.target.value }))} />
+          </label>
+          <div className="surface-panel">
+            <div className="stack-heading">
+              <p className="stack-heading__eyebrow">Health</p>
+              <h3>{String(data.health?.status ?? "unknown")}</h3>
+              <p>Operator API health probe.</p>
+            </div>
+          </div>
+        </div>
       </div>
       {error ? <div className="banner banner--error">{error}</div> : null}
       <div className="workspace-grid">
@@ -165,14 +191,14 @@ export function ControlPage({ token }: { token: string }) {
                 <Metric label="Retrievers" value={arrayOfStrings(capabilityIsolation.allowed_retriever_ids).length} />
                 <Metric label="Knowledge scopes" value={Array.isArray(capabilityIsolation.allowed_knowledge_scopes) ? capabilityIsolation.allowed_knowledge_scopes.length : 0} />
               </div>
-              <JsonBlock value={capabilityIsolation} />
+              <InspectPanel title="Capability isolation payload" summary="Provider, tool, and retriever restrictions after resolution." value={capabilityIsolation} />
             </div>
           </div>
         </Section>
         <Section eyebrow="Control" title="Scope control-state" summary="Cross-plane summary for policy, knowledge, teaching, rollouts, and customer preferences.">
           <div className="section-grid">
             <KeyValueList entries={[["Agent", form.agentId || "n/a"], ["Channel", form.channel || "n/a"], ["Session", form.sessionId || form.sessionKey || "n/a"], ["Customer", form.customerId || "n/a"]]} />
-            <JsonBlock value={data.controlState} />
+            <InspectPanel title="Control-state payload" summary="Raw control graph payload for the selected scope." value={data.controlState} />
           </div>
         </Section>
         <Section eyebrow="Knowledge" title="Knowledge state" summary="Active snapshot metadata, lint pressure, and scope health.">
@@ -185,7 +211,7 @@ export function ControlPage({ token }: { token: string }) {
                 ["Jobs", Array.isArray(knowledgeState.recent_sync_jobs) ? knowledgeState.recent_sync_jobs.length : 0],
               ]}
             />
-            <JsonBlock value={knowledgeState} />
+            <InspectPanel title="Knowledge payload" summary="Snapshot, source, and lint details for deeper inspection." value={knowledgeState} />
           </div>
         </Section>
         <Section eyebrow="Teaching" title="Teaching state" summary="Feedback outputs and downstream control artifacts grouped for the current session.">
@@ -198,7 +224,7 @@ export function ControlPage({ token }: { token: string }) {
                 ["Control groups", Object.keys(controlGroups).length],
               ]}
             />
-            <JsonBlock value={teachingState} />
+            <InspectPanel title="Teaching payload" summary="Feedback and downstream artifacts for the selected scope." value={teachingState} />
           </div>
         </Section>
         <Section eyebrow="Governance" title="Recent control changes" summary="Pending and applied graph-native changes for the selected scope.">
@@ -215,7 +241,7 @@ export function ControlPage({ token }: { token: string }) {
               </span>
             ))}
           </div>
-          <JsonBlock value={recentChanges} />
+          <InspectPanel title="Recent lineage payload" summary="Raw recent-change list across the resolved control groups." value={recentChanges} />
         </Section>
       </div>
     </>
@@ -238,7 +264,7 @@ function ChangeColumn({ title, items }: { title: string; items: unknown[] }) {
         <h3>{title}</h3>
         <Pill label={`${items.length} items`} />
       </div>
-      <JsonBlock value={items} />
+      <InspectPanel title={`${title} changes`} summary="Raw change items for this governance bucket." value={items} defaultOpen />
     </div>
   );
 }
