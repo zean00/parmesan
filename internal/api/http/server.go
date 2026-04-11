@@ -25,6 +25,7 @@ import (
 
 	"github.com/sahal/parmesan/internal/acp"
 	"github.com/sahal/parmesan/internal/api/sse"
+	"github.com/sahal/parmesan/internal/config"
 	customercontext "github.com/sahal/parmesan/internal/customercontext"
 	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/approval"
@@ -70,6 +71,7 @@ type Server struct {
 	sessions                   *sessionsvc.Service
 	moderator                  *moderation.Service
 	customerEnricher           *customercontext.Enricher
+	moderationAlerts           config.ModerationAlertConfig
 	listener                   *sessionsvc.Listener
 	operatorAPIKey             string
 	trustedOperatorIDHeader    string
@@ -415,6 +417,11 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 
 func (s *Server) WithCustomerContextEnricher(enricher *customercontext.Enricher) *Server {
 	s.customerEnricher = enricher
+	return s
+}
+
+func (s *Server) WithModerationAlertConfig(cfg config.ModerationAlertConfig) *Server {
+	s.moderationAlerts = cfg
 	return s
 }
 
@@ -1411,9 +1418,14 @@ func (s *Server) appendEvent(w http.ResponseWriter, r *http.Request) {
 		req.Kind = "message"
 	}
 
-	content, metadata, err := s.prepareModeratedInboundEvent(r.Context(), req.Source, req.Kind, req.Content, nil, req.Moderation)
+	content, metadata, moderationPayload, err := s.prepareModeratedInboundEvent(r.Context(), req.Source, req.Kind, req.Content, nil, req.Moderation)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	sess, err := s.store.GetSession(r.Context(), sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
 	event, execID, traceID, err := s.enqueueSessionTurn(r.Context(), sessionID, req.ID, req.Source, req.Kind, content, nil, metadata)
@@ -1421,6 +1433,7 @@ func (s *Server) appendEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.maybeAppendModerationAlert(r.Context(), sess, event, moderationPayload)
 	s.appendTrace(r.Context(), audit.Record{
 		ID:          traceID,
 		Kind:        "session.event",
@@ -1456,7 +1469,7 @@ func (s *Server) acpCreateMessage(w http.ResponseWriter, r *http.Request) {
 		req.Source = "customer"
 	}
 	content := []session.ContentPart{{Type: "text", Text: req.Text}}
-	content, metadata, err := s.prepareModeratedInboundEvent(r.Context(), req.Source, acp.EventKindMessage, content, req.Metadata, req.Moderation)
+	content, metadata, moderationPayload, err := s.prepareModeratedInboundEvent(r.Context(), req.Source, acp.EventKindMessage, content, req.Metadata, req.Moderation)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -1486,6 +1499,7 @@ func (s *Server) acpCreateMessage(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		s.maybeAppendModerationAlert(r.Context(), sess, event, moderationPayload)
 		s.publishSessionEvent(sessionID, event, "", event.TraceID, event.CreatedAt)
 		writeJSON(w, http.StatusCreated, acp.NormalizeEvent(event))
 		return
@@ -1495,6 +1509,7 @@ func (s *Server) acpCreateMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.maybeAppendModerationAlert(r.Context(), sess, event, moderationPayload)
 	writeJSON(w, http.StatusCreated, acp.NormalizeEvent(event))
 }
 
@@ -1692,7 +1707,7 @@ func (s *Server) acpAppendEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	content, metadata, err := s.prepareModeratedInboundEvent(r.Context(), req.Source, req.Kind, req.Content, req.Metadata, req.Moderation)
+	content, metadata, moderationPayload, err := s.prepareModeratedInboundEvent(r.Context(), req.Source, req.Kind, req.Content, req.Metadata, req.Moderation)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -1703,6 +1718,9 @@ func (s *Server) acpAppendEvent(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if sess, err := s.store.GetSession(r.Context(), req.SessionID); err == nil {
+		s.maybeAppendModerationAlert(r.Context(), sess, acp.EventToDomain(created), moderationPayload)
 	}
 	writeJSON(w, http.StatusCreated, created)
 }
@@ -7649,12 +7667,13 @@ func sanitizeSessionEvent(item session.Event) session.Event {
 	return acp.EventToDomain(acp.SanitizeEvent(item))
 }
 
-func (s *Server) prepareModeratedInboundEvent(ctx context.Context, source, kind string, content []session.ContentPart, metadata map[string]any, rawMode string) ([]session.ContentPart, map[string]any, error) {
+func (s *Server) prepareModeratedInboundEvent(ctx context.Context, source, kind string, content []session.ContentPart, metadata map[string]any, rawMode string) ([]session.ContentPart, map[string]any, map[string]any, error) {
 	mode := moderation.NormalizeMode(rawMode)
 	if rawMode != "" && mode == "" {
-		return nil, nil, fmt.Errorf("invalid moderation mode")
+		return nil, nil, nil, fmt.Errorf("invalid moderation mode")
 	}
 	metadata = cloneMap(metadata)
+	delete(metadata, "moderation")
 	if source != "customer" || kind != acp.EventKindMessage {
 		if mode != "" && mode != moderation.ModeOff {
 			metadata["moderation"] = map[string]any{
@@ -7664,7 +7683,7 @@ func (s *Server) prepareModeratedInboundEvent(ctx context.Context, source, kind 
 				"reason":   "non_customer_or_non_message",
 			}
 		}
-		return content, metadata, nil
+		return content, metadata, mapValue(metadata["moderation"]), nil
 	}
 	if mode == "" {
 		mode = moderation.ModeOff
@@ -7678,7 +7697,7 @@ func (s *Server) prepareModeratedInboundEvent(ctx context.Context, source, kind 
 				"provider": "local",
 			}
 		}
-		return content, metadata, nil
+		return content, metadata, mapValue(metadata["moderation"]), nil
 	}
 	result := s.moderator.Moderate(ctx, mode, textParts)
 	metadata["moderation"] = map[string]any{
@@ -7691,11 +7710,200 @@ func (s *Server) prepareModeratedInboundEvent(ctx context.Context, source, kind 
 		"censored":   result.Censored,
 	}
 	if !result.Censored {
-		return content, metadata, nil
+		return content, metadata, mapValue(metadata["moderation"]), nil
 	}
 	metadata["raw_content"] = textParts
 	metadata["raw_visibility"] = "operator_only"
-	return censorContentParts(content, result.Placeholder), metadata, nil
+	return censorContentParts(content, result.Placeholder), metadata, mapValue(metadata["moderation"]), nil
+}
+
+func (s *Server) maybeAppendModerationAlert(ctx context.Context, sess session.Session, event session.Event, moderationPayload map[string]any) {
+	if !shouldAlertOnModeration(s.resolvedModerationAlertConfig(ctx, sess.AgentID), moderationPayload) {
+		return
+	}
+	record := audit.Record{
+		ID:          stableServerID("modalert", sess.ID, event.ID),
+		Kind:        "moderation.flagged",
+		SessionID:   sess.ID,
+		ExecutionID: event.ExecutionID,
+		TraceID:     event.TraceID,
+		Message:     "customer input flagged by moderation",
+		Fields:      moderationAlertFields(moderationPayload),
+		CreatedAt:   event.CreatedAt,
+	}
+	s.appendTrace(ctx, record)
+}
+
+func (s *Server) resolvedModerationAlertConfig(ctx context.Context, agentID string) config.ModerationAlertConfig {
+	cfg := normalizedModerationAlertConfig(s.moderationAlerts)
+	if strings.TrimSpace(agentID) == "" {
+		return cfg
+	}
+	if profile, err := s.store.GetAgentProfile(ctx, agentID); err == nil {
+		override := moderationAlertOverrideFromMap(mapValue(profile.Metadata["moderation_alerts"]))
+		if override.present {
+			return applyModerationAlertOverride(cfg, override)
+		}
+	}
+	return cfg
+}
+
+func moderationAlertFields(payload map[string]any) map[string]any {
+	if len(payload) == 0 {
+		return nil
+	}
+	out := map[string]any{}
+	for _, key := range []string{"mode", "decision", "provider", "reason", "categories", "jailbreak", "censored"} {
+		if value, ok := payload[key]; ok {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func shouldAlertOnModeration(cfg config.ModerationAlertConfig, payload map[string]any) bool {
+	if !cfg.Enabled || len(payload) == 0 {
+		return false
+	}
+	if boolValue(payload["jailbreak"]) && cfg.NotifyOnJailbreak {
+		return true
+	}
+	if boolValue(payload["censored"]) && cfg.NotifyOnCensored {
+		return true
+	}
+	if len(cfg.NotifyCategories) == 0 {
+		return false
+	}
+	configured := map[string]struct{}{}
+	for _, item := range cfg.NotifyCategories {
+		item = strings.ToLower(strings.TrimSpace(item))
+		if item != "" {
+			configured[item] = struct{}{}
+		}
+	}
+	for _, item := range stringSliceFromAny(payload["categories"]) {
+		if _, ok := configured[strings.ToLower(strings.TrimSpace(item))]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func moderationAlertConfigFromMap(values map[string]any) config.ModerationAlertConfig {
+	if len(values) == 0 {
+		return config.ModerationAlertConfig{}
+	}
+	return config.ModerationAlertConfig{
+		Enabled:           boolValue(values["enabled"]),
+		NotifyOnCensored:  boolValue(values["notify_on_censored"]),
+		NotifyOnJailbreak: boolValue(values["notify_on_jailbreak"]),
+		NotifyCategories:  stringSliceFromAny(values["notify_categories"]),
+	}
+}
+
+func normalizedModerationAlertConfig(cfg config.ModerationAlertConfig) config.ModerationAlertConfig {
+	cfg.NotifyCategories = dedupeNormalizedStrings(cfg.NotifyCategories)
+	return cfg
+}
+
+type moderationAlertOverride struct {
+	present             bool
+	enabled             *bool
+	notifyOnCensored    *bool
+	notifyOnJailbreak   *bool
+	notifyCategories    []string
+	hasNotifyCategories bool
+}
+
+func moderationAlertOverrideFromMap(values map[string]any) moderationAlertOverride {
+	if len(values) == 0 {
+		return moderationAlertOverride{}
+	}
+	override := moderationAlertOverride{present: true}
+	if value, ok := values["enabled"]; ok {
+		b := boolValue(value)
+		override.enabled = &b
+	}
+	if value, ok := values["notify_on_censored"]; ok {
+		b := boolValue(value)
+		override.notifyOnCensored = &b
+	}
+	if value, ok := values["notify_on_jailbreak"]; ok {
+		b := boolValue(value)
+		override.notifyOnJailbreak = &b
+	}
+	if value, ok := values["notify_categories"]; ok {
+		override.hasNotifyCategories = true
+		override.notifyCategories = dedupeNormalizedStrings(stringSliceFromAny(value))
+	}
+	return override
+}
+
+func applyModerationAlertOverride(base config.ModerationAlertConfig, override moderationAlertOverride) config.ModerationAlertConfig {
+	out := normalizedModerationAlertConfig(base)
+	if override.enabled != nil {
+		out.Enabled = *override.enabled
+	}
+	if override.notifyOnCensored != nil {
+		out.NotifyOnCensored = *override.notifyOnCensored
+	}
+	if override.notifyOnJailbreak != nil {
+		out.NotifyOnJailbreak = *override.notifyOnJailbreak
+	}
+	if override.hasNotifyCategories {
+		out.NotifyCategories = append([]string(nil), override.notifyCategories...)
+	}
+	return normalizedModerationAlertConfig(out)
+}
+
+func boolValue(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true")
+	default:
+		return false
+	}
+}
+
+func stringSliceFromAny(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return append([]string(nil), typed...)
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text := strings.TrimSpace(fmt.Sprint(item))
+			if text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func dedupeNormalizedStrings(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.ToLower(strings.TrimSpace(item))
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func extractTextParts(content []session.ContentPart) string {

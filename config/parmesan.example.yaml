@@ -32,6 +32,13 @@ customer_context:
     on_error: continue
     sources: []
 
+moderation:
+  alerts:
+    enabled: false
+    notify_on_censored: true
+    notify_on_jailbreak: true
+    notify_categories: []
+
 bootstrap:
   agents_dir: /agents
 

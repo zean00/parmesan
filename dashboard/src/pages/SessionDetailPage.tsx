@@ -137,6 +137,7 @@ export function SessionDetailPage({ token }: { token: string }) {
   }, [sessionId, token]);
 
   const summary = useMemo(() => (session?.summary ?? {}) as JSONObject, [session]);
+  const moderationSummary = useMemo(() => latestModerationSummary(events), [events]);
 
   return (
     <>
@@ -193,6 +194,23 @@ export function SessionDetailPage({ token }: { token: string }) {
                   ["Last activity", formatDate(session?.last_activity_at)],
                 ]}
               />
+              {moderationSummary ? (
+                <div className="surface-panel">
+                  <div className="stack-heading">
+                    <p className="stack-heading__eyebrow">Moderation</p>
+                    <h3>Flagged customer input</h3>
+                    <p>Latest moderation outcome for this session.</p>
+                  </div>
+                  <div className="pill-group">
+                    <Pill label={String(moderationSummary.decision ?? "unknown")} tone={moderationSummary.censored ? "danger" : "attention"} />
+                    <Pill label={`mode: ${String(moderationSummary.mode ?? "n/a")}`} tone="neutral" />
+                    {moderationSummary.jailbreak ? <Pill label="jailbreak" tone="danger" /> : null}
+                    {moderationSummary.categories.map((item) => (
+                      <Pill key={item} label={item} tone="attention" />
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               <InspectPanel title="Session summary" summary="Compact summary payload for the current session." value={summary} />
             </div>
           </Section>
@@ -334,6 +352,7 @@ export function SessionDetailPage({ token }: { token: string }) {
             <div className="stack">
               <InspectPanel title="Lifecycle payload" summary="Raw lifecycle state for session monitoring and debugging." value={lifecycle} defaultOpen />
               <InspectPanel title="Teaching payload" summary="Feedback-derived state and downstream learning artifacts." value={teachingState} />
+              {moderationSummary ? <InspectPanel title="Moderation summary" summary="Safe moderation payload for the latest flagged inbound message." value={moderationSummary.raw} /> : null}
             </div>
           </div>
         </Section>
@@ -386,4 +405,22 @@ function eventPreview(event: SessionEvent): string {
     return `Tool event: ${event.kind}.`;
   }
   return "Structured event payload available in the execution or lifecycle inspectors.";
+}
+
+function latestModerationSummary(events: SessionEvent[]): { decision?: string; mode?: string; jailbreak: boolean; censored: boolean; categories: string[]; raw: JSONObject } | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    const moderation = (event.metadata?.moderation ?? null) as JSONObject | null;
+    if (!moderation) continue;
+    const decision = typeof moderation.decision === "string" ? moderation.decision : undefined;
+    const mode = typeof moderation.mode === "string" ? moderation.mode : undefined;
+    const jailbreak = moderation.jailbreak === true;
+    const censored = moderation.censored === true;
+    const categories = Array.isArray(moderation.categories) ? moderation.categories.map((item) => String(item)) : [];
+    if (!censored && !jailbreak && categories.length === 0) {
+      continue;
+    }
+    return { decision, mode, jailbreak, censored, categories, raw: moderation };
+  }
+  return null;
 }

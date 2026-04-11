@@ -63,6 +63,17 @@ type CustomerContextConfig struct {
 	Enrichment CustomerContextEnrichmentConfig `yaml:"enrichment" json:"enrichment,omitempty"`
 }
 
+type ModerationConfig struct {
+	Alerts ModerationAlertConfig `yaml:"alerts" json:"alerts,omitempty"`
+}
+
+type ModerationAlertConfig struct {
+	Enabled           bool     `yaml:"enabled" json:"enabled,omitempty"`
+	NotifyOnCensored  bool     `yaml:"notify_on_censored" json:"notify_on_censored,omitempty"`
+	NotifyOnJailbreak bool     `yaml:"notify_on_jailbreak" json:"notify_on_jailbreak,omitempty"`
+	NotifyCategories  []string `yaml:"notify_categories" json:"notify_categories,omitempty"`
+}
+
 type CustomerContextEnrichmentConfig struct {
 	Enabled        bool                                    `yaml:"enabled" json:"enabled,omitempty"`
 	TimeoutSeconds int                                     `yaml:"timeout_seconds" json:"timeout_seconds,omitempty"`
@@ -128,6 +139,7 @@ type Config struct {
 	MCP                 MCPConfig
 	AgentServers        map[string]AgentServerConfig
 	CustomerContext     CustomerContextConfig
+	Moderation          ModerationConfig
 	AsyncWriteQueueSize int
 	RequestTimeout      time.Duration
 }
@@ -180,6 +192,7 @@ func Load(service string) Config {
 		MCP:                 MCPConfig{Providers: fileCfg.MCP.Providers},
 		AgentServers:        fileCfg.AgentServers,
 		CustomerContext:     fileCfg.CustomerContext,
+		Moderation:          fileCfg.Moderation,
 		AsyncWriteQueueSize: intEnv("ASYNC_WRITE_QUEUE_SIZE", 256),
 		RequestTimeout:      durationEnv("REQUEST_TIMEOUT_SECONDS", 15),
 	}
@@ -226,6 +239,7 @@ type fileConfig struct {
 	MCP             MCPConfig                    `yaml:"mcp"`
 	AgentServers    map[string]AgentServerConfig `yaml:"agent_servers"`
 	CustomerContext CustomerContextConfig        `yaml:"customer_context"`
+	Moderation      ModerationConfig             `yaml:"moderation"`
 	Observability   struct {
 		MetricsAddress string `yaml:"metrics_address"`
 		OTLPEndpoint   string `yaml:"otlp_endpoint"`

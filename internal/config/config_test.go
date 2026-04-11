@@ -131,3 +131,29 @@ customer_context:
 		t.Fatalf("sql source = %#v, want sql config", enrichment.Sources[1])
 	}
 }
+
+func TestLoadModerationAlertsFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "parmesan.yaml")
+	raw := []byte(`
+moderation:
+  alerts:
+    enabled: true
+    notify_on_censored: true
+    notify_on_jailbreak: false
+    notify_categories: [self_harm, violence]
+`)
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("PARMESAN_CONFIG", path)
+
+	cfg := Load("api")
+	alerts := cfg.Moderation.Alerts
+	if !alerts.Enabled || !alerts.NotifyOnCensored || alerts.NotifyOnJailbreak {
+		t.Fatalf("alerts = %#v, want enabled censored-only config", alerts)
+	}
+	if len(alerts.NotifyCategories) != 2 || alerts.NotifyCategories[0] != "self_harm" || alerts.NotifyCategories[1] != "violence" {
+		t.Fatalf("notify_categories = %#v, want self_harm/violence", alerts.NotifyCategories)
+	}
+}

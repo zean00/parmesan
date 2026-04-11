@@ -58,7 +58,9 @@ func RunAPI(ctx context.Context) error {
 	writes.Start(ctx, 1)
 	defer writes.Stop()
 
-	server := httpapi.New(cfg.HTTP.Address, repo, writes, broker, router, syncer).WithCustomerContextEnricher(customercontext.New(cfg.CustomerContext))
+	server := httpapi.New(cfg.HTTP.Address, repo, writes, broker, router, syncer).
+		WithCustomerContextEnricher(customercontext.New(cfg.CustomerContext)).
+		WithModerationAlertConfig(cfg.Moderation.Alerts)
 	return server.Run(ctx)
 }
 

@@ -92,7 +92,7 @@ export function NotificationsPage({ token }: { token: string }) {
                 {notifications.map((item) => (
                   <div className="notification-card" key={item.id}>
                     <div className="notification-card__meta">
-                      <Pill label={item.severity || "info"} tone={item.severity === "error" ? "danger" : item.severity === "warning" ? "attention" : "positive"} />
+                      <Pill label={item.severity || "info"} tone={notificationTone(item.severity)} />
                       <Pill label={item.kind} tone="neutral" />
                       <span>{formatDate(item.created_at)}</span>
                     </div>
@@ -119,4 +119,20 @@ export function NotificationsPage({ token }: { token: string }) {
       </div>
     </>
   );
+}
+
+function notificationTone(severity: string): "neutral" | "positive" | "attention" | "danger" {
+  switch ((severity || "").toLowerCase()) {
+    case "critical":
+    case "error":
+      return "danger";
+    case "warning":
+    case "attention":
+      return "attention";
+    case "info":
+    case "neutral":
+      return "neutral";
+    default:
+      return "positive";
+  }
 }

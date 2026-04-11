@@ -408,6 +408,24 @@ func (s *Server) notificationFromAuditRecord(ctx context.Context, record audit.R
 			Status:      "open",
 			Payload:     cloneMap(record.Fields),
 		}, true, nil
+	case "moderation.flagged":
+		severity := "attention"
+		if boolValue(record.Fields["jailbreak"]) {
+			severity = "critical"
+		}
+		return &operatorNotification{
+			ID:          record.ID,
+			Kind:        "moderation_flagged",
+			Severity:    severity,
+			Title:       "Moderation flagged customer input",
+			SessionID:   record.SessionID,
+			ExecutionID: record.ExecutionID,
+			AgentID:     sessionAgentID,
+			TraceID:     record.TraceID,
+			CreatedAt:   record.CreatedAt,
+			Status:      "open",
+			Payload:     cloneMap(record.Fields),
+		}, true, nil
 	default:
 		return nil, false, nil
 	}
