@@ -8,7 +8,7 @@ import { Section } from "../components/Section";
 import { getJSON, postJSON } from "../lib/api";
 import { formatDate } from "../lib/format";
 import { streamSSE } from "../lib/sse";
-import type { ExecutionPayload, JSONObject, SessionEvent, SessionView } from "../types";
+import type { ExecutionPayload, JSONObject, SessionEvent, SessionView, TraceTimeline, TraceTimelineEntry } from "../types";
 
 type ExecutionBundle = {
   payload: ExecutionPayload | null;
@@ -17,6 +17,7 @@ type ExecutionBundle = {
   explain: JSONObject | null;
   toolRuns: JSONObject[] | null;
   deliveryAttempts: JSONObject[] | null;
+  trace: TraceTimeline | null;
 };
 
 export function SessionDetailPage({ token }: { token: string }) {
@@ -33,6 +34,7 @@ export function SessionDetailPage({ token }: { token: string }) {
     explain: null,
     toolRuns: null,
     deliveryAttempts: null,
+    trace: null,
   });
   const [messageText, setMessageText] = useState("");
   const [noteText, setNoteText] = useState("");
@@ -72,6 +74,7 @@ export function SessionDetailPage({ token }: { token: string }) {
         explain: null,
         toolRuns: null,
         deliveryAttempts: null,
+        trace: null,
       });
       return;
     }
@@ -84,7 +87,16 @@ export function SessionDetailPage({ token }: { token: string }) {
         getJSON<JSONObject[]>(token, `/v1/executions/${executionID}/tool-runs`),
         getJSON<JSONObject[]>(token, `/v1/executions/${executionID}/delivery-attempts`),
       ]);
-      setExecution({ payload, resolvedPolicy, quality, explain, toolRuns, deliveryAttempts });
+      const traceID = typeof payload.execution?.trace_id === "string" ? payload.execution.trace_id : "";
+      let trace: TraceTimeline | null = null;
+      if (traceID) {
+        try {
+          trace = await getJSON<TraceTimeline>(token, `/v1/traces/${traceID}`);
+        } catch (err) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      }
+      setExecution({ payload, resolvedPolicy, quality, explain, toolRuns, deliveryAttempts, trace });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -138,6 +150,19 @@ export function SessionDetailPage({ token }: { token: string }) {
 
   const summary = useMemo(() => (session?.summary ?? {}) as JSONObject, [session]);
   const moderationSummary = useMemo(() => latestModerationSummary(events), [events]);
+  const traceSummary = useMemo(() => summarizeTrace(execution.trace), [execution.trace]);
+  const [traceKindFilter, setTraceKindFilter] = useState("");
+  const filteredTraceEntries = useMemo(() => {
+    if (!execution.trace) {
+      return [];
+    }
+    return execution.trace.entries.filter((entry) => {
+      if (!traceKindFilter) {
+        return true;
+      }
+      return traceGroup(entry.kind) === traceKindFilter;
+    });
+  }, [execution.trace, traceKindFilter]);
 
   return (
     <>
@@ -368,7 +393,43 @@ export function SessionDetailPage({ token }: { token: string }) {
               ]}
             />
             <div className="stack">
+              <div className="surface-panel">
+                <div className="stack-heading">
+                  <p className="stack-heading__eyebrow">Trace summary</p>
+                  <h3>Structured execution timeline</h3>
+                  <p>Trace-native sequence across execution state, responses, tools, approvals, delivery, and audit records.</p>
+                </div>
+                <div className="pill-group">
+                  {traceSummary.map(([label, count]) => (
+                    <button
+                      className={`trace-filter-chip${traceKindFilter === label ? " trace-filter-chip--active" : ""}`}
+                      key={label}
+                      type="button"
+                      onClick={() => setTraceKindFilter((current) => (current === label ? "" : label))}
+                    >
+                      <span>{label}</span>
+                      <strong>{count}</strong>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="trace-list">
+                {filteredTraceEntries.map((entry) => (
+                  <article className="trace-card" key={`${entry.kind}:${entry.id}`}>
+                    <div className="trace-card__meta">
+                      <Pill label={traceGroup(entry.kind)} tone={traceTone(entry.kind)} />
+                      <span>{entry.kind}</span>
+                      <span>{formatDate(entry.when)}</span>
+                    </div>
+                    <h3>{traceTitle(entry)}</h3>
+                    <p className="muted">{traceSummaryLine(entry)}</p>
+                  </article>
+                ))}
+                {execution.trace && filteredTraceEntries.length === 0 ? <div className="data-table__empty">No trace entries match the current stage filter.</div> : null}
+                {!execution.trace ? <div className="data-table__empty">No trace timeline is available for the latest execution.</div> : null}
+              </div>
               <InspectPanel title="Execution payload" summary="Execution summary payload for the latest run." value={execution.payload} defaultOpen />
+              <InspectPanel title="Trace timeline" summary="Raw trace timeline payload returned by the trace endpoint." value={execution.trace} />
               <InspectPanel title="Resolved policy" summary="Policy resolution data for the execution." value={execution.resolvedPolicy} />
               <InspectPanel title="Quality" summary="Quality evaluation payload for the execution." value={execution.quality} />
               <InspectPanel title="Explain" summary="Explain/debug payload for the execution." value={execution.explain} />
@@ -380,6 +441,138 @@ export function SessionDetailPage({ token }: { token: string }) {
       </div>
     </>
   );
+}
+
+function summarizeTrace(trace: TraceTimeline | null): Array<[string, number]> {
+  if (!trace) {
+    return [];
+  }
+  const counts = new Map<string, number>();
+  for (const entry of trace.entries) {
+    const key = traceGroup(entry.kind);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return Array.from(counts.entries()).sort((left, right) => right[1] - left[1]);
+}
+
+function traceGroup(kind: string): string {
+  if (kind === "execution" || kind.startsWith("execution.")) {
+    return "execution";
+  }
+  if (kind === "response" || kind.startsWith("response.")) {
+    return "response";
+  }
+  if (kind.startsWith("tool.")) {
+    return "tool";
+  }
+  if (kind.startsWith("delivery.")) {
+    return "delivery";
+  }
+  if (kind === "approval") {
+    return "approval";
+  }
+  if (kind === "session.event" || kind.startsWith("operator.")) {
+    return "session";
+  }
+  if (kind.startsWith("audit.") || kind.startsWith("media.")) {
+    return "audit";
+  }
+  return "other";
+}
+
+function traceTone(kind: string): "neutral" | "positive" | "attention" | "danger" {
+  const group = traceGroup(kind);
+  switch (group) {
+    case "execution":
+    case "response":
+      return "positive";
+    case "tool":
+    case "approval":
+      return "attention";
+    case "audit":
+      return "danger";
+    default:
+      return "neutral";
+  }
+}
+
+function traceTitle(entry: TraceTimelineEntry): string {
+  const payload = tracePayload(entry);
+  switch (entry.kind) {
+    case "execution":
+      return `Execution ${valueString(payload.id) || entry.execution_id || entry.id}`;
+    case "response":
+      return `Response ${valueString(payload.id) || entry.id}`;
+    case "approval":
+      return `Approval ${valueString(payload.status) || entry.id}`;
+    case "tool.run":
+      return valueString(payload.tool_id) || valueString(payload.name) || "Tool run";
+    case "delivery.attempt":
+      return valueString(payload.channel) ? `Delivery via ${valueString(payload.channel)}` : "Delivery attempt";
+    default:
+      if (entry.kind.startsWith("execution.step")) {
+        return valueString(payload.name) || valueString(payload.step_name) || "Execution step";
+      }
+      if (entry.kind.startsWith("response.trace_span")) {
+        return valueString(payload.name) || valueString(payload.kind) || "Response trace span";
+      }
+      if (entry.kind === "session.event" || entry.kind.startsWith("operator.")) {
+        return valueString(payload.kind) || entry.kind;
+      }
+      if (entry.kind.startsWith("audit.")) {
+        return valueString(payload.message) || entry.kind;
+      }
+      return entry.kind;
+  }
+}
+
+function traceSummaryLine(entry: TraceTimelineEntry): string {
+  const payload = tracePayload(entry);
+  const parts: string[] = [];
+  const status = valueString(payload.status);
+  const reason = valueString(payload.reason) || valueString(payload.message);
+  const source = valueString(payload.source);
+  const kind = valueString(payload.kind);
+  if (status) {
+    parts.push(`status ${status}`);
+  }
+  if (source && source !== "system") {
+    parts.push(`source ${source}`);
+  }
+  if (kind && kind !== entry.kind) {
+    parts.push(`kind ${kind}`);
+  }
+  if (reason) {
+    parts.push(reason);
+  }
+  if (parts.length === 0) {
+    const fields = objectField(payload, "fields");
+    const fieldKeys = Object.keys(fields ?? {});
+    if (fieldKeys.length > 0) {
+      parts.push(`fields: ${fieldKeys.slice(0, 3).join(", ")}`);
+    }
+  }
+  return parts.join(" • ") || "Structured trace payload available in the inspector.";
+}
+
+function tracePayload(entry: TraceTimelineEntry): JSONObject {
+  const payload = entry.payload;
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    return payload as JSONObject;
+  }
+  return {};
+}
+
+function objectField(value: JSONObject, key: string): JSONObject | null {
+  const field = value[key];
+  if (field && typeof field === "object" && !Array.isArray(field)) {
+    return field as JSONObject;
+  }
+  return null;
+}
+
+function valueString(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }
 
 function timelineTone(source: string): "assistant" | "operator" | "system" {

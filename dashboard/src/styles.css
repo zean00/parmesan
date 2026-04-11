@@ -232,7 +232,8 @@ a {
 .workspace-grid,
 .stack,
 .timeline,
-.notification-list {
+.notification-list,
+.trace-list {
   display: grid;
   gap: 1rem;
 }
@@ -466,6 +467,34 @@ a {
   gap: 0.65rem;
 }
 
+.trace-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted-strong);
+  border-radius: 999px;
+  padding: 0.55rem 0.8rem;
+  cursor: pointer;
+  transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease;
+}
+
+.trace-filter-chip:hover {
+  transform: translateY(-1px);
+  border-color: var(--line-strong);
+}
+
+.trace-filter-chip strong {
+  color: var(--text);
+}
+
+.trace-filter-chip--active {
+  border-color: rgba(245, 157, 69, 0.32);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
 .preset-grid {
   display: flex;
   flex-wrap: wrap;
@@ -666,6 +695,7 @@ a {
 
 .timeline__item,
 .notification-card,
+.trace-card,
 .action-card,
 .change-column {
   border-radius: 1rem;
@@ -673,7 +703,8 @@ a {
 }
 
 .timeline__meta,
-.notification-card__meta {
+.notification-card__meta,
+.trace-card__meta {
   display: flex;
   flex-wrap: wrap;
   gap: 0.6rem;
@@ -691,6 +722,7 @@ a {
 
 .timeline__body p,
 .notification-card h3,
+.trace-card h3,
 .action-card h3 {
   margin: 0;
 }
@@ -821,6 +853,7 @@ a {
 
 .nav-list__item:focus-visible,
 .button:focus-visible,
+.trace-filter-chip:focus-visible,
 .query-form input:focus-visible,
 .query-form select:focus-visible,
 .query-form textarea:focus-visible,

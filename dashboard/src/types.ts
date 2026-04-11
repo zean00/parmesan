@@ -103,3 +103,20 @@ export type ExecutionPayload = {
   execution?: JSONObject;
   steps?: JSONObject[];
 };
+
+export type TraceTimelineEntry = {
+  kind: string;
+  id: string;
+  session_id?: string;
+  execution_id?: string;
+  trace_id?: string;
+  when: string;
+  payload?: JSONValue;
+};
+
+export type TraceTimeline = {
+  trace_id: string;
+  session_id?: string;
+  execution_id?: string;
+  entries: TraceTimelineEntry[];
+};
