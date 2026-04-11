@@ -380,6 +380,19 @@ a {
   align-items: end;
 }
 
+.input-cluster {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.input-cluster--double {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.input-cluster--triple {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .query-form input,
 .query-form select,
 .query-form textarea,
@@ -421,6 +434,13 @@ a {
   transform: translateY(-1px);
 }
 
+.code-field {
+  min-height: 10.5rem;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
 .filters-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -444,6 +464,17 @@ a {
   display: flex;
   flex-wrap: wrap;
   gap: 0.65rem;
+}
+
+.preset-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.preset-button {
+  min-height: 2.5rem;
+  padding-inline: 0.95rem;
 }
 
 .metric-strip {
@@ -865,6 +896,8 @@ a {
   .timeline-grid,
   .section-grid,
   .action-grid,
+  .input-cluster--double,
+  .input-cluster--triple,
   .filters-grid,
   .query-form--inline {
     grid-template-columns: 1fr;
