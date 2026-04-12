@@ -12,6 +12,7 @@ Start with the curated documentation set:
 
 - [Documentation Index](./docs/README.md)
 - [Getting Started](./docs/getting-started.md)
+- [Configuration](./docs/configuration.md)
 - [Concepts](./docs/concepts.md)
 - [Architecture](./docs/architecture.md)
 - [Engine](./docs/engine.md)

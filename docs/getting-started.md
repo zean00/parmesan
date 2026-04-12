@@ -21,6 +21,10 @@ The stock sample is:
 - policy bundle: `examples/live_support_policy.yaml`
 - seeded knowledge: `knowledge/live_support/`
 
+For the detailed config reference, use:
+
+- [Configuration](./configuration.md)
+
 ## Fastest Path: Docker Compose
 
 1. Copy the environment template:

@@ -1,0 +1,413 @@
+# Configuration
+
+This document is the practical configuration reference for the current
+repository.
+
+Use it together with:
+
+- [Getting Started](./getting-started.md) for boot flow
+- [Policies](./policies.md) for policy authoring
+- [Architecture](./architecture.md) for runtime shape
+
+## Configuration Layers
+
+Parmesan is configured from three main file layers:
+
+1. Global runtime config in `config/parmesan.yaml`
+2. Agent definition files in `agents/*.yaml`
+3. Policy bundle files referenced by each agent definition
+
+At startup:
+
+1. `cmd/bootstrap` reads agent definition files from `bootstrap.agents_dir`
+2. each agent file points at a policy bundle and optional knowledge seed path
+3. `cmd/api` and `cmd/worker` load the same global runtime config
+
+```mermaid
+flowchart LR
+    Config[config/parmesan.yaml]
+    Agents[agents/*.yaml]
+    Policy[examples/...policy.yaml]
+    Knowledge[knowledge/...]
+    Bootstrap[cmd/bootstrap]
+    API[cmd/api]
+    Worker[cmd/worker]
+
+    Config --> Bootstrap
+    Config --> API
+    Config --> Worker
+    Agents --> Bootstrap
+    Policy --> Bootstrap
+    Knowledge --> Bootstrap
+```
+
+## Global Runtime Config
+
+The runtime config file path is controlled by `PARMESAN_CONFIG`.
+
+Current stock example:
+
+- `config/parmesan.example.yaml`
+
+Current stock deployment file:
+
+- `config/parmesan.yaml`
+
+### Minimal Example
+
+```yaml
+http:
+  address: ":8080"
+
+database:
+  url: "${DATABASE_URL}"
+
+secrets:
+  master_key: "${SECRETS_MASTER_KEY}"
+
+providers:
+  openrouter_api_key: "${OPENROUTER_API_KEY}"
+  default_reasoning: openrouter
+  default_structured: openrouter
+  default_embedding: openrouter
+
+operator:
+  api_key: "${OPERATOR_API_KEY}"
+
+knowledge:
+  root: /knowledge
+
+bootstrap:
+  agents_dir: /agents
+```
+
+### Main Sections
+
+`http`
+- `address`: bind address for the API process. The file value can be overridden
+  by `HTTP_ADDR`.
+
+`database`
+- `url`: Postgres connection string. The runtime requires a real database for
+  the normal deployment path.
+
+`secrets`
+- `master_key`: symmetric key for encrypted secrets storage.
+
+`providers`
+- `openai_api_key`
+- `openrouter_api_key`
+- `openrouter_base_url`
+- `default_reasoning`
+- `default_structured`
+- `default_embedding`
+- `maintainer_reasoning`
+- `maintainer_structured`
+- `maintainer_embedding`
+
+These select which registered provider family is used for customer execution
+and maintainer/learning work. The stock config uses OpenRouter for all three
+roles.
+
+`operator`
+- `api_key`
+- `trusted_id_header`
+- `trusted_roles_header`
+- `default_operator_id`
+- `default_operator_roles`
+
+`knowledge`
+- `root`: filesystem root used when bootstrap resolves folder-backed knowledge
+  seeds.
+
+`bootstrap`
+- `agents_dir`: directory scanned by `cmd/bootstrap` for `*.yaml` and `*.yml`
+  agent definition files.
+
+`acp`
+- `response_coalesce_ms`: durable coalescing window for inbound customer
+  messages before response execution starts
+- `delegation_timeout_seconds`: max wait for delegated ACP peer agents
+
+`mcp.providers`
+- list of MCP provider registrations that bootstrap should materialize into the
+  provider catalog
+
+`agent_servers`
+- local ACP peer agents started over stdio and exposed for delegation by policy
+
+`customer_context.enrichment`
+- optional server-side enrichment pipeline for session creation
+
+`moderation.alerts`
+- notification policy for operator-visible moderation alerts
+
+`observability`
+- metrics and OTLP settings
+
+`runtime`
+- async write queue and request timeout settings
+
+### Environment Override Rules
+
+Parmesan loads file config first, then applies environment overrides.
+
+Important runtime env vars:
+
+- `PARMESAN_CONFIG`
+- `DATABASE_URL`
+- `SECRETS_MASTER_KEY`
+- `OPENAI_API_KEY`
+- `OPENROUTER_API_KEY`
+- `OPENROUTER_BASE_URL`
+- `DEFAULT_REASONING_PROVIDER`
+- `DEFAULT_STRUCTURED_PROVIDER`
+- `DEFAULT_EMBEDDING_PROVIDER`
+- `DEFAULT_MAINTAINER_REASONING_PROVIDER`
+- `DEFAULT_MAINTAINER_STRUCTURED_PROVIDER`
+- `DEFAULT_MAINTAINER_EMBEDDING_PROVIDER`
+- `OPERATOR_API_KEY`
+- `OPERATOR_TRUSTED_ID_HEADER`
+- `OPERATOR_TRUSTED_ROLES_HEADER`
+- `DEFAULT_OPERATOR_ID`
+- `DEFAULT_OPERATOR_ROLES`
+- `KNOWLEDGE_SOURCE_ROOT`
+- `PARMESAN_AGENTS_DIR`
+- `ACP_RESPONSE_COALESCE_MS`
+- `ACP_DELEGATION_TIMEOUT_SECONDS`
+
+The config loader also supports `${VAR}` interpolation inside YAML file values.
+
+## Agent Definition Files
+
+Each file in `agents/*.yaml` defines one bootstrapped agent profile.
+
+Current stock example:
+
+- `agents/live_support.yaml`
+
+### Example
+
+```yaml
+id: agent_profile_live_support
+name: Live Support Agent
+description: Customer-facing support agent for orders, shipping, returns, refunds, and account help.
+status: active
+policy_bundle_path: ../examples/live_support_policy.yaml
+knowledge_seed_path: live_support
+knowledge_source_id: source_live_support_seed
+default_knowledge_scope:
+  kind: agent
+  id: agent_profile_live_support
+metadata:
+  release_sample: true
+  channel: acp
+```
+
+### Fields
+
+`id`
+- durable agent profile id
+
+`name`
+- operator-facing display name
+
+`description`
+- operator-facing description
+
+`status`
+- defaults to `active` when omitted
+
+`policy_bundle_path`
+- required path to the YAML policy bundle
+- relative paths resolve relative to the agent definition file
+
+`knowledge_seed_path`
+- optional folder path under the configured knowledge root
+
+`knowledge_source_id`
+- optional durable id for the bootstrapped knowledge source
+
+`default_knowledge_scope`
+- defaults to `kind: agent` and the agent `id` if omitted
+
+`capability_isolation`
+- optional metadata block used to constrain visible tools or delegated agents
+
+`metadata`
+- arbitrary profile metadata
+- currently also used for some runtime extensions such as
+  `moderation_alerts`
+
+## Policy Bundle Configuration
+
+Policy bundles are authored as YAML and compiled during bootstrap.
+
+A minimal useful bundle usually contains:
+
+- `id`
+- `version`
+- `composition_mode`
+- `no_match`
+- `domain_boundary`
+- `soul`
+- `guidelines`
+- `templates`
+
+See:
+
+- `examples/live_support_policy.yaml`
+- [Policies](./policies.md)
+
+## Connections And Integrations
+
+### Model Provider Connection
+
+The stock path uses OpenRouter:
+
+```yaml
+providers:
+  openrouter_api_key: "${OPENROUTER_API_KEY}"
+  openrouter_base_url: "${OPENROUTER_BASE_URL}"
+  default_reasoning: openrouter
+  default_structured: openrouter
+  default_embedding: openrouter
+```
+
+This controls both runtime generation and embedding selection. Maintainer work
+can use separate provider routing via the `maintainer_*` fields.
+
+### MCP Providers
+
+MCP providers are configured globally, then registered during bootstrap.
+
+Example:
+
+```yaml
+mcp:
+  providers:
+    - id: docs
+      name: Docs MCP
+      kind: mcp
+      base_url: http://docs-mcp:8080
+```
+
+This registers the provider in the tool catalog. Policy still needs to expose
+the relevant capability before the runtime can use it.
+
+### Delegated ACP Peer Agents
+
+ACP peer agents are configured under `agent_servers`.
+
+Example:
+
+```yaml
+agent_servers:
+  OpenCode:
+    command: opencode
+    args: ["acp", "--pure"]
+    startup_timeout_seconds: 10
+    request_timeout_seconds: 30
+```
+
+These peers are available for policy-driven delegation. They are not implicitly
+used by the runtime. Policy must expose them.
+
+### Customer Context Enrichment
+
+Session creation can enrich `customer_context` before the session is persisted.
+
+Supported source types:
+
+- `static`
+- `http`
+- `sql`
+
+Example:
+
+```yaml
+customer_context:
+  enrichment:
+    enabled: true
+    timeout_seconds: 2
+    on_error: continue
+    sources:
+      - id: crm
+        type: http
+        merge_strategy: overwrite
+        prompt_safe_fields: [name, tier]
+        request:
+          method: POST
+          url: https://crm.internal/customers/lookup
+          headers:
+            Authorization: "Bearer ${CRM_TOKEN}"
+          body_template: |
+            {"customer_id":"{{ customer.id }}"}
+```
+
+Supported merge behaviors:
+
+- `ignore`
+- `overwrite`
+- `keep_both`
+
+Per-field merge overrides can be set with `field_merge`.
+
+### Moderation Alerts
+
+Global moderation alerts:
+
+```yaml
+moderation:
+  alerts:
+    enabled: true
+    notify_on_censored: true
+    notify_on_jailbreak: true
+    notify_categories:
+      - self_harm
+      - violence
+```
+
+Per-agent override:
+
+```yaml
+metadata:
+  moderation_alerts:
+    enabled: false
+```
+
+## Practical Setup Patterns
+
+### One Agent, One Policy Bundle, Seeded Knowledge
+
+- define one file in `agents/`
+- point it at one bundle in `examples/` or another policy directory
+- seed one knowledge folder under `knowledge/`
+- run `cmd/bootstrap`
+
+### Multiple Agents In One Runtime
+
+- place multiple YAML agent files in `agents/`
+- give each one its own `id`
+- use a distinct policy bundle path for each
+- set `default_knowledge_scope` explicitly when scopes should not equal agent id
+- serve ACP traffic through agent-scoped routes such as
+  `POST /v1/acp/agents/{agent_id}/sessions`
+
+### Operator Dashboard
+
+The dashboard expects:
+
+- API reachable at `/v1`
+- operator authentication via `OPERATOR_API_KEY` or trusted headers
+
+The Vite dev server uses `PARMESAN_API_URL` for backend proxying.
+
+## Implementation References
+
+- global config model and env overrides: `internal/config/config.go`
+- bootstrap agent file loading: `cmd/bootstrap/main.go`
+- stock runtime config: `config/parmesan.example.yaml`
+- stock agent definition: `agents/live_support.yaml`
+- stock policy bundle: `examples/live_support_policy.yaml`
+- moderation override lookup: `internal/api/http/server.go`

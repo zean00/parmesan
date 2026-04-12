@@ -14,12 +14,46 @@ Policy bundles can define:
 - delegated-agent exposure
 - capability isolation
 
+In practice, a policy bundle is the place where you turn runtime inventory into
+allowed behavior. Registered tools, MCP providers, or ACP peer agents are not
+usable until policy exposes them.
+
 ## Authoring Model
 
 Policies are authored in YAML and compiled into typed records. YAML is an
 authoring format, not the hot-path runtime representation.
 
 Key example:
+
+- `examples/live_support_policy.yaml`
+
+## Minimal Bundle Shape
+
+```yaml
+id: bundle_live_support_v2
+version: v2
+composition_mode: strict
+no_match: I can help with customer support questions about orders, shipping, returns, refunds, and account help. Please tell me the support issue.
+domain_boundary:
+  mode: soft_redirect
+  allowed_topics:
+    - orders
+    - shipping
+soul:
+  identity: Parmesan Support Agent
+  role: Customer support assistant
+guidelines:
+  - id: truth_missing_details
+    when: customer asks for information that is not present in the conversation or retrieved context
+    then: say you do not have the missing detail yet and ask for the minimum detail needed to continue.
+templates:
+  - id: generic_support_open
+    mode: strict
+    when: customer asks for customer support help
+    text: Hi, I can help with that. Please tell me the issue and any relevant order or account detail.
+```
+
+The stock example includes all of these shapes in a real bundle:
 
 - `examples/live_support_policy.yaml`
 
@@ -33,6 +67,43 @@ Policies determine:
 - when approvals are required
 - how tone and response style should be shaped
 
+## Main Sections
+
+`composition_mode`
+- controls how strictly the bundle should drive the turn
+
+`no_match`
+- default fallback when no more specific policy path matches
+
+`domain_boundary`
+- defines the allowed topic boundary and redirect behavior
+
+`soul`
+- response identity and style constraints
+
+`guidelines`
+- conditional behavioral rules phrased as `when` and `then`
+
+`templates`
+- direct response paths for common cases, especially strict clarifications or
+  deterministic replies
+
+`journeys`
+- step-oriented policy flows when the conversation must move through a sequence
+
+## Annotated Stock Example
+
+In the current `live_support` sample:
+
+- `domain_boundary.allowed_topics` constrains the agent to support topics
+- `soul` keeps the tone concise and professional
+- `guidelines` enforce truthfulness and scope redirect behavior
+- `templates` provide deterministic clarification messages for tracking,
+  refunds, and account help
+
+That bundle is intentionally simple. It is a good starting point because it
+shows the control model without burying it under a large workflow graph.
+
 ## Capability Exposure
 
 A registered tool, MCP provider, or ACP peer agent is not automatically
@@ -44,6 +115,27 @@ This is a deliberate safety boundary:
 
 - discovery populates the catalog
 - policy controls exposure
+
+Two important implications:
+
+1. global runtime config tells Parmesan what exists
+2. policy decides what the current agent may actually use
+
+## Delegated Agents And Tools
+
+Parmesan currently chooses one capability kind for a turn. That means a
+delegated ACP peer agent competes with tools rather than acting as an implicit
+sub-workflow behind the scenes.
+
+Typical pattern:
+
+- configure a peer under `agent_servers` in the global config
+- expose it from a guideline or journey node in policy
+- optionally constrain it further with `capability_isolation`
+
+For the connection layer, use:
+
+- [Configuration](./configuration.md)
 
 ## SOUL And Style
 
@@ -68,11 +160,18 @@ Policy changes are governed through rollout primitives rather than silent
 in-place mutation. Draft policy changes from feedback or learning become review
 artifacts first.
 
+This means:
+
+- customer turns read the active compiled policy state
+- learning does not silently rewrite production behavior
+- operator review remains the promotion gate for policy-oriented changes
+
 ## Related Surfaces
 
 - operator composed-state endpoints
 - control-state views in the dashboard
 - proposal and rollout endpoints
+- [Configuration](./configuration.md)
 
 ## Implementation References
 

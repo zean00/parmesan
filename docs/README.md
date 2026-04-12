@@ -6,12 +6,13 @@ exists in this repository.
 ## Read In This Order
 
 1. [Getting Started](./getting-started.md)
-2. [Concepts](./concepts.md)
-3. [Architecture](./architecture.md)
-4. [Engine](./engine.md)
-5. [Policies](./policies.md)
-6. [Feedback Loop / Learning](./feedback-learning.md)
-7. [Operations / Dashboard](./operations-dashboard.md)
+2. [Configuration](./configuration.md)
+3. [Concepts](./concepts.md)
+4. [Architecture](./architecture.md)
+5. [Engine](./engine.md)
+6. [Policies](./policies.md)
+7. [Feedback Loop / Learning](./feedback-learning.md)
+8. [Operations / Dashboard](./operations-dashboard.md)
 
 ## Related Documents
 
