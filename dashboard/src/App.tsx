@@ -7,6 +7,7 @@ import { ControlPage } from "./pages/ControlPage";
 import { NotificationsPage } from "./pages/NotificationsPage";
 import { SessionDetailPage } from "./pages/SessionDetailPage";
 import { SessionsPage } from "./pages/SessionsPage";
+import { TraceWorkspacePage } from "./pages/TraceWorkspacePage";
 
 const tokenStorageKey = "parmesan.operator.token";
 
@@ -126,6 +127,7 @@ function DashboardApp({ token, onSignOut }: { token: string; onSignOut: () => vo
           <Route path="/" element={<Navigate to="/sessions" replace />} />
           <Route path="/sessions" element={<SessionsPage token={token} />} />
           <Route path="/sessions/:sessionId" element={<SessionDetailPage token={token} />} />
+          <Route path="/sessions/:sessionId/traces/:traceId" element={<TraceWorkspacePage token={token} />} />
           <Route path="/agents" element={<AgentsPage token={token} />} />
           <Route path="/agents/:agentId" element={<AgentDetailPage token={token} />} />
           <Route path="/agents/:agentId/test" element={<AgentTestPage token={token} />} />

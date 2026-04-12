@@ -2851,6 +2851,83 @@ func TestListTracesSupportsFiltersAndLimit(t *testing.T) {
 	}
 }
 
+func TestOperatorListSessionTracesReturnsSummaries(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_trace", Channel: "web", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	if err := repo.CreateExecution(context.Background(), execution.TurnExecution{
+		ID: "exec_1", SessionID: "sess_trace", TraceID: "trace_1", Status: execution.StatusSucceeded, CreatedAt: now, UpdatedAt: now.Add(2 * time.Minute),
+	}, []execution.ExecutionStep{
+		{ID: "step_1", ExecutionID: "exec_1", Name: "retrieve", Status: execution.StatusSucceeded, CreatedAt: now.Add(time.Minute), UpdatedAt: now.Add(2 * time.Minute)},
+	}); err != nil {
+		t.Fatalf("CreateExecution(trace_1) error = %v", err)
+	}
+	if err := repo.CreateExecution(context.Background(), execution.TurnExecution{
+		ID: "exec_2", SessionID: "sess_trace", TraceID: "trace_2", Status: execution.StatusBlocked, CreatedAt: now.Add(3 * time.Minute), UpdatedAt: now.Add(4 * time.Minute),
+	}, []execution.ExecutionStep{
+		{ID: "step_2", ExecutionID: "exec_2", Name: "tool_call", Status: execution.StatusBlocked, CreatedAt: now.Add(3 * time.Minute), UpdatedAt: now.Add(4 * time.Minute)},
+	}); err != nil {
+		t.Fatalf("CreateExecution(trace_2) error = %v", err)
+	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID: "evt_1", SessionID: "sess_trace", Source: "customer", Kind: "message", TraceID: "trace_1", ExecutionID: "exec_1", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("AppendEvent(trace_1) error = %v", err)
+	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID: "evt_2", SessionID: "sess_trace", Source: "customer", Kind: "message", TraceID: "trace_2", ExecutionID: "exec_2", CreatedAt: now.Add(3 * time.Minute),
+	}); err != nil {
+		t.Fatalf("AppendEvent(trace_2) error = %v", err)
+	}
+	if err := repo.SaveResponse(context.Background(), responsedomain.Response{
+		ID: "resp_2", SessionID: "sess_trace", ExecutionID: "exec_2", TraceID: "trace_2", Status: responsedomain.StatusReady, CreatedAt: now.Add(4 * time.Minute), UpdatedAt: now.Add(4 * time.Minute),
+	}); err != nil {
+		t.Fatalf("SaveResponse() error = %v", err)
+	}
+	if err := repo.AppendAuditRecord(context.Background(), audit.Record{
+		ID: "audit_1", Kind: "tool.completed", SessionID: "sess_trace", ExecutionID: "exec_1", TraceID: "trace_1", Message: "retrieval complete", CreatedAt: now.Add(90 * time.Second),
+	}); err != nil {
+		t.Fatalf("AppendAuditRecord(trace_1) error = %v", err)
+	}
+	if err := repo.AppendAuditRecord(context.Background(), audit.Record{
+		ID: "audit_2", Kind: "approval.requested", SessionID: "sess_trace", ExecutionID: "exec_2", TraceID: "trace_2", Message: "approval requested", CreatedAt: now.Add(5 * time.Minute),
+	}); err != nil {
+		t.Fatalf("AppendAuditRecord(trace_2) error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/sessions/sess_trace/traces", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got []sessionTraceSummary
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode session traces: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2 summaries (%#v)", len(got), got)
+	}
+	if got[0].TraceID != "trace_2" || got[0].ExecutionID != "exec_2" {
+		t.Fatalf("got[0] = %#v, want latest trace_2 summary first", got[0])
+	}
+	if got[0].GroupCounts["execution"] == 0 || got[0].GroupCounts["response"] == 0 || got[0].GroupCounts["audit"] == 0 {
+		t.Fatalf("trace_2 group counts = %#v, want execution/response/audit counts", got[0].GroupCounts)
+	}
+	if got[0].Headline == "" {
+		t.Fatalf("trace_2 headline empty, want non-empty")
+	}
+	if got[1].TraceID != "trace_1" || got[1].GroupCounts["execution"] == 0 {
+		t.Fatalf("got[1] = %#v, want trace_1 summary with execution counts", got[1])
+	}
+}
+
 func waitFor(t *testing.T, timeout time.Duration, fn func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

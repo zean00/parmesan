@@ -286,6 +286,13 @@ a {
   align-items: start;
 }
 
+.trace-workspace {
+  display: grid;
+  grid-template-columns: minmax(16rem, 20rem) minmax(0, 1.4fr) minmax(18rem, 24rem);
+  gap: 1rem;
+  align-items: start;
+}
+
 .surface-panel {
   border-radius: 1rem;
   padding: 1rem;
@@ -493,6 +500,85 @@ a {
   border-color: rgba(245, 157, 69, 0.32);
   background: var(--accent-soft);
   color: var(--text);
+}
+
+.trace-rail {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.trace-rail__item,
+.trace-entry {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 1rem;
+  padding: 0.9rem 1rem;
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease;
+}
+
+.trace-rail__item:hover,
+.trace-entry:hover {
+  transform: translateY(-1px);
+  border-color: var(--line-strong);
+}
+
+.trace-rail__item--active,
+.trace-entry--active {
+  border-color: rgba(245, 157, 69, 0.32);
+  background: rgba(245, 157, 69, 0.09);
+}
+
+.trace-rail__item strong,
+.trace-entry strong {
+  display: block;
+  margin-top: 0.25rem;
+}
+
+.trace-rail__item small,
+.trace-entry small {
+  display: block;
+  margin-top: 0.35rem;
+  color: var(--muted);
+}
+
+.trace-rail__meta,
+.trace-entry__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.trace-sections {
+  display: grid;
+  gap: 1rem;
+}
+
+.trace-stage {
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.02);
+  overflow: hidden;
+}
+
+.trace-stage__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+  padding: 0.95rem 1rem 0;
+}
+
+.trace-stage__body {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.95rem 1rem 1rem;
 }
 
 .preset-grid {
@@ -854,6 +940,8 @@ a {
 .nav-list__item:focus-visible,
 .button:focus-visible,
 .trace-filter-chip:focus-visible,
+.trace-rail__item:focus-visible,
+.trace-entry:focus-visible,
 .query-form input:focus-visible,
 .query-form select:focus-visible,
 .query-form textarea:focus-visible,
@@ -886,6 +974,7 @@ a {
 
 @media (max-width: 1280px) {
   .workspace-columns,
+  .trace-workspace,
   .section-grid,
   .metric-strip,
   .metric-strip--wide,
@@ -911,6 +1000,10 @@ a {
   }
 
   .workspace-columns {
+    grid-template-columns: 1fr;
+  }
+
+  .trace-workspace {
     grid-template-columns: 1fr;
   }
 }

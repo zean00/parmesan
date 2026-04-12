@@ -151,6 +151,17 @@ type traceTimelineResponse struct {
 	Entries     []traceTimelineEntry `json:"entries"`
 }
 
+type sessionTraceSummary struct {
+	TraceID     string         `json:"trace_id"`
+	SessionID   string         `json:"session_id,omitempty"`
+	ExecutionID string         `json:"execution_id,omitempty"`
+	StartedAt   time.Time      `json:"started_at,omitempty"`
+	UpdatedAt   time.Time      `json:"updated_at,omitempty"`
+	Status      string         `json:"status,omitempty"`
+	Headline    string         `json:"headline,omitempty"`
+	GroupCounts map[string]int `json:"group_counts,omitempty"`
+}
+
 type responseView struct {
 	ID               string            `json:"id"`
 	ArtifactMeta     artifactmeta.Meta `json:"artifact_meta,omitempty"`
@@ -298,6 +309,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/operator/sessions/{id}", s.operatorGetSession)
 	mux.HandleFunc("GET /v1/operator/sessions/{id}/events", s.operatorListEvents)
 	mux.HandleFunc("GET /v1/operator/sessions/{id}/stream", s.operatorStreamEvents)
+	mux.HandleFunc("GET /v1/operator/sessions/{id}/traces", s.operatorListSessionTraces)
 	mux.HandleFunc("GET /v1/operator/sessions/{id}/lifecycle", s.operatorGetSessionLifecycle)
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/close", s.operatorCloseSession)
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/keep", s.operatorKeepSession)
@@ -2073,6 +2085,20 @@ func (s *Server) operatorListEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, events)
+}
+
+func (s *Server) operatorListSessionTraces(w http.ResponseWriter, r *http.Request) {
+	sess, err := s.store.GetSession(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	items, err := s.sessionTraceSummaries(r.Context(), sess.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) operatorGetSessionLifecycle(w http.ResponseWriter, r *http.Request) {
@@ -8588,6 +8614,232 @@ func (s *Server) buildTraceTimeline(ctx context.Context, traceID string) (traceT
 		ExecutionID: targetExec.ID,
 		Entries:     entries,
 	}, nil
+}
+
+func (s *Server) sessionTraceSummaries(ctx context.Context, sessionID string) ([]sessionTraceSummary, error) {
+	traceIDs, err := s.sessionTraceIDs(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]sessionTraceSummary, 0, len(traceIDs))
+	for _, traceID := range traceIDs {
+		timeline, err := s.buildTraceTimeline(ctx, traceID)
+		if err != nil {
+			continue
+		}
+		if timeline.SessionID != "" && timeline.SessionID != sessionID {
+			continue
+		}
+		summary := summarizeTraceTimeline(timeline)
+		if summary.TraceID == "" {
+			continue
+		}
+		out = append(out, summary)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+			return out[i].TraceID > out[j].TraceID
+		}
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	return out, nil
+}
+
+func (s *Server) sessionTraceIDs(ctx context.Context, sessionID string) ([]string, error) {
+	seen := map[string]struct{}{}
+	var ids []string
+	add := func(traceID string) {
+		traceID = strings.TrimSpace(traceID)
+		if traceID == "" {
+			return
+		}
+		if _, ok := seen[traceID]; ok {
+			return
+		}
+		seen[traceID] = struct{}{}
+		ids = append(ids, traceID)
+	}
+	events, err := s.sessions.ListEvents(ctx, session.EventQuery{SessionID: sessionID})
+	if err != nil {
+		return nil, err
+	}
+	for _, event := range events {
+		add(event.TraceID)
+	}
+	responses, err := s.store.ListResponses(ctx, responsedomain.Query{SessionID: sessionID})
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range responses {
+		add(item.TraceID)
+	}
+	spans, err := s.store.ListResponseTraceSpans(ctx, responsedomain.TraceSpanQuery{SessionID: sessionID})
+	if err != nil {
+		return nil, err
+	}
+	for _, span := range spans {
+		add(span.TraceID)
+	}
+	return ids, nil
+}
+
+func summarizeTraceTimeline(timeline traceTimelineResponse) sessionTraceSummary {
+	summary := sessionTraceSummary{
+		TraceID:     timeline.TraceID,
+		SessionID:   timeline.SessionID,
+		ExecutionID: timeline.ExecutionID,
+		GroupCounts: map[string]int{},
+	}
+	for _, entry := range timeline.Entries {
+		if summary.StartedAt.IsZero() || entry.When.Before(summary.StartedAt) {
+			summary.StartedAt = entry.When
+		}
+		if summary.UpdatedAt.IsZero() || entry.When.After(summary.UpdatedAt) {
+			summary.UpdatedAt = entry.When
+		}
+		group := traceEntryGroup(entry.Kind)
+		summary.GroupCounts[group]++
+		if summary.ExecutionID == "" && entry.ExecutionID != "" {
+			summary.ExecutionID = entry.ExecutionID
+		}
+		if status := timelineEntryStatus(entry); status != "" {
+			summary.Status = status
+		}
+	}
+	for i := len(timeline.Entries) - 1; i >= 0; i-- {
+		if headline := timelineEntryHeadline(timeline.Entries[i]); headline != "" {
+			summary.Headline = headline
+			break
+		}
+	}
+	if summary.Status == "" {
+		summary.Status = "unknown"
+	}
+	if summary.Headline == "" {
+		summary.Headline = "Trace activity available"
+	}
+	return summary
+}
+
+func traceEntryGroup(kind string) string {
+	switch {
+	case kind == "execution" || strings.HasPrefix(kind, "execution."):
+		return "execution"
+	case kind == "response" || strings.HasPrefix(kind, "response."):
+		return "response"
+	case strings.HasPrefix(kind, "tool."):
+		return "tool"
+	case strings.HasPrefix(kind, "delivery."):
+		return "delivery"
+	case kind == "approval":
+		return "approval"
+	case kind == "session.event" || strings.HasPrefix(kind, "operator."):
+		return "session"
+	case strings.HasPrefix(kind, "audit.") || strings.HasPrefix(kind, "media."):
+		return "audit"
+	default:
+		return "other"
+	}
+}
+
+func timelineEntryStatus(entry traceTimelineEntry) string {
+	payload := timelineEntryPayloadMap(entry.Payload)
+	if payload == nil {
+		return ""
+	}
+	value := strings.TrimSpace(fmt.Sprint(payload["status"]))
+	if value == "" || value == "<nil>" {
+		return ""
+	}
+	return value
+}
+
+func timelineEntryHeadline(entry traceTimelineEntry) string {
+	payload := timelineEntryPayloadMap(entry.Payload)
+	switch entry.Kind {
+	case "response":
+		if payload != nil {
+			if value := strings.TrimSpace(fmt.Sprint(payload["status"])); value != "" && value != "<nil>" {
+				return "Response " + value
+			}
+		}
+		return "Response generated"
+	case "approval":
+		if payload != nil {
+			if value := strings.TrimSpace(fmt.Sprint(payload["status"])); value != "" && value != "<nil>" {
+				return "Approval " + value
+			}
+		}
+		return "Approval requested"
+	case "tool.run":
+		if payload != nil {
+			name := firstNonEmpty(strings.TrimSpace(fmt.Sprint(payload["tool_id"])), strings.TrimSpace(fmt.Sprint(payload["name"])))
+			if name != "" && name != "<nil>" {
+				return "Tool " + name
+			}
+		}
+		return "Tool activity"
+	case "delivery.attempt":
+		if payload != nil {
+			channel := strings.TrimSpace(fmt.Sprint(payload["channel"]))
+			if channel != "" && channel != "<nil>" {
+				return "Delivery via " + channel
+			}
+		}
+		return "Delivery attempt"
+	default:
+		if strings.HasPrefix(entry.Kind, "audit.") {
+			if payload != nil {
+				if value := strings.TrimSpace(fmt.Sprint(payload["message"])); value != "" && value != "<nil>" {
+					return value
+				}
+			}
+			return strings.TrimPrefix(entry.Kind, "audit.")
+		}
+		if strings.HasPrefix(entry.Kind, "operator.") || entry.Kind == "session.event" {
+			if payload != nil {
+				if value := strings.TrimSpace(fmt.Sprint(payload["kind"])); value != "" && value != "<nil>" {
+					return value
+				}
+			}
+			return entry.Kind
+		}
+		if strings.HasPrefix(entry.Kind, "execution.step") {
+			if payload != nil {
+				if value := firstNonEmpty(strings.TrimSpace(fmt.Sprint(payload["name"])), strings.TrimSpace(fmt.Sprint(payload["step_name"]))); value != "" && value != "<nil>" {
+					return value
+				}
+			}
+			return "Execution step"
+		}
+		if entry.Kind == "execution" {
+			if payload != nil {
+				if value := strings.TrimSpace(fmt.Sprint(payload["status"])); value != "" && value != "<nil>" {
+					return "Execution " + value
+				}
+			}
+			return "Execution started"
+		}
+	}
+	return ""
+}
+
+func timelineEntryPayloadMap(payload any) map[string]any {
+	if payload == nil {
+		return nil
+	}
+	if value, ok := payload.(map[string]any); ok {
+		return value
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil
+	}
+	return out
 }
 
 func (s *Server) mediaAuditTimelinePayload(ctx context.Context, record audit.Record) map[string]any {

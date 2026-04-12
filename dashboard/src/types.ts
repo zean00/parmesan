@@ -120,3 +120,14 @@ export type TraceTimeline = {
   execution_id?: string;
   entries: TraceTimelineEntry[];
 };
+
+export type SessionTraceSummary = {
+  trace_id: string;
+  session_id?: string;
+  execution_id?: string;
+  started_at?: string;
+  updated_at?: string;
+  status?: string;
+  headline?: string;
+  group_counts?: Record<string, number>;
+};

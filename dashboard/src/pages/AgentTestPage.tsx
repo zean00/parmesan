@@ -307,6 +307,11 @@ export function AgentTestPage({ token }: { token: string }) {
                   <Link className="button button--ghost" to={`/sessions/${session.id}`}>
                     Open operator session view
                   </Link>
+                  {(summary.last_trace_id as string | undefined) ? (
+                    <Link className="button button--ghost" to={`/sessions/${session.id}/traces/${String(summary.last_trace_id)}`}>
+                      Open trace workspace
+                    </Link>
+                  ) : null}
                 </div>
               ) : null}
             </div>
