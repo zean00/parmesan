@@ -4,6 +4,19 @@ Parmesan is a customer-facing agent runtime focused on explicit policy control,
 durable turn execution, multi-provider model routing, and first-class remote
 tool catalogs.
 
+## Documentation
+
+Start here for the curated documentation set:
+
+- [Documentation Index](./docs/README.md)
+- [Getting Started](./docs/getting-started.md)
+- [Concepts](./docs/concepts.md)
+- [Architecture](./docs/architecture.md)
+- [Engine](./docs/engine.md)
+- [Policies](./docs/policies.md)
+- [Feedback Loop / Learning](./docs/feedback-learning.md)
+- [Operations / Dashboard](./docs/operations-dashboard.md)
+
 ## Status
 
 This repository currently contains the bootstrap implementation:
