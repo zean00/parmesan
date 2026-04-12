@@ -308,10 +308,41 @@ agent_servers:
     args: ["acp", "--pure"]
     startup_timeout_seconds: 10
     request_timeout_seconds: 30
+    acp:
+      model: anthropic/claude-3.7-sonnet
+      prompt_prefix: "You are the implementation worker for the parent agent."
+      prompt_suffix: "Return only the final answer for the parent agent."
+      mcp_servers:
+        - type: stdio
+          name: Repo Tools
+          command: npx
+          args: ["-y", "@acme/repo-mcp"]
+          env:
+            REPO_TOKEN: "${REPO_TOKEN}"
+        - type: sse
+          name: Docs
+          url: "https://docs.example/sse"
+          headers:
+            Authorization: "Bearer ${DOCS_TOKEN}"
 ```
 
 These peers are available for policy-driven delegation. They are not implicitly
 used by the runtime. Policy must expose them.
+
+The nested `acp` block controls how Parmesan opens the delegated ACP session:
+
+- `model`: sent through ACP `session/set_config_option` when the peer agent
+  advertises a compatible model config option; otherwise Parmesan skips the
+  override and continues delegation
+- `mcp_servers`: sent through ACP `session/new`
+- `prompt_prefix` and `prompt_suffix`: wrapped around Parmesan's generated
+  delegated prompt before `session/prompt`
+
+These are invocation defaults for that external agent server. They do not
+change Parmesan's own runtime model routing or public ACP session contract.
+When an ACP peer omits `mcpCapabilities` during `initialize`, Parmesan treats
+that as unknown capability metadata and still attempts `session/new` with the
+configured MCP servers.
 
 ### Customer Context Enrichment
 

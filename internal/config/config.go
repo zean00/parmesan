@@ -57,6 +57,25 @@ type AgentServerConfig struct {
 	Env                   map[string]string `yaml:"env" json:"env,omitempty"`
 	StartupTimeoutSeconds int               `yaml:"startup_timeout_seconds" json:"startup_timeout_seconds,omitempty"`
 	RequestTimeoutSeconds int               `yaml:"request_timeout_seconds" json:"request_timeout_seconds,omitempty"`
+	ACP                   ACPAgentConfig    `yaml:"acp" json:"acp,omitempty"`
+}
+
+type ACPAgentConfig struct {
+	Model        string               `yaml:"model" json:"model,omitempty"`
+	PromptPrefix string               `yaml:"prompt_prefix" json:"prompt_prefix,omitempty"`
+	PromptSuffix string               `yaml:"prompt_suffix" json:"prompt_suffix,omitempty"`
+	MCPServers   []ACPMCPServerConfig `yaml:"mcp_servers" json:"mcp_servers,omitempty"`
+}
+
+type ACPMCPServerConfig struct {
+	Type    string            `yaml:"type" json:"type"`
+	Name    string            `yaml:"name" json:"name"`
+	Command string            `yaml:"command" json:"command,omitempty"`
+	Args    []string          `yaml:"args" json:"args,omitempty"`
+	Env     map[string]string `yaml:"env" json:"env,omitempty"`
+	URL     string            `yaml:"url" json:"url,omitempty"`
+	Headers map[string]string `yaml:"headers" json:"headers,omitempty"`
+	Meta    map[string]any    `yaml:"_meta" json:"_meta,omitempty"`
 }
 
 type CustomerContextConfig struct {

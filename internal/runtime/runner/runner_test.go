@@ -1264,6 +1264,14 @@ func TestRunnerDelegatesToExternalAgentPeer(t *testing.T) {
 			},
 			StartupTimeoutSeconds: 2,
 			RequestTimeoutSeconds: 2,
+			ACP: config.ACPAgentConfig{
+				Model:        "anthropic/claude-3.7-sonnet",
+				PromptPrefix: "Prefix instruction.",
+				PromptSuffix: "Suffix instruction.",
+				MCPServers: []config.ACPMCPServerConfig{
+					{Type: "stdio", Name: "Repo Tools", Command: "npx", Args: []string{"-y", "@acme/repo-mcp"}, Env: map[string]string{"REPO_TOKEN": "secret"}},
+				},
+			},
 		},
 	}))
 
@@ -1321,6 +1329,15 @@ func TestRunnerDelegatesToExternalAgentPeer(t *testing.T) {
 	if delegated["result_text"] != "Delegated runner answer" {
 		t.Fatalf("delegated output = %#v, want delegated answer text", delegated)
 	}
+	if delegated["model"] != "anthropic/claude-3.7-sonnet" {
+		t.Fatalf("delegated output = %#v, want delegated model", delegated)
+	}
+	if mcp, ok := delegated["mcp_servers"].([]string); !ok || len(mcp) != 1 || mcp[0] != "Repo Tools" {
+		t.Fatalf("delegated output = %#v, want delegated MCP server names", delegated)
+	}
+	if delegated["prompt_prefix_applied"] != true || delegated["prompt_suffix_applied"] != true {
+		t.Fatalf("delegated output = %#v, want prompt flags", delegated)
+	}
 }
 
 func runRunnerACPHelperProcess() {
@@ -1336,12 +1353,43 @@ func runRunnerACPHelperProcess() {
 		id, _ := msg["id"].(float64)
 		switch method {
 		case "initialize":
-			writeRunnerHelperJSON(writer, map[string]any{"jsonrpc": "2.0", "id": int(id), "result": map[string]any{"ok": true}})
+			writeRunnerHelperJSON(writer, map[string]any{"jsonrpc": "2.0", "id": int(id), "result": map[string]any{
+				"agentCapabilities": map[string]any{
+					"mcpCapabilities": map[string]any{"http": true, "sse": true},
+				},
+			}})
 		case "session/new":
+			params, _ := msg["params"].(map[string]any)
+			mcpServers, _ := params["mcpServers"].([]any)
+			if len(mcpServers) != 1 {
+				panic("expected one MCP server")
+			}
+			writeRunnerHelperJSON(writer, map[string]any{"jsonrpc": "2.0", "id": int(id), "result": map[string]any{
+				"ok": true,
+				"configOptions": []map[string]any{
+					{
+						"configId": "model",
+						"category": "model",
+						"options": []map[string]any{
+							{"value": "anthropic/claude-3.7-sonnet", "label": "anthropic/claude-3.7-sonnet"},
+						},
+					},
+				},
+			}})
+		case "session/set_config_option":
 			writeRunnerHelperJSON(writer, map[string]any{"jsonrpc": "2.0", "id": int(id), "result": map[string]any{"ok": true}})
 		case "session/prompt":
 			params, _ := msg["params"].(map[string]any)
 			sessionID, _ := params["sessionId"].(string)
+			prompt, _ := params["prompt"].([]any)
+			if len(prompt) != 1 {
+				panic("expected one prompt block")
+			}
+			block, _ := prompt[0].(map[string]any)
+			text, _ := block["text"].(string)
+			if !strings.Contains(text, "Prefix instruction.") || !strings.Contains(text, "Suffix instruction.") {
+				panic("expected injected prompt text")
+			}
 			writeRunnerHelperJSON(writer, map[string]any{"jsonrpc": "2.0", "id": int(id), "result": map[string]any{"ok": true}})
 			writeRunnerHelperJSON(writer, map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": sessionID, "update": map[string]any{"type": "agent_message_chunk", "text": "Delegated runner answer"}}})
 			writeRunnerHelperJSON(writer, map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": sessionID, "update": map[string]any{"type": "agent_turn_complete"}}})

@@ -133,6 +133,11 @@ Typical pattern:
 - expose it from a guideline or journey node in policy
 - optionally constrain it further with `capability_isolation`
 
+The policy bundle still references delegated agents by string id only. External
+ACP invocation defaults such as delegated model selection, delegated MCP
+servers, and delegated prompt prefix/suffix are configured on the corresponding
+`agent_servers.<id>` entry rather than inline in the policy bundle.
+
 For the connection layer, use:
 
 - [Configuration](./configuration.md)

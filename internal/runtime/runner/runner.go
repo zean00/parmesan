@@ -1715,6 +1715,18 @@ func (r *Runner) maybeDelegateAgent(ctx context.Context, exec execution.TurnExec
 		"status":     status,
 		"error":      result.Error,
 	}
+	if strings.TrimSpace(result.Model) != "" {
+		fields["model"] = result.Model
+	}
+	if len(result.MCPServerNames) > 0 {
+		fields["mcp_servers"] = append([]string(nil), result.MCPServerNames...)
+	}
+	if result.PromptPrefixApplied {
+		fields["prompt_prefix_applied"] = true
+	}
+	if result.PromptSuffixApplied {
+		fields["prompt_suffix_applied"] = true
+	}
 	if strings.TrimSpace(result.Text) != "" {
 		fields["result_text"] = result.Text
 	}
@@ -1748,10 +1760,14 @@ func (r *Runner) maybeDelegateAgent(ctx context.Context, exec execution.TurnExec
 	}
 	return map[string]any{
 		"delegated_agent": map[string]any{
-			"server_id":   serverID,
-			"session_id":  result.SessionID,
-			"status":      status,
-			"result_text": result.Text,
+			"server_id":             serverID,
+			"session_id":            result.SessionID,
+			"status":                status,
+			"result_text":           result.Text,
+			"model":                 result.Model,
+			"mcp_servers":           append([]string(nil), result.MCPServerNames...),
+			"prompt_prefix_applied": result.PromptPrefixApplied,
+			"prompt_suffix_applied": result.PromptSuffixApplied,
 		},
 	}, nil
 }

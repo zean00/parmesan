@@ -25,11 +25,15 @@ type Request struct {
 }
 
 type Result struct {
-	ServerID  string
-	SessionID string
-	Status    string
-	Text      string
-	Error     string
+	ServerID            string
+	SessionID           string
+	Status              string
+	Text                string
+	Error               string
+	Model               string
+	MCPServerNames      []string
+	PromptPrefixApplied bool
+	PromptSuffixApplied bool
 }
 
 type Manager struct {
@@ -98,6 +102,7 @@ func (m *Manager) peer(serverID string) (*peer, error) {
 type peer struct {
 	serverID string
 	config   config.AgentServerConfig
+	info     peerInfo
 
 	mu          sync.Mutex
 	cmd         *exec.Cmd
@@ -106,6 +111,16 @@ type peer struct {
 	subscribers map[string][]chan updateNotification
 	nextID      int64
 	started     bool
+}
+
+type peerInfo struct {
+	mcpHTTPKnown  bool
+	mcpHTTP       bool
+	mcpSSEKnown   bool
+	mcpSSE        bool
+	modelConfigID string
+	modelValueIDs map[string]string
+	initialized   bool
 }
 
 type rpcMessage struct {
@@ -202,14 +217,22 @@ func (p *peer) stop() {
 
 func (p *peer) initialize(ctx context.Context) error {
 	var out map[string]any
-	return p.call(ctx, "initialize", map[string]any{
+	if err := p.call(ctx, "initialize", map[string]any{
 		"protocolVersion": 1,
 		"clientInfo": map[string]any{
 			"name":    "parmesan",
 			"version": "0.1.0",
 		},
+		"clientCapabilities": map[string]any{
+			"fs":       map[string]any{"readTextFile": false, "writeTextFile": false},
+			"terminal": false,
+		},
 		"capabilities": map[string]any{},
-	}, &out)
+	}, &out); err != nil {
+		return err
+	}
+	p.info = parsePeerInfo(out)
+	return nil
 }
 
 func (p *peer) delegate(ctx context.Context, req Request) (Result, error) {
@@ -220,23 +243,45 @@ func (p *peer) delegate(ctx context.Context, req Request) (Result, error) {
 	if strings.TrimSpace(req.CWD) == "" {
 		req.CWD = "."
 	}
+	if err := p.validateMCPServers(); err != nil {
+		return Result{ServerID: p.serverID, SessionID: sessionID, Status: "failed", Error: err.Error()}, err
+	}
 	updates := make(chan updateNotification, 32)
 	p.subscribe(sessionID, updates)
 	defer p.unsubscribe(sessionID, updates)
 
 	var sessionResp map[string]any
 	if err := p.call(ctx, "session/new", map[string]any{
-		"sessionId": sessionID,
-		"cwd":       req.CWD,
-		"metadata":  req.Metadata,
+		"sessionId":  sessionID,
+		"cwd":        req.CWD,
+		"mcpServers": p.sessionMCPServers(),
+		"_meta":      cloneAnyMap(req.Metadata),
+		"metadata":   req.Metadata,
 	}, &sessionResp); err != nil {
 		return Result{}, err
 	}
+	modelName := strings.TrimSpace(p.config.ACP.Model)
+	appliedModel := ""
+	if modelName != "" {
+		configID, valueID, ok := p.resolveModelConfig(sessionResp, modelName)
+		if ok {
+			var configResp map[string]any
+			if err := p.call(ctx, "session/set_config_option", map[string]any{
+				"sessionId": sessionID,
+				"configId":  configID,
+				"value":     valueID,
+			}, &configResp); err != nil {
+				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "failed", Error: err.Error(), Model: modelName, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, err
+			}
+			appliedModel = modelName
+		}
+	}
+	finalPrompt := p.wrapPrompt(req.Prompt)
 	var promptResp map[string]any
 	if err := p.call(ctx, "session/prompt", map[string]any{
 		"sessionId": sessionID,
 		"prompt": []map[string]any{
-			{"type": "text", "text": req.Prompt},
+			{"type": "text", "text": finalPrompt},
 		},
 	}, &promptResp); err != nil {
 		return Result{}, err
@@ -249,7 +294,7 @@ func (p *peer) delegate(ctx context.Context, req Request) (Result, error) {
 	for {
 		select {
 		case <-waitCtx.Done():
-			return Result{ServerID: p.serverID, SessionID: sessionID, Status: "timeout", Error: waitCtx.Err().Error()}, waitCtx.Err()
+			return Result{ServerID: p.serverID, SessionID: sessionID, Status: "timeout", Error: waitCtx.Err().Error(), Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, waitCtx.Err()
 		case item := <-updates:
 			typ := stringField(item.Update, "type")
 			switch typ {
@@ -263,12 +308,12 @@ func (p *peer) delegate(ctx context.Context, req Request) (Result, error) {
 					text = stringField(item.Update, "text")
 				}
 				if text == "" {
-					return Result{ServerID: p.serverID, SessionID: sessionID, Status: "failed", Error: "delegated agent produced no message"}, errors.New("delegated agent produced no message")
+					return Result{ServerID: p.serverID, SessionID: sessionID, Status: "failed", Error: "delegated agent produced no message", Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, errors.New("delegated agent produced no message")
 				}
-				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text}, nil
+				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text, Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, nil
 			case "error", "agent_turn_error":
 				msg := firstNonEmpty(stringField(item.Update, "message"), stringField(item.Update, "error"), "delegated agent failed")
-				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "failed", Error: msg}, errors.New(msg)
+				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "failed", Error: msg, Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, errors.New(msg)
 			}
 		}
 	}
@@ -419,6 +464,219 @@ func (p *peer) unsubscribe(sessionID string, ch chan updateNotification) {
 		return
 	}
 	p.subscribers[sessionID] = out
+}
+
+func (p *peer) wrapPrompt(prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	if prefix := strings.TrimSpace(p.config.ACP.PromptPrefix); prefix != "" {
+		prompt = prefix + "\n\n" + prompt
+	}
+	if suffix := strings.TrimSpace(p.config.ACP.PromptSuffix); suffix != "" {
+		if prompt != "" {
+			prompt += "\n\n"
+		}
+		prompt += suffix
+	}
+	return strings.TrimSpace(prompt)
+}
+
+func (p *peer) validateMCPServers() error {
+	for _, server := range p.config.ACP.MCPServers {
+		switch strings.ToLower(strings.TrimSpace(server.Type)) {
+		case "", "stdio":
+			continue
+		case "http":
+			if p.info.initialized && p.info.mcpHTTPKnown && !p.info.mcpHTTP {
+				return fmt.Errorf("delegated agent %q does not advertise ACP HTTP MCP support", p.serverID)
+			}
+		case "sse":
+			if p.info.initialized && p.info.mcpSSEKnown && !p.info.mcpSSE {
+				return fmt.Errorf("delegated agent %q does not advertise ACP SSE MCP support", p.serverID)
+			}
+		default:
+			return fmt.Errorf("delegated agent %q has unsupported MCP server type %q", p.serverID, server.Type)
+		}
+	}
+	return nil
+}
+
+func (p *peer) sessionMCPServerNames() []string {
+	out := make([]string, 0, len(p.config.ACP.MCPServers))
+	for _, item := range p.config.ACP.MCPServers {
+		if name := strings.TrimSpace(item.Name); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func (p *peer) sessionMCPServers() []map[string]any {
+	if len(p.config.ACP.MCPServers) == 0 {
+		return []map[string]any{}
+	}
+	out := make([]map[string]any, 0, len(p.config.ACP.MCPServers))
+	for _, item := range p.config.ACP.MCPServers {
+		server := map[string]any{
+			"type": firstNonEmpty(item.Type, "stdio"),
+			"name": item.Name,
+		}
+		if len(item.Meta) > 0 {
+			server["_meta"] = cloneAnyMap(item.Meta)
+		}
+		switch strings.ToLower(firstNonEmpty(item.Type, "stdio")) {
+		case "stdio":
+			server["command"] = item.Command
+			server["args"] = append([]string(nil), item.Args...)
+			server["env"] = cloneStringMap(item.Env)
+		case "http", "sse":
+			server["url"] = item.URL
+			server["headers"] = cloneStringMap(item.Headers)
+		}
+		out = append(out, server)
+	}
+	return out
+}
+
+func (p *peer) resolveModelConfig(sessionResp map[string]any, modelName string) (string, string, bool) {
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		return "", "", false
+	}
+	configID, values := modelConfigSelection(parseConfigOptions(sessionResp))
+	valueID := ""
+	if configID != "" && values != nil {
+		valueID = values[modelName]
+	}
+	if configID == "" || valueID == "" {
+		configID, valueID = p.info.selectModelValue(modelName)
+	}
+	if configID == "" || valueID == "" {
+		return "", "", false
+	}
+	return configID, valueID, true
+}
+
+func parsePeerInfo(initResp map[string]any) peerInfo {
+	info := peerInfo{modelValueIDs: map[string]string{}}
+	root := mapValue(initResp["agentCapabilities"])
+	if root == nil {
+		root = mapValue(initResp["capabilities"])
+	}
+	if root != nil {
+		mcp := mapValue(root["mcpCapabilities"])
+		if mcp != nil {
+			info.mcpHTTP, info.mcpHTTPKnown = boolValueKnown(mcp["http"])
+			info.mcpSSE, info.mcpSSEKnown = boolValueKnown(mcp["sse"])
+		}
+	}
+	configID, values := modelConfigSelection(parseConfigOptions(initResp))
+	info.modelConfigID = configID
+	info.modelValueIDs = values
+	info.initialized = true
+	return info
+}
+
+func (p peerInfo) selectModelValue(modelName string) (string, string) {
+	if p.modelConfigID == "" || len(p.modelValueIDs) == 0 {
+		return "", ""
+	}
+	valueID := p.modelValueIDs[strings.TrimSpace(modelName)]
+	if valueID == "" {
+		return "", ""
+	}
+	return p.modelConfigID, valueID
+}
+
+func parseConfigOptions(values map[string]any) []map[string]any {
+	raw, ok := values["configOptions"]
+	if !ok {
+		return nil
+	}
+	items, _ := raw.([]any)
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if decoded := mapValue(item); decoded != nil {
+			out = append(out, decoded)
+		}
+	}
+	return out
+}
+
+func modelConfigSelection(options []map[string]any) (string, map[string]string) {
+	for _, option := range options {
+		category := strings.ToLower(stringField(option, "category"))
+		if category != "model" {
+			continue
+		}
+		configID := firstNonEmpty(stringField(option, "configId"), stringField(option, "id"))
+		if configID == "" {
+			continue
+		}
+		values := map[string]string{}
+		for _, item := range sliceMaps(option["options"]) {
+			valueID := firstNonEmpty(stringField(item, "value"), stringField(item, "valueId"), stringField(item, "id"))
+			if valueID == "" {
+				continue
+			}
+			for _, key := range []string{"label", "name", "description"} {
+				label := strings.TrimSpace(fmt.Sprint(item[key]))
+				if label != "" {
+					values[label] = valueID
+				}
+			}
+			values[valueID] = valueID
+		}
+		return configID, values
+	}
+	return "", nil
+}
+
+func sliceMaps(raw any) []map[string]any {
+	items, _ := raw.([]any)
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if decoded := mapValue(item); decoded != nil {
+			out = append(out, decoded)
+		}
+	}
+	return out
+}
+
+func mapValue(raw any) map[string]any {
+	typed, _ := raw.(map[string]any)
+	return typed
+}
+
+func boolValue(raw any) bool {
+	value, _ := raw.(bool)
+	return value
+}
+
+func boolValueKnown(raw any) (bool, bool) {
+	value, ok := raw.(bool)
+	return value, ok
+}
+
+func cloneAnyMap(values map[string]any) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func stringField(values map[string]any, key string) string {

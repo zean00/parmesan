@@ -48,6 +48,22 @@ agent_servers:
       OPENCODE_API_KEY: "${OPENROUTER_API_KEY}"
     startup_timeout_seconds: 7
     request_timeout_seconds: 11
+    acp:
+      model: anthropic/claude-3.7-sonnet
+      prompt_prefix: "Solve carefully."
+      prompt_suffix: "Return only the final answer."
+      mcp_servers:
+        - type: stdio
+          name: Repo Tools
+          command: npx
+          args: ["-y", "@acme/repo-mcp"]
+          env:
+            REPO_TOKEN: "${OPENROUTER_API_KEY}"
+        - type: sse
+          name: Docs
+          url: "https://docs.example/sse"
+          headers:
+            Authorization: "Bearer ${OPENROUTER_API_KEY}"
 `)
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -72,6 +88,21 @@ agent_servers:
 	}
 	if server.StartupTimeoutSeconds != 7 || server.RequestTimeoutSeconds != 11 {
 		t.Fatalf("timeouts = %d/%d, want 7/11", server.StartupTimeoutSeconds, server.RequestTimeoutSeconds)
+	}
+	if server.ACP.Model != "anthropic/claude-3.7-sonnet" {
+		t.Fatalf("ACP.Model = %q, want anthropic/claude-3.7-sonnet", server.ACP.Model)
+	}
+	if server.ACP.PromptPrefix != "Solve carefully." || server.ACP.PromptSuffix != "Return only the final answer." {
+		t.Fatalf("ACP prompt injection = %#v, want configured prefix/suffix", server.ACP)
+	}
+	if len(server.ACP.MCPServers) != 2 {
+		t.Fatalf("ACP.MCPServers = %#v, want two servers", server.ACP.MCPServers)
+	}
+	if server.ACP.MCPServers[0].Env["REPO_TOKEN"] != "test-key" {
+		t.Fatalf("ACP MCP env expansion = %#v, want test-key", server.ACP.MCPServers[0].Env)
+	}
+	if server.ACP.MCPServers[1].Headers["Authorization"] != "Bearer test-key" {
+		t.Fatalf("ACP MCP headers = %#v, want expanded auth header", server.ACP.MCPServers[1].Headers)
 	}
 }
 

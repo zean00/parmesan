@@ -52,6 +52,22 @@ agent_servers:
   #   args: ["acp", "--pure"]
   #   startup_timeout_seconds: 10
   #   request_timeout_seconds: 30
+  #   acp:
+  #     model: anthropic/claude-3.7-sonnet
+  #     prompt_prefix: "You are the implementation worker for the parent agent."
+  #     prompt_suffix: "Return only the final answer for the parent agent."
+  #     mcp_servers:
+  #       - type: stdio
+  #         name: Repo Tools
+  #         command: npx
+  #         args: ["-y", "@acme/repo-mcp"]
+  #         env:
+  #           REPO_TOKEN: "${REPO_TOKEN}"
+  #       - type: sse
+  #         name: Docs
+  #         url: "https://docs.example/sse"
+  #         headers:
+  #           Authorization: "Bearer ${DOCS_TOKEN}"
 
 mcp:
   providers: []
