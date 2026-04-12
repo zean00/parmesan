@@ -3,6 +3,15 @@
 This document describes the current repository architecture, not just the long
 range design target.
 
+## What This Page Is For
+
+Use this page when you need to answer questions like:
+
+- which deployables exist right now
+- what the main runtime surfaces are
+- where data is persisted
+- how ACP, the dashboard, the worker, and bootstrap fit together
+
 ## System Shape
 
 Parmesan is currently a modular Go monolith with multiple deployables:
@@ -18,17 +27,28 @@ Supporting infrastructure:
 - PostgreSQL with pgvector
 - optional Nexus as an ACP-facing channel layer
 
+## Quick Map
+
+| Component | Main responsibility |
+| --- | --- |
+| `api` | ACP ingress, operator API, trace/control inspection, synchronous mutations |
+| `worker` | asynchronous jobs such as maintainer work and background processing |
+| `bootstrap` | load file-backed agents, policy references, and seeded knowledge |
+| `migrate` | apply SQL schema migrations |
+| `dashboard` | operator-facing UI |
+| Postgres | system of record for sessions, executions, traces, knowledge, and governance state |
+
 ```mermaid
 flowchart LR
-    Client[ACP Client / Channel]
-    Nexus[Nexus or Adapter]
-    Dashboard[Dashboard]
-    API[API]
-    Worker[Worker]
-    Bootstrap[Bootstrap]
-    Migrate[Migrate]
-    DB[(Postgres + pgvector)]
-    Bundle[Config / Agents / Knowledge]
+    Client["ACP Client / Channel"]
+    Nexus["Nexus or Adapter"]
+    Dashboard["Dashboard"]
+    API["API"]
+    Worker["Worker"]
+    Bootstrap["Bootstrap"]
+    Migrate["Migrate"]
+    DB["Postgres + pgvector"]
+    Bundle["Config / Agents / Knowledge"]
 
     Client --> Nexus --> API
     Dashboard --> API
@@ -53,6 +73,8 @@ The API exposes:
 - trace and execution inspection endpoints
 - SSE streams for sessions and notifications
 
+This is the primary control and conversation edge for the platform.
+
 ### Worker
 
 The worker handles asynchronous work such as:
@@ -62,6 +84,9 @@ The worker handles asynchronous work such as:
 - media enrichment
 - background evaluation and replay support
 
+The worker exists so the runtime path does not need to inline all slower or
+backgroundable work inside customer-facing request handling.
+
 ### Bootstrap
 
 Bootstrap loads file-backed startup data:
@@ -70,6 +95,9 @@ Bootstrap loads file-backed startup data:
 - policy bundle references
 - seeded knowledge sources
 - configured MCP providers
+
+Bootstrap is the bridge between file-backed repo assets and durable runtime
+state in Postgres.
 
 ### Dashboard
 
@@ -82,6 +110,9 @@ The dashboard is the operator surface for:
 - control-state inspection
 - agent testing
 
+The dashboard is not a separate backend. It is a frontend over the operator API
+served by the main platform.
+
 ## High-Level Flow
 
 1. A client creates an ACP session.
@@ -93,6 +124,10 @@ The dashboard is the operator surface for:
 7. Operators can inspect the session, execution, and trace.
 8. Feedback can produce customer preferences, knowledge proposals, and draft
    policy changes.
+
+This is the main reason the architecture is split the way it is: live customer
+turns, durable inspection, and governed learning all share the same system of
+record, but they are not the same workflow.
 
 ```mermaid
 sequenceDiagram
@@ -127,6 +162,9 @@ Postgres is the primary system of record for:
 - customer preferences
 - maintainer jobs and workspaces
 
+In other words, Parmesan is operationally stateful by design. The runtime does
+not treat these artifacts as disposable logs.
+
 ## Current Deployable Topology
 
 Default compose startup:
@@ -145,11 +183,8 @@ The backend image now contains the stock file-backed deployment bundle:
 - `/knowledge`
 - `/examples`
 
-## Detailed Design Reference
-
-For the longer-range system design and rationale, see:
-
-- [Detailed Architecture Plan](../customer-facing-agent-architecture.md)
+This keeps the default release-style deployment self-contained, while still
+allowing local development to point at repo files directly.
 
 ## Implementation References
 

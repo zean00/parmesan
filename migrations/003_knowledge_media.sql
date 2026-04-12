@@ -50,8 +50,11 @@ CREATE TABLE IF NOT EXISTS knowledge_chunks (
 CREATE INDEX IF NOT EXISTS knowledge_chunks_scope_idx
 ON knowledge_chunks(scope_kind, scope_id, created_at DESC);
 
-CREATE INDEX IF NOT EXISTS knowledge_chunks_embedding_idx
-ON knowledge_chunks USING hnsw (embedding vector_cosine_ops);
+-- pgvector ANN indexes require a fixed-dimension vector column or expression.
+-- Parmesan keeps knowledge embeddings generic so different providers/models can
+-- coexist, which means `embedding` is intentionally declared as `vector`
+-- without dimensions. The retriever still uses vector distance ordering, but we
+-- cannot build a global HNSW index on this schema.
 
 CREATE TABLE IF NOT EXISTS knowledge_snapshots (
     id TEXT PRIMARY KEY,

@@ -3,6 +3,18 @@
 Parmesan is a customer-facing agent runtime with explicit policy control,
 durable execution, supervised operations, and closed-loop learning.
 
+## At A Glance
+
+Use this page to build the correct mental model before diving into the lower
+level docs.
+
+Parmesan is designed for:
+
+- customer-facing conversations, not open-ended autonomous exploration
+- durable and inspectable execution, not ephemeral best-effort runs
+- explicit policy boundaries, not hidden prompt-only behavior
+- operator supervision and learning, not silent self-modification
+
 ## Core Mental Model
 
 Parmesan is not an open-ended autonomous agent shell.
@@ -18,13 +30,13 @@ It is a supervised customer-facing system where:
 
 ```mermaid
 flowchart LR
-    Customer[Customer]
-    ACP[ACP Session]
-    Runtime[Runtime Engine]
-    Trace[Durable Execution + Trace]
-    Operator[Operator]
-    Learning[Learning Outputs]
-    Control[Knowledge / Policy Control]
+    Customer["Customer"]
+    ACP["ACP Session"]
+    Runtime["Runtime Engine"]
+    Trace["Durable Execution + Trace"]
+    Operator["Operator"]
+    Learning["Learning Outputs"]
+    Control["Knowledge / Policy Control"]
 
     Customer --> ACP --> Runtime --> Trace
     Trace --> Operator
@@ -34,6 +46,16 @@ flowchart LR
 ```
 
 ## Main Building Blocks
+
+| Building block | What it represents |
+| --- | --- |
+| agent profile | the durable identity and default operating scope of an agent |
+| session | the durable conversation container |
+| execution | one durable processing unit for a turn |
+| trace | the causal record of what happened during that execution |
+| policy bundle | the behavioral control layer |
+| knowledge | the governed retrieval substrate |
+| customer context | normalized and optionally enriched customer metadata |
 
 ### Agent Profile
 
@@ -100,7 +122,20 @@ Customer identity and metadata are normalized from ACP `_meta` and can be
 enriched from HTTP, SQL, or static sources. Only configured prompt-safe fields
 are injected into the runtime prompt.
 
+## One Useful Distinction
+
+It helps to keep these concepts separate:
+
+- `session`: the conversation container
+- `execution`: one processing attempt for a turn
+- `trace`: the detailed causal record connected to that execution
+- `feedback`: operator or response-level input about what should improve later
+- `learning`: governed downstream updates produced from feedback or conversation history
+
 ## Three Operational Planes
+
+These planes interact, but they are intentionally not collapsed into one
+undifferentiated agent loop.
 
 ### Runtime Plane
 
@@ -132,6 +167,15 @@ Handles post-conversation improvement:
 - knowledge proposals
 - draft policy updates
 - regression/eval artifacts
+
+## Practical Reading Path
+
+After this page:
+
+- read [Architecture](./architecture.md) for deployables and data flow
+- read [Engine](./engine.md) for turn execution
+- read [Policies](./policies.md) for behavioral control
+- read [Feedback Loop / Learning](./feedback-learning.md) for post-turn improvement
 
 ## Implementation References
 

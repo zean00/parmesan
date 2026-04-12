@@ -3,6 +3,17 @@
 This guide gets Parmesan running with the stock live-support agent, seeded
 knowledge, API, worker, and dashboard.
 
+## Before You Start
+
+For the default path, you only need:
+
+- Docker and Docker Compose
+- a valid `OPENROUTER_API_KEY`
+- values for `SECRETS_MASTER_KEY` and `OPERATOR_API_KEY`
+
+If you want the lower-level reference while following this guide, keep
+[Configuration](./configuration.md) open in another tab.
+
 ## What You Get
 
 The default deployment starts:
@@ -21,9 +32,12 @@ The stock sample is:
 - policy bundle: `examples/live_support_policy.yaml`
 - seeded knowledge: `knowledge/live_support/`
 
-For the detailed config reference, use:
+## Fast Path Summary
 
-- [Configuration](./configuration.md)
+1. copy `.env.example` to `.env`
+2. set the three required secrets
+3. run `docker compose up --build`
+4. open the dashboard and sign in with `OPERATOR_API_KEY`
 
 ## Fastest Path: Docker Compose
 
@@ -51,6 +65,13 @@ docker compose up --build
 - API: `http://127.0.0.1:8080`
 
 The default dashboard token is the value of `OPERATOR_API_KEY`.
+
+### Operator Sign-In
+
+When the dashboard opens, it first shows the operator token gate. Use the same
+bearer token configured as `OPERATOR_API_KEY`.
+
+![Dashboard token gate](./assets/dashboard-token-gate.png)
 
 ## What The Default Compose Flow Does
 
@@ -127,3 +148,7 @@ After startup, check:
 - the `live_support` agent appears in the agent list
 - the test console can create an ACP session
 - the session workspace shows traces and events for a test conversation
+
+The normal landing page after sign-in is the session inbox:
+
+![Dashboard session inbox](./assets/dashboard-sessions-inbox.png)

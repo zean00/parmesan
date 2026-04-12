@@ -8,6 +8,9 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](./LICENSE).
 
 ## Documentation
 
+Use the root README as a repo entry point. Use the docs set for the detailed
+reference.
+
 Start with the curated documentation set:
 
 - [Documentation Index](./docs/README.md)
@@ -33,7 +36,20 @@ platform with:
 - feedback, learning, and maintainer flows
 - Docker-based release-style deployment
 
+## Quick Orientation
+
+| If you need to... | Start here |
+| --- | --- |
+| boot the stack | [docs/getting-started.md](/home/sahal/workspace/agents/parmesan/docs/getting-started.md) |
+| configure providers, MCP, ACP peers, or enrichment | [docs/configuration.md](/home/sahal/workspace/agents/parmesan/docs/configuration.md) |
+| understand execution and policy behavior | [docs/engine.md](/home/sahal/workspace/agents/parmesan/docs/engine.md) and [docs/policies.md](/home/sahal/workspace/agents/parmesan/docs/policies.md) |
+| operate sessions and traces | [docs/operations-dashboard.md](/home/sahal/workspace/agents/parmesan/docs/operations-dashboard.md) |
+| understand learning and feedback | [docs/feedback-learning.md](/home/sahal/workspace/agents/parmesan/docs/feedback-learning.md) |
+
 ## Run
+
+For a less dense step-by-step version of this section, use
+[docs/getting-started.md](/home/sahal/workspace/agents/parmesan/docs/getting-started.md).
 
 Release-style Docker deployment:
 

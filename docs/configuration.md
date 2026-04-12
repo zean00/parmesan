@@ -9,6 +9,16 @@ Use it together with:
 - [Policies](./policies.md) for policy authoring
 - [Architecture](./architecture.md) for runtime shape
 
+## At A Glance
+
+Parmesan configuration is split across three file layers:
+
+| Layer | Purpose | Typical path |
+| --- | --- | --- |
+| global runtime config | provider, database, MCP, ACP peer, operator, enrichment settings | `config/parmesan.yaml` |
+| agent definition | one durable agent profile | `agents/*.yaml` |
+| policy bundle | behavioral rules, templates, journeys, capability exposure | referenced from the agent file |
+
 ## Configuration Layers
 
 Parmesan is configured from three main file layers:
@@ -25,13 +35,13 @@ At startup:
 
 ```mermaid
 flowchart LR
-    Config[config/parmesan.yaml]
-    Agents[agents/*.yaml]
-    Policy[examples/...policy.yaml]
-    Knowledge[knowledge/...]
-    Bootstrap[cmd/bootstrap]
-    API[cmd/api]
-    Worker[cmd/worker]
+    Config["config/parmesan.yaml"]
+    Agents["agents/*.yaml"]
+    Policy["examples/...policy.yaml"]
+    Knowledge["knowledge/..."]
+    Bootstrap["cmd/bootstrap"]
+    API["cmd/api"]
+    Worker["cmd/worker"]
 
     Config --> Bootstrap
     Config --> API
@@ -52,6 +62,15 @@ Current stock example:
 Current stock deployment file:
 
 - `config/parmesan.yaml`
+
+### Mental Model
+
+Use the global runtime config for infrastructure and catalogs, not for business
+behavior.
+
+- put provider, database, operator, MCP, ACP peer, and enrichment settings here
+- put agent identity and default knowledge scope in the agent file
+- put decision logic, templates, journeys, and capability exposure in the policy bundle
 
 ### Minimal Example
 
@@ -82,6 +101,23 @@ bootstrap:
 ```
 
 ### Main Sections
+
+| Section | What it controls |
+| --- | --- |
+| `http` | API bind address |
+| `database` | Postgres connection |
+| `secrets` | master encryption key |
+| `providers` | model and embedding provider routing |
+| `operator` | operator auth and identity defaults |
+| `knowledge` | seeded knowledge root |
+| `bootstrap` | where agent files are loaded from |
+| `acp` | inbound coalescing and delegated-agent timeout |
+| `mcp.providers` | globally registered MCP catalog |
+| `agent_servers` | external ACP peer agents available for delegation |
+| `customer_context.enrichment` | session-creation enrichment hook |
+| `moderation.alerts` | operator moderation notification rules |
+| `observability` | metrics and telemetry |
+| `runtime` | request and async queue settings |
 
 `http`
 - `address`: bind address for the API process. The file value can be overridden
@@ -186,6 +222,16 @@ Current stock example:
 
 - `agents/live_support.yaml`
 
+### What Belongs Here
+
+An agent definition should answer:
+
+- what this agent is called
+- which policy bundle controls it
+- which seeded knowledge should be attached initially
+- what the default knowledge scope is
+- what profile metadata operators or runtime extensions should see
+
 ### Example
 
 ```yaml
@@ -254,12 +300,19 @@ A minimal useful bundle usually contains:
 - `guidelines`
 - `templates`
 
+Use policy bundles for behavior, not infrastructure. If you are trying to set a
+model provider, MCP registration, or ACP peer process command here, it belongs
+in the global config instead.
+
 See:
 
 - `examples/live_support_policy.yaml`
 - [Policies](./policies.md)
 
 ## Connections And Integrations
+
+This section covers the parts that usually need concrete examples in a real
+deployment.
 
 ### Model Provider Connection
 
@@ -276,6 +329,11 @@ providers:
 
 This controls both runtime generation and embedding selection. Maintainer work
 can use separate provider routing via the `maintainer_*` fields.
+
+Practical rule:
+
+- `default_*` controls customer-facing runtime work
+- `maintainer_*` controls learning, wiki maintenance, and policy-drafting work
 
 ### MCP Providers
 
@@ -294,6 +352,11 @@ mcp:
 
 This registers the provider in the tool catalog. Policy still needs to expose
 the relevant capability before the runtime can use it.
+
+That split is deliberate:
+
+- config says what exists
+- policy says what the agent may use
 
 ### Delegated ACP Peer Agents
 
@@ -326,6 +389,9 @@ agent_servers:
             Authorization: "Bearer ${DOCS_TOKEN}"
 ```
 
+This section defines how Parmesan starts or connects to the peer agent process.
+The policy bundle only refers to the peer by id.
+
 These peers are available for policy-driven delegation. They are not implicitly
 used by the runtime. Policy must expose them.
 
@@ -344,9 +410,21 @@ When an ACP peer omits `mcpCapabilities` during `initialize`, Parmesan treats
 that as unknown capability metadata and still attempts `session/new` with the
 configured MCP servers.
 
+Operationally, think of this as a delegation profile for that peer server:
+
+- which model Parmesan should try to request
+- which MCP servers Parmesan should attach for that delegated session
+- what framing text Parmesan should wrap around the delegated task
+
 ### Customer Context Enrichment
 
 Session creation can enrich `customer_context` before the session is persisted.
+
+Practical boundary:
+
+- ACP `_meta` carries caller-supplied context
+- enrichment augments it from trusted server-side sources
+- only configured prompt-safe fields are later injected into runtime prompts
 
 Supported source types:
 
@@ -406,6 +484,9 @@ metadata:
   moderation_alerts:
     enabled: false
 ```
+
+Use agent-level overrides only when one profile genuinely needs a different
+alert posture than the global default.
 
 ## Practical Setup Patterns
 

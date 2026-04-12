@@ -1,0 +1,37 @@
+site_name: Parmesan Documentation
+site_description: Operator and engineering guide for the Parmesan customer-facing agent runtime
+repo_name: parmesan
+docs_dir: docs
+site_dir: site
+use_directory_urls: false
+exclude_docs: /README.md
+
+theme:
+  name: mkdocs
+
+markdown_extensions:
+  - admonition
+  - tables
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_div_format
+  - toc:
+      permalink: true
+
+extra_javascript:
+  - javascripts/mermaid.min.js
+  - javascripts/mermaid-init.js
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Configuration: configuration.md
+  - Concepts: concepts.md
+  - Architecture: architecture.md
+  - Engine: engine.md
+  - Policies: policies.md
+  - Feedback Loop / Learning: feedback-learning.md
+  - Operations / Dashboard: operations-dashboard.md
+  - ACP Contract: acp/README.md

@@ -2,6 +2,18 @@
 
 Policies are the main behavioral control layer in Parmesan.
 
+## At A Glance
+
+Policies answer one question: given everything the runtime knows right now,
+what is this agent allowed or required to do next.
+
+Use this document when you are:
+
+- authoring or reviewing a policy bundle
+- exposing tools, MCP providers, or delegated agents
+- changing response style or domain boundaries
+- tracing why an agent took a specific path
+
 ## What Policies Define
 
 Policy bundles can define:
@@ -17,6 +29,17 @@ Policy bundles can define:
 In practice, a policy bundle is the place where you turn runtime inventory into
 allowed behavior. Registered tools, MCP providers, or ACP peer agents are not
 usable until policy exposes them.
+
+## Quick Mental Model
+
+| Section | Purpose |
+| --- | --- |
+| `soul` | voice, role, identity, style guardrails |
+| `domain_boundary` | what the agent should stay inside or redirect away from |
+| `guidelines` | conditional behavior rules |
+| `templates` | deterministic direct replies |
+| `journeys` | structured step-based flows |
+| capability exposure | which tools, MCP servers, or delegated agents are even eligible |
 
 ## Authoring Model
 
@@ -66,6 +89,11 @@ Policies determine:
 - when tools are visible
 - when approvals are required
 - how tone and response style should be shaped
+
+Put differently:
+
+- config tells Parmesan what is available
+- policy tells Parmesan what this agent may actually do with it
 
 ## Main Sections
 
@@ -121,6 +149,9 @@ Two important implications:
 1. global runtime config tells Parmesan what exists
 2. policy decides what the current agent may actually use
 
+This separation is one of the main reasons the runtime stays governable as it
+gains more tools and external peers.
+
 ## Delegated Agents And Tools
 
 Parmesan currently chooses one capability kind for a turn. That means a
@@ -132,6 +163,12 @@ Typical pattern:
 - configure a peer under `agent_servers` in the global config
 - expose it from a guideline or journey node in policy
 - optionally constrain it further with `capability_isolation`
+
+Authoring rule:
+
+- define the peer and its invocation defaults in global config
+- expose or require the peer in policy
+- do not duplicate connection details inside the bundle
 
 The policy bundle still references delegated agents by string id only. External
 ACP invocation defaults such as delegated model selection, delegated MCP
@@ -159,6 +196,8 @@ SOUL influences style, but it does not override:
 - compliance/safety rules
 - approval requirements
 
+Treat SOUL as style and posture, not as a substitute for business logic.
+
 ## Rollouts And Governance
 
 Policy changes are governed through rollout primitives rather than silent
@@ -170,6 +209,9 @@ This means:
 - customer turns read the active compiled policy state
 - learning does not silently rewrite production behavior
 - operator review remains the promotion gate for policy-oriented changes
+
+That governance boundary is intentional. Parmesan is designed so feedback can
+propose policy change without silently mutating production behavior.
 
 ## Related Surfaces
 

@@ -3,16 +3,25 @@
 Parmesan has a closed-loop learning system, but live customer sessions do not
 directly mutate active production behavior.
 
+## What This Page Covers
+
+Use this page when you need to understand:
+
+- what feedback can be captured today
+- what artifacts learning can produce
+- what remains governed versus automatic
+- how the maintainer path relates to customer turns
+
 ```mermaid
 flowchart LR
-    Session[Session + Trace]
-    Feedback[Operator Feedback]
-    Compiler[Learning Compiler]
-    Prefs[Customer Preferences]
-    Knowledge[Knowledge Proposals]
-    Policy[Draft Policy / SOUL Proposals]
-    Regressions[Regression Fixtures]
-    Review[Operator Review]
+    Session["Session + Trace"]
+    Feedback["Operator Feedback"]
+    Compiler["Learning Compiler"]
+    Prefs["Customer Preferences"]
+    Knowledge["Knowledge Proposals"]
+    Policy["Draft Policy / SOUL Proposals"]
+    Regressions["Regression Fixtures"]
+    Review["Operator Review"]
 
     Session --> Feedback --> Compiler
     Compiler --> Prefs
@@ -26,6 +35,8 @@ flowchart LR
 
 ## Inputs
 
+Think of learning inputs as signals, not automatic production edits.
+
 The main learning inputs are:
 
 - session-level operator feedback
@@ -33,6 +44,9 @@ The main learning inputs are:
 - customer preference signals
 - seeded and synced knowledge sources
 - learning from conversation history
+
+These inputs are intentionally broader than just one “thumbs up / thumbs down”
+feedback box.
 
 ## What Feedback Can Produce
 
@@ -44,6 +58,9 @@ Feedback can compile into:
 - draft policy / SOUL proposals
 - regression fixture candidates
 
+Not every feedback item produces every artifact. The compiler decides what is
+actionable and what scope it belongs to.
+
 ## Learning Boundaries
 
 Parmesan keeps these boundaries explicit:
@@ -53,6 +70,9 @@ Parmesan keeps these boundaries explicit:
 - customer preferences do not override hard safety or business rules
 - shared knowledge changes remain reviewable
 - policy changes become proposals first
+
+These boundaries are the point of the system. Parmesan is trying to be
+improvable without becoming opaque or self-mutating.
 
 ## Knowledge Loop
 
@@ -67,6 +87,14 @@ The long-range direction is documented in the repository discussions around a
 more LLM-maintained evolving wiki, but the current implementation is still a
 governed typed-knowledge system with proposal and apply steps.
 
+So the current model is best understood as:
+
+- LLM-assisted and maintainer-driven
+- proposal-oriented
+- operator-reviewable
+
+not as a fully autonomous self-editing wiki runtime.
+
 ## Preference Loop
 
 Customer-specific learning flows into preference records with lifecycle actions:
@@ -76,6 +104,10 @@ Customer-specific learning flows into preference records with lifecycle actions:
 - expire
 
 This keeps customer memory explicit and reviewable.
+
+Customer preference learning is intentionally narrower than policy change. A
+preference can personalize behavior inside allowed boundaries; it does not
+override hard rules.
 
 ## Operator Role
 
@@ -87,6 +119,8 @@ Operators remain central to learning:
 - they inspect teaching state
 - they can export regression candidates
 
+Operators are not bypassed here. They are part of the learning loop by design.
+
 ## Dashboard Surfaces
 
 Relevant current operator surfaces include:
@@ -95,6 +129,10 @@ Relevant current operator surfaces include:
 - teaching-state inspection
 - control-state and recent change views
 - regression and quality-related operator endpoints
+
+The backend supports richer response-scoped feedback than the current dashboard
+fully exposes, so the learning backend is ahead of the operator UX in some
+areas.
 
 ```mermaid
 sequenceDiagram

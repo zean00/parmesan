@@ -1,21 +1,26 @@
 # Parmesan Documentation
 
-This documentation set is the operator and engineering guide for Parmesan as it
-exists in this repository.
+This directory is the source for both:
 
-## Read In This Order
+- repository-readable Markdown docs
+- MkDocs site generation
 
-1. [Getting Started](./getting-started.md)
-2. [Configuration](./configuration.md)
-3. [Concepts](./concepts.md)
-4. [Architecture](./architecture.md)
-5. [Engine](./engine.md)
-6. [Policies](./policies.md)
-7. [Feedback Loop / Learning](./feedback-learning.md)
-8. [Operations / Dashboard](./operations-dashboard.md)
+For the full landing page and navigation, use [index.md](./index.md).
 
-## Related Documents
+## Build With MkDocs
 
-- [ACP Contract](./acp/README.md)
-- [Detailed Architecture Plan](../customer-facing-agent-architecture.md)
-- [Root README](../README.md)
+From the repository root:
+
+```bash
+python3 -m pip install -r docs/requirements-mkdocs.txt
+python3 -m mkdocs build --clean
+```
+
+The MkDocs config lives in `mkdocs.yml` and is set to `use_directory_urls:
+false` so generated pages build as explicit `.html` files instead of directory
+indexes.
+
+Mermaid is vendored locally under `docs/javascripts/mermaid.min.js`, so the
+built site renders diagrams without depending on a CDN.
+
+Generated site output goes to `site/` and should not be committed.
