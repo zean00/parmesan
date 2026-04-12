@@ -19,7 +19,10 @@ COPY --from=backend-builder /out/worker /app/worker
 COPY --from=backend-builder /out/migrate /app/migrate
 COPY --from=backend-builder /out/bootstrap /app/bootstrap
 COPY migrations /app/migrations
-COPY examples /app/examples
+COPY examples /examples
+COPY config /config
+COPY agents /agents
+COPY knowledge /knowledge
 ENV PARMESAN_MIGRATIONS_DIR=/app/migrations
 
 FROM node:22-alpine AS dashboard-builder

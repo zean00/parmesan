@@ -30,8 +30,29 @@ docker compose up --build
 This starts Postgres, applies migrations, bootstraps the sample live-support
 agent from [agents/live_support.yaml](/home/sahal/workspace/agents/parmesan/agents/live_support.yaml),
 registers markdown knowledge from [knowledge/live_support](/home/sahal/workspace/agents/parmesan/knowledge/live_support),
-runs the API and worker, and serves the dashboard at `http://127.0.0.1:4173`.
-The dashboard token defaults to `dev-operator`.
+runs the API and worker, and serves the dashboard at
+`http://127.0.0.1:${PARMESAN_DASHBOARD_PORT:-4173}`. The dashboard token
+defaults to `dev-operator`.
+
+The deployment image now ships with the default file-backed config, agent
+definitions, and seeded knowledge already attached inside the container:
+
+- `/config/parmesan.yaml`
+- `/agents/*.yaml`
+- `/knowledge/**`
+
+That means the default compose path no longer depends on host bind mounts for
+runtime config or bootstrap data. To change agent definitions, config, or
+knowledge seeds, edit the files in this repo and rebuild the images.
+
+Container behavior:
+
+- `postgres`, `api`, `worker`, `dashboard`, and optional `nexus` use
+  `restart: unless-stopped`
+- `api` exposes a container healthcheck on `/healthz`
+- `dashboard` healthchecks through nginx to the API `/healthz`
+- `api` waits for `bootstrap` to complete successfully before starting
+- `dashboard` waits for a healthy `api` before starting
 
 File-backed runtime configuration lives in
 [config/parmesan.yaml](/home/sahal/workspace/agents/parmesan/config/parmesan.yaml).
@@ -43,6 +64,11 @@ Nexus can be attached as an optional compose profile when an image is available:
 ```bash
 NEXUS_IMAGE=your-nexus-image docker compose --profile nexus up --build
 ```
+
+Published ports can be adjusted from `.env`:
+
+- `PARMESAN_API_PORT`
+- `PARMESAN_DASHBOARD_PORT`
 
 Manual local development:
 
