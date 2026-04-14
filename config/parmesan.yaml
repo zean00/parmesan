@@ -9,6 +9,7 @@ secrets:
 
 providers:
   openrouter_api_key: "${OPENROUTER_API_KEY}"
+  openai_base_url: "${OPENAI_BASE_URL}"
   openrouter_base_url: "${OPENROUTER_BASE_URL}"
   default_reasoning: openrouter
   default_structured: openrouter

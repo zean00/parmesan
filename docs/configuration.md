@@ -86,9 +86,14 @@ secrets:
 
 providers:
   openrouter_api_key: "${OPENROUTER_API_KEY}"
+  openai_base_url: "${OPENAI_BASE_URL}"
   default_reasoning: openrouter
   default_structured: openrouter
   default_embedding: openrouter
+
+tool_providers:
+  allowed_hosts: []
+  allow_local_dev: false
 
 operator:
   api_key: "${OPERATOR_API_KEY}"
@@ -109,6 +114,7 @@ bootstrap:
 | `secrets` | master encryption key |
 | `providers` | model and embedding provider routing |
 | `operator` | operator auth and identity defaults |
+| `tool_providers` | outbound security policy for registered tool providers |
 | `knowledge` | seeded knowledge root |
 | `bootstrap` | where agent files are loaded from |
 | `acp` | inbound coalescing and delegated-agent timeout |
@@ -132,6 +138,7 @@ bootstrap:
 
 `providers`
 - `openai_api_key`
+- `openai_base_url`
 - `openrouter_api_key`
 - `openrouter_base_url`
 - `default_reasoning`
@@ -144,6 +151,15 @@ bootstrap:
 These select which registered provider family is used for customer execution
 and maintainer/learning work. The stock config uses OpenRouter for all three
 roles.
+
+`tool_providers`
+- `allowed_hosts`
+- `allow_local_dev`
+
+These control which remote hosts Parmesan is allowed to contact for registered
+tool providers. In production, use an explicit host allowlist and HTTPS. For
+local development against localhost MCP or OpenAPI servers, set
+`allow_local_dev: true`.
 
 `operator`
 - `api_key`
@@ -235,6 +251,7 @@ Important runtime env vars:
 - `DATABASE_URL`
 - `SECRETS_MASTER_KEY`
 - `OPENAI_API_KEY`
+- `OPENAI_BASE_URL`
 - `OPENROUTER_API_KEY`
 - `OPENROUTER_BASE_URL`
 - `DEFAULT_REASONING_PROVIDER`
@@ -361,6 +378,7 @@ The stock path uses OpenRouter:
 
 ```yaml
 providers:
+  openai_base_url: "${OPENAI_BASE_URL}"
   openrouter_api_key: "${OPENROUTER_API_KEY}"
   openrouter_base_url: "${OPENROUTER_BASE_URL}"
   default_reasoning: openrouter
@@ -375,6 +393,70 @@ Practical rule:
 
 - `default_*` controls customer-facing runtime work
 - `maintainer_*` controls learning, wiki maintenance, and policy-drafting work
+
+### Local OpenAI-Compatible Backends
+
+Parmesan does not have a separate built-in `ollama`, `lmstudio`, or
+`llama.cpp` model provider. Instead, you can point the existing OpenAI-shaped
+provider slot at any OpenAI-compatible local server.
+
+At minimum, this works for:
+
+- LM Studio
+- Ollama
+- llama.cpp `llama-server`
+
+Parmesan-side example:
+
+```yaml
+providers:
+  openai_api_key: "local-dev"
+  openai_base_url: "http://127.0.0.1:1234/v1"
+  default_reasoning: openai
+  default_structured: openai
+  default_embedding: openai
+
+tool_providers:
+  allow_local_dev: true
+```
+
+Backend-side examples:
+
+LM Studio:
+
+```bash
+lms server start --port 1234
+```
+
+Ollama:
+
+```bash
+ollama serve
+```
+
+Then expose Parmesan to:
+
+```text
+http://127.0.0.1:11434/v1
+```
+
+llama.cpp:
+
+```bash
+llama-server -m /models/model.gguf --port 8080
+```
+
+Then expose Parmesan to:
+
+```text
+http://127.0.0.1:8080/v1
+```
+
+Recommended local routing targets:
+
+- LM Studio: `http://127.0.0.1:1234/v1`
+- Ollama: `http://127.0.0.1:11434/v1`
+- llama.cpp: `http://127.0.0.1:8080/v1`
 
 ### MCP Providers
 

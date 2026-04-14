@@ -16,6 +16,7 @@ type HTTPConfig struct {
 
 type ProviderConfig struct {
 	OpenAIAPIKey         string
+	OpenAIBase           string
 	OpenRouterAPIKey     string
 	OpenRouterBase       string
 	DefaultReasoning     string
@@ -198,6 +199,7 @@ func Load(service string) Config {
 		SecretsMasterKey: env("SECRETS_MASTER_KEY", fileCfg.Secrets.MasterKey),
 		Provider: ProviderConfig{
 			OpenAIAPIKey:         env("OPENAI_API_KEY", fileCfg.Providers.OpenAIAPIKey),
+			OpenAIBase:           env("OPENAI_BASE_URL", defaultString(fileCfg.Providers.OpenAIBaseURL, "https://api.openai.com/v1")),
 			OpenRouterAPIKey:     env("OPENROUTER_API_KEY", fileCfg.Providers.OpenRouterAPIKey),
 			OpenRouterBase:       env("OPENROUTER_BASE_URL", defaultString(fileCfg.Providers.OpenRouterBaseURL, "https://openrouter.ai/api/v1")),
 			DefaultReasoning:     env("DEFAULT_REASONING_PROVIDER", defaultString(fileCfg.Providers.DefaultReasoning, "openrouter")),
@@ -250,6 +252,7 @@ type fileConfig struct {
 	} `yaml:"secrets"`
 	Providers struct {
 		OpenAIAPIKey         string `yaml:"openai_api_key"`
+		OpenAIBaseURL        string `yaml:"openai_base_url"`
 		OpenRouterAPIKey     string `yaml:"openrouter_api_key"`
 		OpenRouterBaseURL    string `yaml:"openrouter_base_url"`
 		DefaultReasoning     string `yaml:"default_reasoning"`
@@ -321,6 +324,7 @@ func applyFileEnv(cfg fileConfig) {
 	setEnvDefault("DATABASE_URL", cfg.Database.URL)
 	setEnvDefault("SECRETS_MASTER_KEY", cfg.Secrets.MasterKey)
 	setEnvDefault("OPENAI_API_KEY", cfg.Providers.OpenAIAPIKey)
+	setEnvDefault("OPENAI_BASE_URL", cfg.Providers.OpenAIBaseURL)
 	setEnvDefault("OPENROUTER_API_KEY", cfg.Providers.OpenRouterAPIKey)
 	setEnvDefault("OPENROUTER_BASE_URL", cfg.Providers.OpenRouterBaseURL)
 	setEnvDefault("DEFAULT_REASONING_PROVIDER", cfg.Providers.DefaultReasoning)

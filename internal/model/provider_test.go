@@ -64,6 +64,33 @@ func TestGenerateUsesProviderOverride(t *testing.T) {
 	}
 }
 
+func TestOpenAIProviderUsesConfiguredBaseURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"content": "local-openai"}}},
+		})
+	}))
+	defer server.Close()
+
+	router := NewRouter(config.ProviderConfig{
+		OpenAIAPIKey:      "local-dev",
+		OpenAIBase:        server.URL,
+		DefaultReasoning:  "openai",
+		DefaultStructured: "openai",
+		DefaultEmbedding:  "openai",
+	})
+
+	resp, err := router.Generate(context.Background(), CapabilityReasoning, Request{
+		Prompt: "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Provider != "openai" || resp.Text != "local-openai" {
+		t.Fatalf("resp = %#v, want openai/local-openai", resp)
+	}
+}
+
 func TestSupportsRejectsUnknownProviderOverride(t *testing.T) {
 	router := NewRouter(config.ProviderConfig{
 		DefaultReasoning:  "openrouter",

@@ -119,11 +119,11 @@ func NewRouterWithDefaults(cfg config.ProviderConfig, reasoning, structured, emb
 		stats:  map[string]ProviderStats{},
 	}
 
-	router.Register(NewHTTPProvider("openai", CapabilityReasoning, "https://api.openai.com/v1", cfg.OpenAIAPIKey))
+	router.Register(NewHTTPProvider("openai", CapabilityReasoning, cfg.OpenAIBase, cfg.OpenAIAPIKey))
 	router.Register(NewHTTPProvider("openrouter", CapabilityReasoning, cfg.OpenRouterBase, cfg.OpenRouterAPIKey))
-	router.Register(NewHTTPProvider("openai-structured", CapabilityStructured, "https://api.openai.com/v1", cfg.OpenAIAPIKey))
+	router.Register(NewHTTPProvider("openai-structured", CapabilityStructured, cfg.OpenAIBase, cfg.OpenAIAPIKey))
 	router.Register(NewHTTPProvider("openrouter-structured", CapabilityStructured, cfg.OpenRouterBase, cfg.OpenRouterAPIKey))
-	router.Register(NewHTTPProvider("openai-embedding", CapabilityEmbedding, "https://api.openai.com/v1", cfg.OpenAIAPIKey))
+	router.Register(NewHTTPProvider("openai-embedding", CapabilityEmbedding, cfg.OpenAIBase, cfg.OpenAIAPIKey))
 	router.Register(NewHTTPProvider("openrouter-embedding", CapabilityEmbedding, cfg.OpenRouterBase, cfg.OpenRouterAPIKey))
 
 	return router

@@ -110,6 +110,61 @@ go run ./cmd/api
 go run ./cmd/worker
 ```
 
+### Local OpenAI-Compatible Models
+
+If you want to run against a local OpenAI-compatible backend instead of the
+hosted OpenRouter path, the compatible targets are:
+
+- LM Studio
+- Ollama
+- llama.cpp `llama-server`
+
+Backend examples:
+
+LM Studio:
+
+```bash
+lms server start --port 1234
+```
+
+Ollama:
+
+```bash
+ollama serve
+```
+
+llama.cpp:
+
+```bash
+llama-server -m /models/model.gguf --port 8080
+```
+
+Parmesan-side config shape:
+
+```yaml
+providers:
+  openai_api_key: "local-dev"
+  openai_base_url: "http://127.0.0.1:1234/v1"
+  default_reasoning: openai
+  default_structured: openai
+  default_embedding: openai
+
+tool_providers:
+  allow_local_dev: true
+```
+
+Then point the model provider base URL at one of:
+
+- `http://127.0.0.1:1234/v1` for LM Studio
+- `http://127.0.0.1:11434/v1` for Ollama
+- `http://127.0.0.1:8080/v1` for llama.cpp
+
+You can switch the `openai_base_url` value to:
+
+- `http://127.0.0.1:1234/v1` for LM Studio
+- `http://127.0.0.1:11434/v1` for Ollama
+- `http://127.0.0.1:8080/v1` for llama.cpp
+
 Run the dashboard separately:
 
 ```bash
@@ -130,6 +185,8 @@ Relevant local path overrides:
 - `PARMESAN_CONFIG`
 - `PARMESAN_AGENTS_DIR`
 - `KNOWLEDGE_SOURCE_ROOT`
+- `TOOL_PROVIDER_ALLOW_LOCAL_DEV`
+- `TOOL_PROVIDER_ALLOWED_HOSTS`
 
 ## Implementation References
 

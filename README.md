@@ -4,6 +4,21 @@ Parmesan is a customer-facing agent runtime focused on explicit policy control,
 durable turn execution, multi-provider model routing, and first-class remote
 tool catalogs.
 
+## Project Lineage
+
+Parmesan heavily borrows the core product and runtime ideas from
+[Parlant](https://github.com/emcie-co/parlant), but it is not a 1:1 port.
+Think of it as a related implementation that keeps the policy-governed
+customer-agent shape while extending the system in a different direction.
+
+Key additions compared to the original Parlant concept:
+
+- feedback learning loop, inspired by Hermes-style agent learning workflows
+- durable and resumable execution, inspired by Temporal-style agent execution
+- ACP and MCP integration as first-class runtime surfaces
+- MCP-only tool support
+- external agent delegation through ACP
+
 Licensed under the Apache License, Version 2.0. See [LICENSE](./LICENSE).
 
 ## Documentation
@@ -197,6 +212,13 @@ Operator endpoints support single-tenant RBAC. `OPERATOR_API_KEY` remains a
 bootstrap admin credential; production operators can use stored operator API
 tokens or trusted identity headers via `OPERATOR_TRUSTED_ID_HEADER` and
 `OPERATOR_TRUSTED_ROLES_HEADER`.
+
+Local OpenAI-compatible model backends such as LM Studio, Ollama, and
+`llama.cpp` can now be targeted by setting `openai_base_url` / `OPENAI_BASE_URL`
+to the local server. See
+[docs/configuration.md](./docs/configuration.md) and
+[docs/getting-started.md](./docs/getting-started.md) for the expected
+Parmesan-side config shape and backend-side startup examples.
 
 ## API Endpoints
 This repository exposes a large ACP, operator, policy, trace, knowledge, and
