@@ -14,6 +14,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/delivery"
 	"github.com/sahal/parmesan/internal/domain/execution"
 	gatewaydomain "github.com/sahal/parmesan/internal/domain/gateway"
+	responsedomain "github.com/sahal/parmesan/internal/domain/response"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/observability"
 	"github.com/sahal/parmesan/internal/sessionsvc"
@@ -318,6 +319,10 @@ func (s *Server) flushConversation(ctx context.Context, w http.ResponseWriter, f
 	if err != nil {
 		return err
 	}
+	responses, err := s.repo.ListResponses(ctx, responsedomain.Query{SessionID: binding.SessionID})
+	if err != nil {
+		return err
+	}
 	approvals, err := s.repo.ListApprovalSessions(ctx, binding.SessionID)
 	if err != nil {
 		return err
@@ -336,6 +341,9 @@ func (s *Server) flushConversation(ctx context.Context, w http.ResponseWriter, f
 	var items []item
 	for _, event := range events {
 		if _, ok := seen[event.ID]; ok {
+			continue
+		}
+		if !customerVisibleEvent(event, responses) {
 			continue
 		}
 		if event.Source == "ai_agent" {
@@ -423,8 +431,12 @@ func (s *Server) deliveryLoop(ctx context.Context) {
 				if err != nil {
 					continue
 				}
+				responses, err := s.repo.ListResponses(ctx, responsedomain.Query{SessionID: binding.SessionID})
+				if err != nil {
+					continue
+				}
 				for _, event := range events {
-					if event.Source == "ai_agent" {
+					if event.Source == "ai_agent" && customerVisibleEvent(event, responses) {
 						_ = s.saveDelivery(ctx, binding, event)
 					}
 				}
@@ -445,6 +457,42 @@ func newStep(execID, name string, recomputable bool) execution.ExecutionStep {
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
+}
+
+func customerVisibleEvent(event session.Event, responses []responsedomain.Response) bool {
+	if event.Metadata != nil {
+		if internalOnly, ok := event.Metadata["internal_only"].(bool); ok && internalOnly {
+			return false
+		}
+	}
+	switch event.Source {
+	case "ai_agent":
+		return deliverableResponseEvent(event, responses)
+	case "human_agent", "human_agent_on_behalf_of_ai_agent", "customer":
+		return true
+	default:
+		return false
+	}
+}
+
+func deliverableResponseEvent(event session.Event, responses []responsedomain.Response) bool {
+	for _, item := range responses {
+		if item.ExecutionID != event.ExecutionID {
+			continue
+		}
+		if item.PreambleEventID == event.ID {
+			return true
+		}
+		if item.Status != responsedomain.StatusReady {
+			continue
+		}
+		for _, eventID := range item.MessageEventIDs {
+			if eventID == event.ID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

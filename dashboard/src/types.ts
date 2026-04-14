@@ -104,6 +104,21 @@ export type ExecutionPayload = {
   steps?: JSONObject[];
 };
 
+export type ResponseView = {
+  id: string;
+  session_id: string;
+  execution_id: string;
+  status: string;
+  reason?: string;
+  message_event_ids?: string[];
+  held_message_event_ids?: string[];
+  review_decision?: string;
+  reviewed_by?: string;
+  reviewed_at?: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
 export type TraceTimelineEntry = {
   kind: string;
   id: string;

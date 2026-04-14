@@ -178,32 +178,36 @@ type sessionTraceSummary struct {
 }
 
 type responseView struct {
-	ID               string            `json:"id"`
-	ArtifactMeta     artifactmeta.Meta `json:"artifact_meta,omitempty"`
-	SessionID        string            `json:"session_id"`
-	ExecutionID      string            `json:"execution_id"`
-	PolicySnapshotID string            `json:"policy_snapshot_id,omitempty"`
-	TraceID          string            `json:"trace_id,omitempty"`
-	TriggerEventIDs  []string          `json:"trigger_event_ids,omitempty"`
-	TriggerSource    string            `json:"trigger_source,omitempty"`
-	TriggerReason    string            `json:"trigger_reason,omitempty"`
-	DedupeKey        string            `json:"dedupe_key,omitempty"`
-	Status           string            `json:"status"`
-	Reason           string            `json:"reason,omitempty"`
-	IterationCount   int               `json:"iteration_count,omitempty"`
-	MaxIterations    int               `json:"max_iterations,omitempty"`
-	StabilityReached bool              `json:"stability_reached,omitempty"`
-	GenerationMode   string            `json:"generation_mode,omitempty"`
-	PreambleEventID  string            `json:"preamble_event_id,omitempty"`
-	MessageEventIDs  []string          `json:"message_event_ids,omitempty"`
-	ToolInsights     []string          `json:"tool_insights,omitempty"`
-	GlossaryTerms    []string          `json:"glossary_terms,omitempty"`
-	StartedAt        time.Time         `json:"started_at,omitempty"`
-	CompletedAt      time.Time         `json:"completed_at,omitempty"`
-	CanceledAt       time.Time         `json:"canceled_at,omitempty"`
-	CreatedAt        time.Time         `json:"created_at"`
-	UpdatedAt        time.Time         `json:"updated_at"`
-	TraceSpans       []traceSpanView   `json:"trace_spans,omitempty"`
+	ID                  string            `json:"id"`
+	ArtifactMeta        artifactmeta.Meta `json:"artifact_meta,omitempty"`
+	SessionID           string            `json:"session_id"`
+	ExecutionID         string            `json:"execution_id"`
+	PolicySnapshotID    string            `json:"policy_snapshot_id,omitempty"`
+	TraceID             string            `json:"trace_id,omitempty"`
+	TriggerEventIDs     []string          `json:"trigger_event_ids,omitempty"`
+	TriggerSource       string            `json:"trigger_source,omitempty"`
+	TriggerReason       string            `json:"trigger_reason,omitempty"`
+	DedupeKey           string            `json:"dedupe_key,omitempty"`
+	Status              string            `json:"status"`
+	Reason              string            `json:"reason,omitempty"`
+	IterationCount      int               `json:"iteration_count,omitempty"`
+	MaxIterations       int               `json:"max_iterations,omitempty"`
+	StabilityReached    bool              `json:"stability_reached,omitempty"`
+	GenerationMode      string            `json:"generation_mode,omitempty"`
+	PreambleEventID     string            `json:"preamble_event_id,omitempty"`
+	MessageEventIDs     []string          `json:"message_event_ids,omitempty"`
+	HeldMessageEventIDs []string          `json:"held_message_event_ids,omitempty"`
+	ReviewDecision      string            `json:"review_decision,omitempty"`
+	ReviewedBy          string            `json:"reviewed_by,omitempty"`
+	ReviewedAt          time.Time         `json:"reviewed_at,omitempty"`
+	ToolInsights        []string          `json:"tool_insights,omitempty"`
+	GlossaryTerms       []string          `json:"glossary_terms,omitempty"`
+	StartedAt           time.Time         `json:"started_at,omitempty"`
+	CompletedAt         time.Time         `json:"completed_at,omitempty"`
+	CanceledAt          time.Time         `json:"canceled_at,omitempty"`
+	CreatedAt           time.Time         `json:"created_at"`
+	UpdatedAt           time.Time         `json:"updated_at"`
+	TraceSpans          []traceSpanView   `json:"trace_spans,omitempty"`
 }
 
 type traceSpanView struct {
@@ -221,6 +225,11 @@ type traceSpanView struct {
 	Fields       map[string]any    `json:"fields,omitempty"`
 	StartedAt    time.Time         `json:"started_at"`
 	FinishedAt   time.Time         `json:"finished_at,omitempty"`
+}
+
+type responseReviewActionRequest struct {
+	OperatorID string `json:"operator_id,omitempty"`
+	Text       string `json:"text,omitempty"`
 }
 
 type responseTriggerView struct {
@@ -324,6 +333,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/operator/sessions/{id}", s.operatorGetSession)
 	mux.HandleFunc("GET /v1/operator/sessions/{id}/events", s.operatorListEvents)
 	mux.HandleFunc("GET /v1/operator/sessions/{id}/stream", s.operatorStreamEvents)
+	mux.HandleFunc("GET /v1/operator/sessions/{id}/pending-response", s.operatorGetPendingResponse)
 	mux.HandleFunc("GET /v1/operator/sessions/{id}/traces", s.operatorListSessionTraces)
 	mux.HandleFunc("GET /v1/operator/sessions/{id}/lifecycle", s.operatorGetSessionLifecycle)
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/close", s.operatorCloseSession)
@@ -335,6 +345,9 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/notes", s.operatorCreateNote)
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/process", s.operatorProcessEvent)
 	mux.HandleFunc("POST /v1/operator/sessions/{id}/feedback", s.operatorCreateFeedback)
+	mux.HandleFunc("POST /v1/operator/responses/{id}/approve-forward", s.operatorApproveForwardResponse)
+	mux.HandleFunc("POST /v1/operator/responses/{id}/replace", s.operatorReplaceResponse)
+	mux.HandleFunc("POST /v1/operator/responses/{id}/edit-forward", s.operatorEditForwardResponse)
 	mux.HandleFunc("GET /v1/operator/sessions/{id}/teaching-state", s.operatorGetSessionTeachingState)
 	mux.HandleFunc("GET /v1/operator/feedback", s.operatorListFeedback)
 	mux.HandleFunc("GET /v1/operator/feedback/{id}", s.operatorGetFeedback)
@@ -1334,31 +1347,35 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 
 func responseViewFromDomain(record responsedomain.Response, spans []responsedomain.TraceSpan) responseView {
 	view := responseView{
-		ID:               record.ID,
-		ArtifactMeta:     record.ArtifactMeta,
-		SessionID:        record.SessionID,
-		ExecutionID:      record.ExecutionID,
-		PolicySnapshotID: record.PolicySnapshotID,
-		TraceID:          record.TraceID,
-		TriggerEventIDs:  append([]string(nil), record.TriggerEventIDs...),
-		TriggerSource:    record.TriggerSource,
-		TriggerReason:    record.TriggerReason,
-		DedupeKey:        record.DedupeKey,
-		Status:           string(record.Status),
-		Reason:           record.Reason,
-		IterationCount:   record.IterationCount,
-		MaxIterations:    record.MaxIterations,
-		StabilityReached: record.StabilityReached,
-		GenerationMode:   record.GenerationMode,
-		PreambleEventID:  record.PreambleEventID,
-		MessageEventIDs:  append([]string(nil), record.MessageEventIDs...),
-		ToolInsights:     append([]string(nil), record.ToolInsights...),
-		GlossaryTerms:    append([]string(nil), record.GlossaryTerms...),
-		StartedAt:        record.StartedAt,
-		CompletedAt:      record.CompletedAt,
-		CanceledAt:       record.CanceledAt,
-		CreatedAt:        record.CreatedAt,
-		UpdatedAt:        record.UpdatedAt,
+		ID:                  record.ID,
+		ArtifactMeta:        record.ArtifactMeta,
+		SessionID:           record.SessionID,
+		ExecutionID:         record.ExecutionID,
+		PolicySnapshotID:    record.PolicySnapshotID,
+		TraceID:             record.TraceID,
+		TriggerEventIDs:     append([]string(nil), record.TriggerEventIDs...),
+		TriggerSource:       record.TriggerSource,
+		TriggerReason:       record.TriggerReason,
+		DedupeKey:           record.DedupeKey,
+		Status:              string(record.Status),
+		Reason:              record.Reason,
+		IterationCount:      record.IterationCount,
+		MaxIterations:       record.MaxIterations,
+		StabilityReached:    record.StabilityReached,
+		GenerationMode:      record.GenerationMode,
+		PreambleEventID:     record.PreambleEventID,
+		MessageEventIDs:     append([]string(nil), record.MessageEventIDs...),
+		HeldMessageEventIDs: append([]string(nil), record.HeldMessageEventIDs...),
+		ReviewDecision:      record.ReviewDecision,
+		ReviewedBy:          record.ReviewedBy,
+		ReviewedAt:          record.ReviewedAt,
+		ToolInsights:        append([]string(nil), record.ToolInsights...),
+		GlossaryTerms:       append([]string(nil), record.GlossaryTerms...),
+		StartedAt:           record.StartedAt,
+		CompletedAt:         record.CompletedAt,
+		CanceledAt:          record.CanceledAt,
+		CreatedAt:           record.CreatedAt,
+		UpdatedAt:           record.UpdatedAt,
 	}
 	for _, span := range spans {
 		view.TraceSpans = append(view.TraceSpans, traceSpanView{
@@ -1393,6 +1410,31 @@ func (s *Server) listSessionResponses(w http.ResponseWriter, r *http.Request) {
 		out = append(out, responseViewFromDomain(item, spans))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func latestPendingResponse(items []responsedomain.Response) responsedomain.Response {
+	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
+	for _, item := range items {
+		if item.Status == responsedomain.StatusReviewRequired {
+			return item
+		}
+	}
+	return responsedomain.Response{}
+}
+
+func (s *Server) operatorGetPendingResponse(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListResponses(r.Context(), responsedomain.Query{SessionID: r.PathValue("id")})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	item := latestPendingResponse(items)
+	if item.ID == "" {
+		http.Error(w, "pending response not found", http.StatusNotFound)
+		return
+	}
+	spans, _ := s.store.ListResponseTraceSpans(r.Context(), responsedomain.TraceSpanQuery{ResponseID: item.ID})
+	writeJSON(w, http.StatusOK, responseViewFromDomain(item, spans))
 }
 
 func (s *Server) getResponse(w http.ResponseWriter, r *http.Request) {
@@ -1494,6 +1536,180 @@ func (s *Server) cancelResponse(w http.ResponseWriter, r *http.Request) {
 	_, _ = s.sessions.CreateACPStatusEvent(r.Context(), item.SessionID, "runtime", "response.canceled", "completed", item.ExecutionID, item.TraceID, map[string]any{
 		"response_id": item.ID,
 		"reason":      item.Reason,
+	}, nil, false)
+	writeJSON(w, http.StatusOK, responseViewFromDomain(item, nil))
+}
+
+func (s *Server) operatorApproveForwardResponse(w http.ResponseWriter, r *http.Request) {
+	var req responseReviewActionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	item, err := s.resolveHeldResponseAction(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	operatorID := requestOperatorID(r, req.OperatorID)
+	now := time.Now().UTC()
+	item.Status = responsedomain.StatusReady
+	item.Reason = ""
+	item.ReviewDecision = "approved"
+	item.ReviewedBy = operatorID
+	item.ReviewedAt = now
+	item.UpdatedAt = now
+	if item.CompletedAt.IsZero() {
+		item.CompletedAt = now
+	}
+	if err := s.store.SaveResponse(r.Context(), item); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.appendTrace(r.Context(), audit.Record{
+		ID:          fmt.Sprintf("trace_%d", now.UnixNano()),
+		Kind:        "response.review.approved",
+		SessionID:   item.SessionID,
+		ExecutionID: item.ExecutionID,
+		TraceID:     item.TraceID,
+		Message:     "held response approved for delivery",
+		Fields:      map[string]any{"response_id": item.ID, "operator_id": operatorID},
+		CreatedAt:   now,
+	})
+	_, _ = s.sessions.CreateACPStatusEvent(r.Context(), item.SessionID, "runtime", "response.review.approved", "completed", item.ExecutionID, item.TraceID, map[string]any{
+		"response_id": item.ID,
+	}, nil, false)
+	writeJSON(w, http.StatusOK, responseViewFromDomain(item, nil))
+}
+
+func (s *Server) operatorReplaceResponse(w http.ResponseWriter, r *http.Request) {
+	var req responseReviewActionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Text) == "" {
+		http.Error(w, "text is required", http.StatusBadRequest)
+		return
+	}
+	item, err := s.resolveHeldResponseAction(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	operatorID := requestOperatorID(r, req.OperatorID)
+	now := time.Now().UTC()
+	event, err := s.sessions.CreateEvent(r.Context(), sessionsvc.CreateEventParams{
+		SessionID:   item.SessionID,
+		Source:      "human_agent_on_behalf_of_ai_agent",
+		Kind:        "message",
+		Content:     []session.ContentPart{{Type: "text", Text: req.Text}},
+		ExecutionID: item.ExecutionID,
+		TraceID:     item.TraceID,
+		Metadata: map[string]any{
+			"response_id":                 item.ID,
+			"operator_id":                 operatorID,
+			"response_review_replacement": true,
+		},
+		Async: true,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.publishSessionEvent(item.SessionID, event, item.ExecutionID, item.TraceID, event.CreatedAt)
+	if len(item.HeldMessageEventIDs) == 0 {
+		item.HeldMessageEventIDs = append([]string(nil), item.MessageEventIDs...)
+	}
+	item.MessageEventIDs = []string{event.ID}
+	item.Status = responsedomain.StatusReady
+	item.Reason = ""
+	item.ReviewDecision = "replaced"
+	item.ReviewedBy = operatorID
+	item.ReviewedAt = now
+	item.UpdatedAt = now
+	if item.CompletedAt.IsZero() {
+		item.CompletedAt = now
+	}
+	if err := s.store.SaveResponse(r.Context(), item); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.appendTrace(r.Context(), audit.Record{
+		ID:          fmt.Sprintf("trace_%d", now.UnixNano()),
+		Kind:        "response.review.replaced",
+		SessionID:   item.SessionID,
+		ExecutionID: item.ExecutionID,
+		TraceID:     item.TraceID,
+		Message:     "held response replaced by operator-authored message",
+		Fields:      map[string]any{"response_id": item.ID, "operator_id": operatorID, "event_id": event.ID},
+		CreatedAt:   now,
+	})
+	_, _ = s.sessions.CreateACPStatusEvent(r.Context(), item.SessionID, "runtime", "response.review.replaced", "completed", item.ExecutionID, item.TraceID, map[string]any{
+		"response_id": item.ID,
+		"event_id":    event.ID,
+	}, nil, false)
+	writeJSON(w, http.StatusOK, responseViewFromDomain(item, nil))
+}
+
+func (s *Server) operatorEditForwardResponse(w http.ResponseWriter, r *http.Request) {
+	var req responseReviewActionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Text) == "" {
+		http.Error(w, "text is required", http.StatusBadRequest)
+		return
+	}
+	item, err := s.resolveHeldResponseAction(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	operatorID := requestOperatorID(r, req.OperatorID)
+	now := time.Now().UTC()
+	event, err := s.sessions.CreateMessageEvent(r.Context(), item.SessionID, "ai_agent", req.Text, item.ExecutionID, item.TraceID, map[string]any{
+		"response_id":           item.ID,
+		"edited_by_operator":    true,
+		"edited_by_operator_id": operatorID,
+		"response_review_edit":  true,
+	}, true)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.publishSessionEvent(item.SessionID, event, item.ExecutionID, item.TraceID, event.CreatedAt)
+	if len(item.HeldMessageEventIDs) == 0 {
+		item.HeldMessageEventIDs = append([]string(nil), item.MessageEventIDs...)
+	}
+	item.MessageEventIDs = []string{event.ID}
+	item.Status = responsedomain.StatusReady
+	item.Reason = ""
+	item.ReviewDecision = "edited_forward"
+	item.ReviewedBy = operatorID
+	item.ReviewedAt = now
+	item.UpdatedAt = now
+	if item.CompletedAt.IsZero() {
+		item.CompletedAt = now
+	}
+	if err := s.store.SaveResponse(r.Context(), item); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.appendTrace(r.Context(), audit.Record{
+		ID:          fmt.Sprintf("trace_%d", now.UnixNano()),
+		Kind:        "response.review.edited",
+		SessionID:   item.SessionID,
+		ExecutionID: item.ExecutionID,
+		TraceID:     item.TraceID,
+		Message:     "held response edited and forwarded by operator",
+		Fields:      map[string]any{"response_id": item.ID, "operator_id": operatorID, "event_id": event.ID},
+		CreatedAt:   now,
+	})
+	_, _ = s.sessions.CreateACPStatusEvent(r.Context(), item.SessionID, "runtime", "response.review.edited", "completed", item.ExecutionID, item.TraceID, map[string]any{
+		"response_id": item.ID,
+		"event_id":    event.ID,
 	}, nil, false)
 	writeJSON(w, http.StatusOK, responseViewFromDomain(item, nil))
 }
@@ -7277,6 +7493,12 @@ func operatorPermission(method, path string) string {
 		}
 		return "session.operate"
 	}
+	if strings.Contains(path, "/operator/responses/") || strings.Contains(path, "/sessions/") && strings.Contains(path, "/pending-response") {
+		if method == http.MethodGet {
+			return "operator.view"
+		}
+		return "session.operate"
+	}
 	if strings.Contains(path, "/knowledge/") {
 		if method == http.MethodGet {
 			return "operator.view"
@@ -7722,6 +7944,24 @@ func sessionMode(sess session.Session) string {
 		return "auto"
 	}
 	return mode
+}
+
+func sessionUnderManualTakeover(sess session.Session) bool {
+	if sessionMode(sess) != "manual" {
+		return false
+	}
+	return stringMetadata(sess.Metadata, "assigned_operator_id") != "" || stringMetadata(sess.Metadata, "takeover_started_at") != ""
+}
+
+func (s *Server) resolveHeldResponseAction(ctx context.Context, responseID string) (responsedomain.Response, error) {
+	item, err := s.store.GetResponse(ctx, responseID)
+	if err != nil {
+		return responsedomain.Response{}, err
+	}
+	if item.Status != responsedomain.StatusReviewRequired {
+		return responsedomain.Response{}, errors.New("response is not awaiting operator review")
+	}
+	return item, nil
 }
 
 func hasLabel(labels []string, target string) bool {

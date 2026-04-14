@@ -470,6 +470,20 @@ func (s *Server) notificationFromAuditRecord(ctx context.Context, record audit.R
 			Status:      "open",
 			Payload:     cloneMap(record.Fields),
 		}, true, nil
+	case "response.review_required":
+		return &operatorNotification{
+			ID:          record.ID,
+			Kind:        "response_review_required",
+			Severity:    "attention",
+			Title:       "Response waiting for operator review",
+			SessionID:   record.SessionID,
+			ExecutionID: record.ExecutionID,
+			AgentID:     sessionAgentID,
+			TraceID:     record.TraceID,
+			CreatedAt:   record.CreatedAt,
+			Status:      "open",
+			Payload:     cloneMap(record.Fields),
+		}, true, nil
 	default:
 		return nil, false, nil
 	}

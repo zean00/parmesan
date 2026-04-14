@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	responsedomain "github.com/sahal/parmesan/internal/domain/response"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/store/memory"
@@ -87,6 +88,25 @@ func TestEnsureBindingCreatesNewSessionWhenPreviousSessionClosed(t *testing.T) {
 	}
 	if second.SessionID == first.SessionID {
 		t.Fatalf("second binding session = %s, want new session after close", second.SessionID)
+	}
+}
+
+func TestDeliverableResponseEventKeepsPreambleVisibleWhileHoldingFinalDraft(t *testing.T) {
+	responses := []responsedomain.Response{
+		{
+			ID:              "resp_1",
+			ExecutionID:     "exec_1",
+			Status:          responsedomain.StatusReviewRequired,
+			PreambleEventID: "evt_preamble",
+			MessageEventIDs: []string{"evt_final"},
+		},
+	}
+
+	if !deliverableResponseEvent(session.Event{ID: "evt_preamble", ExecutionID: "exec_1", Source: "ai_agent"}, responses) {
+		t.Fatal("preamble event should remain customer-visible")
+	}
+	if deliverableResponseEvent(session.Event{ID: "evt_final", ExecutionID: "exec_1", Source: "ai_agent"}, responses) {
+		t.Fatal("held final draft should not be customer-visible before operator review")
 	}
 }
 

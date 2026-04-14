@@ -350,7 +350,13 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 	if err := r.repo.UpdateExecution(ctx, exec); err != nil {
 		return err
 	}
-	_ = r.updateResponseState(ctx, responseRecord, responsedomain.StatusReady, "", func(record *responsedomain.Response) {
+	finalResponseStatus := responsedomain.StatusReady
+	finalResponseReason := ""
+	if current, ok := r.cachedResponse(exec.ID); ok && current.Status == responsedomain.StatusReviewRequired {
+		finalResponseStatus = responsedomain.StatusReviewRequired
+		finalResponseReason = current.Reason
+	}
+	_ = r.updateResponseState(ctx, responseRecord, finalResponseStatus, finalResponseReason, func(record *responsedomain.Response) {
 		record.CompletedAt = time.Now().UTC()
 	})
 	return nil
@@ -606,6 +612,58 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 		}
 		eventIDs := eventIDs(assistantEvents)
 		if len(eventIDs) > 0 {
+			sess, err := r.repo.GetSession(ctx, exec.SessionID)
+			if err != nil {
+				return err
+			}
+			if runnerSessionUnderManualTakeover(sess) {
+				record, err := r.ensureResponseRecord(ctx, *exec)
+				if err != nil {
+					return err
+				}
+				now := time.Now().UTC()
+				if err := r.updateResponseState(ctx, record, responsedomain.StatusReviewRequired, "manual_takeover_review", func(item *responsedomain.Response) {
+					if len(item.HeldMessageEventIDs) == 0 {
+						item.HeldMessageEventIDs = append([]string(nil), eventIDs...)
+					}
+					item.MessageEventIDs = append([]string(nil), eventIDs...)
+					item.ReviewDecision = ""
+					item.ReviewedBy = ""
+					item.ReviewedAt = time.Time{}
+					item.CompletedAt = now
+				}); err != nil {
+					return err
+				}
+				r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
+					ResponseID:  r.responseIDForExecution(ctx, exec.ID),
+					SessionID:   exec.SessionID,
+					ExecutionID: exec.ID,
+					TraceID:     exec.TraceID,
+					Kind:        "response.review_required",
+					Status:      "pending_operator_review",
+					Fields:      map[string]any{"event_ids": eventIDs},
+					StartedAt:   now,
+					FinishedAt:  now,
+				})
+				r.appendTrace(ctx, audit.Record{
+					ID:          fmt.Sprintf("trace_%d", now.UnixNano()),
+					Kind:        "response.review_required",
+					SessionID:   exec.SessionID,
+					ExecutionID: exec.ID,
+					TraceID:     exec.TraceID,
+					Message:     "response held for operator review during manual takeover",
+					Fields:      map[string]any{"response_id": r.responseIDForExecution(ctx, exec.ID), "event_ids": eventIDs},
+					CreatedAt:   now,
+				})
+				if _, err := r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "response.review_required", "blocked", exec.ID, exec.TraceID, map[string]any{
+					"response_id": r.responseIDForExecution(ctx, exec.ID),
+					"event_ids":   eventIDs,
+				}, nil, false); err != nil {
+					return err
+				}
+				r.publish(exec.SessionID, exec.ID, "runtime.response.review_required", map[string]any{"response_id": r.responseIDForExecution(ctx, exec.ID), "event_ids": eventIDs})
+				return nil
+			}
 			r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
 				ResponseID:  r.responseIDForExecution(ctx, exec.ID),
 				SessionID:   exec.SessionID,
@@ -2751,6 +2809,22 @@ func executionCapabilityOverrides(exec execution.TurnExecution) model.Capability
 		return nil
 	}
 	return overrides
+}
+
+func runnerSessionUnderManualTakeover(sess session.Session) bool {
+	if strings.ToLower(strings.TrimSpace(sess.Mode)) != "manual" {
+		return false
+	}
+	if sess.Metadata == nil {
+		return false
+	}
+	if value, ok := sess.Metadata["assigned_operator_id"].(string); ok && strings.TrimSpace(value) != "" {
+		return true
+	}
+	if value, ok := sess.Metadata["takeover_started_at"].(string); ok && strings.TrimSpace(value) != "" {
+		return true
+	}
+	return false
 }
 
 func (r *Runner) publish(sessionID, executionID, typ string, payload any) {

@@ -9,7 +9,7 @@ import { getJSON, postJSON } from "../lib/api";
 import { formatDate } from "../lib/format";
 import { summarizeTrace, traceGroup, traceSummaryLine, traceTitle, traceTone } from "../lib/trace";
 import { streamSSE } from "../lib/sse";
-import type { ExecutionPayload, JSONObject, RetryModelProfile, SessionEvent, SessionView, TraceTimeline } from "../types";
+import type { ExecutionPayload, JSONObject, ResponseView, RetryModelProfile, SessionEvent, SessionView, TraceTimeline } from "../types";
 
 type ExecutionBundle = {
   payload: ExecutionPayload | null;
@@ -40,6 +40,9 @@ export function SessionDetailPage({ token }: { token: string }) {
   const [messageText, setMessageText] = useState("");
   const [noteText, setNoteText] = useState("");
   const [feedbackText, setFeedbackText] = useState("");
+  const [pendingResponse, setPendingResponse] = useState<ResponseView | null>(null);
+  const [replaceResponseText, setReplaceResponseText] = useState("");
+  const [editForwardText, setEditForwardText] = useState("");
   const [retryProfiles, setRetryProfiles] = useState<RetryModelProfile[]>([]);
   const [selectedRetryProfileID, setSelectedRetryProfileID] = useState("");
   const [sending, setSending] = useState("");
@@ -56,10 +59,12 @@ export function SessionDetailPage({ token }: { token: string }) {
         getJSON<JSONObject>(token, `/v1/operator/sessions/${sessionId}/lifecycle`),
         getJSON<JSONObject>(token, `/v1/operator/sessions/${sessionId}/teaching-state`).catch(() => ({})),
       ]);
+      const pendingResponsePayload = await getJSON<ResponseView>(token, `/v1/operator/sessions/${sessionId}/pending-response`).catch(() => null);
       setSession(sessionPayload);
       setEvents(eventsPayload);
       setLifecycle(lifecyclePayload);
       setTeachingState(teachingPayload);
+      setPendingResponse(pendingResponsePayload);
       const summary = (sessionPayload.summary ?? {}) as JSONObject;
       const nextExecutionID = typeof summary.last_execution_id === "string" ? summary.last_execution_id : "";
       setLatestExecutionID(nextExecutionID);
@@ -173,6 +178,7 @@ export function SessionDetailPage({ token }: { token: string }) {
 
   const summary = useMemo(() => (session?.summary ?? {}) as JSONObject, [session]);
   const moderationSummary = useMemo(() => latestModerationSummary(events), [events]);
+  const pendingResponseText = useMemo(() => responseTextFromEvents(events, pendingResponse?.held_message_event_ids ?? pendingResponse?.message_event_ids ?? []), [events, pendingResponse]);
   const traceSummary = useMemo(() => summarizeTrace(execution.trace), [execution.trace]);
   const [traceKindFilter, setTraceKindFilter] = useState("");
   const filteredTraceEntries = useMemo(() => {
@@ -188,6 +194,11 @@ export function SessionDetailPage({ token }: { token: string }) {
   }, [execution.trace, traceKindFilter]);
   const tracePreviewEntries = useMemo(() => filteredTraceEntries.slice(-4).reverse(), [filteredTraceEntries]);
   const activeTraceID = typeof execution.payload?.execution?.trace_id === "string" ? execution.payload.execution.trace_id : "";
+
+  useEffect(() => {
+    setReplaceResponseText("");
+    setEditForwardText(pendingResponseText);
+  }, [pendingResponse?.id, pendingResponseText]);
 
   return (
     <>
@@ -261,6 +272,23 @@ export function SessionDetailPage({ token }: { token: string }) {
                   </div>
                 </div>
               ) : null}
+              {pendingResponse ? (
+                <div className="surface-panel">
+                  <div className="stack-heading">
+                    <p className="stack-heading__eyebrow">Pending review</p>
+                    <h3>Agent response is held</h3>
+                    <p>The current takeover session has a finished response waiting for operator release.</p>
+                  </div>
+                  <KeyValueList
+                    entries={[
+                      ["Response", pendingResponse.id],
+                      ["Execution", pendingResponse.execution_id || "n/a"],
+                      ["Status", pendingResponse.status],
+                      ["Draft", pendingResponseText || "No draft text found"],
+                    ]}
+                  />
+                </div>
+              ) : null}
               <InspectPanel title="Session summary" summary="Compact summary payload for the current session." value={summary} />
             </div>
           </Section>
@@ -314,6 +342,55 @@ export function SessionDetailPage({ token }: { token: string }) {
                   </button>
                 </div>
               </div>
+
+              {pendingResponse ? (
+                <div className="action-card">
+                  <h3>Held response review</h3>
+                  <div className="inline-actions">
+                    <button
+                      className="button button--primary"
+                      disabled={sending !== "" || !pendingResponse.id}
+                      type="button"
+                      onClick={() =>
+                        void mutate("approve-forward", () => postJSON(token, `/v1/operator/responses/${pendingResponse.id}/approve-forward`, {}))
+                      }
+                    >
+                      Approve and forward
+                    </button>
+                  </div>
+                  <textarea value={editForwardText} onChange={(event) => setEditForwardText(event.target.value)} placeholder="Edit the held draft before forwarding" rows={4} />
+                  <div className="inline-actions">
+                    <button
+                      className="button button--ghost"
+                      disabled={sending !== "" || !pendingResponse.id || !editForwardText.trim()}
+                      type="button"
+                      onClick={() =>
+                        void mutate("edit-forward", async () => {
+                          await postJSON(token, `/v1/operator/responses/${pendingResponse.id}/edit-forward`, { text: editForwardText });
+                        })
+                      }
+                    >
+                      Edit and forward
+                    </button>
+                  </div>
+                  <textarea value={replaceResponseText} onChange={(event) => setReplaceResponseText(event.target.value)} placeholder="Replace the held response with an operator-authored message" rows={4} />
+                  <div className="inline-actions">
+                    <button
+                      className="button button--ghost"
+                      disabled={sending !== "" || !pendingResponse.id || !replaceResponseText.trim()}
+                      type="button"
+                      onClick={() =>
+                        void mutate("replace-response", async () => {
+                          await postJSON(token, `/v1/operator/responses/${pendingResponse.id}/replace`, { text: replaceResponseText });
+                          setReplaceResponseText("");
+                        })
+                      }
+                    >
+                      Replace with operator message
+                    </button>
+                  </div>
+                </div>
+              ) : null}
 
               <div className="action-card">
                 <h3>Internal context</h3>
@@ -541,4 +618,22 @@ function latestModerationSummary(events: SessionEvent[]): { decision?: string; m
     return { decision, mode, jailbreak, censored, categories, raw: moderation };
   }
   return null;
+}
+
+function responseTextFromEvents(events: SessionEvent[], eventIDs: string[]): string {
+  if (eventIDs.length === 0) {
+    return "";
+  }
+  const byID = new Map(events.map((event) => [event.id, event]));
+  return eventIDs
+    .map((id) => byID.get(id))
+    .filter((event): event is SessionEvent => Boolean(event))
+    .map((event) =>
+      (event.content ?? [])
+        .filter((part) => part.type === "text" && part.text)
+        .map((part) => part.text ?? "")
+        .join("\n"),
+    )
+    .filter((text) => text.trim())
+    .join("\n\n");
 }

@@ -3428,12 +3428,26 @@ func applyExecutionMetadata(raw []byte, exec *execution.TurnExecution) {
 }
 
 func responseMetadata(record responsedomain.Response) map[string]any {
-	if strings.TrimSpace(record.PolicySnapshotID) == "" {
+	out := map[string]any{}
+	if strings.TrimSpace(record.PolicySnapshotID) != "" {
+		out[policySnapshotIDMetadataKey] = record.PolicySnapshotID
+	}
+	if len(record.HeldMessageEventIDs) > 0 {
+		out["held_message_event_ids"] = append([]string(nil), record.HeldMessageEventIDs...)
+	}
+	if strings.TrimSpace(record.ReviewDecision) != "" {
+		out["review_decision"] = record.ReviewDecision
+	}
+	if strings.TrimSpace(record.ReviewedBy) != "" {
+		out["reviewed_by"] = record.ReviewedBy
+	}
+	if !record.ReviewedAt.IsZero() {
+		out["reviewed_at"] = record.ReviewedAt
+	}
+	if len(out) == 0 {
 		return nil
 	}
-	return map[string]any{
-		policySnapshotIDMetadataKey: record.PolicySnapshotID,
-	}
+	return out
 }
 
 func applyResponseMetadata(raw []byte, record *responsedomain.Response) {
@@ -3445,6 +3459,14 @@ func applyResponseMetadata(raw []byte, record *responsedomain.Response) {
 		return
 	}
 	record.PolicySnapshotID = strings.TrimSpace(stringValue(metadata[policySnapshotIDMetadataKey]))
+	record.HeldMessageEventIDs = stringSlice(metadata["held_message_event_ids"])
+	record.ReviewDecision = strings.TrimSpace(stringValue(metadata["review_decision"]))
+	record.ReviewedBy = strings.TrimSpace(stringValue(metadata["reviewed_by"]))
+	if reviewedAt, ok := metadata["reviewed_at"].(string); ok {
+		if ts, err := time.Parse(time.RFC3339Nano, reviewedAt); err == nil {
+			record.ReviewedAt = ts
+		}
+	}
 }
 
 func watchMetadata(watch session.Watch) map[string]any {
@@ -3473,4 +3495,21 @@ func stringValue(v any) string {
 		return ""
 	}
 	return s
+}
+
+func stringSlice(v any) []string {
+	switch item := v.(type) {
+	case []string:
+		return append([]string(nil), item...)
+	case []any:
+		out := make([]string, 0, len(item))
+		for _, value := range item {
+			if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
