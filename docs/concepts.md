@@ -172,6 +172,8 @@ Handles post-conversation improvement:
 
 After this page:
 
+- read [Execution Model](./execution-model.md) for the difference between
+  session, turn execution, worker, and async writes
 - read [Architecture](./architecture.md) for deployables and data flow
 - read [Engine](./engine.md) for turn execution
 - read [Policies](./policies.md) for behavioral control

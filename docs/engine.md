@@ -11,6 +11,9 @@ Use this page when you need to understand:
 - when policy, retrieval, tools, approvals, and delegated agents are involved
 - what the runtime intentionally does not do
 
+If you need the simpler mental model for `session` vs `turn execution` vs
+`worker`, start with [Execution Model](./execution-model.md).
+
 ```mermaid
 flowchart TD
     Ingress["ACP Message Ingress"]

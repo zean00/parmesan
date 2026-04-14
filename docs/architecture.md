@@ -12,6 +12,10 @@ Use this page when you need to answer questions like:
 - where data is persisted
 - how ACP, the dashboard, the worker, and bootstrap fit together
 
+If you specifically need the difference between `session`, `turn execution`,
+`worker`, and `async writes`, read [Execution Model](./execution-model.md)
+first.
+
 ## System Shape
 
 Parmesan is currently a modular Go monolith with multiple deployables:

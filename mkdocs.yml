@@ -29,6 +29,7 @@ nav:
   - Getting Started: getting-started.md
   - Configuration: configuration.md
   - Concepts: concepts.md
+  - Execution Model: execution-model.md
   - Architecture: architecture.md
   - Engine: engine.md
   - Policies: policies.md
