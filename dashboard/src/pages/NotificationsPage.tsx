@@ -358,6 +358,12 @@ function notificationPermission(): NotificationPermission {
 
 function notificationSummary(item: OperatorNotification): string {
   const payload = item.payload ?? {};
+  if (typeof payload.error === "string" && payload.error) {
+    return payload.error;
+  }
+  if (typeof payload.blocked_reason === "string" && payload.blocked_reason) {
+    return `Blocked: ${payload.blocked_reason}`;
+  }
   if (typeof payload.reason === "string" && payload.reason) {
     return payload.reason;
   }

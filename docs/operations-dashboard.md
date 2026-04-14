@@ -78,6 +78,7 @@ The session workspace supports:
 - notes
 - session-level feedback submission
 - recovery actions for executions
+- retry with a configured fallback model profile
 - lifecycle and teaching-state inspection
 
 ### Trace Workspace

@@ -9,7 +9,7 @@ import { getJSON, postJSON } from "../lib/api";
 import { formatDate } from "../lib/format";
 import { summarizeTrace, traceGroup, traceSummaryLine, traceTitle, traceTone } from "../lib/trace";
 import { streamSSE } from "../lib/sse";
-import type { ExecutionPayload, JSONObject, SessionEvent, SessionView, TraceTimeline } from "../types";
+import type { ExecutionPayload, JSONObject, RetryModelProfile, SessionEvent, SessionView, TraceTimeline } from "../types";
 
 type ExecutionBundle = {
   payload: ExecutionPayload | null;
@@ -40,6 +40,8 @@ export function SessionDetailPage({ token }: { token: string }) {
   const [messageText, setMessageText] = useState("");
   const [noteText, setNoteText] = useState("");
   const [feedbackText, setFeedbackText] = useState("");
+  const [retryProfiles, setRetryProfiles] = useState<RetryModelProfile[]>([]);
+  const [selectedRetryProfileID, setSelectedRetryProfileID] = useState("");
   const [sending, setSending] = useState("");
   const [error, setError] = useState("");
   const [streamStatus, setStreamStatus] = useState<"connecting" | "live" | "error">("connecting");
@@ -63,6 +65,22 @@ export function SessionDetailPage({ token }: { token: string }) {
       setLatestExecutionID(nextExecutionID);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function loadRetryProfiles() {
+    try {
+      const profiles = await getJSON<RetryModelProfile[]>(token, "/v1/operator/retry-model-profiles");
+      setRetryProfiles(profiles);
+      setSelectedRetryProfileID((current) => {
+        if (current && profiles.some((item) => item.id === current)) {
+          return current;
+        }
+        return profiles[0]?.id ?? "";
+      });
+    } catch {
+      setRetryProfiles([]);
+      setSelectedRetryProfileID("");
     }
   }
 
@@ -119,6 +137,10 @@ export function SessionDetailPage({ token }: { token: string }) {
   useEffect(() => {
     void loadSession();
   }, [sessionId]);
+
+  useEffect(() => {
+    void loadRetryProfiles();
+  }, [token]);
 
   useEffect(() => {
     void loadExecution(latestExecutionID);
@@ -340,6 +362,29 @@ export function SessionDetailPage({ token }: { token: string }) {
                   >
                     Retry
                   </button>
+                  {retryProfiles.length > 0 ? (
+                    <>
+                      <select value={selectedRetryProfileID} onChange={(event) => setSelectedRetryProfileID(event.target.value)}>
+                        {retryProfiles.map((profile) => (
+                          <option key={profile.id} value={profile.id}>
+                            {profile.name || profile.id}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        className="button button--primary"
+                        disabled={sending !== "" || !latestExecutionID || !selectedRetryProfileID}
+                        type="button"
+                        onClick={() =>
+                          void mutate("retry-with-model-profile", () =>
+                            postJSON(token, `/v1/operator/executions/${latestExecutionID}/retry-with-model-profile`, { profile_id: selectedRetryProfileID }),
+                          )
+                        }
+                      >
+                        Retry with fallback model
+                      </button>
+                    </>
+                  ) : null}
                   <button
                     className="button button--ghost"
                     disabled={sending !== "" || !latestExecutionID}
@@ -392,6 +437,7 @@ export function SessionDetailPage({ token }: { token: string }) {
                 ["Execution", latestExecutionID || "n/a"],
                 ["Trace", (execution.payload?.execution?.trace_id as string | undefined) || "n/a"],
                 ["Status", (execution.payload?.execution?.status as string | undefined) || "n/a"],
+                ["Retry profile", (execution.payload?.execution?.retry_model_profile_id as string | undefined) || "n/a"],
                 ["Policy snapshot", (execution.payload?.execution?.policy_snapshot_id as string | undefined) || "n/a"],
               ]}
             />

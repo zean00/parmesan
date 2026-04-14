@@ -63,3 +63,4 @@ observability:
 runtime:
   async_write_queue_size: 256
   request_timeout_seconds: 15
+  retry_model_profiles: []

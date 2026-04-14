@@ -43,6 +43,15 @@ type ACPConfig struct {
 	DelegationTimeoutSecs int
 }
 
+type RetryModelProfileConfig struct {
+	ID                 string `yaml:"id" json:"id"`
+	Name               string `yaml:"name" json:"name,omitempty"`
+	ReasoningProvider  string `yaml:"reasoning_provider" json:"reasoning_provider,omitempty"`
+	ReasoningModel     string `yaml:"reasoning_model" json:"reasoning_model,omitempty"`
+	StructuredProvider string `yaml:"structured_provider" json:"structured_provider,omitempty"`
+	StructuredModel    string `yaml:"structured_model" json:"structured_model,omitempty"`
+}
+
 type BootstrapConfig struct {
 	AgentsDir string
 }
@@ -159,6 +168,7 @@ type Config struct {
 	AgentServers        map[string]AgentServerConfig
 	CustomerContext     CustomerContextConfig
 	Moderation          ModerationConfig
+	RetryModelProfiles  []RetryModelProfileConfig
 	AsyncWriteQueueSize int
 	RequestTimeout      time.Duration
 }
@@ -212,6 +222,7 @@ func Load(service string) Config {
 		AgentServers:        fileCfg.AgentServers,
 		CustomerContext:     fileCfg.CustomerContext,
 		Moderation:          fileCfg.Moderation,
+		RetryModelProfiles:  fileCfg.Runtime.RetryModelProfiles,
 		AsyncWriteQueueSize: intEnv("ASYNC_WRITE_QUEUE_SIZE", 256),
 		RequestTimeout:      durationEnv("REQUEST_TIMEOUT_SECONDS", 15),
 	}
@@ -267,8 +278,9 @@ type fileConfig struct {
 		OrgID          string `yaml:"org_id"`
 	} `yaml:"observability"`
 	Runtime struct {
-		AsyncWriteQueueSize int `yaml:"async_write_queue_size"`
-		RequestTimeoutSecs  int `yaml:"request_timeout_seconds"`
+		AsyncWriteQueueSize int                       `yaml:"async_write_queue_size"`
+		RequestTimeoutSecs  int                       `yaml:"request_timeout_seconds"`
+		RetryModelProfiles  []RetryModelProfileConfig `yaml:"retry_model_profiles"`
 	} `yaml:"runtime"`
 }
 

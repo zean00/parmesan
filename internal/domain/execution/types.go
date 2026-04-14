@@ -37,25 +37,45 @@ type RetryPolicy struct {
 	RetryUntilValid   bool `json:"retry_until_valid,omitempty"`
 }
 
+type ModelOverride struct {
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+}
+
+func (o ModelOverride) IsZero() bool {
+	return o.Provider == "" && o.Model == ""
+}
+
+type RetryModelOverride struct {
+	Reasoning  ModelOverride `json:"reasoning,omitempty"`
+	Structured ModelOverride `json:"structured,omitempty"`
+}
+
+func (o RetryModelOverride) IsZero() bool {
+	return o.Reasoning.IsZero() && o.Structured.IsZero()
+}
+
 type TurnExecution struct {
-	ID              string            `json:"id"`
-	ArtifactMeta    artifactmeta.Meta `json:"artifact_meta,omitempty"`
-	SessionID       string            `json:"session_id"`
-	TriggerEventID  string            `json:"trigger_event_id"`
-	TriggerEventIDs []string          `json:"trigger_event_ids,omitempty"`
-	PolicyBundleID  string            `json:"policy_bundle_id,omitempty"`
-	PolicySnapshotID string           `json:"policy_snapshot_id,omitempty"`
-	ProposalID      string            `json:"proposal_id,omitempty"`
-	RolloutID       string            `json:"rollout_id,omitempty"`
-	SelectionReason string            `json:"selection_reason,omitempty"`
-	TraceID         string            `json:"trace_id,omitempty"`
-	Status          Status            `json:"status"`
-	LeaseOwner      string            `json:"lease_owner,omitempty"`
-	LeaseExpiresAt  time.Time         `json:"lease_expires_at,omitempty"`
-	BlockedReason   string            `json:"blocked_reason,omitempty"`
-	ResumeSignal    string            `json:"resume_signal,omitempty"`
-	CreatedAt       time.Time         `json:"created_at"`
-	UpdatedAt       time.Time         `json:"updated_at"`
+	ID                  string             `json:"id"`
+	ArtifactMeta        artifactmeta.Meta  `json:"artifact_meta,omitempty"`
+	SessionID           string             `json:"session_id"`
+	TriggerEventID      string             `json:"trigger_event_id"`
+	TriggerEventIDs     []string           `json:"trigger_event_ids,omitempty"`
+	PolicyBundleID      string             `json:"policy_bundle_id,omitempty"`
+	PolicySnapshotID    string             `json:"policy_snapshot_id,omitempty"`
+	ProposalID          string             `json:"proposal_id,omitempty"`
+	RolloutID           string             `json:"rollout_id,omitempty"`
+	SelectionReason     string             `json:"selection_reason,omitempty"`
+	TraceID             string             `json:"trace_id,omitempty"`
+	Status              Status             `json:"status"`
+	LeaseOwner          string             `json:"lease_owner,omitempty"`
+	LeaseExpiresAt      time.Time          `json:"lease_expires_at,omitempty"`
+	BlockedReason       string             `json:"blocked_reason,omitempty"`
+	ResumeSignal        string             `json:"resume_signal,omitempty"`
+	RetryModelProfileID string             `json:"retry_model_profile_id,omitempty"`
+	RetryModelOverride  RetryModelOverride `json:"retry_model_override,omitempty"`
+	CreatedAt           time.Time          `json:"created_at"`
+	UpdatedAt           time.Time          `json:"updated_at"`
 }
 
 type ExecutionStep struct {

@@ -4831,6 +4831,8 @@ func TestOperatorListNotifications(t *testing.T) {
 	for _, record := range []audit.Record{
 		{ID: "audit_approval", Kind: "approval.requested", SessionID: "sess_notify", ExecutionID: "exec_1", TraceID: "trace_1", CreatedAt: now},
 		{ID: "audit_failed", Kind: "execution.failed", SessionID: "sess_notify", ExecutionID: "exec_2", TraceID: "trace_2", CreatedAt: now.Add(time.Second)},
+		{ID: "audit_blocked", Kind: "execution.blocked", SessionID: "sess_notify", ExecutionID: "exec_3", TraceID: "trace_3", CreatedAt: now.Add(2 * time.Second), Fields: map[string]any{"blocked_reason": execution.BlockedReasonRetryBudgetExhausted}},
+		{ID: "audit_tool_failed", Kind: "tool.run.failed", SessionID: "sess_notify", ExecutionID: "exec_4", TraceID: "trace_4", CreatedAt: now.Add(3 * time.Second), Fields: map[string]any{"tool": "orders.lookup", "retryable": true, "error": "provider timeout"}},
 		{ID: "audit_ignore", Kind: "session.event", SessionID: "sess_notify", TraceID: "trace_3", CreatedAt: now.Add(2 * time.Second)},
 	} {
 		if err := repo.AppendAuditRecord(context.Background(), record); err != nil {
@@ -4849,11 +4851,17 @@ func TestOperatorListNotifications(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 2 {
-		t.Fatalf("notifications = %#v, want 2 actionable items", items)
+	if len(items) != 4 {
+		t.Fatalf("notifications = %#v, want 4 actionable items", items)
 	}
-	if items[0].Kind != "execution_failed" || items[1].Kind != "approval_requested" {
-		t.Fatalf("notification kinds = %#v, want execution_failed then approval_requested", items)
+	wantKinds := []string{"tool_failed", "execution_blocked", "execution_failed", "approval_requested"}
+	for i, want := range wantKinds {
+		if items[i].Kind != want {
+			t.Fatalf("notification kinds = %#v, want %v", items, wantKinds)
+		}
+	}
+	if items[0].Severity != "attention" || items[1].Severity != "critical" {
+		t.Fatalf("notification severities = %#v, want attention then critical for tool failure and blocked execution", items)
 	}
 }
 
@@ -5205,7 +5213,15 @@ func TestACPApprovalEndpointsListPendingAndResolve(t *testing.T) {
 func TestOperatorExecutionRecoveryActions(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
-	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil).
+		WithRetryModelProfiles([]config.RetryModelProfileConfig{{
+			ID:                 "structured_safe",
+			Name:               "Structured-safe fallback",
+			ReasoningProvider:  "openai",
+			ReasoningModel:     "gpt-4.1-mini",
+			StructuredProvider: "openrouter",
+			StructuredModel:    "openai/gpt-4.1-mini",
+		}})
 	now := time.Now().UTC()
 	if err := repo.CreateSession(context.Background(), session.Session{ID: "sess_recovery", Channel: "web", CreatedAt: now}); err != nil {
 		t.Fatal(err)
@@ -5255,6 +5271,30 @@ func TestOperatorExecutionRecoveryActions(t *testing.T) {
 	if len(steps) != 1 || steps[0].Status != execution.StatusPending || steps[0].Attempt != 0 || steps[0].BlockedReason != "" || !steps[0].StartedAt.IsZero() {
 		t.Fatalf("steps after retry = %#v, want reset pending step", steps)
 	}
+	if exec.RetryModelProfileID != "" || !exec.RetryModelOverride.IsZero() {
+		t.Fatalf("execution retry override after plain retry = %#v, want cleared", exec)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/executions/exec_recovery/retry-with-model-profile", strings.NewReader(`{"profile_id":"structured_safe"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("retry-with-model-profile status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	exec, steps, err = repo.GetExecution(context.Background(), "exec_recovery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exec.Status != execution.StatusPending || exec.RetryModelProfileID != "structured_safe" {
+		t.Fatalf("execution after retry-with-model-profile = %#v, want pending structured_safe", exec)
+	}
+	if exec.RetryModelOverride.Reasoning.Provider != "openai" || exec.RetryModelOverride.Structured.Model != "openai/gpt-4.1-mini" {
+		t.Fatalf("execution retry override = %#v, want configured override", exec.RetryModelOverride)
+	}
+	if len(steps) != 1 || steps[0].Status != execution.StatusPending || steps[0].Attempt != 0 {
+		t.Fatalf("steps after retry-with-model-profile = %#v, want reset pending step", steps)
+	}
 
 	req = httptest.NewRequest(http.MethodPost, "/v1/operator/executions/exec_recovery/abandon", nil)
 	rec = httptest.NewRecorder()
@@ -5268,6 +5308,37 @@ func TestOperatorExecutionRecoveryActions(t *testing.T) {
 	}
 	if exec.Status != execution.StatusAbandoned || steps[0].Status != execution.StatusAbandoned {
 		t.Fatalf("execution/steps after abandon = %#v %#v, want abandoned", exec, steps)
+	}
+}
+
+func TestOperatorListRetryModelProfiles(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil).
+		WithRetryModelProfiles([]config.RetryModelProfileConfig{{
+			ID:                 "b_profile",
+			Name:               "B profile",
+			StructuredProvider: "openrouter",
+			StructuredModel:    "openai/gpt-4.1-mini",
+		}, {
+			ID:                "a_profile",
+			Name:              "A profile",
+			ReasoningProvider: "openai",
+			ReasoningModel:    "gpt-4.1-mini",
+		}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/retry-model-profiles", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var payload []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if len(payload) != 2 || payload[0]["id"] != "a_profile" || payload[1]["id"] != "b_profile" {
+		t.Fatalf("payload = %#v, want sorted profiles", payload)
 	}
 }
 

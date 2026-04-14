@@ -60,7 +60,8 @@ func RunAPI(ctx context.Context) error {
 
 	server := httpapi.New(cfg.HTTP.Address, repo, writes, broker, router, syncer).
 		WithCustomerContextEnricher(customercontext.New(cfg.CustomerContext)).
-		WithModerationAlertConfig(cfg.Moderation.Alerts)
+		WithModerationAlertConfig(cfg.Moderation.Alerts).
+		WithRetryModelProfiles(cfg.RetryModelProfiles)
 	return server.Run(ctx)
 }
 

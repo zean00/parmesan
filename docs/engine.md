@@ -127,6 +127,7 @@ are the evidence trail.
 Executions are durable and operator-recoverable. Operators can:
 
 - retry
+- retry with a configured fallback model profile
 - unblock
 - abandon
 - take over the session

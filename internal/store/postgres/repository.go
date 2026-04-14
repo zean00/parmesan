@@ -3380,12 +3380,29 @@ func decodeMetadata(raw []byte) (artifactmeta.Meta, map[string]any, error) {
 }
 
 func executionMetadata(exec execution.TurnExecution) map[string]any {
-	if strings.TrimSpace(exec.PolicySnapshotID) == "" {
+	out := map[string]any{}
+	if strings.TrimSpace(exec.PolicySnapshotID) != "" {
+		out[policySnapshotIDMetadataKey] = exec.PolicySnapshotID
+	}
+	if strings.TrimSpace(exec.RetryModelProfileID) != "" {
+		out["retry_model_profile_id"] = exec.RetryModelProfileID
+	}
+	if !exec.RetryModelOverride.IsZero() {
+		out["retry_model_override"] = map[string]any{
+			"reasoning": map[string]any{
+				"provider": exec.RetryModelOverride.Reasoning.Provider,
+				"model":    exec.RetryModelOverride.Reasoning.Model,
+			},
+			"structured": map[string]any{
+				"provider": exec.RetryModelOverride.Structured.Provider,
+				"model":    exec.RetryModelOverride.Structured.Model,
+			},
+		}
+	}
+	if len(out) == 0 {
 		return nil
 	}
-	return map[string]any{
-		policySnapshotIDMetadataKey: exec.PolicySnapshotID,
-	}
+	return out
 }
 
 func applyExecutionMetadata(raw []byte, exec *execution.TurnExecution) {
@@ -3397,6 +3414,17 @@ func applyExecutionMetadata(raw []byte, exec *execution.TurnExecution) {
 		return
 	}
 	exec.PolicySnapshotID = strings.TrimSpace(stringValue(metadata[policySnapshotIDMetadataKey]))
+	exec.RetryModelProfileID = strings.TrimSpace(stringValue(metadata["retry_model_profile_id"]))
+	if item, ok := metadata["retry_model_override"].(map[string]any); ok {
+		if reasoning, ok := item["reasoning"].(map[string]any); ok {
+			exec.RetryModelOverride.Reasoning.Provider = strings.TrimSpace(stringValue(reasoning["provider"]))
+			exec.RetryModelOverride.Reasoning.Model = strings.TrimSpace(stringValue(reasoning["model"]))
+		}
+		if structured, ok := item["structured"].(map[string]any); ok {
+			exec.RetryModelOverride.Structured.Provider = strings.TrimSpace(stringValue(structured["provider"]))
+			exec.RetryModelOverride.Structured.Model = strings.TrimSpace(stringValue(structured["model"]))
+		}
+	}
 }
 
 func responseMetadata(record responsedomain.Response) map[string]any {

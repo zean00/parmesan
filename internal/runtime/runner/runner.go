@@ -122,6 +122,7 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 		done("error")
 		return err
 	}
+	ctx = model.WithCapabilityOverrides(ctx, executionCapabilityOverrides(exec))
 	responseRecord, _ := r.ensureResponseRecord(ctx, exec)
 	if exec.Status == execution.StatusSucceeded || exec.Status == execution.StatusFailed || exec.Status == execution.StatusAbandoned {
 		return nil
@@ -520,7 +521,7 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 				Status:      "started",
 				StartedAt:   time.Now().UTC(),
 			})
-			resp, err := r.router.Generate(ctx, model.CapabilityReasoning, model.Request{Prompt: prompt})
+			resp, err := r.router.Generate(ctx, model.CapabilityReasoning, model.RequestWithContextOverride(ctx, model.CapabilityReasoning, model.Request{Prompt: prompt}))
 			if err != nil {
 				return err
 			}
@@ -2727,6 +2728,29 @@ func parseJSONMap(raw string) map[string]any {
 		return nil
 	}
 	return out
+}
+
+func executionCapabilityOverrides(exec execution.TurnExecution) model.CapabilityOverrides {
+	if exec.RetryModelOverride.IsZero() {
+		return nil
+	}
+	overrides := model.CapabilityOverrides{}
+	if !exec.RetryModelOverride.Reasoning.IsZero() {
+		overrides[model.CapabilityReasoning] = model.Request{
+			ProviderOverride: exec.RetryModelOverride.Reasoning.Provider,
+			ModelOverride:    exec.RetryModelOverride.Reasoning.Model,
+		}
+	}
+	if !exec.RetryModelOverride.Structured.IsZero() {
+		overrides[model.CapabilityStructured] = model.Request{
+			ProviderOverride: exec.RetryModelOverride.Structured.Provider,
+			ModelOverride:    exec.RetryModelOverride.Structured.Model,
+		}
+	}
+	if len(overrides) == 0 {
+		return nil
+	}
+	return overrides
 }
 
 func (r *Runner) publish(sessionID, executionID, typ string, payload any) {

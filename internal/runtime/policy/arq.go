@@ -84,7 +84,7 @@ func generateStructured(ctx context.Context, router *model.Router, prompt string
 	if router == nil {
 		return false
 	}
-	resp, err := router.Generate(ctx, model.CapabilityStructured, model.Request{Prompt: prompt})
+	resp, err := router.Generate(ctx, model.CapabilityStructured, model.RequestWithContextOverride(ctx, model.CapabilityStructured, model.Request{Prompt: prompt}))
 	if err != nil {
 		return false
 	}

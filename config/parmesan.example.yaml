@@ -79,3 +79,16 @@ observability:
 runtime:
   async_write_queue_size: 256
   request_timeout_seconds: 15
+  retry_model_profiles:
+    - id: structured_safe
+      name: Structured-safe fallback
+      reasoning_provider: openrouter
+      reasoning_model: openai/gpt-4.1-mini
+      structured_provider: openrouter
+      structured_model: openai/gpt-4.1
+    - id: provider_swap
+      name: Provider swap fallback
+      reasoning_provider: openai
+      reasoning_model: gpt-4.1-mini
+      structured_provider: openai
+      structured_model: gpt-4.1-mini

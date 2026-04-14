@@ -131,3 +131,12 @@ export type SessionTraceSummary = {
   headline?: string;
   group_counts?: Record<string, number>;
 };
+
+export type RetryModelProfile = {
+  id: string;
+  name?: string;
+  reasoning_provider?: string;
+  reasoning_model?: string;
+  structured_provider?: string;
+  structured_model?: string;
+};

@@ -72,6 +72,7 @@ type Server struct {
 	moderator                  *moderation.Service
 	customerEnricher           *customercontext.Enricher
 	moderationAlerts           config.ModerationAlertConfig
+	retryModelProfiles         map[string]config.RetryModelProfileConfig
 	listener                   *sessionsvc.Listener
 	operatorAPIKey             string
 	trustedOperatorIDHeader    string
@@ -105,6 +106,20 @@ type sessionSummary struct {
 	SoulHash              string   `json:"soul_hash,omitempty"`
 	PreferenceHash        string   `json:"preference_hash,omitempty"`
 	RetrieverResultHashes []string `json:"retriever_result_hashes,omitempty"`
+}
+
+type retryModelProfileView struct {
+	ID                 string `json:"id"`
+	Name               string `json:"name,omitempty"`
+	ReasoningProvider  string `json:"reasoning_provider,omitempty"`
+	ReasoningModel     string `json:"reasoning_model,omitempty"`
+	StructuredProvider string `json:"structured_provider,omitempty"`
+	StructuredModel    string `json:"structured_model,omitempty"`
+}
+
+type retryExecutionWithModelProfileRequest struct {
+	ProfileID  string `json:"profile_id"`
+	OperatorID string `json:"operator_id,omitempty"`
 }
 
 type sessionView struct {
@@ -326,6 +341,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/operator/feedback/{id}/lineage", s.operatorGetFeedbackLineage)
 	mux.HandleFunc("GET /v1/operator/notifications", s.operatorListNotifications)
 	mux.HandleFunc("GET /v1/operator/notifications/stream", s.operatorStreamNotifications)
+	mux.HandleFunc("GET /v1/operator/retry-model-profiles", s.operatorListRetryModelProfiles)
 	mux.HandleFunc("GET /v1/operator/quality/regressions", s.operatorListRegressionFixtures)
 	mux.HandleFunc("POST /v1/operator/quality/regressions/{id}/state", s.operatorTransitionRegressionFixture)
 	mux.HandleFunc("GET /v1/operator/quality/regressions/export", s.operatorExportRegressionFixtures)
@@ -407,6 +423,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/executions/{id}/tool-runs", s.listToolRuns)
 	mux.HandleFunc("GET /v1/executions/{id}/delivery-attempts", s.listDeliveryAttempts)
 	mux.HandleFunc("POST /v1/operator/executions/{id}/retry", s.operatorRetryExecution)
+	mux.HandleFunc("POST /v1/operator/executions/{id}/retry-with-model-profile", s.operatorRetryExecutionWithModelProfile)
 	mux.HandleFunc("POST /v1/operator/executions/{id}/unblock", s.operatorUnblockExecution)
 	mux.HandleFunc("POST /v1/operator/executions/{id}/abandon", s.operatorAbandonExecution)
 	mux.HandleFunc("POST /v1/replays", s.replayExecution)
@@ -435,6 +452,81 @@ func (s *Server) WithCustomerContextEnricher(enricher *customercontext.Enricher)
 func (s *Server) WithModerationAlertConfig(cfg config.ModerationAlertConfig) *Server {
 	s.moderationAlerts = cfg
 	return s
+}
+
+func (s *Server) WithRetryModelProfiles(profiles []config.RetryModelProfileConfig) *Server {
+	if len(profiles) == 0 {
+		s.retryModelProfiles = nil
+		return s
+	}
+	s.retryModelProfiles = make(map[string]config.RetryModelProfileConfig, len(profiles))
+	for _, profile := range profiles {
+		id := strings.TrimSpace(profile.ID)
+		if id == "" {
+			continue
+		}
+		profile.ID = id
+		s.retryModelProfiles[id] = profile
+	}
+	return s
+}
+
+func (s *Server) lookupRetryModelProfile(id string) (config.RetryModelProfileConfig, bool) {
+	if s.retryModelProfiles == nil {
+		return config.RetryModelProfileConfig{}, false
+	}
+	profile, ok := s.retryModelProfiles[strings.TrimSpace(id)]
+	return profile, ok
+}
+
+func resolvedRetryModelOverride(profile config.RetryModelProfileConfig, router *model.Router) (execution.RetryModelOverride, error) {
+	override := execution.RetryModelOverride{
+		Reasoning: execution.ModelOverride{
+			Provider: strings.TrimSpace(profile.ReasoningProvider),
+			Model:    strings.TrimSpace(profile.ReasoningModel),
+		},
+		Structured: execution.ModelOverride{
+			Provider: strings.TrimSpace(profile.StructuredProvider),
+			Model:    strings.TrimSpace(profile.StructuredModel),
+		},
+	}
+	if override.Reasoning.Provider != "" && (router == nil || !router.Supports(model.CapabilityReasoning, override.Reasoning.Provider)) {
+		return execution.RetryModelOverride{}, fmt.Errorf("reasoning provider %q is not registered", override.Reasoning.Provider)
+	}
+	if override.Structured.Provider != "" && (router == nil || !router.Supports(model.CapabilityStructured, override.Structured.Provider)) {
+		return execution.RetryModelOverride{}, fmt.Errorf("structured provider %q is not registered", override.Structured.Provider)
+	}
+	return override, nil
+}
+
+func resetExecutionForRetry(exec *execution.TurnExecution, steps []execution.ExecutionStep, now time.Time) {
+	if exec == nil {
+		return
+	}
+	exec.Status = execution.StatusPending
+	exec.LeaseOwner = ""
+	exec.LeaseExpiresAt = time.Time{}
+	exec.BlockedReason = ""
+	exec.ResumeSignal = ""
+	exec.RetryModelProfileID = ""
+	exec.RetryModelOverride = execution.RetryModelOverride{}
+	exec.UpdatedAt = now
+	for i := range steps {
+		if steps[i].Status == execution.StatusSucceeded {
+			continue
+		}
+		steps[i].Status = execution.StatusPending
+		steps[i].Attempt = 0
+		steps[i].LeaseOwner = ""
+		steps[i].LeaseExpiresAt = time.Time{}
+		steps[i].NextAttemptAt = time.Time{}
+		steps[i].BlockedReason = ""
+		steps[i].ResumeSignal = ""
+		steps[i].RetryReason = ""
+		steps[i].StartedAt = time.Time{}
+		steps[i].FinishedAt = time.Time{}
+		steps[i].UpdatedAt = now
+	}
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -2042,6 +2134,22 @@ func (s *Server) operatorQueueSummary(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, summary)
+}
+
+func (s *Server) operatorListRetryModelProfiles(w http.ResponseWriter, r *http.Request) {
+	views := make([]retryModelProfileView, 0, len(s.retryModelProfiles))
+	for _, profile := range s.retryModelProfiles {
+		views = append(views, retryModelProfileView{
+			ID:                 profile.ID,
+			Name:               profile.Name,
+			ReasoningProvider:  profile.ReasoningProvider,
+			ReasoningModel:     profile.ReasoningModel,
+			StructuredProvider: profile.StructuredProvider,
+			StructuredModel:    profile.StructuredModel,
+		})
+	}
+	sort.Slice(views, func(i, j int) bool { return views[i].ID < views[j].ID })
+	writeJSON(w, http.StatusOK, views)
 }
 
 func (s *Server) operatorGetSession(w http.ResponseWriter, r *http.Request) {
@@ -6381,37 +6489,12 @@ func (s *Server) operatorRetryExecution(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	now := time.Now().UTC()
-	exec.Status = execution.StatusPending
-	exec.LeaseOwner = ""
-	exec.LeaseExpiresAt = time.Time{}
-	exec.BlockedReason = ""
-	exec.ResumeSignal = ""
-	exec.UpdatedAt = now
-	for _, step := range steps {
-		if step.Status == execution.StatusSucceeded {
-			continue
-		}
-		step.Status = execution.StatusPending
-		step.Attempt = 0
-		step.LeaseOwner = ""
-		step.LeaseExpiresAt = time.Time{}
-		step.NextAttemptAt = time.Time{}
-		step.BlockedReason = ""
-		step.ResumeSignal = ""
-		step.RetryReason = ""
-		step.StartedAt = time.Time{}
-		step.FinishedAt = time.Time{}
-		step.UpdatedAt = now
-		if err := s.store.UpdateExecutionStep(r.Context(), step); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	}
-	if err := s.store.UpdateExecution(r.Context(), exec); err != nil {
+	resetExecutionForRetry(&exec, steps, time.Now().UTC())
+	if err := s.updateExecutionRetry(r.Context(), exec, steps); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	now := exec.UpdatedAt
 	s.appendTrace(r.Context(), audit.Record{
 		ID:          fmt.Sprintf("trace_%d", now.UnixNano()),
 		Kind:        "execution.operator_retry",
@@ -6423,6 +6506,67 @@ func (s *Server) operatorRetryExecution(w http.ResponseWriter, r *http.Request) 
 		CreatedAt:   now,
 	})
 	writeJSON(w, http.StatusOK, exec)
+}
+
+func (s *Server) operatorRetryExecutionWithModelProfile(w http.ResponseWriter, r *http.Request) {
+	exec, steps, err := s.store.GetExecution(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	var req retryExecutionWithModelProfileRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	profile, ok := s.lookupRetryModelProfile(req.ProfileID)
+	if !ok {
+		http.Error(w, "retry model profile not found", http.StatusBadRequest)
+		return
+	}
+	override, err := resolvedRetryModelOverride(profile, s.router)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	resetExecutionForRetry(&exec, steps, time.Now().UTC())
+	exec.RetryModelProfileID = profile.ID
+	exec.RetryModelOverride = override
+	if err := s.updateExecutionRetry(r.Context(), exec, steps); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	now := exec.UpdatedAt
+	s.appendTrace(r.Context(), audit.Record{
+		ID:          fmt.Sprintf("trace_%d", now.UnixNano()),
+		Kind:        "execution.operator_retry_with_model_profile",
+		SessionID:   exec.SessionID,
+		ExecutionID: exec.ID,
+		TraceID:     exec.TraceID,
+		Message:     "execution retry requested with fallback model profile",
+		Fields: map[string]any{
+			"operator_id":         requestOperatorID(r, req.OperatorID),
+			"profile_id":          profile.ID,
+			"reasoning_provider":  override.Reasoning.Provider,
+			"reasoning_model":     override.Reasoning.Model,
+			"structured_provider": override.Structured.Provider,
+			"structured_model":    override.Structured.Model,
+		},
+		CreatedAt: now,
+	})
+	writeJSON(w, http.StatusOK, exec)
+}
+
+func (s *Server) updateExecutionRetry(ctx context.Context, exec execution.TurnExecution, steps []execution.ExecutionStep) error {
+	for _, step := range steps {
+		if err := s.store.UpdateExecutionStep(ctx, step); err != nil {
+			return err
+		}
+	}
+	if err := s.store.UpdateExecution(ctx, exec); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Server) operatorUnblockExecution(w http.ResponseWriter, r *http.Request) {

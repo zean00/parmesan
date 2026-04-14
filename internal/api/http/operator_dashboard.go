@@ -366,6 +366,50 @@ func (s *Server) notificationFromAuditRecord(ctx context.Context, record audit.R
 			Status:      "open",
 			Payload:     cloneMap(record.Fields),
 		}, true, nil
+	case "execution.blocked":
+		severity := "attention"
+		title := "Execution blocked"
+		blockedReason := strings.TrimSpace(fmt.Sprint(record.Fields["blocked_reason"]))
+		if blockedReason == execution.BlockedReasonRetryBudgetExhausted {
+			severity = "critical"
+			title = "Execution blocked after retries"
+		}
+		return &operatorNotification{
+			ID:          record.ID,
+			Kind:        "execution_blocked",
+			Severity:    severity,
+			Title:       title,
+			SessionID:   record.SessionID,
+			ExecutionID: record.ExecutionID,
+			AgentID:     sessionAgentID,
+			TraceID:     record.TraceID,
+			CreatedAt:   record.CreatedAt,
+			Status:      "open",
+			Payload:     cloneMap(record.Fields),
+		}, true, nil
+	case "tool.run.failed":
+		severity := "critical"
+		if boolValue(record.Fields["retryable"]) {
+			severity = "attention"
+		}
+		title := "Tool call failed"
+		toolName := strings.TrimSpace(fmt.Sprint(record.Fields["tool"]))
+		if toolName != "" {
+			title = fmt.Sprintf("Tool failed: %s", toolName)
+		}
+		return &operatorNotification{
+			ID:          record.ID,
+			Kind:        "tool_failed",
+			Severity:    severity,
+			Title:       title,
+			SessionID:   record.SessionID,
+			ExecutionID: record.ExecutionID,
+			AgentID:     sessionAgentID,
+			TraceID:     record.TraceID,
+			CreatedAt:   record.CreatedAt,
+			Status:      "open",
+			Payload:     cloneMap(record.Fields),
+		}, true, nil
 	case "operator.takeover.started":
 		return &operatorNotification{
 			ID:          record.ID,

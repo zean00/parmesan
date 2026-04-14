@@ -188,3 +188,41 @@ moderation:
 		t.Fatalf("notify_categories = %#v, want self_harm/violence", alerts.NotifyCategories)
 	}
 }
+
+func TestLoadRetryModelProfilesFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "parmesan.yaml")
+	raw := []byte(`
+runtime:
+  retry_model_profiles:
+    - id: structured_safe
+      name: Structured-safe fallback
+      reasoning_provider: openrouter
+      reasoning_model: openai/gpt-4.1-mini
+      structured_provider: openrouter
+      structured_model: openai/gpt-4.1
+    - id: provider_swap
+      structured_provider: openai
+      structured_model: gpt-4.1-mini
+`)
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("PARMESAN_CONFIG", path)
+
+	cfg := Load("api")
+	if len(cfg.RetryModelProfiles) != 2 {
+		t.Fatalf("RetryModelProfiles = %#v, want two profiles", cfg.RetryModelProfiles)
+	}
+	first := cfg.RetryModelProfiles[0]
+	if first.ID != "structured_safe" || first.Name != "Structured-safe fallback" {
+		t.Fatalf("first profile = %#v, want structured_safe named profile", first)
+	}
+	if first.ReasoningProvider != "openrouter" || first.StructuredModel != "openai/gpt-4.1" {
+		t.Fatalf("first profile fields = %#v, want configured overrides", first)
+	}
+	second := cfg.RetryModelProfiles[1]
+	if second.ID != "provider_swap" || second.StructuredProvider != "openai" || second.StructuredModel != "gpt-4.1-mini" {
+		t.Fatalf("second profile = %#v, want provider_swap structured override", second)
+	}
+}

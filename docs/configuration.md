@@ -117,7 +117,7 @@ bootstrap:
 | `customer_context.enrichment` | session-creation enrichment hook |
 | `moderation.alerts` | operator moderation notification rules |
 | `observability` | metrics and telemetry |
-| `runtime` | request and async queue settings |
+| `runtime` | request, async queue, and fallback retry-model settings |
 
 `http`
 - `address`: bind address for the API process. The file value can be overridden
@@ -182,7 +182,48 @@ roles.
 - metrics and OTLP settings
 
 `runtime`
-- async write queue and request timeout settings
+- async write queue, request timeout, and operator fallback retry-model profiles
+
+### Runtime Retry Model Profiles
+
+The runtime config can define curated fallback profiles that operators may use
+when retrying a blocked or failed execution.
+
+These profiles are read-only from the dashboard. Operators choose from the
+configured list; they do not type arbitrary provider or model ids.
+
+```yaml
+runtime:
+  retry_model_profiles:
+    - id: structured_safe
+      name: Structured-safe fallback
+      reasoning_provider: openrouter
+      reasoning_model: openai/gpt-4.1-mini
+      structured_provider: openrouter
+      structured_model: openai/gpt-4.1
+    - id: provider_swap
+      name: Provider swap fallback
+      reasoning_provider: openai
+      reasoning_model: gpt-4.1-mini
+      structured_provider: openai
+      structured_model: gpt-4.1-mini
+```
+
+Fields:
+
+- `id`: stable profile id used by the operator API
+- `name`: operator-facing label shown in the dashboard
+- `reasoning_provider`: optional provider override for customer-facing response generation
+- `reasoning_model`: optional concrete model override for customer-facing response generation
+- `structured_provider`: optional provider override for customer-facing structured policy calls
+- `structured_model`: optional concrete model override for customer-facing structured policy calls
+
+Behavior:
+
+- the override is execution-scoped, not session-scoped
+- it only applies to the retried execution
+- it affects customer-facing `reasoning` and `structured` calls
+- it does not affect embeddings, maintainer jobs, moderation, or delegated ACP peer agents
 
 ### Environment Override Rules
 

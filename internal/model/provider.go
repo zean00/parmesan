@@ -25,7 +25,42 @@ const (
 )
 
 type Request struct {
-	Prompt string `json:"prompt"`
+	Prompt           string `json:"prompt"`
+	ProviderOverride string `json:"provider_override,omitempty"`
+	ModelOverride    string `json:"model_override,omitempty"`
+}
+
+type contextOverridesKey struct{}
+
+type CapabilityOverrides map[Capability]Request
+
+func WithCapabilityOverrides(ctx context.Context, overrides CapabilityOverrides) context.Context {
+	if len(overrides) == 0 {
+		return ctx
+	}
+	cloned := make(CapabilityOverrides, len(overrides))
+	for cap, req := range overrides {
+		cloned[cap] = req
+	}
+	return context.WithValue(ctx, contextOverridesKey{}, cloned)
+}
+
+func RequestWithContextOverride(ctx context.Context, cap Capability, req Request) Request {
+	overrides, ok := ctx.Value(contextOverridesKey{}).(CapabilityOverrides)
+	if !ok {
+		return req
+	}
+	override, ok := overrides[cap]
+	if !ok {
+		return req
+	}
+	if strings.TrimSpace(override.ProviderOverride) != "" {
+		req.ProviderOverride = strings.TrimSpace(override.ProviderOverride)
+	}
+	if strings.TrimSpace(override.ModelOverride) != "" {
+		req.ModelOverride = strings.TrimSpace(override.ModelOverride)
+	}
+	return req
 }
 
 type Response struct {
@@ -112,15 +147,19 @@ func (r *Router) Register(provider Provider) {
 }
 
 func (r *Router) Route(cap Capability) (Provider, error) {
-	candidates := r.candidates(cap)
+	candidates := r.candidates(cap, "")
 	if len(candidates) == 0 {
 		return nil, errors.New("no default provider configured")
 	}
 	return candidates[0], nil
 }
 
+func (r *Router) Supports(cap Capability, name string) bool {
+	return len(r.candidates(cap, name)) > 0
+}
+
 func (r *Router) Generate(ctx context.Context, cap Capability, req Request) (Response, error) {
-	candidates := r.candidates(cap)
+	candidates := r.candidates(cap, req.ProviderOverride)
 	if len(candidates) == 0 {
 		return Response{}, errors.New("no provider candidates registered")
 	}
@@ -144,7 +183,7 @@ func (r *Router) Generate(ctx context.Context, cap Capability, req Request) (Res
 }
 
 func (r *Router) Embed(ctx context.Context, texts []string) (EmbeddingResponse, error) {
-	candidates := r.candidates(CapabilityEmbedding)
+	candidates := r.candidates(CapabilityEmbedding, "")
 	if len(candidates) == 0 {
 		return EmbeddingResponse{}, errors.New("no embedding providers registered")
 	}
@@ -171,13 +210,31 @@ func (r *Router) Embed(ctx context.Context, texts []string) (EmbeddingResponse, 
 	return EmbeddingResponse{}, lastErr
 }
 
-func (r *Router) candidates(cap Capability) []Provider {
-	name, ok := r.defaults[cap]
-	if !ok {
-		return nil
+func (r *Router) candidates(cap Capability, providerOverride string) []Provider {
+	name := strings.TrimSpace(providerOverride)
+	overrideSet := name != ""
+	if name == "" {
+		var ok bool
+		name, ok = r.defaults[cap]
+		if !ok {
+			return nil
+		}
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	if overrideSet {
+		var out []Provider
+		for _, provider := range r.providers {
+			if provider.Capability() != cap {
+				continue
+			}
+			if provider.Name() == name || providerDefaultName(provider.Name()) == name {
+				out = append(out, provider)
+			}
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
+		return out
+	}
 	var preferred []Provider
 	var fallback []Provider
 	for _, provider := range r.providers {
@@ -304,7 +361,10 @@ func (p *HTTPProvider) Generate(ctx context.Context, req Request) (Response, err
 		return Response{}, errors.New("provider base URL is empty")
 	}
 	endpoint := baseURL + "/chat/completions"
-	modelName := defaultModelForProvider(p.name, p.capability)
+	modelName := strings.TrimSpace(req.ModelOverride)
+	if modelName == "" {
+		modelName = defaultModelForProvider(p.name, p.capability)
+	}
 	body := map[string]any{
 		"model": modelName,
 		"messages": []map[string]string{
