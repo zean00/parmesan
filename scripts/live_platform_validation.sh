@@ -84,7 +84,7 @@ elif command -v jq >/dev/null 2>&1; then
       test_name,
       live_provider,
       providers: [.provider_stats[]? | select(.name | startswith("openrouter") or startswith("openai")) | {name, capability, healthy, success_count, failure_count}],
-      scorecards: [.sessions[]?.scorecards | to_entries[]? | {
+      scorecards: [(.sessions[]?.scorecards // {}) | to_entries[]? | {
         execution_id: .key,
         overall: .value.overall,
         passed: .value.passed,
