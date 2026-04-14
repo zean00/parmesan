@@ -198,7 +198,45 @@ local development against localhost MCP or OpenAPI servers, set
 - metrics and OTLP settings
 
 `runtime`
-- async write queue, request timeout, and operator fallback retry-model profiles
+- execution concurrency, async write workers, async write queue, request timeout,
+  and operator fallback retry-model profiles
+
+Runtime fields:
+
+- `execution_concurrency`: number of concurrent execution workers inside one
+  `cmd/worker` process. Each worker handles one execution at a time, and LLM
+  calls or tool calls block that worker until they complete.
+- `async_write_workers`: number of background async-write workers used by the
+  API, gateway, and worker processes.
+- `async_write_queue_size`: buffered async-write queue depth.
+- `request_timeout_seconds`: outbound request timeout used by runtime HTTP calls.
+
+Defaults:
+
+- `execution_concurrency`: `2`
+- `async_write_workers`: `2`
+- `async_write_queue_size`: `256`
+- `request_timeout_seconds`: `15`
+
+Sizing guidance:
+
+- Parmesan is now concurrent across executions, but still blocking within a
+  single execution. Slow LLM or tool calls occupy one execution worker.
+- Start with `1.5-2` execution workers per vCPU for mixed workloads.
+- For a `4 vCPU` node, a practical starting point is:
+  - `execution_concurrency: 6`
+  - `async_write_workers: 3`
+- If the node is mostly waiting on LLM/tool I/O and Postgres is healthy, try
+  `execution_concurrency: 8`.
+- If Postgres latency, queue lag, or tail latency rises, move back toward `4`.
+
+Recent local benchmark notes on a `4`-CPU test harness:
+
+- throughput scaled strongly from `1 -> 2 -> 4` execution workers
+- `6` workers improved throughput slightly over `4`
+- `8` workers improved peak throughput a little more, but tail latency rose
+  noticeably
+- the practical knee of the curve was around `4-6` workers
 
 ### Runtime Retry Model Profiles
 
@@ -210,6 +248,8 @@ configured list; they do not type arbitrary provider or model ids.
 
 ```yaml
 runtime:
+  execution_concurrency: 6
+  async_write_workers: 3
   retry_model_profiles:
     - id: structured_safe
       name: Structured-safe fallback

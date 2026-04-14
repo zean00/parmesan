@@ -208,6 +208,45 @@ PARMESAN_CONFIG=config/parmesan.yaml DATABASE_URL=postgres://midas:midas@localho
 PARMESAN_CONFIG=config/parmesan.yaml DATABASE_URL=postgres://midas:midas@localhost:5432/parmesan?sslmode=disable OPENROUTER_API_KEY=... OPERATOR_API_KEY=dev-operator HTTP_ADDR=127.0.0.1:8091 go run ./cmd/worker
 ```
 
+### Worker Sizing
+
+Parmesan is now concurrent across executions, but still blocking within a
+single execution lane. A worker can process multiple executions at once, but an
+individual LLM call or tool call still occupies one execution worker until it
+returns.
+
+The important runtime knobs are:
+
+- `runtime.execution_concurrency` / `EXECUTION_CONCURRENCY`
+- `runtime.async_write_workers` / `ASYNC_WRITE_WORKERS`
+
+Default behavior:
+
+- `execution_concurrency: 2`
+- `async_write_workers: 2`
+
+Practical sizing guidance:
+
+- CPU-heavy local workloads: start near `1` execution worker per vCPU
+- mixed workloads: start near `1.5-2` execution workers per vCPU
+- LLM/tool-wait-heavy workloads: you can often push closer to `2` workers per
+  vCPU if Postgres is healthy
+
+For a `4 vCPU` node, the current recommendation is:
+
+- balanced: `execution_concurrency: 6`, `async_write_workers: 3`
+- conservative: `execution_concurrency: 4`, `async_write_workers: 2-3`
+- aggressive: `execution_concurrency: 8` only after measuring real traffic
+
+Recent local benchmarks on a `4`-CPU harness showed:
+
+- strong throughput gains from `1 -> 2 -> 4` workers
+- smaller gains from `4 -> 6 -> 8`
+- noticeably worse tail latency once the worker count moved past `4-6`
+
+So the practical knee of the curve is around `4-6` execution workers on a
+`4 vCPU` machine.
+
 Operator endpoints support single-tenant RBAC. `OPERATOR_API_KEY` remains a
 bootstrap admin credential; production operators can use stored operator API
 tokens or trusted identity headers via `OPERATOR_TRUSTED_ID_HEADER` and

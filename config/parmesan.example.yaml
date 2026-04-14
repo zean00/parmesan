@@ -82,6 +82,8 @@ observability:
   org_id: default
 
 runtime:
+  execution_concurrency: 6
+  async_write_workers: 3
   async_write_queue_size: 256
   request_timeout_seconds: 15
   retry_model_profiles:
