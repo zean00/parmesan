@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sahal/parmesan/internal/domain/tool"
+	"github.com/sahal/parmesan/internal/toolsecurity"
 )
 
 func TestInvokeAppliesBearerAuthHeader(t *testing.T) {
@@ -64,5 +65,20 @@ func TestInvokeOpenAPIImportSubstitutesPathParameters(t *testing.T) {
 	body, _ := out["body"].(map[string]any)
 	if body["id"] != "ord_123" {
 		t.Fatalf("output body = %#v, want id=ord_123", body)
+	}
+}
+
+func TestInvokeRejectsDisallowedProviderURL(t *testing.T) {
+	invoker := New().WithProviderURLPolicy(toolsecurity.ProviderURLPolicy{
+		AllowedHosts: []string{"tools.example.com"},
+	})
+	_, err := invoker.Invoke(context.Background(),
+		tool.ProviderBinding{ID: "provider_1", URI: "https://internal.example.net"},
+		tool.AuthBinding{},
+		tool.CatalogEntry{ID: "tool_1", ProviderID: "provider_1", Name: "demo", RuntimeProtocol: "mcp"},
+		map[string]any{},
+	)
+	if err == nil {
+		t.Fatal("Invoke() error = nil, want provider policy rejection")
 	}
 }

@@ -3124,6 +3124,21 @@ func TestProviderAuthEndpointsRedactSecret(t *testing.T) {
 	}
 }
 
+func TestRegisterProviderRejectsDisallowedURI(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil).
+		WithToolProviderSecurity(config.ToolProviderSecurityConfig{AllowedHosts: []string{"tools.example.com"}})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/tools/providers/register", strings.NewReader(`{"id":"provider_1","kind":"mcp_remote","name":"demo","uri":"https://internal.example.net"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("register provider status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
 func TestACPSessionEndpointsRoundTrip(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
@@ -4516,6 +4531,21 @@ func TestOperatorEndpointsRequireTokenWhenConfigured(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("ACP status = %d, want %d without operator token body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
+
+	for _, path := range []string{
+		"/v1/admin/events/stream",
+		"/v1/policy/bundles",
+		"/v1/tools/providers",
+		"/v1/tools/catalog",
+		"/v1/replays",
+	} {
+		req = httptest.NewRequest(http.MethodGet, path, nil)
+		rec = httptest.NewRecorder()
+		srv.httpServer.Handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s status = %d, want %d body=%s", path, rec.Code, http.StatusUnauthorized, rec.Body.String())
+		}
+	}
 }
 
 func TestOperatorRBACStoredTokenAndTrustedHeaders(t *testing.T) {
@@ -4552,6 +4582,14 @@ func TestOperatorRBACStoredTokenAndTrustedHeaders(t *testing.T) {
 	srv.httpServer.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("viewer takeover status = %d, want %d body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/tools/providers/provider_1/auth", nil)
+	req.Header.Set("Authorization", "Bearer viewer-secret")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("viewer auth metadata status = %d, want %d body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
 	}
 
 	t.Setenv("OPERATOR_TRUSTED_ID_HEADER", "X-Operator-ID")

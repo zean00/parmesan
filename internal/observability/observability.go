@@ -139,6 +139,10 @@ func (r *Runtime) StartSpan(ctx context.Context, subsystem, name string, attrs .
 	}
 }
 
+func (r *Runtime) RecordEvent(subsystem, event, status string) {
+	r.events.WithLabelValues(r.service, first(subsystem, "runtime"), first(event, "event"), first(status, "ok")).Inc()
+}
+
 func statusString(v int) string {
 	if v < 100 {
 		return "0"

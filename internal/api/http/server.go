@@ -58,6 +58,7 @@ import (
 	"github.com/sahal/parmesan/internal/sessionsvc"
 	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
+	"github.com/sahal/parmesan/internal/toolsecurity"
 	"github.com/sahal/parmesan/internal/toolsync"
 )
 
@@ -77,6 +78,7 @@ type Server struct {
 	operatorAPIKey             string
 	trustedOperatorIDHeader    string
 	trustedOperatorRolesHeader string
+	toolProviderSecurity       config.ToolProviderSecurityConfig
 }
 
 const adminStreamID = "__admin__"
@@ -480,6 +482,17 @@ func (s *Server) WithRetryModelProfiles(profiles []config.RetryModelProfileConfi
 		}
 		profile.ID = id
 		s.retryModelProfiles[id] = profile
+	}
+	return s
+}
+
+func (s *Server) WithToolProviderSecurity(cfg config.ToolProviderSecurityConfig) *Server {
+	s.toolProviderSecurity = cfg
+	if s.syncer != nil {
+		s.syncer.WithProviderURLPolicy(toolsecurity.ProviderURLPolicy{
+			AllowedHosts:  cfg.AllowedHosts,
+			AllowLocalDev: cfg.AllowLocalDev,
+		})
 	}
 	return s
 }
@@ -6481,6 +6494,10 @@ func (s *Server) registerProvider(w http.ResponseWriter, r *http.Request) {
 	if req.ID == "" {
 		req.ID = fmt.Sprintf("provider_%d", time.Now().UnixNano())
 	}
+	if err := s.validateProviderURI(req.URI); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	binding := tool.ProviderBinding{
 		ID:           req.ID,
 		Kind:         req.Kind,
@@ -6585,6 +6602,10 @@ func (s *Server) syncProvider(w http.ResponseWriter, r *http.Request) {
 	binding, err := s.store.GetProvider(r.Context(), providerID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if err := s.validateProviderURI(binding.URI); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	entries, err := s.syncer.SyncProvider(r.Context(), binding)
@@ -7376,7 +7397,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 
 func (s *Server) operatorAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/v1/operator/") && r.URL.Path != "/v1/operator" && !strings.HasPrefix(r.URL.Path, "/v1/proposals") && !strings.HasPrefix(r.URL.Path, "/v1/rollouts") {
+		if !requiresOperatorAuth(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -7478,6 +7499,27 @@ func operatorPermission(method, path string) string {
 		}
 		return "policy.manage"
 	}
+	if path == "/v1/policy/import" {
+		return "policy.manage"
+	}
+	if path == "/v1/policy/bundles" || path == "/v1/admin/events/stream" {
+		return "operator.view"
+	}
+	if strings.HasPrefix(path, "/v1/tools/providers") || path == "/v1/tools/catalog" {
+		if strings.HasSuffix(path, "/auth") {
+			return "policy.manage"
+		}
+		if method == http.MethodGet {
+			return "operator.view"
+		}
+		return "policy.manage"
+	}
+	if strings.HasPrefix(path, "/v1/replays") {
+		if method == http.MethodGet {
+			return "operator.view"
+		}
+		return "policy.manage"
+	}
 	if strings.HasPrefix(path, "/v1/operator/operators") {
 		return "operator.manage"
 	}
@@ -7524,6 +7566,41 @@ func operatorPermission(method, path string) string {
 		return "operator.manage"
 	}
 	return "operator.view"
+}
+
+func requiresOperatorAuth(path string) bool {
+	switch {
+	case strings.HasPrefix(path, "/v1/operator/"):
+		return true
+	case path == "/v1/operator":
+		return true
+	case strings.HasPrefix(path, "/v1/proposals"):
+		return true
+	case strings.HasPrefix(path, "/v1/rollouts"):
+		return true
+	case path == "/v1/policy/import":
+		return true
+	case path == "/v1/policy/bundles":
+		return true
+	case path == "/v1/admin/events/stream":
+		return true
+	case strings.HasPrefix(path, "/v1/tools/providers"):
+		return true
+	case path == "/v1/tools/catalog":
+		return true
+	case strings.HasPrefix(path, "/v1/replays"):
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) validateProviderURI(rawURI string) error {
+	policy := toolsecurity.ProviderURLPolicy{
+		AllowedHosts:  s.toolProviderSecurity.AllowedHosts,
+		AllowLocalDev: s.toolProviderSecurity.AllowLocalDev,
+	}
+	return policy.Validate(rawURI)
 }
 
 func operatorHasPermission(roles []string, permission string) bool {

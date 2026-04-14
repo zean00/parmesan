@@ -13,10 +13,11 @@ import (
 	"time"
 
 	"github.com/sahal/parmesan/internal/domain/tool"
+	"github.com/sahal/parmesan/internal/toolsecurity"
 )
 
 type Invoker struct {
-	client *http.Client
+	policy toolsecurity.ProviderURLPolicy
 }
 
 type ErrorClass string
@@ -41,12 +42,18 @@ func (e *InvokeError) Error() string {
 }
 
 func New() *Invoker {
-	return &Invoker{
-		client: &http.Client{Timeout: 20 * time.Second},
-	}
+	return &Invoker{}
+}
+
+func (i *Invoker) WithProviderURLPolicy(policy toolsecurity.ProviderURLPolicy) *Invoker {
+	i.policy = policy
+	return i
 }
 
 func (i *Invoker) Invoke(ctx context.Context, binding tool.ProviderBinding, auth tool.AuthBinding, entry tool.CatalogEntry, input map[string]any) (map[string]any, error) {
+	if err := i.policy.Validate(binding.URI); err != nil {
+		return nil, classifyInvokeFailure(err, 0)
+	}
 	switch entry.RuntimeProtocol {
 	case "", "mcp":
 		return i.invokeMCP(ctx, binding, auth, entry, input)
@@ -80,7 +87,7 @@ func (i *Invoker) invokeMCP(ctx context.Context, binding tool.ProviderBinding, a
 	}
 	req.Header.Set("Content-Type", "application/json")
 	applyAuth(req, auth)
-	resp, err := i.client.Do(req)
+	resp, err := i.httpClient().Do(req)
 	if err != nil {
 		return nil, classifyInvokeFailure(err, 0)
 	}
@@ -141,7 +148,7 @@ func (i *Invoker) invokeOpenAPIImport(ctx context.Context, binding tool.Provider
 		req.Header.Set("Content-Type", "application/json")
 	}
 	applyAuth(req, auth)
-	resp, err := i.client.Do(req)
+	resp, err := i.httpClient().Do(req)
 	if err != nil {
 		return nil, classifyInvokeFailure(err, 0)
 	}
@@ -264,4 +271,12 @@ func classifyHTTPStatus(status int, body string) error {
 	default:
 		return &InvokeError{Class: ErrorPermanent, Retryable: false, Message: msg, Status: status}
 	}
+}
+
+func (i *Invoker) httpClient() *http.Client {
+	policy := i.policy
+	if policy.RequestTimeout <= 0 {
+		policy.RequestTimeout = 20 * time.Second
+	}
+	return policy.HTTPClient()
 }

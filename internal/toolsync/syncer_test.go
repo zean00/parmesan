@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sahal/parmesan/internal/domain/tool"
+	"github.com/sahal/parmesan/internal/toolsecurity"
 )
 
 func TestSyncOpenAPI(t *testing.T) {
@@ -46,5 +47,20 @@ paths:
 	}
 	if entries[0].RuntimeProtocol != "mcp" {
 		t.Fatalf("runtime protocol = %q, want mcp", entries[0].RuntimeProtocol)
+	}
+}
+
+func TestSyncProviderRejectsDisallowedProviderURL(t *testing.T) {
+	syncer := New().WithProviderURLPolicy(toolsecurity.ProviderURLPolicy{
+		AllowedHosts: []string{"tools.example.com"},
+	})
+	_, err := syncer.SyncProvider(context.Background(), tool.ProviderBinding{
+		ID:   "provider_openapi",
+		Kind: tool.ProviderOpenAPI,
+		Name: "demo",
+		URI:  "https://internal.example.net/openapi.yaml",
+	})
+	if err == nil {
+		t.Fatal("SyncProvider() error = nil, want provider policy rejection")
 	}
 }

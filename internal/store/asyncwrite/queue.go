@@ -7,6 +7,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sahal/parmesan/internal/domain/approval"
 	"github.com/sahal/parmesan/internal/domain/audit"
@@ -20,6 +21,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/domain/toolrun"
+	"github.com/sahal/parmesan/internal/observability"
 	"github.com/sahal/parmesan/internal/store"
 )
 
@@ -36,6 +38,11 @@ type Queue struct {
 	wg      sync.WaitGroup
 	closed  atomic.Bool
 	pending atomic.Int64
+	failed  atomic.Int64
+	failMu  sync.Mutex
+	lastJob string
+	lastAt  time.Time
+	lastOK  time.Time
 }
 
 func New(repo store.Repository, size int) *Queue {
@@ -65,11 +72,27 @@ func (q *Queue) Stop() {
 	q.wg.Wait()
 }
 
-func (q *Queue) Stats() map[string]int64 {
-	return map[string]int64{
-		"pending":  q.pending.Load(),
-		"capacity": int64(cap(q.ch)),
+func (q *Queue) Stats() map[string]any {
+	q.failMu.Lock()
+	defer q.failMu.Unlock()
+	healthy := q.lastAt.IsZero() || (!q.lastOK.IsZero() && q.lastOK.After(q.lastAt))
+	stats := map[string]any{
+		"pending":      q.pending.Load(),
+		"capacity":     int64(cap(q.ch)),
+		"failed":       q.failed.Load(),
+		"healthy":      healthy,
+		"queued_state": "queued_not_yet_persisted",
 	}
+	if q.lastJob != "" {
+		stats["last_failed_job"] = q.lastJob
+	}
+	if !q.lastAt.IsZero() {
+		stats["last_failed_at"] = q.lastAt
+	}
+	if !q.lastOK.IsZero() {
+		stats["last_succeeded_at"] = q.lastOK
+	}
+	return stats
 }
 
 func (q *Queue) SaveBundle(ctx context.Context, bundle policy.Bundle) error {
@@ -189,8 +212,26 @@ func (q *Queue) worker(_ context.Context) {
 	defer q.wg.Done()
 	for job := range q.ch {
 		if err := job.run(); err != nil {
+			q.recordFailure(job.name)
 			log.Printf("async write %s failed: %v", job.name, err)
+		} else {
+			q.recordSuccess()
 		}
 		q.pending.Add(-1)
 	}
+}
+
+func (q *Queue) recordFailure(jobName string) {
+	q.failed.Add(1)
+	q.failMu.Lock()
+	q.lastJob = jobName
+	q.lastAt = time.Now().UTC()
+	q.failMu.Unlock()
+	observability.Current().RecordEvent("asyncwrite", jobName, "failed")
+}
+
+func (q *Queue) recordSuccess() {
+	q.failMu.Lock()
+	q.lastOK = time.Now().UTC()
+	q.failMu.Unlock()
 }

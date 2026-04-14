@@ -25,6 +25,7 @@ import (
 	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/toolruntime"
+	"github.com/sahal/parmesan/internal/toolsecurity"
 )
 
 type Runner struct {
@@ -45,6 +46,11 @@ func New(repo store.Repository, writes *asyncwrite.Queue, router *model.Router) 
 		invoker:  toolruntime.New(),
 		interval: time.Second,
 	}
+}
+
+func (r *Runner) WithProviderURLPolicy(policy toolsecurity.ProviderURLPolicy) *Runner {
+	r.invoker.WithProviderURLPolicy(policy)
+	return r
 }
 
 func (r *Runner) Start(ctx context.Context) {

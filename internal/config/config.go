@@ -60,6 +60,11 @@ type MCPConfig struct {
 	Providers []MCPProviderConfig `yaml:"providers" json:"providers,omitempty"`
 }
 
+type ToolProviderSecurityConfig struct {
+	AllowedHosts  []string `yaml:"allowed_hosts" json:"allowed_hosts,omitempty"`
+	AllowLocalDev bool     `yaml:"allow_local_dev" json:"allow_local_dev,omitempty"`
+}
+
 type AgentServerConfig struct {
 	Command               string            `yaml:"command" json:"command"`
 	Args                  []string          `yaml:"args" json:"args,omitempty"`
@@ -154,23 +159,24 @@ type ObservabilityConfig struct {
 }
 
 type Config struct {
-	ServiceName         string
-	HTTP                HTTPConfig
-	Observability       ObservabilityConfig
-	DatabaseURL         string
-	SecretsMasterKey    string
-	Provider            ProviderConfig
-	Operator            OperatorConfig
-	Knowledge           KnowledgeConfig
-	ACP                 ACPConfig
-	Bootstrap           BootstrapConfig
-	MCP                 MCPConfig
-	AgentServers        map[string]AgentServerConfig
-	CustomerContext     CustomerContextConfig
-	Moderation          ModerationConfig
-	RetryModelProfiles  []RetryModelProfileConfig
-	AsyncWriteQueueSize int
-	RequestTimeout      time.Duration
+	ServiceName          string
+	HTTP                 HTTPConfig
+	Observability        ObservabilityConfig
+	DatabaseURL          string
+	SecretsMasterKey     string
+	Provider             ProviderConfig
+	Operator             OperatorConfig
+	Knowledge            KnowledgeConfig
+	ACP                  ACPConfig
+	Bootstrap            BootstrapConfig
+	MCP                  MCPConfig
+	ToolProviderSecurity ToolProviderSecurityConfig
+	AgentServers         map[string]AgentServerConfig
+	CustomerContext      CustomerContextConfig
+	Moderation           ModerationConfig
+	RetryModelProfiles   []RetryModelProfileConfig
+	AsyncWriteQueueSize  int
+	RequestTimeout       time.Duration
 }
 
 func Load(service string) Config {
@@ -218,7 +224,11 @@ func Load(service string) Config {
 		Bootstrap: BootstrapConfig{
 			AgentsDir: env("PARMESAN_AGENTS_DIR", fileCfg.Bootstrap.AgentsDir),
 		},
-		MCP:                 MCPConfig{Providers: fileCfg.MCP.Providers},
+		MCP: MCPConfig{Providers: fileCfg.MCP.Providers},
+		ToolProviderSecurity: ToolProviderSecurityConfig{
+			AllowedHosts:  csvEnv("TOOL_PROVIDER_ALLOWED_HOSTS", fileCfg.ToolProviders.AllowedHosts),
+			AllowLocalDev: boolEnv("TOOL_PROVIDER_ALLOW_LOCAL_DEV", fileCfg.ToolProviders.AllowLocalDev),
+		},
 		AgentServers:        fileCfg.AgentServers,
 		CustomerContext:     fileCfg.CustomerContext,
 		Moderation:          fileCfg.Moderation,
@@ -266,6 +276,10 @@ type fileConfig struct {
 	Bootstrap struct {
 		AgentsDir string `yaml:"agents_dir"`
 	} `yaml:"bootstrap"`
+	ToolProviders struct {
+		AllowedHosts  []string `yaml:"allowed_hosts"`
+		AllowLocalDev bool     `yaml:"allow_local_dev"`
+	} `yaml:"tool_providers"`
 	MCP             MCPConfig                    `yaml:"mcp"`
 	AgentServers    map[string]AgentServerConfig `yaml:"agent_servers"`
 	CustomerContext CustomerContextConfig        `yaml:"customer_context"`
@@ -322,6 +336,12 @@ func applyFileEnv(cfg fileConfig) {
 	setEnvDefault("DEFAULT_OPERATOR_ROLES", cfg.Operator.DefaultOperatorRoles)
 	setEnvDefault("KNOWLEDGE_SOURCE_ROOT", cfg.Knowledge.Root)
 	setEnvDefault("PARMESAN_AGENTS_DIR", cfg.Bootstrap.AgentsDir)
+	if len(cfg.ToolProviders.AllowedHosts) > 0 {
+		setEnvDefault("TOOL_PROVIDER_ALLOWED_HOSTS", strings.Join(cfg.ToolProviders.AllowedHosts, ","))
+	}
+	if cfg.ToolProviders.AllowLocalDev {
+		setEnvDefault("TOOL_PROVIDER_ALLOW_LOCAL_DEV", strconv.FormatBool(cfg.ToolProviders.AllowLocalDev))
+	}
 	setEnvDefault("METRICS_ADDR", cfg.Observability.MetricsAddress)
 	setEnvDefault("OTEL_EXPORTER_OTLP_ENDPOINT", cfg.Observability.OTLPEndpoint)
 	setEnvDefault("OTEL_EXPORTER_OTLP_HEADERS", cfg.Observability.OTLPHeaders)
@@ -359,6 +379,31 @@ func defaultAddr(service string) string {
 	default:
 		return ":8080"
 	}
+}
+
+func csvEnv(key string, fallback []string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return normalizeCSV(fallback)
+	}
+	return normalizeCSV(strings.Split(raw, ","))
+}
+
+func normalizeCSV(items []string) []string {
+	out := make([]string, 0, len(items))
+	seen := map[string]struct{}{}
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
 }
 
 func defaultMetricsAddr(service string) string {

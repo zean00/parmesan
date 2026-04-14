@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/sahal/parmesan/internal/acppeer"
 	httpapi "github.com/sahal/parmesan/internal/api/http"
@@ -23,6 +24,7 @@ import (
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/store/memory"
 	"github.com/sahal/parmesan/internal/store/postgres"
+	"github.com/sahal/parmesan/internal/toolsecurity"
 	"github.com/sahal/parmesan/internal/toolsync"
 	"github.com/sahal/parmesan/internal/worker"
 )
@@ -36,7 +38,12 @@ func RunAPI(ctx context.Context) error {
 	writes := asyncwrite.New(repo, cfg.AsyncWriteQueueSize)
 	broker := sse.NewBroker()
 	router := model.NewRouter(cfg.Provider)
-	syncer := toolsync.New()
+	providerPolicy := toolsecurity.ProviderURLPolicy{
+		AllowedHosts:   cfg.ToolProviderSecurity.AllowedHosts,
+		AllowLocalDev:  cfg.ToolProviderSecurity.AllowLocalDev,
+		RequestTimeout: cfg.RequestTimeout,
+	}
+	syncer := toolsync.New().WithProviderURLPolicy(providerPolicy)
 	shutdownObs, err := observability.Init(ctx, cfg)
 	if err != nil {
 		return err
@@ -44,9 +51,12 @@ func RunAPI(ctx context.Context) error {
 	defer func() { _ = shutdownObs(context.Background()) }()
 
 	if cfg.DatabaseURL != "" {
+		if strings.TrimSpace(cfg.SecretsMasterKey) == "" {
+			return fmt.Errorf("api requires SECRETS_MASTER_KEY when DATABASE_URL is configured")
+		}
 		postgresClient, err = postgres.Connect(ctx, cfg.DatabaseURL)
 		if err != nil {
-			logger.Warn("postgres unavailable, continuing with memory store", "error", err)
+			return fmt.Errorf("postgres unavailable: %w", err)
 		} else {
 			postgresClient.Crypter = secrets.New(cfg.SecretsMasterKey)
 			repo = postgresClient
@@ -61,7 +71,8 @@ func RunAPI(ctx context.Context) error {
 	server := httpapi.New(cfg.HTTP.Address, repo, writes, broker, router, syncer).
 		WithCustomerContextEnricher(customercontext.New(cfg.CustomerContext)).
 		WithModerationAlertConfig(cfg.Moderation.Alerts).
-		WithRetryModelProfiles(cfg.RetryModelProfiles)
+		WithRetryModelProfiles(cfg.RetryModelProfiles).
+		WithToolProviderSecurity(cfg.ToolProviderSecurity)
 	return server.Run(ctx)
 }
 
@@ -74,6 +85,9 @@ func RunGateway(ctx context.Context) error {
 	}
 	if cfg.DatabaseURL == "" {
 		return errDatabaseRequired("gateway")
+	}
+	if strings.TrimSpace(cfg.SecretsMasterKey) == "" {
+		return fmt.Errorf("gateway requires SECRETS_MASTER_KEY when DATABASE_URL is configured")
 	}
 	client, err := postgres.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -99,6 +113,9 @@ func RunWorker(ctx context.Context) error {
 	if cfg.DatabaseURL == "" {
 		return errDatabaseRequired("worker")
 	}
+	if strings.TrimSpace(cfg.SecretsMasterKey) == "" {
+		return fmt.Errorf("worker requires SECRETS_MASTER_KEY when DATABASE_URL is configured")
+	}
 	client, err := postgres.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
@@ -114,9 +131,14 @@ func RunWorker(ctx context.Context) error {
 	writes.Start(ctx, 1)
 	defer writes.Stop()
 	peerManager := acppeer.NewManager(cfg.AgentServers)
-	runner.New(repo, writes, broker, router, "worker-"+hostname()).WithAgentPeers(peerManager).Start(ctx)
+	providerPolicy := toolsecurity.ProviderURLPolicy{
+		AllowedHosts:   cfg.ToolProviderSecurity.AllowedHosts,
+		AllowLocalDev:  cfg.ToolProviderSecurity.AllowLocalDev,
+		RequestTimeout: cfg.RequestTimeout,
+	}
+	runner.New(repo, writes, broker, router, "worker-"+hostname()).WithProviderURLPolicy(providerPolicy).WithAgentPeers(peerManager).Start(ctx)
 	maintainerworker.New(repo, maintainerRouter).Start(ctx)
-	lifecycle.New(repo, writes, router).Start(ctx)
+	lifecycle.New(repo, writes, router).WithProviderURLPolicy(providerPolicy).Start(ctx)
 	replayrunner.New(repo, writes).Start(ctx)
 	return worker.New(cfg.HTTP.Address).Run(ctx)
 }

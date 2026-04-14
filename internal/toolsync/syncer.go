@@ -14,19 +14,26 @@ import (
 	"github.com/getkin/kin-openapi/openapi3"
 
 	"github.com/sahal/parmesan/internal/domain/tool"
+	"github.com/sahal/parmesan/internal/toolsecurity"
 )
 
 type Syncer struct {
-	client *http.Client
+	policy toolsecurity.ProviderURLPolicy
 }
 
 func New() *Syncer {
-	return &Syncer{
-		client: &http.Client{Timeout: 20 * time.Second},
-	}
+	return &Syncer{}
+}
+
+func (s *Syncer) WithProviderURLPolicy(policy toolsecurity.ProviderURLPolicy) *Syncer {
+	s.policy = policy
+	return s
 }
 
 func (s *Syncer) SyncProvider(ctx context.Context, binding tool.ProviderBinding) ([]tool.CatalogEntry, error) {
+	if err := s.policy.Validate(binding.URI); err != nil {
+		return nil, err
+	}
 	switch binding.Kind {
 	case tool.ProviderOpenAPI:
 		return s.syncOpenAPI(ctx, binding)
@@ -42,7 +49,7 @@ func (s *Syncer) syncOpenAPI(ctx context.Context, binding tool.ProviderBinding) 
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.client.Do(req)
+	resp, err := s.httpClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +125,7 @@ func (s *Syncer) syncMCP(ctx context.Context, binding tool.ProviderBinding) ([]t
 			return nil, err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		resp, err := s.client.Do(req)
+		resp, err := s.httpClient().Do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -190,4 +197,12 @@ func mustJSON(v any) string {
 		return `{}`
 	}
 	return string(raw)
+}
+
+func (s *Syncer) httpClient() *http.Client {
+	policy := s.policy
+	if policy.RequestTimeout <= 0 {
+		policy.RequestTimeout = 20 * time.Second
+	}
+	return policy.HTTPClient()
 }
