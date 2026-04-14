@@ -97,3 +97,27 @@ func TestQueueHealthRecoversAfterLaterSuccess(t *testing.T) {
 		t.Fatalf("healthy = %#v, want true after later success stats=%#v", stats["healthy"], stats)
 	}
 }
+
+func TestQueueDrainsBufferedWritesWithMultipleWorkers(t *testing.T) {
+	repo := memory.New()
+	q := New(repo, 16)
+	ctx, cancel := context.WithCancel(context.Background())
+	q.Start(ctx, 3)
+
+	for _, id := range []string{"bundle_1", "bundle_2", "bundle_3"} {
+		if err := q.SaveBundle(context.Background(), policy.Bundle{ID: id, Version: "v1", ImportedAt: time.Now().UTC()}); err != nil {
+			t.Fatalf("SaveBundle(%s) error = %v", id, err)
+		}
+	}
+
+	cancel()
+	q.Stop()
+
+	bundles, err := repo.ListBundles(context.Background())
+	if err != nil {
+		t.Fatalf("ListBundles() error = %v", err)
+	}
+	if len(bundles) != 3 {
+		t.Fatalf("bundles len = %d, want 3 bundles drained with multiple workers", len(bundles))
+	}
+}

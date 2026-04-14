@@ -226,3 +226,38 @@ runtime:
 		t.Fatalf("second profile = %#v, want provider_swap structured override", second)
 	}
 }
+
+func TestLoadRuntimeWorkerSettingsFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "parmesan.yaml")
+	raw := []byte(`
+runtime:
+  execution_concurrency: 3
+  async_write_workers: 4
+  async_write_queue_size: 512
+`)
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("PARMESAN_CONFIG", path)
+	t.Setenv("EXECUTION_CONCURRENCY", "")
+	t.Setenv("ASYNC_WRITE_WORKERS", "")
+	t.Setenv("ASYNC_WRITE_QUEUE_SIZE", "")
+
+	cfg := Load("worker")
+	if cfg.ExecutionConcurrency != 3 {
+		t.Fatalf("ExecutionConcurrency = %d, want 3", cfg.ExecutionConcurrency)
+	}
+	if cfg.AsyncWriteWorkers != 4 {
+		t.Fatalf("AsyncWriteWorkers = %d, want 4", cfg.AsyncWriteWorkers)
+	}
+	if got := os.Getenv("EXECUTION_CONCURRENCY"); got != "3" {
+		t.Fatalf("EXECUTION_CONCURRENCY env = %q, want 3", got)
+	}
+	if got := os.Getenv("ASYNC_WRITE_WORKERS"); got != "4" {
+		t.Fatalf("ASYNC_WRITE_WORKERS env = %q, want 4", got)
+	}
+	if cfg.AsyncWriteQueueSize != 512 {
+		t.Fatalf("AsyncWriteQueueSize = %d, want 512", cfg.AsyncWriteQueueSize)
+	}
+}

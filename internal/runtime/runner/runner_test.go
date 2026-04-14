@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,9 +28,32 @@ import (
 	knowledgeretriever "github.com/sahal/parmesan/internal/knowledge/retriever"
 	"github.com/sahal/parmesan/internal/model"
 	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
+	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/store/memory"
 )
+
+type blockingExecutionRepo struct {
+	store.Repository
+	delay    time.Duration
+	current  atomic.Int32
+	max      atomic.Int32
+	getCalls atomic.Int32
+}
+
+func (r *blockingExecutionRepo) GetExecution(ctx context.Context, executionID string) (execution.TurnExecution, []execution.ExecutionStep, error) {
+	r.getCalls.Add(1)
+	current := r.current.Add(1)
+	for {
+		max := r.max.Load()
+		if current <= max || r.max.CompareAndSwap(max, current) {
+			break
+		}
+	}
+	defer r.current.Add(-1)
+	time.Sleep(r.delay)
+	return r.Repository.GetExecution(ctx, executionID)
+}
 
 func TestRunnerCompletesExecution(t *testing.T) {
 	repo := memory.New()
@@ -127,6 +151,88 @@ func TestRunnerCompletesExecution(t *testing.T) {
 	if !hasPolicyResolvedStatus || !hasResponseDeliveredStatus {
 		t.Fatalf("events = %#v, want persisted ACP status lifecycle events", events)
 	}
+}
+
+func TestRunnerProcessesScheduledExecutionsConcurrently(t *testing.T) {
+	repo := &blockingExecutionRepo{Repository: memory.New(), delay: 100 * time.Millisecond}
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 2)
+	defer writes.Stop()
+
+	r := New(repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), "test-runner").WithExecutionConcurrency(2)
+	r.Start(ctx)
+
+	now := time.Now().UTC()
+	for _, id := range []string{"exec_1", "exec_2"} {
+		if err := repo.CreateExecution(ctx, execution.TurnExecution{
+			ID:        id,
+			SessionID: "sess_" + id,
+			TraceID:   "trace_" + id,
+			Status:    execution.StatusSucceeded,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}, nil); err != nil {
+			t.Fatalf("CreateExecution(%s) error = %v", id, err)
+		}
+	}
+
+	if !r.scheduleExecution(ctx, "exec_1") {
+		t.Fatal("scheduleExecution(exec_1) = false, want true")
+	}
+	if !r.scheduleExecution(ctx, "exec_2") {
+		t.Fatal("scheduleExecution(exec_2) = false, want true")
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if repo.max.Load() >= 2 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("max concurrent GetExecution calls = %d, want at least 2", repo.max.Load())
+}
+
+func TestRunnerDoesNotScheduleSameExecutionTwice(t *testing.T) {
+	repo := &blockingExecutionRepo{Repository: memory.New(), delay: 100 * time.Millisecond}
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 2)
+	defer writes.Stop()
+
+	r := New(repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), "test-runner").WithExecutionConcurrency(2)
+	r.Start(ctx)
+
+	now := time.Now().UTC()
+	if err := repo.CreateExecution(ctx, execution.TurnExecution{
+		ID:        "exec_1",
+		SessionID: "sess_1",
+		TraceID:   "trace_1",
+		Status:    execution.StatusSucceeded,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, nil); err != nil {
+		t.Fatalf("CreateExecution() error = %v", err)
+	}
+
+	if !r.scheduleExecution(ctx, "exec_1") {
+		t.Fatal("first scheduleExecution(exec_1) = false, want true")
+	}
+	if r.scheduleExecution(ctx, "exec_1") {
+		t.Fatal("second scheduleExecution(exec_1) = true, want false while first run is in flight")
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if repo.getCalls.Load() == 1 && repo.current.Load() == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("GetExecution calls = %d current=%d, want exactly one completed execution", repo.getCalls.Load(), repo.current.Load())
 }
 
 func TestResolveViewUsesPolicySnapshot(t *testing.T) {

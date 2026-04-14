@@ -58,6 +58,12 @@ type Runner struct {
 	interval   time.Duration
 	responseMu sync.Mutex
 	responses  map[string]responsedomain.Response
+	workMu     sync.Mutex
+	workQueue  chan string
+	inFlight   map[string]struct{}
+	started    bool
+	workers    int
+	queueSize  int
 }
 
 var errApprovalRequired = errors.New("approval required")
@@ -75,6 +81,9 @@ func New(repo store.Repository, writes *asyncwrite.Queue, broker *sse.Broker, ro
 		leaseTTL:   10 * time.Second,
 		interval:   500 * time.Millisecond,
 		responses:  map[string]responsedomain.Response{},
+		inFlight:   map[string]struct{}{},
+		workers:    1,
+		queueSize:  16,
 	}
 }
 
@@ -88,12 +97,47 @@ func (r *Runner) WithProviderURLPolicy(policy toolsecurity.ProviderURLPolicy) *R
 	return r
 }
 
+func (r *Runner) WithExecutionConcurrency(workers int) *Runner {
+	if workers <= 0 {
+		return r
+	}
+	r.workMu.Lock()
+	defer r.workMu.Unlock()
+	r.workers = workers
+	if minQueueSize := workers * 4; minQueueSize > r.queueSize {
+		r.queueSize = minQueueSize
+	}
+	return r
+}
+
 type resolvedView = policyruntime.EngineResult
 
 const maxResponsePreparationIterations = 4
 
 func (r *Runner) Start(ctx context.Context) {
+	r.startWorkers(ctx)
 	go r.loop(ctx)
+}
+
+func (r *Runner) startWorkers(ctx context.Context) {
+	r.workMu.Lock()
+	if r.started {
+		r.workMu.Unlock()
+		return
+	}
+	if r.workers < 1 {
+		r.workers = 1
+	}
+	if minQueueSize := r.workers * 4; minQueueSize > r.queueSize {
+		r.queueSize = minQueueSize
+	}
+	r.workQueue = make(chan string, r.queueSize)
+	r.started = true
+	workers := r.workers
+	r.workMu.Unlock()
+	for i := 0; i < workers; i++ {
+		go r.workerLoop(ctx)
+	}
 }
 
 func (r *Runner) loop(ctx context.Context) {
@@ -116,8 +160,50 @@ func (r *Runner) runOnce(ctx context.Context) {
 		return
 	}
 	for _, exec := range executions {
-		_ = r.processExecution(ctx, exec.ID)
+		r.scheduleExecution(ctx, exec.ID)
 	}
+}
+
+func (r *Runner) workerLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case executionID := <-r.workQueue:
+			_ = r.processExecution(ctx, executionID)
+			r.releaseExecution(executionID)
+		}
+	}
+}
+
+func (r *Runner) scheduleExecution(ctx context.Context, executionID string) bool {
+	r.workMu.Lock()
+	if _, ok := r.inFlight[executionID]; ok {
+		r.workMu.Unlock()
+		return false
+	}
+	if !r.started || r.workQueue == nil {
+		r.inFlight[executionID] = struct{}{}
+		r.workMu.Unlock()
+		defer r.releaseExecution(executionID)
+		_ = r.processExecution(ctx, executionID)
+		return true
+	}
+	select {
+	case r.workQueue <- executionID:
+		r.inFlight[executionID] = struct{}{}
+		r.workMu.Unlock()
+		return true
+	default:
+		r.workMu.Unlock()
+		return false
+	}
+}
+
+func (r *Runner) releaseExecution(executionID string) {
+	r.workMu.Lock()
+	defer r.workMu.Unlock()
+	delete(r.inFlight, executionID)
 }
 
 func (r *Runner) processExecution(ctx context.Context, executionID string) error {

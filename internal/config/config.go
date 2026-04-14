@@ -176,6 +176,8 @@ type Config struct {
 	CustomerContext      CustomerContextConfig
 	Moderation           ModerationConfig
 	RetryModelProfiles   []RetryModelProfileConfig
+	ExecutionConcurrency int
+	AsyncWriteWorkers    int
 	AsyncWriteQueueSize  int
 	RequestTimeout       time.Duration
 }
@@ -231,12 +233,14 @@ func Load(service string) Config {
 			AllowedHosts:  csvEnv("TOOL_PROVIDER_ALLOWED_HOSTS", fileCfg.ToolProviders.AllowedHosts),
 			AllowLocalDev: boolEnv("TOOL_PROVIDER_ALLOW_LOCAL_DEV", fileCfg.ToolProviders.AllowLocalDev),
 		},
-		AgentServers:        fileCfg.AgentServers,
-		CustomerContext:     fileCfg.CustomerContext,
-		Moderation:          fileCfg.Moderation,
-		RetryModelProfiles:  fileCfg.Runtime.RetryModelProfiles,
-		AsyncWriteQueueSize: intEnv("ASYNC_WRITE_QUEUE_SIZE", 256),
-		RequestTimeout:      durationEnv("REQUEST_TIMEOUT_SECONDS", 15),
+		AgentServers:         fileCfg.AgentServers,
+		CustomerContext:      fileCfg.CustomerContext,
+		Moderation:           fileCfg.Moderation,
+		RetryModelProfiles:   fileCfg.Runtime.RetryModelProfiles,
+		ExecutionConcurrency: intEnv("EXECUTION_CONCURRENCY", defaultInt(fileCfg.Runtime.ExecutionConcurrency, 2)),
+		AsyncWriteWorkers:    intEnv("ASYNC_WRITE_WORKERS", defaultInt(fileCfg.Runtime.AsyncWriteWorkers, 2)),
+		AsyncWriteQueueSize:  intEnv("ASYNC_WRITE_QUEUE_SIZE", 256),
+		RequestTimeout:       durationEnv("REQUEST_TIMEOUT_SECONDS", 15),
 	}
 }
 
@@ -295,9 +299,11 @@ type fileConfig struct {
 		OrgID          string `yaml:"org_id"`
 	} `yaml:"observability"`
 	Runtime struct {
-		AsyncWriteQueueSize int                       `yaml:"async_write_queue_size"`
-		RequestTimeoutSecs  int                       `yaml:"request_timeout_seconds"`
-		RetryModelProfiles  []RetryModelProfileConfig `yaml:"retry_model_profiles"`
+		ExecutionConcurrency int                       `yaml:"execution_concurrency"`
+		AsyncWriteWorkers    int                       `yaml:"async_write_workers"`
+		AsyncWriteQueueSize  int                       `yaml:"async_write_queue_size"`
+		RequestTimeoutSecs   int                       `yaml:"request_timeout_seconds"`
+		RetryModelProfiles   []RetryModelProfileConfig `yaml:"retry_model_profiles"`
 	} `yaml:"runtime"`
 }
 
@@ -361,6 +367,12 @@ func applyFileEnv(cfg fileConfig) {
 	}
 	if cfg.Runtime.AsyncWriteQueueSize > 0 {
 		setEnvDefault("ASYNC_WRITE_QUEUE_SIZE", strconv.Itoa(cfg.Runtime.AsyncWriteQueueSize))
+	}
+	if cfg.Runtime.ExecutionConcurrency > 0 {
+		setEnvDefault("EXECUTION_CONCURRENCY", strconv.Itoa(cfg.Runtime.ExecutionConcurrency))
+	}
+	if cfg.Runtime.AsyncWriteWorkers > 0 {
+		setEnvDefault("ASYNC_WRITE_WORKERS", strconv.Itoa(cfg.Runtime.AsyncWriteWorkers))
 	}
 	if cfg.Runtime.RequestTimeoutSecs > 0 {
 		setEnvDefault("REQUEST_TIMEOUT_SECONDS", strconv.Itoa(cfg.Runtime.RequestTimeoutSecs))

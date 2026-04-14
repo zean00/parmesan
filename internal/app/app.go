@@ -65,7 +65,7 @@ func RunAPI(ctx context.Context) error {
 			logger.Info("postgres connected")
 		}
 	}
-	writes.Start(ctx, 1)
+	writes.Start(ctx, cfg.AsyncWriteWorkers)
 	defer writes.Stop()
 
 	server := httpapi.New(cfg.HTTP.Address, repo, writes, broker, router, syncer).
@@ -98,7 +98,7 @@ func RunGateway(ctx context.Context) error {
 	writes := asyncwrite.New(repo, cfg.AsyncWriteQueueSize)
 	defer client.Close()
 	slog.Info("gateway postgres connected", "service", cfg.ServiceName)
-	writes.Start(ctx, 1)
+	writes.Start(ctx, cfg.AsyncWriteWorkers)
 	defer writes.Stop()
 	return gateway.New(cfg.HTTP.Address, repo, writes).Run(ctx)
 }
@@ -128,7 +128,7 @@ func RunWorker(ctx context.Context) error {
 	broker := sse.NewBroker()
 	defer client.Close()
 	slog.Info("worker postgres connected", "service", cfg.ServiceName)
-	writes.Start(ctx, 1)
+	writes.Start(ctx, cfg.AsyncWriteWorkers)
 	defer writes.Stop()
 	peerManager := acppeer.NewManager(cfg.AgentServers)
 	providerPolicy := toolsecurity.ProviderURLPolicy{
@@ -136,7 +136,11 @@ func RunWorker(ctx context.Context) error {
 		AllowLocalDev:  cfg.ToolProviderSecurity.AllowLocalDev,
 		RequestTimeout: cfg.RequestTimeout,
 	}
-	runner.New(repo, writes, broker, router, "worker-"+hostname()).WithProviderURLPolicy(providerPolicy).WithAgentPeers(peerManager).Start(ctx)
+	runner.New(repo, writes, broker, router, "worker-"+hostname()).
+		WithExecutionConcurrency(cfg.ExecutionConcurrency).
+		WithProviderURLPolicy(providerPolicy).
+		WithAgentPeers(peerManager).
+		Start(ctx)
 	maintainerworker.New(repo, maintainerRouter).Start(ctx)
 	lifecycle.New(repo, writes, router).WithProviderURLPolicy(providerPolicy).Start(ctx)
 	replayrunner.New(repo, writes).Start(ctx)
