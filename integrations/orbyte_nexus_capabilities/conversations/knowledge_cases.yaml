@@ -1,0 +1,21 @@
+cases:
+  - id: exact_source_fact
+    surface: acp
+    prompt: "According to the validated corpus, what does it say about pump-driven pressure in espresso preparation?"
+    expected_behavior:
+      - retrieved answer grounded in one source
+      - citation or URI included
+  - id: cross_page_summary
+    surface: acp
+    prompt: "Using the validated corpus only, summarize how espresso, espresso machines, and coffee preparation relate to pressure-based brewing."
+    expected_behavior:
+      - uses retrieved knowledge from the captured corpus
+      - answer remains grounded and factual
+      - citation or URI included
+  - id: retrieval_miss
+    surface: acp
+    prompt: "What does the validated corpus say about the exact warranty duration for Espresso Double 20260417-032558?"
+    expected_behavior:
+      - explicit knowledge miss
+      - no invented warranty claim
+      - suggests operator/knowledge update path

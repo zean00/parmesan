@@ -1,0 +1,29 @@
+{
+  "source_id": "src_orbyte_nexus_capability_corpus",
+  "scope_kind": "agent",
+  "scope_id": "agent_orbyte_nexus_knowledge_validation",
+  "capture_output_dir": "integrations/orbyte_nexus_capabilities/knowledge/captured",
+  "pages": [
+    {
+      "id": "espresso_wikipedia",
+      "title": "Espresso",
+      "filename": "espresso.md",
+      "url": "https://en.wikipedia.org/wiki/Espresso",
+      "notes": "High-level beverage facts for grounded retrieval."
+    },
+    {
+      "id": "espresso_machine_wikipedia",
+      "title": "Espresso machine",
+      "filename": "espresso-machine.md",
+      "url": "https://en.wikipedia.org/wiki/Espresso_machine",
+      "notes": "Machine and pressure concepts for knowledge-grounded product discussion."
+    },
+    {
+      "id": "coffee_preparation_wikipedia",
+      "title": "Coffee preparation",
+      "filename": "coffee-preparation.md",
+      "url": "https://en.wikipedia.org/wiki/Coffee_preparation",
+      "notes": "Cross-page preparation context for retrieval combination checks."
+    }
+  ]
+}

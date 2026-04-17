@@ -44,6 +44,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/rollout"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
+	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 	knowledgecompiler "github.com/sahal/parmesan/internal/knowledge/compiler"
 	knowledgeenrichment "github.com/sahal/parmesan/internal/knowledge/enrichment"
 	knowledgelearning "github.com/sahal/parmesan/internal/knowledge/learning"
@@ -54,7 +55,6 @@ import (
 	"github.com/sahal/parmesan/internal/policyyaml"
 	"github.com/sahal/parmesan/internal/quality"
 	rolloutengine "github.com/sahal/parmesan/internal/rollout"
-	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 	"github.com/sahal/parmesan/internal/sessionsvc"
 	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
@@ -276,7 +276,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 		router:                     router,
 		syncer:                     syncer,
 		sessions:                   sessionsvc.New(repo, writes),
-		moderator:                  moderation.NewService(router, strings.EqualFold(strings.TrimSpace(os.Getenv("MODERATION_LLM_ENABLED")), "true")),
+		moderator:                  moderation.NewService(router, moderation.Settings{}),
 		listener:                   sessionsvc.NewListener(repo),
 		operatorAPIKey:             strings.TrimSpace(os.Getenv("OPERATOR_API_KEY")),
 		trustedOperatorIDHeader:    strings.TrimSpace(os.Getenv("OPERATOR_TRUSTED_ID_HEADER")),
@@ -467,6 +467,12 @@ func (s *Server) WithCustomerContextEnricher(enricher *customercontext.Enricher)
 
 func (s *Server) WithModerationAlertConfig(cfg config.ModerationAlertConfig) *Server {
 	s.moderationAlerts = cfg
+	return s
+}
+
+func (s *Server) WithModerationConfig(cfg config.ModerationConfig) *Server {
+	s.moderationAlerts = cfg.Alerts
+	s.moderator = moderation.NewService(s.router, moderation.Settings{ClassifierEnabled: cfg.Classifier.Enabled})
 	return s
 }
 

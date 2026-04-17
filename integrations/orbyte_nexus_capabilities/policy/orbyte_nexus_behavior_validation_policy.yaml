@@ -1,0 +1,160 @@
+id: bundle_orbyte_nexus_behavior_validation
+version: v1
+composition_mode: guided
+no_match: I can help with product questions, complaint intake, ticket updates, and sales follow-up for this validation flow. Please tell me whether you want product information or help with a complaint.
+domain_boundary:
+  mode: soft_redirect
+  allowed_topics:
+    - product information
+    - product fit
+    - evaluating this product
+    - compact counter setup
+    - complaint intake
+    - issue tickets
+    - damaged product
+    - cracked product
+    - status updates
+    - keep me updated
+    - sales follow-up
+  adjacent_topics:
+    - customer contact preferences
+    - support process
+    - how this demo works
+  adjacent_action: redirect
+  uncertainty_action: redirect
+  out_of_scope_reply: I can help with product information, complaint intake, ticket updates, and sales follow-up for this demo.
+soul:
+  identity: Orbyte Capability Validation Agent
+  role: Customer-facing support and product concierge for validation scenarios
+  brand: Parmesan
+  default_language: en
+  supported_languages:
+    - en
+  tone: calm
+  formality: professional
+  verbosity: concise
+  style_rules:
+    - Answer directly and keep the conversation practical.
+    - Redirect out-of-scope questions without pretending to cover them.
+    - Use retrieved product or CRM facts instead of guessing.
+    - When a complaint is created, confirm that the customer will receive updates.
+  avoid_rules:
+    - Do not invent ticket ids, lead ids, or product details.
+    - Do not claim that a lead or ticket was created unless the tools or delegated agent returned it.
+semantics:
+  signals:
+    - id: complaint_issue
+      phrases:
+        - my order arrived damaged
+        - the product is broken
+        - the product arrived cracked
+        - i want to file a complaint
+        - please create a complaint ticket
+    - id: update_request
+      phrases:
+        - keep me updated
+        - let me know the status
+        - email me updates
+        - tell me when there is a status update
+    - id: product_interest
+      phrases:
+        - tell me about this product
+        - i want product information
+        - i am evaluating this product
+        - have sales follow up
+        - i want someone to contact me about this product
+watch_capabilities:
+  - id: orbyte_minimal.crm.ticket.get
+    kind: crm_ticket_status
+    schedule_strategy: poll
+    trigger_signals:
+      - update_request
+    subject_keys:
+      - ticket_id
+    required_fields:
+      - ticket_id
+    status_keys:
+      - status
+    poll_interval_seconds: 5
+    stop_values:
+      - resolved
+      - closed
+    delivery_template: "I have an update on ticket {{ticket_number}}: status is now {{status}}."
+delegation_contracts:
+  - id: complaint_ticket
+    agent_ids:
+      - OpenCodeOrbyteMinimal
+    resource_type: support_ticket
+    result_text_field: user_message
+    required_result_fields:
+      - ticket_id
+      - ticket_number
+      - status
+    field_aliases:
+      - target: resource.id
+        sources: [ticket_id]
+      - target: resource.display_id
+        sources: [ticket_number]
+      - target: resource.status
+        sources: [status]
+      - target: resource.attributes.party_id
+        sources: [party_id]
+      - target: resource.attributes.party_name
+        sources: [party_name]
+      - target: resource.attributes.queue_code
+        sources: [queue_code]
+    verification:
+      primary_tool_id: orbyte_minimal.crm.ticket.get
+      primary_args:
+        ticket_id: "{{resource.id}}"
+      fallback_tools:
+        - tool_id: orbyte_minimal.crm.ticket.search
+          args:
+            query: "{{resource.display_id}}"
+            party_id: "{{resource.attributes.party_id}}"
+            queue_code: "{{resource.attributes.queue_code}}"
+            page: "1"
+            page_size: "10"
+      extract_paths:
+        - target: resource.id
+          sources: [structuredContent.id, structuredContent.values.ticket_id, record_id, record.id]
+        - target: resource.display_id
+          sources: [structuredContent.values.ticket_number, values.ticket_number, record.values.ticket_number, ticket_number]
+        - target: resource.status
+          sources: [structuredContent.values.status, values.status, record.values.status, status]
+        - target: resource.attributes.party_id
+          sources: [structuredContent.values.party_id, values.party_id, record.values.party_id, party_id]
+        - target: resource.attributes.party_name
+          sources: [structuredContent.values.party_name, values.party_name, record.values.party_name, party_name]
+        - target: resource.attributes.queue_code
+          sources: [structuredContent.values.queue_code, values.queue_code, record.values.queue_code, queue_code]
+      require_match_on:
+        - resource.id
+        - resource.display_id
+    watch_capability_id: orbyte_minimal.crm.ticket.get
+    failure_user_message: I could not confirm ticket creation yet.
+lifecycle_policy:
+  id: capability_validation
+  idle_candidate_after_ms: 100
+  awaiting_close_after_ms: 300
+  keep_recheck_after_ms: 300
+guidelines:
+  - id: complaint_delegate
+    when: customer reports a damaged, broken, or cracked product, wants to file a complaint or issue ticket, and expects status updates
+    then: delegate the complaint intake to the external CRM complaint workflow and tell the customer you will track the ticket status.
+    agents:
+      - OpenCodeOrbyteMinimal
+  - id: complaint_followup_status
+    when: customer asks for the next step, current status, or an update for a complaint or ticket that is already open, already created, or already being handled
+    then: The next step is support review, and I will continue to monitor the complaint status and keep you updated.
+  - id: product_lookup_and_lead
+    when: customer asks for product information, product fit, or product details and wants a sales or commercial follow-up about that product
+    then: retrieve the product information from Orbyte and create or update the CRM lead for follow-up.
+    tools:
+      - commercial_core.item.search
+      - commercial_core.item.get
+      - crm.lead.find_or_create_for_product_interest
+capability_isolation:
+  allowed_provider_ids:
+    - orbyte_full
+    - orbyte_minimal

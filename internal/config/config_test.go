@@ -189,6 +189,26 @@ moderation:
 	}
 }
 
+func TestLoadModerationClassifierFromFileAndEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "parmesan.yaml")
+	raw := []byte(`
+moderation:
+  classifier:
+    enabled: false
+`)
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("PARMESAN_CONFIG", path)
+	t.Setenv("MODERATION_LLM_ENABLED", "true")
+
+	cfg := Load("api")
+	if !cfg.Moderation.Classifier.Enabled {
+		t.Fatalf("classifier = %#v, want enabled from env override", cfg.Moderation.Classifier)
+	}
+}
+
 func TestLoadRetryModelProfilesFromFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "parmesan.yaml")

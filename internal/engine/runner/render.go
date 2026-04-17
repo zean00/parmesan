@@ -41,6 +41,9 @@ func renderResponseMessages(view resolvedView, toolOutput map[string]any) []stri
 	if rendered := renderTemplateMessages(view.ResponseAnalysisStage.CandidateTemplates, toolOutput); len(rendered) > 0 {
 		return rendered
 	}
+	if view.RetrieverStage.Outcome.GroundingRequired {
+		return nil
+	}
 	if len(toolOutput) > 0 {
 		return nil
 	}

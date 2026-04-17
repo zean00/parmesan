@@ -65,7 +65,10 @@ func buildRetrieverStageResult(ctx context.Context, options ResolveOptions, stat
 	}
 	active := activeRetrieverBindings(state.bundle.Retrievers, state)
 	if len(active) == 0 {
-		return RetrieverStageResult{KnowledgeSnapshotID: snapshotID}
+		return RetrieverStageResult{
+			KnowledgeSnapshotID: snapshotID,
+			Outcome:             RetrievalOutcome{State: "not_attempted"},
+		}
 	}
 
 	results := make([]knowledgeretriever.Result, len(active))
@@ -118,7 +121,40 @@ func buildRetrieverStageResult(ctx context.Context, options ResolveOptions, stat
 		Results:             results,
 		KnowledgeSnapshotID: snapshotID,
 		TransientGuidelines: transientGuidelinesFromRetrieverResults(results),
+		Outcome:             retrievalOutcomeFromResults(results),
 	}
+}
+
+func retrievalOutcomeFromResults(results []knowledgeretriever.Result) RetrievalOutcome {
+	outcome := RetrievalOutcome{
+		Attempted:         len(results) > 0,
+		GroundingRequired: len(results) > 0,
+		State:             "not_attempted",
+	}
+	if len(results) == 0 {
+		return outcome
+	}
+	outcome.State = "no_results"
+	for _, item := range results {
+		if strings.TrimSpace(item.Data) != "" || len(item.Citations) > 0 {
+			outcome.HasUsableEvidence = true
+			outcome.State = "evidence_available"
+			return outcome
+		}
+		if len(item.TransientGuidelines) > 0 {
+			outcome.HasUsableEvidence = true
+			outcome.GroundingRequired = false
+			outcome.State = "guidance_available"
+			return outcome
+		}
+	}
+	for _, item := range results {
+		if strings.TrimSpace(item.Error) != "" {
+			outcome.State = "insufficient"
+			return outcome
+		}
+	}
+	return outcome
 }
 
 func transientGuidelinesFromRetrieverResults(results []knowledgeretriever.Result) []policy.Guideline {

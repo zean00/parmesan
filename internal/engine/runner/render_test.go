@@ -5,6 +5,7 @@ import (
 
 	"github.com/sahal/parmesan/internal/domain/policy"
 	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
+	knowledgeretriever "github.com/sahal/parmesan/internal/knowledge/retriever"
 )
 
 func TestRenderResponsePrefersMatchedGuidelineInstructionOverJourneyPrompt(t *testing.T) {
@@ -148,5 +149,58 @@ func TestRenderResponseDefersToComposerWhenToolOutputExists(t *testing.T) {
 	})
 	if got != nil {
 		t.Fatalf("messages = %#v, want nil so compose_response uses tool outputs instead of guideline text", got)
+	}
+}
+
+func TestRenderResponseDefersToComposerWhenRetrievedKnowledgeExists(t *testing.T) {
+	view := resolvedView{
+		CompositionMode: "guided",
+		MatchFinalizeStage: policyruntime.FinalizeStageResult{
+			MatchedGuidelines: []policy.Guideline{{
+				ID:   "grounded_answer",
+				Then: "answer from retrieved knowledge, include the supporting source citation, and keep the answer factual.",
+			}},
+		},
+		RetrieverStage: policyruntime.RetrieverStageResult{
+			Outcome: policyruntime.RetrievalOutcome{
+				Attempted:         true,
+				State:             "evidence_available",
+				HasUsableEvidence: true,
+				GroundingRequired: true,
+			},
+			Results: []knowledgeretriever.Result{{
+				RetrieverID: "validated_corpus",
+				Data:        "Espresso machine article: pump-driven machines use an electric pump to provide brewing pressure.",
+			}},
+		},
+	}
+
+	got := renderResponseMessages(view, nil)
+	if got != nil {
+		t.Fatalf("messages = %#v, want nil so compose_response uses retrieved knowledge", got)
+	}
+}
+
+func TestRenderResponseDefersToComposerWhenGroundedRetrievalMisses(t *testing.T) {
+	view := resolvedView{
+		CompositionMode: "guided",
+		MatchFinalizeStage: policyruntime.FinalizeStageResult{
+			MatchedGuidelines: []policy.Guideline{{
+				ID:   "grounded_answer",
+				Then: "answer from retrieved knowledge, include the supporting source citation, and keep the answer factual.",
+			}},
+		},
+		RetrieverStage: policyruntime.RetrieverStageResult{
+			Outcome: policyruntime.RetrievalOutcome{
+				Attempted:         true,
+				State:             "no_results",
+				GroundingRequired: true,
+			},
+		},
+	}
+
+	got := renderResponseMessages(view, nil)
+	if got != nil {
+		t.Fatalf("messages = %#v, want nil so compose_response can return an honest grounded miss", got)
 	}
 }

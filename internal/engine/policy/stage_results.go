@@ -2,8 +2,8 @@ package policyruntime
 
 import (
 	"github.com/sahal/parmesan/internal/domain/policy"
-	retrieverdomain "github.com/sahal/parmesan/internal/knowledge/retriever"
 	semantics "github.com/sahal/parmesan/internal/engine/semantics"
+	retrieverdomain "github.com/sahal/parmesan/internal/knowledge/retriever"
 )
 
 type StageResult interface {
@@ -209,6 +209,7 @@ type RetrieverStageResult struct {
 	Results             []retrieverdomain.Result `json:"results,omitempty"`
 	KnowledgeSnapshotID string                   `json:"knowledge_snapshot_id,omitempty"`
 	TransientGuidelines []policy.Guideline       `json:"transient_guidelines,omitempty"`
+	Outcome             RetrievalOutcome         `json:"outcome,omitempty"`
 }
 
 func (r RetrieverStageResult) Apply(state *matchingState) {
@@ -226,7 +227,15 @@ func (r RetrieverStageResult) BatchOutput() map[string]any {
 		"results":               r.Results,
 		"knowledge_snapshot_id": r.KnowledgeSnapshotID,
 		"transient_guidelines":  r.TransientGuidelines,
+		"outcome":               r.Outcome,
 	}
+}
+
+type RetrievalOutcome struct {
+	Attempted         bool   `json:"attempted,omitempty"`
+	State             string `json:"state,omitempty"`
+	HasUsableEvidence bool   `json:"has_usable_evidence,omitempty"`
+	GroundingRequired bool   `json:"grounding_required,omitempty"`
 }
 
 type ResponseAnalysisStageResult struct {

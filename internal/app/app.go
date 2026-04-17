@@ -12,6 +12,7 @@ import (
 	"github.com/sahal/parmesan/internal/api/sse"
 	"github.com/sahal/parmesan/internal/config"
 	"github.com/sahal/parmesan/internal/customercontext"
+	"github.com/sahal/parmesan/internal/engine/runner"
 	"github.com/sahal/parmesan/internal/gateway"
 	orbyteintegration "github.com/sahal/parmesan/internal/integrations/orbyte"
 	"github.com/sahal/parmesan/internal/lifecycle"
@@ -19,7 +20,6 @@ import (
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/observability"
 	replayrunner "github.com/sahal/parmesan/internal/replay"
-	"github.com/sahal/parmesan/internal/engine/runner"
 	"github.com/sahal/parmesan/internal/secrets"
 	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
@@ -71,7 +71,7 @@ func RunAPI(ctx context.Context) error {
 
 	server := httpapi.New(cfg.HTTP.Address, repo, writes, broker, router, syncer).
 		WithCustomerContextEnricher(customercontext.New(cfg.CustomerContext)).
-		WithModerationAlertConfig(cfg.Moderation.Alerts).
+		WithModerationConfig(cfg.Moderation).
 		WithRetryModelProfiles(cfg.RetryModelProfiles).
 		WithToolArgumentResolver(orbyteintegration.NewToolArgumentResolver()).
 		WithToolProviderSecurity(cfg.ToolProviderSecurity)

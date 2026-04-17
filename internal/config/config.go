@@ -98,7 +98,8 @@ type CustomerContextConfig struct {
 }
 
 type ModerationConfig struct {
-	Alerts ModerationAlertConfig `yaml:"alerts" json:"alerts,omitempty"`
+	Alerts     ModerationAlertConfig      `yaml:"alerts" json:"alerts,omitempty"`
+	Classifier ModerationClassifierConfig `yaml:"classifier" json:"classifier,omitempty"`
 }
 
 type ModerationAlertConfig struct {
@@ -106,6 +107,10 @@ type ModerationAlertConfig struct {
 	NotifyOnCensored  bool     `yaml:"notify_on_censored" json:"notify_on_censored,omitempty"`
 	NotifyOnJailbreak bool     `yaml:"notify_on_jailbreak" json:"notify_on_jailbreak,omitempty"`
 	NotifyCategories  []string `yaml:"notify_categories" json:"notify_categories,omitempty"`
+}
+
+type ModerationClassifierConfig struct {
+	Enabled bool `yaml:"enabled" json:"enabled,omitempty"`
 }
 
 type CustomerContextEnrichmentConfig struct {
@@ -233,9 +238,14 @@ func Load(service string) Config {
 			AllowedHosts:  csvEnv("TOOL_PROVIDER_ALLOWED_HOSTS", fileCfg.ToolProviders.AllowedHosts),
 			AllowLocalDev: boolEnv("TOOL_PROVIDER_ALLOW_LOCAL_DEV", fileCfg.ToolProviders.AllowLocalDev),
 		},
-		AgentServers:         fileCfg.AgentServers,
-		CustomerContext:      fileCfg.CustomerContext,
-		Moderation:           fileCfg.Moderation,
+		AgentServers:    fileCfg.AgentServers,
+		CustomerContext: fileCfg.CustomerContext,
+		Moderation: ModerationConfig{
+			Alerts: fileCfg.Moderation.Alerts,
+			Classifier: ModerationClassifierConfig{
+				Enabled: boolEnv("MODERATION_LLM_ENABLED", fileCfg.Moderation.Classifier.Enabled),
+			},
+		},
 		RetryModelProfiles:   fileCfg.Runtime.RetryModelProfiles,
 		ExecutionConcurrency: intEnv("EXECUTION_CONCURRENCY", defaultInt(fileCfg.Runtime.ExecutionConcurrency, 2)),
 		AsyncWriteWorkers:    intEnv("ASYNC_WRITE_WORKERS", defaultInt(fileCfg.Runtime.AsyncWriteWorkers, 2)),

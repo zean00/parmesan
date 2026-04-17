@@ -1,0 +1,12 @@
+id: agent_orbyte_nexus_behavior_validation
+name: Orbyte Nexus Behavior Validation Agent
+description: Validation agent for out-of-scope behavior, operator takeover, manual review, and integration-safe complaint and product flows across Nexus, Parmesan, OpenCode, and Orbyte.
+status: active
+policy_bundle_path: ../policy/orbyte_nexus_behavior_validation_policy.yaml
+default_knowledge_scope:
+  kind: agent
+  id: agent_orbyte_nexus_behavior_validation
+metadata:
+  integration: orbyte_nexus_capabilities
+  channel: acp
+  validation_pack: behavior

@@ -29,6 +29,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/domain/toolrun"
+	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 	knowledgecompiler "github.com/sahal/parmesan/internal/knowledge/compiler"
 	knowledgeenrichment "github.com/sahal/parmesan/internal/knowledge/enrichment"
 	knowledgelearning "github.com/sahal/parmesan/internal/knowledge/learning"
@@ -36,7 +37,6 @@ import (
 	"github.com/sahal/parmesan/internal/observability"
 	"github.com/sahal/parmesan/internal/quality"
 	rolloutengine "github.com/sahal/parmesan/internal/rollout"
-	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 	"github.com/sahal/parmesan/internal/sessionsvc"
 	"github.com/sahal/parmesan/internal/sessionwatch"
 	"github.com/sahal/parmesan/internal/store"
@@ -2682,6 +2682,9 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 	if knowledge := retrievedKnowledgeText(view); knowledge != "" {
 		parts = append(parts, "Retrieved knowledge:\n"+knowledge)
 	}
+	if outcome := retrievedKnowledgeOutcomeText(view); outcome != "" {
+		parts = append(parts, outcome)
+	}
 	if toolDecision := view.ToolDecisionStage.Decision; toolDecision.SelectedTool != "" {
 		parts = append(parts, "Selected tool: "+toolDecision.SelectedTool)
 	}
@@ -2867,6 +2870,19 @@ func retrievedKnowledgeText(view resolvedView) string {
 		parts = append(parts, strings.TrimSpace(item.Data))
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+func retrievedKnowledgeOutcomeText(view resolvedView) string {
+	outcome := view.RetrieverStage.Outcome
+	if !outcome.GroundingRequired || outcome.HasUsableEvidence {
+		return ""
+	}
+	switch outcome.State {
+	case "insufficient", "no_results":
+		return "Retrieved knowledge outcome: retrieval did not produce usable evidence. If the answer depends on retrieved knowledge, say that the available knowledge is insufficient and do not invent missing facts."
+	default:
+		return ""
+	}
 }
 
 func retrieverResultHashes(view resolvedView) []string {
