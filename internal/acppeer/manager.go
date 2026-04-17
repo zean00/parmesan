@@ -248,7 +248,9 @@ func (p *peer) delegate(ctx context.Context, req Request) (Result, error) {
 	}
 	updates := make(chan updateNotification, 32)
 	p.subscribe(sessionID, updates)
-	defer p.unsubscribe(sessionID, updates)
+	defer func() {
+		p.unsubscribe(sessionID, updates)
+	}()
 
 	var sessionResp map[string]any
 	if err := p.call(ctx, "session/new", map[string]any{
@@ -259,6 +261,14 @@ func (p *peer) delegate(ctx context.Context, req Request) (Result, error) {
 		"metadata":   req.Metadata,
 	}, &sessionResp); err != nil {
 		return Result{}, err
+	}
+	if returnedSessionID := firstNonEmpty(stringField(sessionResp, "sessionId"), stringField(sessionResp, "session_id")); returnedSessionID != "" {
+		if returnedSessionID != sessionID {
+			p.unsubscribe(sessionID, updates)
+			sessionID = returnedSessionID
+			p.subscribe(sessionID, updates)
+		}
+		sessionID = returnedSessionID
 	}
 	modelName := strings.TrimSpace(p.config.ACP.Model)
 	appliedModel := ""
@@ -277,42 +287,67 @@ func (p *peer) delegate(ctx context.Context, req Request) (Result, error) {
 		}
 	}
 	finalPrompt := p.wrapPrompt(req.Prompt)
-	var promptResp map[string]any
-	if err := p.call(ctx, "session/prompt", map[string]any{
-		"sessionId": sessionID,
-		"prompt": []map[string]any{
-			{"type": "text", "text": finalPrompt},
-		},
-	}, &promptResp); err != nil {
-		return Result{}, err
-	}
-
 	timeout := time.Duration(defaultPositive(p.config.RequestTimeoutSeconds, 30)) * time.Second
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	type promptResult struct {
+		resp map[string]any
+		err  error
+	}
+	promptDone := make(chan promptResult, 1)
+	go func() {
+		var promptResp map[string]any
+		err := p.call(waitCtx, "session/prompt", map[string]any{
+			"sessionId": sessionID,
+			"prompt": []map[string]any{
+				{"type": "text", "text": finalPrompt},
+			},
+		}, &promptResp)
+		promptDone <- promptResult{resp: promptResp, err: err}
+	}()
+
 	var chunks []string
+	var promptResp map[string]any
+	turnCompleted := false
 	for {
 		select {
 		case <-waitCtx.Done():
+			if text := strings.TrimSpace(strings.Join(chunks, "")); text != "" && promptCallCompleted(promptResp) {
+				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text, Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, nil
+			}
 			return Result{ServerID: p.serverID, SessionID: sessionID, Status: "timeout", Error: waitCtx.Err().Error(), Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, waitCtx.Err()
+		case outcome := <-promptDone:
+			if outcome.err != nil {
+				return Result{}, outcome.err
+			}
+			promptResp = outcome.resp
+			if turnCompleted {
+				if text := strings.TrimSpace(strings.Join(chunks, "")); text != "" {
+					return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text, Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, nil
+				}
+			}
+			if text := promptResponseText(promptResp); text != "" {
+				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text, Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, nil
+			}
 		case item := <-updates:
-			typ := stringField(item.Update, "type")
+			typ := firstNonEmpty(stringField(item.Update, "type"), stringField(item.Update, "sessionUpdate"))
 			switch typ {
 			case "agent_message_chunk":
-				if text := stringField(item.Update, "text"); strings.TrimSpace(text) != "" {
+				if text := updateText(item.Update); strings.TrimSpace(text) != "" {
 					chunks = append(chunks, text)
 				}
-			case "agent_turn_complete", "turn_complete":
+			case "agent_turn_complete", "turn_complete", "agent_message":
+				turnCompleted = true
 				text := strings.TrimSpace(strings.Join(chunks, ""))
 				if text == "" {
-					text = stringField(item.Update, "text")
+					text = updateText(item.Update)
 				}
 				if text == "" {
 					return Result{ServerID: p.serverID, SessionID: sessionID, Status: "failed", Error: "delegated agent produced no message", Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, errors.New("delegated agent produced no message")
 				}
 				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text, Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, nil
 			case "error", "agent_turn_error":
-				msg := firstNonEmpty(stringField(item.Update, "message"), stringField(item.Update, "error"), "delegated agent failed")
+				msg := firstNonEmpty(stringField(item.Update, "message"), stringField(item.Update, "error"), updateText(item.Update), "delegated agent failed")
 				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "failed", Error: msg, Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, errors.New(msg)
 			}
 		}
@@ -428,6 +463,53 @@ func (p *peer) handleUpdate(raw json.RawMessage) {
 	}
 }
 
+func updateText(update map[string]any) string {
+	if text := stringField(update, "text"); text != "" {
+		return text
+	}
+	content, _ := update["content"].(map[string]any)
+	if content == nil {
+		return ""
+	}
+	return stringField(content, "text")
+}
+
+func promptResponseText(promptResp map[string]any) string {
+	if promptResp == nil {
+		return ""
+	}
+	if text := stringField(promptResp, "text"); text != "" {
+		return text
+	}
+	message, _ := promptResp["message"].(map[string]any)
+	if message != nil {
+		if text := stringField(message, "text"); text != "" {
+			return text
+		}
+	}
+	content, _ := promptResp["content"].([]any)
+	for _, item := range content {
+		block, _ := item.(map[string]any)
+		if block == nil {
+			continue
+		}
+		if text := stringField(block, "text"); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func promptCallCompleted(promptResp map[string]any) bool {
+	stopReason := strings.TrimSpace(firstNonEmpty(stringField(promptResp, "stopReason"), stringField(promptResp, "stop_reason")))
+	switch stopReason {
+	case "", "error":
+		return false
+	default:
+		return true
+	}
+}
+
 func (p *peer) replyMethodNotFound(id int64, method string) {
 	raw, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
@@ -516,21 +598,33 @@ func (p *peer) sessionMCPServers() []map[string]any {
 	}
 	out := make([]map[string]any, 0, len(p.config.ACP.MCPServers))
 	for _, item := range p.config.ACP.MCPServers {
+		serverType := strings.ToLower(firstNonEmpty(item.Type, "stdio"))
 		server := map[string]any{
-			"type": firstNonEmpty(item.Type, "stdio"),
+			"type": serverType,
 			"name": item.Name,
 		}
 		if len(item.Meta) > 0 {
 			server["_meta"] = cloneAnyMap(item.Meta)
 		}
-		switch strings.ToLower(firstNonEmpty(item.Type, "stdio")) {
+		switch serverType {
 		case "stdio":
 			server["command"] = item.Command
 			server["args"] = append([]string(nil), item.Args...)
 			server["env"] = cloneStringMap(item.Env)
 		case "http", "sse":
 			server["url"] = item.URL
-			server["headers"] = cloneStringMap(item.Headers)
+			if serverType == "http" {
+				server["headers"] = cloneStringMap(item.Headers)
+			} else {
+				headers := make([]map[string]string, 0, len(item.Headers))
+				for key, value := range item.Headers {
+					headers = append(headers, map[string]string{
+						"name":  key,
+						"value": value,
+					})
+				}
+				server["headers"] = headers
+			}
 		}
 		out = append(out, server)
 	}

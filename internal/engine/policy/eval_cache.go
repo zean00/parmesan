@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	"github.com/sahal/parmesan/internal/domain/policy"
-	semantics "github.com/sahal/parmesan/internal/runtime/semantics"
+	semantics "github.com/sahal/parmesan/internal/engine/semantics"
 )
 
 type matchingEvalCache struct {

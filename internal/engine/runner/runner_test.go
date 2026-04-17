@@ -27,7 +27,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/toolrun"
 	knowledgeretriever "github.com/sahal/parmesan/internal/knowledge/retriever"
 	"github.com/sahal/parmesan/internal/model"
-	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
+	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/store/memory"

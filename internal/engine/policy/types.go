@@ -10,7 +10,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/policy"
 	retrieverdomain "github.com/sahal/parmesan/internal/knowledge/retriever"
 	"github.com/sahal/parmesan/internal/model"
-	"github.com/sahal/parmesan/internal/runtime/semantics"
+	"github.com/sahal/parmesan/internal/engine/semantics"
 )
 
 type MatchingContext struct {
@@ -257,8 +257,18 @@ type ToolPlanEvaluation struct {
 	Rationale         string                           `json:"rationale,omitempty"`
 }
 
+type ToolIdentity struct {
+	ToolID         string `json:"tool_id"`
+	ProviderID     string `json:"provider_id,omitempty"`
+	ToolName       string `json:"tool_name,omitempty"`
+	CatalogEntryID string `json:"catalog_entry_id,omitempty"`
+}
+
 type ToolCandidate struct {
 	ToolID               string                `json:"tool_id"`
+	ProviderID           string                `json:"provider_id,omitempty"`
+	ToolName             string                `json:"tool_name,omitempty"`
+	CatalogEntryID       string                `json:"catalog_entry_id,omitempty"`
 	GroupKey             string                `json:"group_key,omitempty"`
 	ReferenceTools       []string              `json:"reference_tools,omitempty"`
 	RunInTandemWith      []string              `json:"run_in_tandem_with,omitempty"`
@@ -307,9 +317,12 @@ type ToolCallPlan struct {
 }
 
 type ToolPlannedCall struct {
-	ToolID    string         `json:"tool_id"`
-	Arguments map[string]any `json:"arguments,omitempty"`
-	Rationale string         `json:"rationale,omitempty"`
+	ToolID         string         `json:"tool_id"`
+	ProviderID     string         `json:"provider_id,omitempty"`
+	ToolName       string         `json:"tool_name,omitempty"`
+	CatalogEntryID string         `json:"catalog_entry_id,omitempty"`
+	Arguments      map[string]any `json:"arguments,omitempty"`
+	Rationale      string         `json:"rationale,omitempty"`
 }
 
 type ToolArgumentIssue struct {
@@ -452,6 +465,10 @@ func (m RetrieverMap) GetRetriever(id string) retrieverdomain.Interface {
 	return m[id]
 }
 
+type ToolArgumentResolver interface {
+	ResolveToolArguments(matchCtx MatchingContext, identity ToolIdentity, fields []string) map[string]any
+}
+
 type ResolveOptions struct {
 	Router            *model.Router
 	RetrieverRegistry RetrieverRegistry
@@ -459,4 +476,5 @@ type ResolveOptions struct {
 	KnowledgeSnapshot *knowledge.Snapshot
 	KnowledgeChunks   []knowledge.Chunk
 	DerivedSignals    []string
+	ArgumentResolver  ToolArgumentResolver
 }

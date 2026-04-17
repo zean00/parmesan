@@ -9,7 +9,7 @@ import (
 
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/tool"
-	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
+	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 )
 
 func TestLoadFixtureParsesGoldenScenarios(t *testing.T) {

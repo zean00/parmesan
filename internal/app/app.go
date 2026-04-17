@@ -13,12 +13,13 @@ import (
 	"github.com/sahal/parmesan/internal/config"
 	"github.com/sahal/parmesan/internal/customercontext"
 	"github.com/sahal/parmesan/internal/gateway"
+	orbyteintegration "github.com/sahal/parmesan/internal/integrations/orbyte"
 	"github.com/sahal/parmesan/internal/lifecycle"
 	maintainerworker "github.com/sahal/parmesan/internal/maintainer"
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/observability"
 	replayrunner "github.com/sahal/parmesan/internal/replay"
-	"github.com/sahal/parmesan/internal/runtime/runner"
+	"github.com/sahal/parmesan/internal/engine/runner"
 	"github.com/sahal/parmesan/internal/secrets"
 	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
@@ -72,6 +73,7 @@ func RunAPI(ctx context.Context) error {
 		WithCustomerContextEnricher(customercontext.New(cfg.CustomerContext)).
 		WithModerationAlertConfig(cfg.Moderation.Alerts).
 		WithRetryModelProfiles(cfg.RetryModelProfiles).
+		WithToolArgumentResolver(orbyteintegration.NewToolArgumentResolver()).
 		WithToolProviderSecurity(cfg.ToolProviderSecurity)
 	return server.Run(ctx)
 }
@@ -138,6 +140,7 @@ func RunWorker(ctx context.Context) error {
 	}
 	runner.New(repo, writes, broker, router, "worker-"+hostname()).
 		WithExecutionConcurrency(cfg.ExecutionConcurrency).
+		WithToolArgumentResolver(orbyteintegration.NewToolArgumentResolver()).
 		WithProviderURLPolicy(providerPolicy).
 		WithAgentPeers(peerManager).
 		Start(ctx)

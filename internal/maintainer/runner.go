@@ -183,16 +183,24 @@ func (s *Service) ensureWorkspace(ctx context.Context, scopeKind, scopeID, mode 
 		return items[0], nil
 	}
 	now := time.Now().UTC()
+	indexTitle := "Knowledge Index"
+	logTitle := "Knowledge Log"
+	if mode == maintainerdomain.ModeCustomerMemory {
+		indexTitle = "Customer Memory Index"
+		logTitle = "Customer Memory Log"
+	}
 	workspace := maintainerdomain.Workspace{
-		ID:        stableID("kwork", scopeKind, scopeID, mode),
-		ScopeKind: scopeKind,
-		ScopeID:   scopeID,
-		Mode:      mode,
-		Status:    "active",
-		Schema:    defaultWorkspaceSchema(scopeKind, scopeID, mode),
-		Metadata:  map[string]any{"created_by": "maintainer"},
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:          stableID("kwork", scopeKind, scopeID, mode),
+		ScopeKind:   scopeKind,
+		ScopeID:     scopeID,
+		Mode:        mode,
+		Status:      "active",
+		Schema:      defaultWorkspaceSchema(scopeKind, scopeID, mode),
+		IndexPageID: stableID("kpage", scopeKind, scopeID, mode, indexTitle),
+		LogPageID:   stableID("kpage", scopeKind, scopeID, mode, logTitle),
+		Metadata:    map[string]any{"created_by": "maintainer"},
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 	return workspace, s.repo.SaveMaintainerWorkspace(ctx, workspace)
 }

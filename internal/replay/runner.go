@@ -14,7 +14,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/observability"
 	"github.com/sahal/parmesan/internal/quality"
-	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
+	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 )

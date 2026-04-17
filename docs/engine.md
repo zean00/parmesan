@@ -186,8 +186,8 @@ flowchart LR
 
 - turn ingress and ACP message handling: `internal/api/http/server.go`
 - execution creation and turn enqueueing: `internal/api/http/server.go`
-- runner orchestration: `internal/runtime/runner/runner.go`
-- policy stages: `internal/runtime/policy/`
+- runner orchestration: `internal/engine/runner/runner.go`
+- policy stages: `internal/engine/policy/`
 - tool invocation: `internal/toolruntime/invoker.go`
-- response rendering: `internal/runtime/runner/render.go`
+- response rendering: `internal/engine/runner/render.go`
 - moderation path: `internal/moderation/moderation.go`

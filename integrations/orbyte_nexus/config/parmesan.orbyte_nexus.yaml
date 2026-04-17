@@ -1,0 +1,110 @@
+http:
+  address: "${PARMESAN_HTTP_ADDR}"
+
+database:
+  url: "${DATABASE_URL}"
+
+secrets:
+  master_key: "${SECRETS_MASTER_KEY}"
+
+providers:
+  openai_api_key: "${OPENAI_API_KEY}"
+  openai_base_url: "${OPENAI_BASE_URL}"
+  openrouter_api_key: "${OPENROUTER_API_KEY}"
+  openrouter_base_url: "${OPENROUTER_BASE_URL}"
+  default_reasoning: "${DEFAULT_REASONING_PROVIDER}"
+  default_structured: "${DEFAULT_STRUCTURED_PROVIDER}"
+  default_embedding: "${DEFAULT_EMBEDDING_PROVIDER}"
+  maintainer_reasoning: "${DEFAULT_REASONING_PROVIDER}"
+  maintainer_structured: "${DEFAULT_STRUCTURED_PROVIDER}"
+  maintainer_embedding: "${DEFAULT_EMBEDDING_PROVIDER}"
+
+tool_providers:
+  allow_local_dev: true
+  allowed_hosts:
+    - 127.0.0.1
+    - localhost
+
+operator:
+  api_key: "${OPERATOR_API_KEY}"
+  default_operator_id: validation_operator
+  default_operator_roles: operator
+
+bootstrap:
+  agents_dir: "${PARMESAN_AGENTS_DIR}"
+
+acp:
+  response_coalesce_ms: 500
+  delegation_timeout_seconds: 420
+
+agent_servers:
+  OpenCodeOrbyteMinimal:
+    command: "${OPENCODE_COMMAND}"
+    args: ["acp", "--pure"]
+    startup_timeout_seconds: 20
+    request_timeout_seconds: 420
+    env:
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL}"
+      OPENROUTER_BASE_URL: "${OPENROUTER_BASE_URL}"
+    acp:
+      model: "${OPENCODE_MODEL}"
+      prompt_prefix: |
+        You are the delegated CRM complaint intake worker for the parent agent.
+        Use Orbyte minimal MCP only.
+        Use exact skill id crm_customer_complaint_ticket_intake.
+        Execute the shortest successful path only.
+        Required order:
+        1. crm.customer.summary
+        2. crm.ticket.search
+        3. if needed crm.ticket.create with confirm_apply=true
+        4. confirm the final ticket reference
+        Never stop after a narrative description alone.
+        Your task is incomplete until you have a real final ticket reference from MCP output.
+        Do not invent ids.
+        Do not omit fields.
+        ticket_id must be copied from a real MCP ticket record id or canonical ticket reference.
+        ticket_number must be copied from a real MCP ticket record.
+        After create_ticket, inspect the returned value carefully.
+        If it returned a human ticket number like CRM-..., treat that as a ticket number, not as the internal record id.
+        Call crm.ticket.get only when you have a real internal crm_ticket:... id.
+        If create returns only a ticket number, immediately run crm.ticket.search using that returned ticket number as the primary query plus the same customer and queue.
+        Do not restrict the recovery search to status=open because newly created tickets can still be new.
+        If that still fails, broaden crm.ticket.search with the recent complaint wording and the same customer and queue context.
+        If you still cannot confirm both ticket_id and ticket_number from MCP output, return this exact failure JSON:
+        {"user_message":"I could not confirm ticket creation yet.","ticket_id":"","ticket_number":"","queue_code":"","status":"failed"}
+        If you can confirm the ticket, return this exact shape:
+        {"user_message":"Your complaint ticket <ticket_number> has been opened. You will receive updates on status changes.","ticket_id":"<real ticket id>","ticket_number":"<real ticket number>","queue_code":"<real queue code>","status":"open"}
+        Return only one JSON object with keys:
+        user_message, ticket_id, ticket_number, queue_code, status
+      prompt_suffix: |
+        Return only valid JSON.
+        Do not wrap it in markdown.
+        Do not add commentary.
+        Do not return JSON missing ticket_id or ticket_number unless both are empty and status is failed.
+      mcp_servers:
+        - type: http
+          name: Orbyte Minimal
+          url: "${ORBYTE_MINIMAL_MCP_URL}"
+
+mcp:
+  providers:
+    - id: orbyte_full
+      name: Orbyte Full MCP
+      kind: mcp_remote
+      base_url: "${ORBYTE_FULL_MCP_URL}"
+    - id: orbyte_minimal
+      name: Orbyte Minimal MCP
+      kind: mcp_remote
+      base_url: "${ORBYTE_MINIMAL_MCP_URL}"
+
+observability:
+  metrics_address: "${PARMESAN_METRICS_ADDR}"
+  org_id: default
+
+runtime:
+  execution_concurrency: 4
+  async_write_workers: 2
+  async_write_queue_size: 256
+  request_timeout_seconds: 20

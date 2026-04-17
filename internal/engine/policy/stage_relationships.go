@@ -6,7 +6,7 @@ import (
 
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/model"
-	semantics "github.com/sahal/parmesan/internal/runtime/semantics"
+	semantics "github.com/sahal/parmesan/internal/engine/semantics"
 )
 
 func buildCustomerDependencyStageResult(ctx MatchingContext, items []policy.Guideline) CustomerDependencyStageResult {

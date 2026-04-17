@@ -14,7 +14,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/model"
-	semantics "github.com/sahal/parmesan/internal/runtime/semantics"
+	semantics "github.com/sahal/parmesan/internal/engine/semantics"
 	"github.com/sahal/parmesan/internal/sessionwatch"
 )
 
@@ -76,7 +76,7 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	ToolExposureStageResult{ExposedTools: exposedTools, ToolApprovals: toolApprovals}.Apply(state)
 	exposedAgents := resolveAgentExposure(bundle.GuidelineAgentAssociations, state.matchFinalizeStage.MatchedGuidelines, state.activeJourneyState, bundle.CapabilityIsolation)
 	AgentExposureStageResult{ExposedAgents: exposedAgents}.Apply(state)
-	toolPlanResult, toolDecisionResult := buildToolStageResults(ctx, options.Router, state.context, state, bundle.Relationships, catalog)
+	toolPlanResult, toolDecisionResult := buildToolStageResults(ctx, options.Router, state.context, state, bundle.Relationships, catalog, options.ArgumentResolver)
 	toolPlanResult.Apply(state)
 	toolDecisionResult.Apply(state)
 	agentDecisionResult := buildAgentStageResults(ctx, options.Router, state.context, state)
@@ -2922,14 +2922,17 @@ func stagedToolMatchesToolID(callToolID string, expected string) bool {
 	if callToolID == expected {
 		return true
 	}
+	callToolID = strings.ReplaceAll(callToolID, ":", ".")
+	expected = strings.ReplaceAll(expected, ":", ".")
+	if callToolID == expected {
+		return true
+	}
 	callTail := strings.TrimPrefix(callToolID, "local:")
 	expectedTail := strings.TrimPrefix(expected, "local:")
 	if callTail == expectedTail {
 		return true
 	}
-	callDot := strings.ReplaceAll(callToolID, ":", ".")
-	expectedDot := strings.ReplaceAll(expected, ":", ".")
-	return callDot == expectedDot
+	return false
 }
 
 func journeyPathBetween(flow policy.Journey, fromID string, toID string) []string {
@@ -3732,13 +3735,8 @@ func journeyNodeRelevance(ctx MatchingContext, state policy.JourneyNode) (int, [
 }
 
 func findToolCatalogEntry(catalog []tool.CatalogEntry, selected string) (tool.CatalogEntry, bool) {
-	selected = strings.TrimSpace(selected)
-	for _, entry := range catalog {
-		if entry.Name == selected || entry.ID == selected || entry.ProviderID+"."+entry.Name == selected {
-			return entry, true
-		}
-	}
-	return tool.CatalogEntry{}, false
+	entry, ok, err := ResolveToolCatalogEntry(catalog, selected)
+	return entry, ok && err == nil
 }
 
 type toolArgumentSpec struct {

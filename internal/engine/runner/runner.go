@@ -36,7 +36,7 @@ import (
 	"github.com/sahal/parmesan/internal/observability"
 	"github.com/sahal/parmesan/internal/quality"
 	rolloutengine "github.com/sahal/parmesan/internal/rollout"
-	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
+	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 	"github.com/sahal/parmesan/internal/sessionsvc"
 	"github.com/sahal/parmesan/internal/sessionwatch"
 	"github.com/sahal/parmesan/internal/store"
@@ -46,24 +46,25 @@ import (
 )
 
 type Runner struct {
-	repo       store.Repository
-	writes     *asyncwrite.Queue
-	broker     *sse.Broker
-	router     *model.Router
-	invoker    *toolruntime.Invoker
-	agentPeers *acppeer.Manager
-	sessions   *sessionsvc.Service
-	leaseOwner string
-	leaseTTL   time.Duration
-	interval   time.Duration
-	responseMu sync.Mutex
-	responses  map[string]responsedomain.Response
-	workMu     sync.Mutex
-	workQueue  chan string
-	inFlight   map[string]struct{}
-	started    bool
-	workers    int
-	queueSize  int
+	repo             store.Repository
+	writes           *asyncwrite.Queue
+	broker           *sse.Broker
+	router           *model.Router
+	invoker          *toolruntime.Invoker
+	agentPeers       *acppeer.Manager
+	sessions         *sessionsvc.Service
+	leaseOwner       string
+	leaseTTL         time.Duration
+	interval         time.Duration
+	responseMu       sync.Mutex
+	responses        map[string]responsedomain.Response
+	workMu           sync.Mutex
+	workQueue        chan string
+	inFlight         map[string]struct{}
+	started          bool
+	workers          int
+	queueSize        int
+	argumentResolver policyruntime.ToolArgumentResolver
 }
 
 var errApprovalRequired = errors.New("approval required")
@@ -107,6 +108,11 @@ func (r *Runner) WithExecutionConcurrency(workers int) *Runner {
 	if minQueueSize := workers * 4; minQueueSize > r.queueSize {
 		r.queueSize = minQueueSize
 	}
+	return r
+}
+
+func (r *Runner) WithToolArgumentResolver(resolver policyruntime.ToolArgumentResolver) *Runner {
+	r.argumentResolver = resolver
 	return r
 }
 
@@ -441,6 +447,17 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 	exec.UpdatedAt = time.Now().UTC()
 	if err := r.repo.UpdateExecution(ctx, exec); err != nil {
 		return err
+	}
+	if err := r.learnFromExecution(ctx, exec); err != nil {
+		r.appendTrace(ctx, audit.Record{
+			ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+			Kind:        "execution.learning_failed",
+			SessionID:   exec.SessionID,
+			ExecutionID: exec.ID,
+			TraceID:     exec.TraceID,
+			Message:     err.Error(),
+			CreatedAt:   time.Now().UTC(),
+		})
 	}
 	finalResponseStatus := responsedomain.StatusReady
 	finalResponseReason := ""
@@ -837,6 +854,7 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 	derivedSignals := r.derivedSignalText(ctx, exec.SessionID)
 	view, err := policyruntime.ResolveWithOptions(ctx, events, selectedBundles, journeys, catalog, policyruntime.ResolveOptions{
 		Router:            r.router,
+		ArgumentResolver:  r.argumentResolver,
 		KnowledgeSearcher: r.repo,
 		KnowledgeSnapshot: knowledgeSnapshot,
 		KnowledgeChunks:   knowledgeChunks,
@@ -967,7 +985,7 @@ func (r *Runner) prepareResponse(ctx context.Context, exec execution.TurnExecuti
 			StartedAt:   started,
 			FinishedAt:  time.Now().UTC(),
 		})
-		if strings.EqualFold(view.CapabilityDecisionStage.Decision.Kind, "agent") && toolOutput != nil {
+		if toolOutput != nil {
 			record.StabilityReached = true
 			_ = r.updateResponseState(ctx, record, responsedomain.StatusProcessing, "", func(item *responsedomain.Response) {
 				item.StabilityReached = true
@@ -1184,6 +1202,9 @@ func (r *Runner) runtimeUpdateIntent(ctx context.Context, exec execution.TurnExe
 		return intent, true
 	}
 	now := time.Now().UTC()
+	if intent, ok := delegatedAgentWatchIntent(view, toolOutput, now); ok {
+		return intent, true
+	}
 	customerText := latestCustomerText(events)
 	for _, capability := range view.WatchCapabilities {
 		if intent, ok := runtimeCapabilityIntentFromView(capability, view, customerText, now); ok {
@@ -1878,11 +1899,25 @@ func (r *Runner) maybeDelegateAgent(ctx context.Context, exec execution.TurnExec
 	if result.PromptSuffixApplied {
 		fields["prompt_suffix_applied"] = true
 	}
-	if strings.TrimSpace(result.Text) != "" {
-		fields["result_text"] = result.Text
+	for key, value := range delegatedAgentOutput(result.Text) {
+		switch key {
+		case "server_id", "session_id", "status", "error", "model", "mcp_servers", "prompt_prefix_applied", "prompt_suffix_applied":
+			if key == "status" {
+				fields["result_status"] = value
+			}
+			continue
+		}
+		fields[key] = value
+	}
+	if contract, ok := delegatedAgentContract(view, fields); ok {
+		delegatedApplyContract(contract, fields)
+	}
+	verificationErr := r.verifyDelegatedAgentOutput(ctx, view, fields)
+	if verificationErr != nil {
+		fields["verification_error"] = verificationErr.Error()
 	}
 	kind := "agent.completed"
-	if err != nil {
+	if err != nil || verificationErr != nil {
 		kind = "agent.failed"
 	}
 	_, _ = r.sessions.CreateEvent(ctx, sessionsvc.CreateEventParams{
@@ -1909,18 +1944,122 @@ func (r *Runner) maybeDelegateAgent(ctx context.Context, exec execution.TurnExec
 	if err != nil {
 		return map[string]any{"delegated_agent": fields}, nil
 	}
-	return map[string]any{
-		"delegated_agent": map[string]any{
-			"server_id":             serverID,
-			"session_id":            result.SessionID,
-			"status":                status,
-			"result_text":           result.Text,
-			"model":                 result.Model,
-			"mcp_servers":           append([]string(nil), result.MCPServerNames...),
-			"prompt_prefix_applied": result.PromptPrefixApplied,
-			"prompt_suffix_applied": result.PromptSuffixApplied,
-		},
-	}, nil
+	if verificationErr != nil {
+		return map[string]any{"delegated_agent": fields}, nil
+	}
+	return map[string]any{"delegated_agent": fields}, nil
+}
+
+func (r *Runner) verifyDelegatedAgentOutput(ctx context.Context, view resolvedView, fields map[string]any) error {
+	contract, ok := delegatedAgentContract(view, fields)
+	if !ok {
+		return nil
+	}
+	result, _ := fields["result"].(map[string]any)
+	if len(result) == 0 {
+		return nil
+	}
+	if missing := delegatedContractMissingFields(contract, fields); len(missing) > 0 {
+		return r.markDelegatedVerificationFailed(fields, contract, "missing delegated result fields: "+strings.Join(missing, ", "))
+	}
+	tools := delegatedVerificationTools(contract)
+	if len(tools) == 0 {
+		return nil
+	}
+	expected, _ := fields["resource"].(map[string]any)
+	var lastErr error
+	for _, verificationTool := range tools {
+		entry, ok := findCatalogEntry(r.repo, verificationTool.ToolID)
+		if !ok {
+			lastErr = fmt.Errorf("verification tool %q not found", verificationTool.ToolID)
+			continue
+		}
+		binding, err := r.repo.GetProvider(ctx, entry.ProviderID)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		auth, err := r.repo.GetProviderAuthBinding(ctx, entry.ProviderID)
+		if err != nil {
+			auth = tool.AuthBinding{}
+		}
+		args := delegatedVerificationArgs(verificationTool.Args, fields)
+		output, err := r.invoker.Invoke(ctx, binding, auth, entry, args)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		verified := delegatedVerifiedResource(contract, output)
+		if !delegatedResourceMatches(expected, verified, contract.Verification.RequireMatchOn) {
+			verified = delegatedVerifiedResourceSearchResult(contract, output, expected)
+		}
+		if len(verified) == 0 {
+			lastErr = fmt.Errorf("verification tool %q did not match delegated resource", verificationTool.ToolID)
+			continue
+		}
+		merged := cloneAnyMap(result)
+		if merged == nil {
+			merged = map[string]any{}
+		}
+		fields["resource"] = verified
+		delegatedBackfillAliasFields(contract.FieldAliases, verified, fields, merged)
+		if resultTextField := strings.TrimSpace(contract.ResultTextField); resultTextField != "" {
+			if message := strings.TrimSpace(fmt.Sprint(merged[resultTextField])); message != "" {
+				fields["result_text"] = message
+			}
+		}
+		if status := delegatedLookupString(verified, "status"); status != "" {
+			fields["status"] = status
+			fields["result_status"] = status
+			merged["status"] = status
+		}
+		fields["result"] = merged
+		fields["verification"] = map[string]any{
+			"verified": true,
+			"tool_id":  entry.ProviderID + "." + entry.Name,
+			"output":   output,
+		}
+		return nil
+	}
+	if lastErr != nil {
+		return r.markDelegatedVerificationFailed(fields, contract, lastErr.Error())
+	}
+	return r.markDelegatedVerificationFailed(fields, contract, "delegated resource verification failed")
+}
+
+func (r *Runner) markDelegatedVerificationFailed(fields map[string]any, contract policy.DelegationContract, reason string) error {
+	failureMessage := strings.TrimSpace(contract.FailureUserMessage)
+	if failureMessage == "" {
+		failureMessage = "I could not confirm the delegated resource yet."
+	}
+	result, _ := fields["result"].(map[string]any)
+	if len(result) == 0 {
+		result = map[string]any{}
+	}
+	result["status"] = "failed"
+	if resultTextField := strings.TrimSpace(contract.ResultTextField); resultTextField != "" {
+		result[resultTextField] = failureMessage
+	}
+	fields["result"] = result
+	fields["result_text"] = failureMessage
+	fields["result_status"] = "failed"
+	fields["resource"] = map[string]any{"type": contract.ResourceType}
+	for _, alias := range contract.FieldAliases {
+		for _, source := range alias.Sources {
+			source = strings.TrimSpace(source)
+			if source == "" || strings.Contains(source, ".") {
+				continue
+			}
+			fields[source] = ""
+			result[source] = ""
+		}
+	}
+	fields["status"] = "failed"
+	fields["verification"] = map[string]any{
+		"verified": false,
+		"reason":   reason,
+	}
+	return errors.New(reason)
 }
 
 type toolBatchItem struct {
@@ -1943,7 +2082,7 @@ func (r *Runner) runToolCallsParallel(ctx context.Context, exec execution.TurnEx
 			continue
 		}
 		decision := decisionForPlannedCall(view, call)
-		key := entry.ProviderID + ":" + entry.Name
+		key := policyruntime.QualifiedToolID(entry)
 		if len(decision.Arguments) > 0 {
 			key += "#" + hashArguments(decision.Arguments)
 		}
@@ -2012,6 +2151,7 @@ func (r *Runner) runToolCallsParallel(ctx context.Context, exec execution.TurnEx
 
 func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution, view resolvedView, entry tool.CatalogEntry, decision policyruntime.ToolDecision) (map[string]any, error) {
 	responseID := r.responseIDForExecution(ctx, exec.ID)
+	toolID := policyruntime.QualifiedToolID(entry)
 	if !decision.CanRun {
 		payload := map[string]any{
 			"tool":              entry.Name,
@@ -2032,13 +2172,13 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 			CreatedAt:   time.Now().UTC(),
 		})
 		_, _ = r.sessions.CreateToolEvent(ctx, exec.SessionID, "runtime", "tool.blocked", exec.ID, exec.TraceID, map[string]any{
-			"tool_id":           entry.ID,
+			"tool_id":           toolID,
 			"reason":            "cannot_run",
 			"missing_arguments": append([]string(nil), decision.MissingArguments...),
 			"invalid_arguments": append([]string(nil), decision.InvalidArguments...),
 			"missing_issues":    append([]policyruntime.ToolArgumentIssue(nil), decision.MissingIssues...),
 			"invalid_issues":    append([]policyruntime.ToolArgumentIssue(nil), decision.InvalidIssues...),
-		}, map[string]any{"provider_id": entry.ProviderID}, false)
+		}, map[string]any{"provider_id": entry.ProviderID, "tool_name": entry.Name, "catalog_entry_id": entry.ID}, false)
 		r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
 			ResponseID:  responseID,
 			SessionID:   exec.SessionID,
@@ -2072,8 +2212,8 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 	if err != nil {
 		auth = tool.AuthBinding{}
 	}
-	idempotencyKey := fmt.Sprintf("%s_%s_%s", exec.ID, entry.ID, hashArguments(decision.Arguments))
-	if output, ok := r.reuseToolRun(ctx, exec.ID, entry.ID, idempotencyKey); ok {
+	idempotencyKey := fmt.Sprintf("%s_%s_%s", exec.ID, toolID, hashArguments(decision.Arguments))
+	if output, ok := r.reuseToolRun(ctx, exec.ID, toolID, idempotencyKey); ok {
 		r.appendTrace(ctx, audit.Record{
 			ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
 			Kind:        "tool.run.reused",
@@ -2085,18 +2225,18 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 			CreatedAt:   time.Now().UTC(),
 		})
 		_, _ = r.sessions.CreateToolEvent(ctx, exec.SessionID, "runtime", "tool.completed", exec.ID, exec.TraceID, map[string]any{
-			"tool_id":     entry.ID,
+			"tool_id":     toolID,
 			"provider_id": entry.ProviderID,
 			"output":      output,
 			"reused":      true,
-		}, nil, false)
+		}, map[string]any{"tool_name": entry.Name, "catalog_entry_id": entry.ID}, false)
 		r.publish(exec.SessionID, exec.ID, "runtime.tool.completed", map[string]any{"tool": entry.Name, "output": output, "reused": true})
 		return output, nil
 	}
 	run := toolrun.Run{
 		ID:             fmt.Sprintf("toolrun_%d", time.Now().UnixNano()),
 		ExecutionID:    exec.ID,
-		ToolID:         entry.ID,
+		ToolID:         toolID,
 		Status:         "running",
 		IdempotencyKey: idempotencyKey,
 		InputJSON:      mustJSON(decision.Arguments),
@@ -2106,10 +2246,10 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 		return nil, err
 	}
 	_, _ = r.sessions.CreateToolEvent(ctx, exec.SessionID, "runtime", "tool.started", exec.ID, exec.TraceID, map[string]any{
-		"tool_id":     entry.ID,
+		"tool_id":     toolID,
 		"provider_id": entry.ProviderID,
 		"arguments":   cloneAnyMap(decision.Arguments),
-	}, nil, false)
+	}, map[string]any{"tool_name": entry.Name, "catalog_entry_id": entry.ID}, false)
 	toolRunStarted := time.Now().UTC()
 	r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
 		ResponseID:  responseID,
@@ -2139,13 +2279,13 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 			CreatedAt:   time.Now().UTC(),
 		})
 		_, _ = r.sessions.CreateToolEvent(ctx, exec.SessionID, "runtime", "tool.failed", exec.ID, exec.TraceID, map[string]any{
-			"tool_id":     entry.ID,
+			"tool_id":     toolID,
 			"provider_id": entry.ProviderID,
 			"error":       err.Error(),
 			"error_class": toolErrorPayload(err)["error_class"],
 			"retryable":   toolErrorPayload(err)["retryable"],
 			"status":      toolErrorPayload(err)["status"],
-		}, nil, false)
+		}, map[string]any{"tool_name": entry.Name, "catalog_entry_id": entry.ID}, false)
 		r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
 			ResponseID:  responseID,
 			SessionID:   exec.SessionID,
@@ -2176,10 +2316,10 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 		CreatedAt:   time.Now().UTC(),
 	})
 	_, _ = r.sessions.CreateToolEvent(ctx, exec.SessionID, "runtime", "tool.completed", exec.ID, exec.TraceID, map[string]any{
-		"tool_id":     entry.ID,
+		"tool_id":     toolID,
 		"provider_id": entry.ProviderID,
 		"output":      output,
-	}, nil, false)
+	}, map[string]any{"tool_name": entry.Name, "catalog_entry_id": entry.ID}, false)
 	r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
 		ResponseID:  responseID,
 		SessionID:   exec.SessionID,
@@ -2392,7 +2532,8 @@ func (r *Runner) reuseToolRun(ctx context.Context, executionID string, toolID st
 func (r *Runner) approvalStatus(ctx context.Context, exec execution.TurnExecution, entry tool.CatalogEntry, view resolvedView) (string, error) {
 	responseID := r.responseIDForExecution(ctx, exec.ID)
 	toolApprovals := view.ToolExposureStage.ToolApprovals
-	approvalMode := toolApprovals[entry.ID]
+	toolID := policyruntime.QualifiedToolID(entry)
+	approvalMode := toolApprovals[toolID]
 	if approvalMode == "" {
 		approvalMode = toolApprovals[entry.Name]
 	}
@@ -2407,7 +2548,7 @@ func (r *Runner) approvalStatus(ctx context.Context, exec execution.TurnExecutio
 		return "", err
 	}
 	for _, item := range approvals {
-		if item.ExecutionID == exec.ID && item.ToolID == entry.ID {
+		if item.ExecutionID == exec.ID && (item.ToolID == toolID || item.ToolID == entry.ID) {
 			if item.Status == approval.StatusPending && item.ExpiresAt.Before(time.Now().UTC()) {
 				item.Status = approval.StatusExpired
 				item.UpdatedAt = time.Now().UTC()
@@ -2422,7 +2563,7 @@ func (r *Runner) approvalStatus(ctx context.Context, exec execution.TurnExecutio
 		ID:          fmt.Sprintf("approval_%d", now.UnixNano()),
 		SessionID:   exec.SessionID,
 		ExecutionID: exec.ID,
-		ToolID:      entry.ID,
+		ToolID:      toolID,
 		Status:      approval.StatusPending,
 		RequestText: "Approval required before running " + entry.Name,
 		ExpiresAt:   now.Add(15 * time.Minute),
@@ -2442,8 +2583,10 @@ func (r *Runner) approvalStatus(ctx context.Context, exec execution.TurnExecutio
 		Fields:      map[string]any{"approval_id": item.ID, "tool": entry.Name},
 		CreatedAt:   time.Now().UTC(),
 	})
-	_, _ = r.sessions.CreateApprovalRequestedEvent(ctx, exec.SessionID, "runtime", exec.ID, exec.TraceID, item.ID, entry.ID, item.RequestText, item.ExpiresAt, map[string]any{
-		"tool_name": entry.Name,
+	_, _ = r.sessions.CreateApprovalRequestedEvent(ctx, exec.SessionID, "runtime", exec.ID, exec.TraceID, item.ID, toolID, item.RequestText, item.ExpiresAt, map[string]any{
+		"tool_name":        entry.Name,
+		"provider_id":      entry.ProviderID,
+		"catalog_entry_id": entry.ID,
 	}, false)
 	r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
 		ResponseID:  responseID,
@@ -2475,12 +2618,8 @@ func findCatalogEntry(repo store.Repository, name string) (tool.CatalogEntry, bo
 	if err != nil {
 		return tool.CatalogEntry{}, false
 	}
-	for _, entry := range entries {
-		if entry.Name == name || entry.ProviderID+"."+entry.Name == name {
-			return entry, true
-		}
-	}
-	return tool.CatalogEntry{}, false
+	entry, ok, err := policyruntime.ResolveToolCatalogEntry(entries, name)
+	return entry, ok && err == nil
 }
 
 func composePrompt(view resolvedView, events []session.Event, toolOutput map[string]any) string {
@@ -2791,20 +2930,8 @@ func delegatedAgentPrompt(exec execution.TurnExecution, view resolvedView, event
 	if latest := latestText(events); latest != "" {
 		parts = append(parts, "Customer request: "+latest)
 	}
-	if history := compactConversationExcerpt(events); history != "" {
-		parts = append(parts, "Conversation excerpt:\n"+history)
-	}
 	if len(view.MatchFinalizeStage.MatchedGuidelines) > 0 {
 		parts = append(parts, "Matched guideline IDs: "+strings.Join(idsFromGuidelines(view.MatchFinalizeStage.MatchedGuidelines), ", "))
-	}
-	if view.ActiveJourney != nil {
-		parts = append(parts, "Active journey: "+view.ActiveJourney.ID)
-	}
-	if view.ActiveJourneyState != nil {
-		parts = append(parts, "Active journey state: "+view.ActiveJourneyState.ID)
-		if strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
-			parts = append(parts, "Journey instruction: "+view.ActiveJourneyState.Instruction)
-		}
 	}
 	parts = append(parts, "Parent execution ID: "+exec.ID)
 	parts = append(parts, "Solve the task and return a concise final answer for the parent agent. Do not ask the parent agent to inspect your internal process.")

@@ -45,7 +45,7 @@ func TestArchitectureRemovesLegacyViewAndHelperNames(t *testing.T) {
 
 func TestArchitectureKeepsStageBuildersOutOfRuntimeFile(t *testing.T) {
 	root := repoRoot(t)
-	runtimePath := filepath.Join(root, "internal", "runtime", "policy", "runtime.go")
+	runtimePath := filepath.Join(root, "internal", "engine", "policy", "runtime.go")
 	raw, err := os.ReadFile(runtimePath)
 	if err != nil {
 		t.Fatalf("ReadFile(%q) error = %v", runtimePath, err)

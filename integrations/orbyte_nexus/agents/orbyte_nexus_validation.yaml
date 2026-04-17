@@ -1,0 +1,11 @@
+id: agent_orbyte_nexus_validation
+name: Orbyte Nexus Validation Agent
+description: End-to-end validation agent for complaint intake, proactive ticket updates, product information, and CRM lead capture across Nexus, Parmesan, OpenCode, and Orbyte.
+status: active
+policy_bundle_path: ../policy/orbyte_nexus_validation_policy.yaml
+default_knowledge_scope:
+  kind: agent
+  id: agent_orbyte_nexus_validation
+metadata:
+  integration: orbyte_nexus
+  channel: acp

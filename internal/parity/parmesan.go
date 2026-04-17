@@ -15,7 +15,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/model"
-	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
+	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 )
 
 func RunParmesan(ctx context.Context, s Scenario) (NormalizedResult, error) {

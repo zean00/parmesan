@@ -109,6 +109,19 @@ func TestCompileFeedbackScoreOnlyDoesNotCreateLearningOutputs(t *testing.T) {
 	}
 }
 
+func TestPreferenceFindingsExtractsContactChannelFromEmailMeUpdates(t *testing.T) {
+	findings := preferenceFindings("Call me Rina. Email me updates.")
+	for _, finding := range findings {
+		if finding.Key == "contact_channel" {
+			if finding.Value != "email" {
+				t.Fatalf("contact_channel value = %q, want email", finding.Value)
+			}
+			return
+		}
+	}
+	t.Fatalf("contact_channel finding not found in %#v", findings)
+}
+
 func proposalPageTitle(payload map[string]any) string {
 	page, _ := payload["page"].(map[string]any)
 	title, _ := page["title"].(string)

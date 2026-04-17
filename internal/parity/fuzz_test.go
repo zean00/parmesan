@@ -3,7 +3,7 @@ package parity
 import (
 	"testing"
 
-	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
+	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 )
 
 func FuzzViolatesMustNotInclude(f *testing.F) {

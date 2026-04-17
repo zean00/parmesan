@@ -25,6 +25,7 @@ type Bundle struct {
 	PerceivedPerformance       PerceivedPerformancePolicy  `json:"perceived_performance,omitempty" yaml:"perceived_performance,omitempty"`
 	Semantics                  SemanticsPolicy             `json:"semantics,omitempty" yaml:"semantics,omitempty"`
 	WatchCapabilities          []WatchCapability           `json:"watch_capabilities,omitempty" yaml:"watch_capabilities,omitempty"`
+	DelegationContracts        []DelegationContract        `json:"delegation_contracts,omitempty" yaml:"delegation_contracts,omitempty"`
 	QualityProfile             QualityProfile              `json:"quality_profile,omitempty" yaml:"quality_profile,omitempty"`
 	LifecyclePolicy            LifecyclePolicy             `json:"lifecycle_policy,omitempty" yaml:"lifecycle_policy,omitempty"`
 	CapabilityIsolation        CapabilityIsolation         `json:"capability_isolation,omitempty" yaml:"capability_isolation,omitempty"`
@@ -118,6 +119,36 @@ type WatchCapability struct {
 	ReminderLeadSeconds    int      `json:"reminder_lead_seconds,omitempty" yaml:"reminder_lead_seconds,omitempty"`
 	AllowLifecycleFallback bool     `json:"allow_lifecycle_fallback,omitempty" yaml:"allow_lifecycle_fallback,omitempty"`
 	DeliveryTemplate       string   `json:"delivery_template,omitempty" yaml:"delivery_template,omitempty"`
+}
+
+type DelegationContract struct {
+	ID                 string                 `json:"id" yaml:"id"`
+	AgentIDs           []string               `json:"agent_ids,omitempty" yaml:"agent_ids,omitempty"`
+	ResourceType       string                 `json:"resource_type,omitempty" yaml:"resource_type,omitempty"`
+	ResultTextField    string                 `json:"result_text_field,omitempty" yaml:"result_text_field,omitempty"`
+	RequiredResultKeys []string               `json:"required_result_fields,omitempty" yaml:"required_result_fields,omitempty"`
+	FieldAliases       []DelegationFieldAlias `json:"field_aliases,omitempty" yaml:"field_aliases,omitempty"`
+	Verification       DelegationVerification `json:"verification,omitempty" yaml:"verification,omitempty"`
+	WatchCapabilityID  string                 `json:"watch_capability_id,omitempty" yaml:"watch_capability_id,omitempty"`
+	FailureUserMessage string                 `json:"failure_user_message,omitempty" yaml:"failure_user_message,omitempty"`
+}
+
+type DelegationFieldAlias struct {
+	Target  string   `json:"target" yaml:"target"`
+	Sources []string `json:"sources,omitempty" yaml:"sources,omitempty"`
+}
+
+type DelegationVerification struct {
+	PrimaryToolID  string                       `json:"primary_tool_id,omitempty" yaml:"primary_tool_id,omitempty"`
+	PrimaryArgs    map[string]string            `json:"primary_args,omitempty" yaml:"primary_args,omitempty"`
+	FallbackTools  []DelegationVerificationTool `json:"fallback_tools,omitempty" yaml:"fallback_tools,omitempty"`
+	ExtractPaths   []DelegationFieldAlias       `json:"extract_paths,omitempty" yaml:"extract_paths,omitempty"`
+	RequireMatchOn []string                     `json:"require_match_on,omitempty" yaml:"require_match_on,omitempty"`
+}
+
+type DelegationVerificationTool struct {
+	ToolID string            `json:"tool_id" yaml:"tool_id"`
+	Args   map[string]string `json:"args,omitempty" yaml:"args,omitempty"`
 }
 
 type QualityClaimProfile struct {

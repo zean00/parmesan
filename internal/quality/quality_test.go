@@ -9,7 +9,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	knowledgeretriever "github.com/sahal/parmesan/internal/knowledge/retriever"
-	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
+	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 )
 
 func TestGradeFailsOutOfScopeAnswer(t *testing.T) {

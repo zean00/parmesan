@@ -6,7 +6,7 @@ import (
 
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/model"
-	semantics "github.com/sahal/parmesan/internal/runtime/semantics"
+	semantics "github.com/sahal/parmesan/internal/engine/semantics"
 )
 
 func buildResponseAnalysisStageResult(ctx context.Context, router *model.Router, matchCtx MatchingContext, bundle policy.Bundle, matchedGuidelines []policy.Guideline, templates []policy.Template, existingCoverage map[string]semantics.ActionCoverageEvidence) ResponseAnalysisStageResult {

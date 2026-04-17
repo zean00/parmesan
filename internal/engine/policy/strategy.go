@@ -9,7 +9,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/tool"
 	retrieverdomain "github.com/sahal/parmesan/internal/knowledge/retriever"
 	"github.com/sahal/parmesan/internal/model"
-	semantics "github.com/sahal/parmesan/internal/runtime/semantics"
+	semantics "github.com/sahal/parmesan/internal/engine/semantics"
 )
 
 type guidelineMatchingBatch interface {

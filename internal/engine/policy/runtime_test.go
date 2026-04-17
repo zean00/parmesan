@@ -15,7 +15,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/model"
-	"github.com/sahal/parmesan/internal/runtime/semantics"
+	"github.com/sahal/parmesan/internal/engine/semantics"
 )
 
 func TestResolveBuildsARQDrivenView(t *testing.T) {
@@ -1695,8 +1695,8 @@ func TestResolveBuildsTransitiveOverlapGroupOnlyAcrossMatchedTools(t *testing.T)
 	if len(toolPlan.OverlappingGroups) != 1 {
 		t.Fatalf("overlapping groups = %#v, want 1 transitive group", toolPlan.OverlappingGroups)
 	}
-	if !sameStringSlice(toolPlan.OverlappingGroups[0], []string{"aa", "bb", "cc"}) {
-		t.Fatalf("overlap group = %#v, want [aa bb cc]", toolPlan.OverlappingGroups[0])
+	if !sameStringSlice(toolPlan.OverlappingGroups[0], []string{"local.aa", "local.bb", "local.cc"}) {
+		t.Fatalf("overlap group = %#v, want [local.aa local.bb local.cc]", toolPlan.OverlappingGroups[0])
 	}
 }
 
@@ -1802,8 +1802,8 @@ func TestResolveSkipsAlreadyStagedToolCall(t *testing.T) {
 	}
 	toolPlan := view.ToolPlanStage.Plan
 	toolDecision := view.ToolDecisionStage.Decision
-	if toolPlan.SelectedTool != "lock_card" {
-		t.Fatalf("tool plan = %#v, want selected lock_card", toolPlan)
+	if toolPlan.SelectedTool != "local.lock_card" {
+		t.Fatalf("tool plan = %#v, want selected local.lock_card", toolPlan)
 	}
 	if len(toolPlan.Candidates) != 1 || toolPlan.Candidates[0].DecisionState != "already_staged" {
 		t.Fatalf("tool candidates = %#v, want already_staged candidate state", toolPlan.Candidates)
@@ -1858,17 +1858,17 @@ func TestResolveAutoApprovesNonConsequentialNoArgTool(t *testing.T) {
 	}
 	toolPlan := view.ToolPlanStage.Plan
 	toolDecision := view.ToolDecisionStage.Decision
-	if toolPlan.SelectedTool != "ping" {
-		t.Fatalf("tool plan = %#v, want ping selected", toolPlan)
+	if toolPlan.SelectedTool != "local.ping" {
+		t.Fatalf("tool plan = %#v, want local.ping selected", toolPlan)
 	}
 	if len(toolPlan.Candidates) != 1 || !toolPlan.Candidates[0].AutoApproved || toolPlan.Candidates[0].DecisionState != "selected" {
 		t.Fatalf("tool candidates = %#v, want one auto-approved selected candidate", toolPlan.Candidates)
 	}
-	if len(toolPlan.Batches) != 1 || toolPlan.Batches[0].Kind != "single_tool" || !toolPlan.Batches[0].Simplified || toolPlan.Batches[0].SelectedTool != "ping" {
-		t.Fatalf("tool batches = %#v, want one simplified single-tool batch selecting ping", toolPlan.Batches)
+	if len(toolPlan.Batches) != 1 || toolPlan.Batches[0].Kind != "single_tool" || !toolPlan.Batches[0].Simplified || toolPlan.Batches[0].SelectedTool != "local.ping" {
+		t.Fatalf("tool batches = %#v, want one simplified single-tool batch selecting local.ping", toolPlan.Batches)
 	}
-	if toolDecision.SelectedTool != "ping" || !toolDecision.CanRun {
-		t.Fatalf("tool decision = %#v, want runnable ping selection", toolDecision)
+	if toolDecision.SelectedTool != "local.ping" || !toolDecision.CanRun {
+		t.Fatalf("tool decision = %#v, want runnable local.ping selection", toolDecision)
 	}
 }
 
@@ -1913,14 +1913,14 @@ func TestResolveRejectsUngroundedToolWhenGroundedAlternativeExists(t *testing.T)
 		states[item.ToolID] = item.DecisionState
 		rejectedBy[item.ToolID] = item.RejectedBy
 	}
-	if states["lock_card"] != "selected" {
-		t.Fatalf("tool candidate states = %#v, want lock_card selected", states)
+	if states["local.lock_card"] != "selected" {
+		t.Fatalf("tool candidate states = %#v, want local.lock_card selected", states)
 	}
-	if states["generic_lookup"] != "rejected_ungrounded" {
-		t.Fatalf("tool candidate states = %#v, want generic_lookup rejected_ungrounded", states)
+	if states["local.generic_lookup"] != "rejected_ungrounded" {
+		t.Fatalf("tool candidate states = %#v, want local.generic_lookup rejected_ungrounded", states)
 	}
-	if rejectedBy["generic_lookup"] != "lock_card" {
-		t.Fatalf("tool rejection provenance = %#v, want generic_lookup rejected by lock_card", rejectedBy)
+	if rejectedBy["local.generic_lookup"] != "local.lock_card" {
+		t.Fatalf("tool rejection provenance = %#v, want local.generic_lookup rejected by local.lock_card", rejectedBy)
 	}
 }
 
@@ -1958,8 +1958,8 @@ func TestResolveSelectsSpecializedReferenceTool(t *testing.T) {
 		t.Fatalf("Resolve() error = %v", err)
 	}
 	toolPlan := view.ToolPlanStage.Plan
-	if toolPlan.SelectedTool != "check_motorcycle_price" {
-		t.Fatalf("tool plan = %#v, want specialized motorcycle tool selected", toolPlan)
+	if toolPlan.SelectedTool != "local.check_motorcycle_price" {
+		t.Fatalf("tool plan = %#v, want specialized local.check_motorcycle_price selected", toolPlan)
 	}
 	reasons := map[string]string{}
 	states := map[string]string{}
@@ -1967,10 +1967,10 @@ func TestResolveSelectsSpecializedReferenceTool(t *testing.T) {
 		reasons[item.ToolID] = item.Rationale
 		states[item.ToolID] = item.DecisionState
 	}
-	if states["check_vehicle_price"] != "rejected_overlap" {
-		t.Fatalf("tool candidate states = %#v, want generic vehicle tool rejected_overlap", states)
+	if states["local.check_vehicle_price"] != "rejected_overlap" {
+		t.Fatalf("tool candidate states = %#v, want local.check_vehicle_price rejected_overlap", states)
 	}
-	if !strings.Contains(strings.ToLower(reasons["check_motorcycle_price"]), "specialized") {
+	if !strings.Contains(strings.ToLower(reasons["local.check_motorcycle_price"]), "specialized") {
 		t.Fatalf("tool candidate reasons = %#v, want specialized rationale for motorcycle tool", reasons)
 	}
 }
@@ -2016,7 +2016,7 @@ func TestResolveMarksConfirmationToolToRunInTandemWithScheduleTool(t *testing.T)
 	var confirmation ToolCandidate
 	var found bool
 	for _, item := range toolPlan.Candidates {
-		if item.ToolID == "send_confirmation_email" {
+		if item.ToolID == "local.send_confirmation_email" {
 			confirmation = item
 			found = true
 			break
@@ -2025,11 +2025,11 @@ func TestResolveMarksConfirmationToolToRunInTandemWithScheduleTool(t *testing.T)
 	if !found {
 		t.Fatalf("tool candidates = %#v, want send_confirmation_email candidate present", toolPlan.Candidates)
 	}
-	if !slices.Contains(toolPlan.SelectedTools, "schedule_appointment") || !slices.Contains(toolPlan.SelectedTools, "send_confirmation_email") {
-		t.Fatalf("selected tools = %#v, want both schedule_appointment and send_confirmation_email", toolPlan.SelectedTools)
+	if !slices.Contains(toolPlan.SelectedTools, "local.schedule_appointment") || !slices.Contains(toolPlan.SelectedTools, "local.send_confirmation_email") {
+		t.Fatalf("selected tools = %#v, want both local.schedule_appointment and local.send_confirmation_email", toolPlan.SelectedTools)
 	}
-	if !slices.Contains(confirmation.RunInTandemWith, "schedule_appointment") {
-		t.Fatalf("confirmation candidate tandem targets = %#v, want schedule_appointment", confirmation.RunInTandemWith)
+	if !slices.Contains(confirmation.RunInTandemWith, "local.schedule_appointment") {
+		t.Fatalf("confirmation candidate tandem targets = %#v, want local.schedule_appointment", confirmation.RunInTandemWith)
 	}
 	if !strings.Contains(strings.ToLower(confirmation.Rationale), "tandem") {
 		t.Fatalf("confirmation rationale = %q, want tandem signal", confirmation.Rationale)
@@ -3007,8 +3007,8 @@ func TestResolveWithRouterUsesStructuredToolDecision(t *testing.T) {
 		t.Fatalf("ResolveWithRouter() error = %v", err)
 	}
 	toolDecision := view.ToolDecisionStage.Decision
-	if toolDecision.SelectedTool != "get_return_status" {
-		t.Fatalf("selected tool = %q, want get_return_status", toolDecision.SelectedTool)
+	if toolDecision.SelectedTool != "commerce.get_return_status" {
+		t.Fatalf("selected tool = %q, want commerce.get_return_status", toolDecision.SelectedTool)
 	}
 	if toolDecision.Arguments["reason"] != "status" {
 		t.Fatalf("tool args = %#v, want structured tool arguments", toolDecision.Arguments)
@@ -4335,7 +4335,7 @@ func TestResolveMarksToolAlreadyStagedFromToolEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	state := view.ToolCandidateStates()["get_return_status"]
+	state := view.ToolCandidateStates()["local.get_return_status"]
 	if state != "already_staged" && state != "already_satisfied" {
 		t.Fatalf("tool candidate state = %q, want already_staged or already_satisfied", state)
 	}

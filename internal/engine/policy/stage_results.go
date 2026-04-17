@@ -3,7 +3,7 @@ package policyruntime
 import (
 	"github.com/sahal/parmesan/internal/domain/policy"
 	retrieverdomain "github.com/sahal/parmesan/internal/knowledge/retriever"
-	semantics "github.com/sahal/parmesan/internal/runtime/semantics"
+	semantics "github.com/sahal/parmesan/internal/engine/semantics"
 )
 
 type StageResult interface {

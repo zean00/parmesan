@@ -11,10 +11,10 @@ import (
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/model"
-	semantics "github.com/sahal/parmesan/internal/runtime/semantics"
+	semantics "github.com/sahal/parmesan/internal/engine/semantics"
 )
 
-func buildToolPlan(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, journeyDecision JourneyDecision, guidelines []policy.Guideline, exposedTools []string, approvals map[string]string, relationships []policy.Relationship, catalog []tool.CatalogEntry) (ToolCallPlan, ToolDecision) {
+func buildToolPlan(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, journeyDecision JourneyDecision, guidelines []policy.Guideline, exposedTools []string, approvals map[string]string, relationships []policy.Relationship, catalog []tool.CatalogEntry, argumentResolver ToolArgumentResolver) (ToolCallPlan, ToolDecision) {
 	decision := ToolDecision{
 		Arguments: map[string]any{
 			"session_id":           matchCtx.SessionID,
@@ -31,11 +31,14 @@ func buildToolPlan(ctx context.Context, router *model.Router, matchCtx MatchingC
 		decision.Arguments["journey_state"] = activeState.ID
 	}
 
-	candidates, groups := buildToolCandidates(matchCtx, activeJourney, activeState, journeyDecision, guidelines, exposedTools, relationships, catalog, decision.Arguments)
+	candidates, groups, resolutionIssues := buildToolCandidates(matchCtx, activeJourney, activeState, journeyDecision, guidelines, exposedTools, relationships, catalog, decision.Arguments, argumentResolver)
 	selectionCache := newToolSelectionEvalCache(candidates)
 	plan := ToolCallPlan{
 		Candidates:        candidates,
 		OverlappingGroups: groups,
+	}
+	if len(resolutionIssues) > 0 {
+		plan.Rationale = strings.Join(resolutionIssues, "; ")
 	}
 	plan.Batches = evaluateToolCallBatches(ctx, router, matchCtx, activeJourney, activeState, guidelines, &plan, selectionCache)
 	applyBatchRationales(candidates, plan.Batches)
@@ -49,19 +52,21 @@ func buildToolPlan(ctx context.Context, router *model.Router, matchCtx MatchingC
 	default:
 		plan.SelectedTool, plan.Rationale = selectToolCandidate(ctx, router, matchCtx, activeJourney, activeState, guidelines, batchSelected, selectionCache)
 	}
-	if router != nil && len(exposedTools) > 0 {
+	if router != nil && len(candidates) > 0 {
 		var structured struct {
 			SelectedTool     string         `json:"selected_tool"`
 			ApprovalRequired bool           `json:"approval_required"`
 			Arguments        map[string]any `json:"arguments"`
 			Rationale        string         `json:"rationale"`
 		}
-		prompt := buildToolDecisionPrompt(matchCtx, guidelines, activeJourney, activeState, exposedTools)
+		prompt := buildToolDecisionPrompt(matchCtx, guidelines, activeJourney, activeState, candidateToolIDs(candidates))
 		if generateStructuredWithRetry(ctx, router, prompt, &structured) {
 			if selected := strings.TrimSpace(structured.SelectedTool); selected != "" {
-				if candidate, ok := findCandidate(candidates, selected); ok && candidateRunnable(candidate) {
-					if candidate.Grounded || !hasGroundedRunnableCandidate(candidates) {
-						plan.SelectedTool = selected
+				if selected = firstMatchingCandidateToolID(candidates, selected); selected != "" {
+					if candidate, ok := findCandidate(candidates, selected); ok && candidateRunnable(candidate) {
+						if candidate.Grounded || !hasGroundedRunnableCandidate(candidates) {
+							plan.SelectedTool = selected
+						}
 					}
 				}
 			}
@@ -132,7 +137,7 @@ func buildToolPlan(ctx context.Context, router *model.Router, matchCtx MatchingC
 	}
 	if entry, ok := findToolCatalogEntry(catalog, decision.SelectedTool); ok {
 		specs := extractToolRequirements(entry)
-		decision.Arguments = mergeArguments(decision.Arguments, inferToolArgumentsFromContext(matchCtx, specs))
+		decision.Arguments = mergeArguments(decision.Arguments, inferToolArgumentsFromContext(matchCtx, ToolIdentityForEntry(entry), specs, argumentResolver))
 		decision.MissingIssues, decision.InvalidIssues = evaluateToolArguments(specs, decision.Arguments)
 		decision.CanRun = len(decision.MissingIssues) == 0 && len(decision.InvalidIssues) == 0
 	}
@@ -179,9 +184,12 @@ func buildPlannedCalls(matchCtx MatchingContext, selectedTools []string, candida
 			continue
 		}
 		calls = append(calls, ToolPlannedCall{
-			ToolID:    toolID,
-			Arguments: mergeArguments(nil, candidate.Arguments),
-			Rationale: firstNonEmpty(candidate.SelectionRationale, candidate.PreparationRationale, candidate.Rationale),
+			ToolID:         toolID,
+			ProviderID:     candidate.ProviderID,
+			ToolName:       candidate.ToolName,
+			CatalogEntryID: candidate.CatalogEntryID,
+			Arguments:      mergeArguments(nil, candidate.Arguments),
+			Rationale:      firstNonEmpty(candidate.SelectionRationale, candidate.PreparationRationale, candidate.Rationale),
 		})
 		entry, ok := findToolCatalogEntry(catalog, toolID)
 		if !ok {
@@ -209,7 +217,7 @@ func expandAlternativeToolCalls(matchCtx MatchingContext, candidate ToolCandidat
 	base := mergeArguments(nil, candidate.Arguments)
 	for _, segment := range segments {
 		args := mergeArguments(nil, base)
-		args = mergeArguments(args, inferToolArgumentsFromText(strings.ToLower(strings.TrimSpace(segment)), specs))
+		args = mergeArguments(args, inferToolArgumentsFromText(strings.TrimSpace(segment), candidate.ToolID, specs))
 		if sameToolArguments(base, args, specs) {
 			continue
 		}
@@ -218,9 +226,12 @@ func expandAlternativeToolCalls(matchCtx MatchingContext, candidate ToolCandidat
 			continue
 		}
 		calls = append(calls, ToolPlannedCall{
-			ToolID:    candidate.ToolID,
-			Arguments: args,
-			Rationale: "additional tool call inferred from an alternative customer request segment",
+			ToolID:         candidate.ToolID,
+			ProviderID:     candidate.ProviderID,
+			ToolName:       candidate.ToolName,
+			CatalogEntryID: candidate.CatalogEntryID,
+			Arguments:      args,
+			Rationale:      "additional tool call inferred from an alternative customer request segment",
 		})
 	}
 	return calls
@@ -311,16 +322,21 @@ func preferredCandidateForDecision(candidates []ToolCandidate) (ToolCandidate, b
 	return candidates[0], true
 }
 
-func buildToolCandidates(matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, journeyDecision JourneyDecision, guidelines []policy.Guideline, exposedTools []string, relationships []policy.Relationship, catalog []tool.CatalogEntry, baseArgs map[string]any) ([]ToolCandidate, [][]string) {
+func buildToolCandidates(matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, journeyDecision JourneyDecision, guidelines []policy.Guideline, exposedTools []string, relationships []policy.Relationship, catalog []tool.CatalogEntry, baseArgs map[string]any, argumentResolver ToolArgumentResolver) ([]ToolCandidate, [][]string, []string) {
 	var candidates []ToolCandidate
+	var resolutionIssues []string
 	results, _ := processBatchesInParallel(context.Background(), exposedTools, func(_ context.Context, name string) (ToolCandidate, bool) {
-		entry, ok := findToolCatalogEntry(catalog, name)
+		entry, ok, err := ResolveToolCatalogEntry(catalog, name)
+		if err != nil {
+			return ToolCandidate{Rationale: err.Error()}, true
+		}
 		if !ok {
 			return ToolCandidate{}, true
 		}
+		identity := ToolIdentityForEntry(entry)
 		args := mergeArguments(nil, baseArgs)
 		specs := extractToolRequirements(entry)
-		args = mergeArguments(args, inferToolArgumentsFromContext(matchCtx, specs))
+		args = mergeArguments(args, inferToolArgumentsFromContext(matchCtx, identity, specs, argumentResolver))
 		missing, invalid := evaluateToolArguments(specs, args)
 		alreadySatisfied := toolCandidateAlreadySatisfied(matchCtx, entry, args, specs)
 		approvalMode := ""
@@ -346,11 +362,14 @@ func buildToolCandidates(matchCtx MatchingContext, activeJourney *policy.Journey
 			ActiveStateTool:    activeStateTool,
 			ActiveStateMCPTool: activeStateMCPTool,
 			Guidelines:         guidelines,
-			ToolName:           entry.Name,
+			ToolName:           identity.ToolName,
 			ToolDescription:    entry.Description,
 		})
 		candidate := ToolCandidate{
-			ToolID:               entry.Name,
+			ToolID:               identity.ToolID,
+			ProviderID:           identity.ProviderID,
+			ToolName:             identity.ToolName,
+			CatalogEntryID:       identity.CatalogEntryID,
 			GroupKey:             toolOverlapGroup(entry),
 			ReferenceTools:       references,
 			Consequential:        toolConsequential(entry),
@@ -400,6 +419,9 @@ func buildToolCandidates(matchCtx MatchingContext, activeJourney *policy.Journey
 	})
 	for _, candidate := range results {
 		if candidate.ToolID == "" {
+			if strings.TrimSpace(candidate.Rationale) != "" {
+				resolutionIssues = append(resolutionIssues, candidate.Rationale)
+			}
 			continue
 		}
 		candidates = append(candidates, candidate)
@@ -426,7 +448,7 @@ func buildToolCandidates(matchCtx MatchingContext, activeJourney *policy.Journey
 	sort.SliceStable(groups, func(i, j int) bool {
 		return strings.Join(groups[i], ",") < strings.Join(groups[j], ",")
 	})
-	return candidates, groups
+	return candidates, groups, dedupe(resolutionIssues)
 }
 
 func evaluateToolCallBatches(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, guidelines []policy.Guideline, plan *ToolCallPlan, selectionCache *toolSelectionEvalCache) []ToolCallBatchResult {
@@ -801,24 +823,27 @@ func firstMatchingCandidateToolID(candidates []ToolCandidate, toolRef string) st
 	if toolRef == "" {
 		return ""
 	}
-	if candidate, ok := findCandidate(candidates, toolRef); ok {
-		return candidate.ToolID
-	}
-	trimmed := strings.TrimPrefix(toolRef, "local:")
-	if candidate, ok := findCandidate(candidates, trimmed); ok {
-		return candidate.ToolID
-	}
-	if strings.Contains(toolRef, ":") {
-		parts := strings.SplitN(toolRef, ":", 2)
-		if candidate, ok := findCandidate(candidates, parts[1]); ok {
-			return candidate.ToolID
+	var matches []ToolCandidate
+	for _, candidate := range candidates {
+		switch {
+		case strings.TrimSpace(candidate.ToolID) == toolRef:
+			matches = append(matches, candidate)
+		case strings.TrimSpace(candidate.ToolName) == toolRef:
+			matches = append(matches, candidate)
+		case strings.TrimSpace(candidate.CatalogEntryID) == toolRef:
+			matches = append(matches, candidate)
+		case strings.TrimSpace(candidate.ProviderID+":"+candidate.ToolName) == toolRef:
+			matches = append(matches, candidate)
 		}
 	}
-	return toolRef
+	if len(matches) == 1 {
+		return matches[0].ToolID
+	}
+	return ""
 }
 
 func toolCandidatePreparationRationale(activeState *policy.JourneyNode, guidelines []policy.Guideline, entry tool.CatalogEntry, references []string) string {
-	if activeState != nil && strings.EqualFold(strings.TrimSpace(activeState.Tool), entry.Name) {
+	if activeState != nil && ToolRefMatchesEntry(strings.TrimSpace(activeState.Tool), entry) {
 		return "journey state explicitly requires the tool"
 	}
 	if len(references) > 0 {
@@ -872,22 +897,91 @@ func matchedSemanticTerms(text string, terms []string) []string {
 	return dedupe(matched)
 }
 
-func inferToolArgumentsFromContext(matchCtx MatchingContext, specs map[string]toolArgumentSpec) map[string]any {
+func inferToolArgumentsFromContext(matchCtx MatchingContext, identity ToolIdentity, specs map[string]toolArgumentSpec, resolver ToolArgumentResolver) map[string]any {
 	text := strings.TrimSpace(matchCtx.LatestCustomerText)
 	if text == "" {
 		text = strings.TrimSpace(matchCtx.ConversationText)
 	}
-	return inferToolArgumentsFromText(strings.ToLower(text), specs)
+	if resolver != nil {
+		if resolved := resolver.ResolveToolArguments(matchCtx, identity, toolArgumentFields(specs)); len(resolved) > 0 {
+			return mergeArguments(inferToolArgumentsFromText(text, identity.ToolName, specs), resolved)
+		}
+	}
+	return inferToolArgumentsFromText(text, identity.ToolName, specs)
 }
 
-func inferToolArgumentsFromText(lower string, specs map[string]toolArgumentSpec) map[string]any {
+func toolArgumentFields(specs map[string]toolArgumentSpec) []string {
+	if len(specs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(specs))
+	for field := range specs {
+		out = append(out, field)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func inferToolArgumentsFromText(text string, toolName string, specs map[string]toolArgumentSpec) map[string]any {
+	lower := strings.ToLower(text)
 	out := map[string]any{}
 	for field, spec := range specs {
+		if value, ok := inferArgumentFromToolContext(toolName, strings.ToLower(strings.TrimSpace(field)), text, lower); ok {
+			out[field] = value
+			continue
+		}
 		if value, ok := inferArgumentFromText(strings.ToLower(strings.TrimSpace(field)), spec, lower); ok {
 			out[field] = value
 		}
 	}
 	return out
+}
+
+func inferArgumentFromToolContext(toolName string, field string, text string, lower string) (any, bool) {
+	switch field {
+	case "party_id":
+		if value := extractBetween(text, "party id ", ")", ".", ","); value != "" {
+			return value, true
+		}
+	}
+	_ = toolName
+	_ = lower
+	return nil, false
+}
+
+func extractCustomerTarget(text string) string {
+	for _, marker := range []string{" for ", "purchasing for "} {
+		if value := extractBetween(text, marker, ".", ",", " ("); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func extractBetween(text string, marker string, endMarkers ...string) string {
+	if strings.TrimSpace(text) == "" || strings.TrimSpace(marker) == "" {
+		return ""
+	}
+	lower := strings.ToLower(text)
+	markerLower := strings.ToLower(marker)
+	idx := strings.Index(lower, markerLower)
+	if idx < 0 {
+		return ""
+	}
+	start := idx + len(markerLower)
+	remainder := text[start:]
+	cut := len(remainder)
+	remainderLower := strings.ToLower(remainder)
+	for _, end := range endMarkers {
+		end = strings.ToLower(end)
+		if end == "" {
+			continue
+		}
+		if pos := strings.Index(remainderLower, end); pos >= 0 && pos < cut {
+			cut = pos
+		}
+	}
+	return strings.TrimSpace(strings.Trim(remainder[:cut], " .,:;()"))
 }
 
 func inferArgumentFromText(field string, spec toolArgumentSpec, lower string) (any, bool) {
@@ -1114,13 +1208,7 @@ func toolCandidateInvalidatedByJourneyBacktrack(entry tool.CatalogEntry, activeS
 	if stateTool == "" {
 		return false
 	}
-	entryIDs := []string{
-		strings.TrimSpace(entry.ID),
-		strings.TrimSpace(entry.Name),
-	}
-	if strings.TrimSpace(entry.ProviderID) != "" && strings.TrimSpace(entry.Name) != "" {
-		entryIDs = append(entryIDs, strings.TrimSpace(entry.ProviderID)+":"+strings.TrimSpace(entry.Name))
-	}
+	entryIDs := []string{QualifiedToolID(entry), strings.TrimSpace(entry.ID), strings.TrimSpace(entry.Name), strings.TrimSpace(entry.ProviderID) + ":" + strings.TrimSpace(entry.Name)}
 	for _, candidateID := range entryIDs {
 		if candidateID == "" {
 			continue
@@ -1133,14 +1221,11 @@ func toolCandidateInvalidatedByJourneyBacktrack(entry tool.CatalogEntry, activeS
 }
 
 func stagedToolMatchesEntry(call StagedToolCall, entry tool.CatalogEntry) bool {
-	callID := strings.ToLower(strings.TrimSpace(call.ToolID))
-	if callID == "" {
-		return false
-	}
-	entryName := strings.ToLower(strings.TrimSpace(entry.Name))
-	entryID := strings.ToLower(strings.TrimSpace(entry.ID))
-	providerName := strings.ToLower(strings.TrimSpace(entry.ProviderID + ":" + entry.Name))
-	return callID == entryName || callID == entryID || callID == providerName
+	return ToolRefMatchesEntry(strings.ToLower(strings.TrimSpace(call.ToolID)), tool.CatalogEntry{
+		ID:         strings.ToLower(strings.TrimSpace(entry.ID)),
+		ProviderID: strings.ToLower(strings.TrimSpace(entry.ProviderID)),
+		Name:       strings.ToLower(strings.TrimSpace(entry.Name)),
+	})
 }
 
 func toolConsequential(entry tool.CatalogEntry) bool {
@@ -1176,21 +1261,21 @@ func referenceToolsForEntry(entry tool.CatalogEntry, relationships []policy.Rela
 	refs := map[string]struct{}{}
 	group := toolOverlapGroup(entry)
 	for _, item := range exposedTools {
-		if item == entry.Name {
+		if ToolRefMatchesEntry(item, entry) {
 			continue
 		}
 		if other, ok := findToolCatalogEntry(catalog, item); ok && group != "" && toolOverlapGroup(other) == group {
-			refs[other.Name] = struct{}{}
+			refs[QualifiedToolID(other)] = struct{}{}
 		}
 	}
 	for _, rel := range relationships {
 		kind := strings.ToLower(strings.TrimSpace(rel.Kind))
-		src := normalizeRelationshipToolTarget(rel.Source)
-		dst := normalizeRelationshipToolTarget(rel.Target)
+		src := resolveRelationshipToolTarget(rel.Source, catalog)
+		dst := resolveRelationshipToolTarget(rel.Target, catalog)
 		switch {
-		case (kind == "overlap" || kind == "overlaps" || kind == "reference" || kind == "references") && src == entry.Name && dst != "":
+		case (kind == "overlap" || kind == "overlaps" || kind == "reference" || kind == "references") && src == QualifiedToolID(entry) && dst != "":
 			refs[dst] = struct{}{}
-		case (kind == "overlap" || kind == "overlaps") && dst == entry.Name && src != "":
+		case (kind == "overlap" || kind == "overlaps") && dst == QualifiedToolID(entry) && src != "":
 			refs[src] = struct{}{}
 		}
 	}
@@ -1251,7 +1336,7 @@ func buildOverlappingGroups(candidates []ToolCandidate, relationships []policy.R
 		if kind != "overlap" && kind != "overlaps" {
 			continue
 		}
-		addEdge(normalizeRelationshipToolTarget(rel.Source), normalizeRelationshipToolTarget(rel.Target))
+		addEdge(firstMatchingCandidateToolID(candidates, rel.Source), firstMatchingCandidateToolID(candidates, rel.Target))
 	}
 	visited := map[string]struct{}{}
 	var groups [][]string
@@ -1283,16 +1368,12 @@ func buildOverlappingGroups(candidates []ToolCandidate, relationships []policy.R
 	return groups
 }
 
-func normalizeRelationshipToolTarget(target string) string {
-	target = strings.TrimSpace(target)
-	if target == "" {
+func resolveRelationshipToolTarget(target string, catalog []tool.CatalogEntry) string {
+	entry, ok, err := ResolveToolCatalogEntry(catalog, target)
+	if err != nil || !ok {
 		return ""
 	}
-	if strings.Contains(target, ":") {
-		parts := strings.Split(target, ":")
-		return strings.TrimSpace(parts[len(parts)-1])
-	}
-	return target
+	return QualifiedToolID(entry)
 }
 
 func decodeToolMetadata(entry tool.CatalogEntry) map[string]any {

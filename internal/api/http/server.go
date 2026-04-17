@@ -54,7 +54,7 @@ import (
 	"github.com/sahal/parmesan/internal/policyyaml"
 	"github.com/sahal/parmesan/internal/quality"
 	rolloutengine "github.com/sahal/parmesan/internal/rollout"
-	policyruntime "github.com/sahal/parmesan/internal/runtime/policy"
+	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 	"github.com/sahal/parmesan/internal/sessionsvc"
 	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
@@ -79,6 +79,7 @@ type Server struct {
 	trustedOperatorIDHeader    string
 	trustedOperatorRolesHeader string
 	toolProviderSecurity       config.ToolProviderSecurityConfig
+	argumentResolver           policyruntime.ToolArgumentResolver
 }
 
 const adminStreamID = "__admin__"
@@ -494,6 +495,11 @@ func (s *Server) WithToolProviderSecurity(cfg config.ToolProviderSecurityConfig)
 			AllowLocalDev: cfg.AllowLocalDev,
 		})
 	}
+	return s
+}
+
+func (s *Server) WithToolArgumentResolver(resolver policyruntime.ToolArgumentResolver) *Server {
+	s.argumentResolver = resolver
 	return s
 }
 
@@ -9445,6 +9451,7 @@ func (s *Server) executionQualityPayload(ctx context.Context, exec execution.Tur
 	knowledgeSnapshot, knowledgeChunks := s.qualityKnowledgeSnapshot(ctx, sess, profile, selected)
 	view, err := policyruntime.ResolveWithOptions(ctx, eventsForExecutionResolve(events, exec), selected, journeyInstances, catalog, policyruntime.ResolveOptions{
 		Router:            s.router,
+		ArgumentResolver:  s.argumentResolver,
 		KnowledgeSearcher: s.store,
 		KnowledgeSnapshot: knowledgeSnapshot,
 		KnowledgeChunks:   knowledgeChunks,

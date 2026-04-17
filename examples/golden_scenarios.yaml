@@ -757,7 +757,7 @@ scenarios:
     title: Response analysis should keep a tracked guideline live when only part of the action was already performed
     category: response_analysis
     source_refs:
-      - /home/sahal/workspace/agents/parmesan/internal/runtime/policy/runtime_test.go
+      - /home/sahal/workspace/agents/parmesan/internal/engine/policy/runtime_test.go
     transcript:
       - role: customer
         text: My order is late again.

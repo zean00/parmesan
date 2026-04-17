@@ -31,7 +31,7 @@ import (
 	maintainerworker "github.com/sahal/parmesan/internal/maintainer"
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/quality"
-	"github.com/sahal/parmesan/internal/runtime/runner"
+	"github.com/sahal/parmesan/internal/engine/runner"
 	"github.com/sahal/parmesan/internal/sessionwatch"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/store/memory"

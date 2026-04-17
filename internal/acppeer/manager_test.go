@@ -119,6 +119,140 @@ func TestManagerDelegateSkipsModelOverrideWhenPeerDoesNotAdvertiseConfigOptions(
 	}
 }
 
+func TestManagerDelegateHandlesReturnedSessionIDAndOpenCodeStyleUpdates(t *testing.T) {
+	if os.Getenv("PARMESAN_TEST_ACP_HELPER") == "1" {
+		runACPHelperProcess()
+		return
+	}
+
+	manager := NewManager(map[string]config.AgentServerConfig{
+		"OpenCode": {
+			Command: os.Args[0],
+			Args:    []string{"-test.run=TestManagerDelegateHandlesReturnedSessionIDAndOpenCodeStyleUpdates"},
+			Env: map[string]string{
+				"PARMESAN_TEST_ACP_HELPER":           "1",
+				"PARMESAN_TEST_ACP_RET_SESSION_ID":   "ses_remote_generated",
+				"PARMESAN_TEST_ACP_UPDATE_STYLE":     "opencode",
+				"PARMESAN_TEST_ACP_PROMPT_COMPLETES": "1",
+				"PARMESAN_TEST_ACP_NO_CONFIG":        "1",
+				"PARMESAN_TEST_ACP_NO_MCP_CAPS":      "1",
+			},
+			StartupTimeoutSeconds: 2,
+			RequestTimeoutSeconds: 1,
+			ACP: config.ACPAgentConfig{
+				MCPServers: []config.ACPMCPServerConfig{{Type: "sse", Name: "Docs", URL: "https://docs.example/sse"}},
+			},
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	result, err := manager.Delegate(ctx, "OpenCode", Request{
+		SessionID: "sess_delegate_test",
+		CWD:       ".",
+		Prompt:    "help with this task",
+	})
+	if err != nil {
+		t.Fatalf("Delegate() error = %v", err)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("result = %#v, want completed", result)
+	}
+	if result.SessionID != "ses_remote_generated" {
+		t.Fatalf("result session id = %q, want returned session id", result.SessionID)
+	}
+	if result.Text != "Delegated answer" {
+		t.Fatalf("result text = %q, want delegated answer", result.Text)
+	}
+}
+
+func TestManagerDelegateWaitsForStreamCompletionAfterPromptCompletion(t *testing.T) {
+	if os.Getenv("PARMESAN_TEST_ACP_HELPER") == "1" {
+		runACPHelperProcess()
+		return
+	}
+
+	manager := NewManager(map[string]config.AgentServerConfig{
+		"OpenCode": {
+			Command: os.Args[0],
+			Args:    []string{"-test.run=TestManagerDelegateWaitsForStreamCompletionAfterPromptCompletion"},
+			Env: map[string]string{
+				"PARMESAN_TEST_ACP_HELPER":           "1",
+				"PARMESAN_TEST_ACP_UPDATE_STYLE":     "opencode",
+				"PARMESAN_TEST_ACP_PROMPT_COMPLETES": "1",
+				"PARMESAN_TEST_ACP_STREAM_CHUNKS":    "1",
+				"PARMESAN_TEST_ACP_NO_CONFIG":        "1",
+				"PARMESAN_TEST_ACP_NO_MCP_CAPS":      "1",
+			},
+			StartupTimeoutSeconds: 2,
+			RequestTimeoutSeconds: 2,
+			ACP: config.ACPAgentConfig{
+				MCPServers: []config.ACPMCPServerConfig{{Type: "sse", Name: "Docs", URL: "https://docs.example/sse"}},
+			},
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	result, err := manager.Delegate(ctx, "OpenCode", Request{
+		SessionID: "sess_delegate_test",
+		CWD:       ".",
+		Prompt:    "help with this task",
+	})
+	if err != nil {
+		t.Fatalf("Delegate() error = %v", err)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("result = %#v, want completed", result)
+	}
+	if result.Text != "Delegated answercontinued" {
+		t.Fatalf("result text = %q, want full streamed delegated answer", result.Text)
+	}
+}
+
+func TestManagerDelegatePreservesHTTPMCPTransport(t *testing.T) {
+	if os.Getenv("PARMESAN_TEST_ACP_HELPER") == "1" {
+		runACPHelperProcess()
+		return
+	}
+
+	manager := NewManager(map[string]config.AgentServerConfig{
+		"OpenCode": {
+			Command: os.Args[0],
+			Args:    []string{"-test.run=TestManagerDelegatePreservesHTTPMCPTransport"},
+			Env: map[string]string{
+				"PARMESAN_TEST_ACP_HELPER":         "1",
+				"PARMESAN_TEST_ACP_VALIDATE_HTTP":  "1",
+				"PARMESAN_TEST_ACP_NO_CONFIG":      "1",
+				"PARMESAN_TEST_ACP_NO_MCP_CAPS":    "1",
+			},
+			StartupTimeoutSeconds: 2,
+			RequestTimeoutSeconds: 2,
+			ACP: config.ACPAgentConfig{
+				MCPServers: []config.ACPMCPServerConfig{
+					{
+						Type:    "http",
+						Name:    "HTTP Docs",
+						URL:     "https://docs.example/http",
+						Headers: map[string]string{"Authorization": "Bearer http-secret"},
+					},
+				},
+			},
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	result, err := manager.Delegate(ctx, "OpenCode", Request{
+		SessionID: "sess_delegate_test",
+		CWD:       ".",
+		Prompt:    "help with this task",
+	})
+	if err != nil {
+		t.Fatalf("Delegate() error = %v", err)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("result = %#v, want completed", result)
+	}
+}
+
 func runACPHelperProcess() {
 	scanner := bufio.NewScanner(os.Stdin)
 	writer := bufio.NewWriter(os.Stdout)
@@ -156,7 +290,21 @@ func runACPHelperProcess() {
 			if len(mcpServers) != expectedMCP {
 				panic("expected two MCP servers")
 			}
-			result := map[string]any{"sessionId": params["sessionId"]}
+			if os.Getenv("PARMESAN_TEST_ACP_VALIDATE_HTTP") == "1" {
+				server, _ := mcpServers[0].(map[string]any)
+				if server["type"] != "http" {
+					panic("expected http MCP server type")
+				}
+				headers, _ := server["headers"].(map[string]any)
+				if headers == nil || headers["Authorization"] != "Bearer http-secret" {
+					panic("expected object-shaped http headers")
+				}
+			}
+			sessionID := params["sessionId"]
+			if returned := os.Getenv("PARMESAN_TEST_ACP_RET_SESSION_ID"); returned != "" {
+				sessionID = returned
+			}
+			result := map[string]any{"sessionId": sessionID}
 			if os.Getenv("PARMESAN_TEST_ACP_NO_CONFIG") != "1" {
 				result["configOptions"] = []map[string]any{
 					{
@@ -202,11 +350,64 @@ func runACPHelperProcess() {
 			if text != expectedPrompt {
 				panic("unexpected delegated prompt text")
 			}
+			result := map[string]any{"accepted": true}
+			if os.Getenv("PARMESAN_TEST_ACP_PROMPT_COMPLETES") == "1" {
+				result["stopReason"] = "end_turn"
+			}
 			writeHelperJSON(writer, map[string]any{
 				"jsonrpc": "2.0",
 				"id":      int(id),
-				"result":  map[string]any{"accepted": true},
+				"result":  result,
 			})
+			if os.Getenv("PARMESAN_TEST_ACP_UPDATE_STYLE") == "opencode" {
+				text := "Delegated answer"
+				if os.Getenv("PARMESAN_TEST_ACP_STREAM_CHUNKS") == "1" {
+					text = "Delegated answer "
+				}
+				writeHelperJSON(writer, map[string]any{
+					"jsonrpc": "2.0",
+					"method":  "session/update",
+					"params": map[string]any{
+						"sessionId": sessionID,
+						"update": map[string]any{
+							"sessionUpdate": "agent_message_chunk",
+							"messageId":     "msg_remote",
+							"content": map[string]any{
+								"type": "text",
+								"text": text,
+							},
+						},
+					},
+				})
+				if os.Getenv("PARMESAN_TEST_ACP_STREAM_CHUNKS") == "1" {
+					writeHelperJSON(writer, map[string]any{
+						"jsonrpc": "2.0",
+						"method":  "session/update",
+						"params": map[string]any{
+							"sessionId": sessionID,
+							"update": map[string]any{
+								"sessionUpdate": "agent_message_chunk",
+								"messageId":     "msg_remote",
+								"content": map[string]any{
+									"type": "text",
+									"text": "continued",
+								},
+							},
+						},
+					})
+					writeHelperJSON(writer, map[string]any{
+						"jsonrpc": "2.0",
+						"method":  "session/update",
+						"params": map[string]any{
+							"sessionId": sessionID,
+							"update": map[string]any{
+								"sessionUpdate": "agent_turn_complete",
+							},
+						},
+					})
+				}
+				break
+			}
 			writeHelperJSON(writer, map[string]any{
 				"jsonrpc": "2.0",
 				"method":  "session/update",

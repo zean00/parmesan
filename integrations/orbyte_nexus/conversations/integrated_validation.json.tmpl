@@ -1,0 +1,16 @@
+{
+  "name": "orbyte_nexus_integrated_validation",
+  "complaint_prompt": "Hi, I'm handling purchasing for {{ .ComplaintCustomerName }} (party id {{ .ComplaintCustomerPartyID }}). Call me Rina. Email me updates. The {{ .ComplaintProductName }} we received arrived cracked, so please open a complaint ticket and keep me updated on the status. If you need to create a new ticket, route it to support queue {{ .ComplaintQueueCode }}.",
+  "complaint_expect_contains": [
+    "ticket",
+    "update"
+  ],
+  "proactive_update_expect_contains": [
+    "update on ticket",
+    "resolved"
+  ],
+  "product_prompt": "I'm also evaluating {{ .ProductName }} for {{ .ProductCustomerName }}. Please tell me the key product details and why it fits a compact counter setup, then have sales follow up if it looks suitable.",
+  "product_expect_contains": [
+    "{{ .ProductName }}"
+  ]
+}

@@ -1350,7 +1350,7 @@ func (c *Client) SaveMaintainerJob(ctx context.Context, item maintainer.Job) err
 		    metadata_json = EXCLUDED.metadata_json,
 		    started_at = EXCLUDED.started_at,
 		    finished_at = EXCLUDED.finished_at
-	`, item.ID, nullString(item.WorkspaceID), item.ScopeKind, item.ScopeID, nullString(item.AgentID), nullString(item.CustomerID), item.Mode, item.Trigger, item.Status, nullString(item.RequestedBy), nullString(item.SourceID), nullString(item.SessionID), nullString(item.FeedbackID), nullString(item.ResponseID), nullString(item.RunID), nullString(item.Error), metadata, item.CreatedAt, item.StartedAt, item.FinishedAt)
+	`, item.ID, item.WorkspaceID, item.ScopeKind, item.ScopeID, item.AgentID, item.CustomerID, item.Mode, item.Trigger, item.Status, item.RequestedBy, item.SourceID, item.SessionID, item.FeedbackID, item.ResponseID, item.RunID, item.Error, metadata, item.CreatedAt, item.StartedAt, item.FinishedAt)
 	if err != nil {
 		return err
 	}
@@ -1461,7 +1461,7 @@ func (c *Client) SaveMaintainerRun(ctx context.Context, item maintainer.Run) err
 		    metadata_json = EXCLUDED.metadata_json,
 		    started_at = EXCLUDED.started_at,
 		    finished_at = EXCLUDED.finished_at
-	`, item.ID, item.JobID, nullString(item.WorkspaceID), item.ScopeKind, item.ScopeID, nullString(item.AgentID), nullString(item.CustomerID), item.Mode, item.Trigger, item.Status, nullString(item.ResponseID), nullString(item.Provider), nullString(item.TraceID), inputSummary, outputSummary, metadata, item.CreatedAt, item.StartedAt, item.FinishedAt)
+	`, item.ID, item.JobID, item.WorkspaceID, item.ScopeKind, item.ScopeID, item.AgentID, item.CustomerID, item.Mode, item.Trigger, item.Status, item.ResponseID, item.Provider, item.TraceID, inputSummary, outputSummary, metadata, item.CreatedAt, item.StartedAt, item.FinishedAt)
 	if err != nil {
 		return err
 	}

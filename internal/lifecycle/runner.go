@@ -182,6 +182,19 @@ func hasSessionApprovals(ctx context.Context, repo store.Repository, sessionID s
 	return false
 }
 
+func hasActiveSessionWatches(ctx context.Context, repo store.Repository, sessionID string) bool {
+	items, err := repo.ListSessionWatches(ctx, session.WatchQuery{SessionID: sessionID})
+	if err != nil {
+		return false
+	}
+	for _, item := range items {
+		if item.Status == session.WatchStatusActive {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Runner) sessionBundle(ctx context.Context, sess session.Session) (policy.Bundle, bool) {
 	if strings.TrimSpace(sess.AgentID) == "" {
 		return defaultLifecycleBundle(), true
@@ -243,6 +256,9 @@ func (r *Runner) decideLifecycleAction(ctx context.Context, sess session.Session
 	events, err := r.repo.ListEvents(ctx, sess.ID)
 	if err != nil || len(events) == 0 {
 		return "", ""
+	}
+	if hasActiveSessionWatches(ctx, r.repo, sess.ID) {
+		return "keep_open", "active_watch_pending"
 	}
 	if sess.Status == session.StatusAwaitingCustomer && sess.FollowupCount > 0 {
 		return "close_session", "no_customer_reply_after_followup"
@@ -702,12 +718,53 @@ func renderWatchTemplate(template string, watch session.Watch, output map[string
 
 func extractWatchValue(values map[string]any, keys ...string) string {
 	for _, key := range keys {
-		value := stringify(values[key])
+		value := lookupWatchValue(values, key)
 		if strings.TrimSpace(value) != "" {
 			return value
 		}
 	}
 	return ""
+}
+
+func lookupWatchValue(values map[string]any, key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" || values == nil {
+		return ""
+	}
+	if value := lookupMapPath(values, strings.Split(key, ".")); strings.TrimSpace(value) != "" {
+		return value
+	}
+	if strings.Contains(key, ".") {
+		return ""
+	}
+	for _, path := range [][]string{
+		{"structuredContent", key},
+		{"structuredContent", "values", key},
+		{"values", key},
+	} {
+		if value := lookupMapPath(values, path); strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func lookupMapPath(values map[string]any, path []string) string {
+	if values == nil || len(path) == 0 {
+		return ""
+	}
+	current := any(values)
+	for _, key := range path {
+		node, ok := current.(map[string]any)
+		if !ok {
+			return ""
+		}
+		current, ok = node[key]
+		if !ok {
+			return ""
+		}
+	}
+	return stringify(current)
 }
 
 func shouldStopWatch(capability policy.WatchCapability, watch session.Watch, output map[string]any) bool {
@@ -808,7 +865,7 @@ func findCatalogEntryByID(ctx context.Context, repo store.Repository, toolID str
 		return tool.CatalogEntry{}, false
 	}
 	for _, item := range items {
-		if item.ID == toolID {
+		if item.ID == toolID || item.Name == toolID || item.ProviderID+"."+item.Name == toolID {
 			return item, true
 		}
 	}

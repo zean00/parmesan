@@ -9,7 +9,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/journey"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/model"
-	semantics "github.com/sahal/parmesan/internal/runtime/semantics"
+	semantics "github.com/sahal/parmesan/internal/engine/semantics"
 )
 
 func runJourneyBacktrackARQ(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, instance *journey.Instance) JourneyDecision {

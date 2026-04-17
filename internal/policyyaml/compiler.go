@@ -50,6 +50,9 @@ func ValidateBundle(bundle policy.Bundle) error {
 	if err := validateWatchCapabilities(bundle.WatchCapabilities); err != nil {
 		return err
 	}
+	if err := validateDelegationContracts(bundle.DelegationContracts, bundle.WatchCapabilities); err != nil {
+		return err
+	}
 	if err := validateQualityProfile(bundle.QualityProfile); err != nil {
 		return err
 	}
@@ -426,6 +429,79 @@ func validateWatchCapabilities(items []policy.WatchCapability) error {
 		}
 		if err := validateNonEmptyUnique("watch_capability.stop_values", item.StopValues); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func validateDelegationContracts(items []policy.DelegationContract, watches []policy.WatchCapability) error {
+	seen := map[string]struct{}{}
+	watchIDs := map[string]struct{}{}
+	for _, item := range watches {
+		if strings.TrimSpace(item.ID) != "" {
+			watchIDs[strings.TrimSpace(item.ID)] = struct{}{}
+		}
+	}
+	for _, item := range items {
+		if err := validateID("delegation_contract", item.ID, seen); err != nil {
+			return err
+		}
+		if strings.TrimSpace(item.ResourceType) == "" {
+			return fmt.Errorf("delegation_contract %q requires resource_type", item.ID)
+		}
+		if err := validateNonEmptyUnique("delegation_contract.agent_ids", item.AgentIDs); err != nil {
+			return fmt.Errorf("delegation_contract %q: %w", item.ID, err)
+		}
+		if err := validateNonEmptyUnique("delegation_contract.required_result_fields", item.RequiredResultKeys); err != nil {
+			return fmt.Errorf("delegation_contract %q: %w", item.ID, err)
+		}
+		if strings.TrimSpace(item.WatchCapabilityID) != "" {
+			if _, ok := watchIDs[strings.TrimSpace(item.WatchCapabilityID)]; !ok {
+				return fmt.Errorf("delegation_contract %q references unknown watch_capability_id %q", item.ID, item.WatchCapabilityID)
+			}
+		}
+		if err := validateDelegationFieldAliases("delegation_contract.field_aliases", item.ID, item.FieldAliases); err != nil {
+			return err
+		}
+		if err := validateDelegationVerification(item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateDelegationVerification(item policy.DelegationContract) error {
+	verification := item.Verification
+	if strings.TrimSpace(verification.PrimaryToolID) == "" && len(verification.FallbackTools) == 0 && len(verification.ExtractPaths) == 0 {
+		return nil
+	}
+	if err := validateDelegationFieldAliases("delegation_contract.verification.extract_paths", item.ID, verification.ExtractPaths); err != nil {
+		return err
+	}
+	if err := validateNonEmptyUnique("delegation_contract.verification.require_match_on", verification.RequireMatchOn); err != nil {
+		return fmt.Errorf("delegation_contract %q: %w", item.ID, err)
+	}
+	for _, tool := range verification.FallbackTools {
+		if strings.TrimSpace(tool.ToolID) == "" {
+			return fmt.Errorf("delegation_contract %q fallback_tools requires tool_id", item.ID)
+		}
+	}
+	return nil
+}
+
+func validateDelegationFieldAliases(field string, contractID string, aliases []policy.DelegationFieldAlias) error {
+	seen := map[string]struct{}{}
+	for _, item := range aliases {
+		target := strings.TrimSpace(item.Target)
+		if target == "" {
+			return fmt.Errorf("delegation_contract %q %s requires target", contractID, field)
+		}
+		if _, ok := seen[target]; ok {
+			return fmt.Errorf("delegation_contract %q %s contains duplicate target %q", contractID, field, target)
+		}
+		seen[target] = struct{}{}
+		if err := validateNonEmptyUnique(field+".sources", item.Sources); err != nil {
+			return fmt.Errorf("delegation_contract %q: %w", contractID, err)
 		}
 	}
 	return nil

@@ -223,7 +223,7 @@ propose policy change without silently mutating production behavior.
 ## Implementation References
 
 - YAML policy compiler: `internal/policyyaml/compiler.go`
-- runtime policy matcher and stages: `internal/runtime/policy/`
+- runtime policy matcher and stages: `internal/engine/policy/`
 - rollout selection: `internal/rollout/select.go`
 - control graph materialization: `internal/controlgraph/materialize.go`
 - control change handling: `internal/api/http/control_changes.go`

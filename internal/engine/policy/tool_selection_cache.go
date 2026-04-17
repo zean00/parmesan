@@ -4,7 +4,7 @@ import (
 	"strings"
 	"sync"
 
-	semantics "github.com/sahal/parmesan/internal/runtime/semantics"
+	semantics "github.com/sahal/parmesan/internal/engine/semantics"
 )
 
 type toolSelectionEvalCache struct {

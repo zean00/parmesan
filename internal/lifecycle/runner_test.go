@@ -208,3 +208,34 @@ func TestLifecycleRunnerUsesBundleLifecyclePolicy(t *testing.T) {
 		t.Fatalf("events = %#v, want lifecycle follow-up from bundle policy", events)
 	}
 }
+
+func TestRenderWatchTemplateReadsStructuredContentValues(t *testing.T) {
+	capability := policy.WatchCapability{
+		StatusKeys:       []string{"status"},
+		StopValues:       []string{"resolved"},
+		DeliveryTemplate: "I have an update on ticket {{ticket_number}}: status is now {{status}}.",
+	}
+	watch := session.Watch{
+		SubjectRef: "crm_ticket:01KPB4925RAN9PGT7TW6D4P8K9",
+		Arguments: map[string]any{
+			"ticket_number": "CRM-20260416122927.094",
+		},
+	}
+	output := map[string]any{
+		"structuredContent": map[string]any{
+			"values": map[string]any{
+				"status":        "resolved",
+				"ticket_number": "CRM-20260416122927.094",
+			},
+		},
+	}
+
+	message := formatWatchUpdateMessage(capability, watch, output)
+	want := "I have an update on ticket CRM-20260416122927.094: status is now resolved."
+	if message != want {
+		t.Fatalf("message = %q, want %q", message, want)
+	}
+	if !shouldStopWatch(capability, watch, output) {
+		t.Fatalf("watch should stop when nested structured content reports resolved status")
+	}
+}

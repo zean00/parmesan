@@ -175,7 +175,7 @@ var (
 	rePrefer         = regexp.MustCompile(`(?i)\bi prefer ([^.!\n]+)`)
 	reCallMe         = regexp.MustCompile(`(?i)\bcall me ([^.!\n]+)`)
 	reName           = regexp.MustCompile(`(?i)\bmy name is ([^.!\n]+)`)
-	reContactChannel = regexp.MustCompile(`(?i)\b(?:contact me|reach me|send(?: me)? updates?) (?:via|by|through)\s+(email|sms|phone|chat)\b`)
+	reContactChannel = regexp.MustCompile(`(?i)\b(?:(?:contact me|reach me|send(?: me)? updates?) (?:via|by|through)\s+(email|sms|phone|chat)|(?:(email|sms|phone|chat))\s+me\s+updates?)\b`)
 	reLanguage       = regexp.MustCompile(`(?i)\b(?:please )?(?:reply|respond|speak|write) in\s+([a-zA-Z]+)\b`)
 	reConcise        = regexp.MustCompile(`(?i)\b(?:be|keep it|please be)\s+(concise|brief|short)\b`)
 	reFormality      = regexp.MustCompile(`(?i)\b(?:be|please be)\s+(formal|casual)\b`)
@@ -587,10 +587,17 @@ func preferenceFindings(text string) []preferenceFinding {
 		{reInferredPrefer, func(string) string { return "inferred_preference" }, func(value string) string { return value }, true, "inferred from ambiguous language", func(value string) string { return "Confirm whether the customer prefers " + value + "." }},
 	} {
 		match := item.re.FindStringSubmatch(text)
-		if len(match) != 2 {
+		if len(match) < 2 {
 			continue
 		}
-		value := strings.TrimSpace(match[1])
+		value := ""
+		for _, candidate := range match[1:] {
+			candidate = strings.TrimSpace(candidate)
+			if candidate != "" {
+				value = candidate
+				break
+			}
+		}
 		if value == "" {
 			continue
 		}

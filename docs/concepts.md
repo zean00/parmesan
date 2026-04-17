@@ -184,7 +184,7 @@ After this page:
 - ACP session and event types: `internal/acp/types.go`
 - ACP service layer: `internal/acp/service.go`
 - session service: `internal/sessionsvc/service.go`
-- runtime policy engine: `internal/runtime/policy/runtime.go`
-- execution runner: `internal/runtime/runner/runner.go`
+- runtime policy engine: `internal/engine/policy/runtime.go`
+- execution runner: `internal/engine/runner/runner.go`
 - customer context enrichment: `internal/customercontext/enricher.go`
 - operator and ACP HTTP surfaces: `internal/api/http/server.go`

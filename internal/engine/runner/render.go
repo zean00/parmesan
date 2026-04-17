@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -42,6 +41,9 @@ func renderResponseMessages(view resolvedView, toolOutput map[string]any) []stri
 	if rendered := renderTemplateMessages(view.ResponseAnalysisStage.CandidateTemplates, toolOutput); len(rendered) > 0 {
 		return rendered
 	}
+	if len(toolOutput) > 0 {
+		return nil
+	}
 	guidelines := view.MatchFinalizeStage.MatchedGuidelines
 	if len(guidelines) > 0 {
 		parts := make([]string, 0, len(guidelines))
@@ -57,19 +59,12 @@ func renderResponseMessages(view resolvedView, toolOutput map[string]any) []stri
 	if view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
 		return []string{view.ActiveJourneyState.Instruction}
 	}
-	if len(toolOutput) > 0 {
-		raw, _ := json.Marshal(toolOutput)
-		return []string{fmt.Sprintf("I checked the tool result: %s", string(raw))}
-	}
 	return nil
 }
 
 func delegatedAgentResultText(toolOutput map[string]any) string {
 	delegated, _ := toolOutput["delegated_agent"].(map[string]any)
-	if delegated == nil {
-		return ""
-	}
-	if status := strings.TrimSpace(fmt.Sprint(delegated["status"])); status != "" && !strings.EqualFold(status, "completed") {
+	if !delegatedAgentUsable(delegated) {
 		return ""
 	}
 	return strings.TrimSpace(fmt.Sprint(delegated["result_text"]))

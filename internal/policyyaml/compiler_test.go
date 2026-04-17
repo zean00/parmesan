@@ -156,6 +156,28 @@ semantics:
   signals:
     - id: scheduling
       tokens: [schedule, appointment]
+delegation_contracts:
+  - id: reminder_ticket
+    agent_ids: [OpenCode]
+    resource_type: support_ticket
+    result_text_field: user_message
+    required_result_fields: [ticket_id, ticket_number, status]
+    field_aliases:
+      - target: resource.id
+        sources: [ticket_id]
+    verification:
+      primary_tool_id: ticket.get
+      primary_args:
+        ticket_id: "{{resource.id}}"
+      fallback_tools:
+        - tool_id: ticket.search
+          args:
+            query: "{{result.ticket_number}}"
+      extract_paths:
+        - target: resource.id
+          sources: [structuredContent.id]
+      require_match_on: [resource.id]
+    watch_capability_id: reminder_watch
 `)
 
 	bundle, err := ParseBundle(raw)
@@ -164,6 +186,9 @@ semantics:
 	}
 	if len(bundle.WatchCapabilities) != 1 || bundle.WatchCapabilities[0].ID != "reminder_watch" {
 		t.Fatalf("watch capabilities = %#v, want parsed capability", bundle.WatchCapabilities)
+	}
+	if len(bundle.DelegationContracts) != 1 || bundle.DelegationContracts[0].ID != "reminder_ticket" {
+		t.Fatalf("delegation contracts = %#v, want parsed contract", bundle.DelegationContracts)
 	}
 	if bundle.QualityProfile.ID != "support_quality" || bundle.LifecyclePolicy.ID != "support_lifecycle" {
 		t.Fatalf("quality/lifecycle = %#v / %#v, want parsed profile and lifecycle policy", bundle.QualityProfile, bundle.LifecyclePolicy)
@@ -176,6 +201,22 @@ semantics:
 	}
 	if len(bundle.Semantics.Signals) != 1 || bundle.Semantics.Signals[0].ID != "scheduling" {
 		t.Fatalf("semantics = %#v, want parsed semantics", bundle.Semantics)
+	}
+}
+
+func TestParseBundleRejectsUnknownDelegationWatchCapability(t *testing.T) {
+	raw := []byte(`
+id: bundle-1
+version: v1
+delegation_contracts:
+  - id: complaint_ticket
+    agent_ids: [OpenCode]
+    resource_type: support_ticket
+    watch_capability_id: missing_watch
+`)
+
+	if _, err := ParseBundle(raw); err == nil {
+		t.Fatal("ParseBundle() error = nil, want unknown watch capability error")
 	}
 }
 
