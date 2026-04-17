@@ -219,6 +219,25 @@ In the live Orbyte + Nexus validation, this was exercised by:
 5. observing the same execution resume and complete successfully on a later
    attempt
 
+## Retrieval Grounding During Execution
+
+Retrieved knowledge is now tracked with an explicit outcome, not just a raw
+list of retriever results.
+
+That matters during response composition:
+
+- `evidence_available` keeps the turn on the grounded-answer path
+- `guidance_available` allows transient retriever guidance to drive the answer
+  without being misread as a retrieval miss
+- `insufficient` or `no_results` allow the composer to produce an honest miss
+  instead of falling straight back to generic guideline text
+
+So retrieval-aware execution now distinguishes between:
+
+- grounded evidence
+- transient retriever guidance
+- retrieval miss or insufficient evidence
+
 This is the runtime model to expect for retryable dependency outages: durable
 state, resumable execution, and the same execution record carrying the turn to
 completion.

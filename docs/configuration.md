@@ -631,6 +631,8 @@ Global moderation alerts:
 
 ```yaml
 moderation:
+  classifier:
+    enabled: true
   alerts:
     enabled: true
     notify_on_censored: true
@@ -650,6 +652,53 @@ metadata:
 
 Use agent-level overrides only when one profile genuinely needs a different
 alert posture than the global default.
+
+### Moderation Classifier
+
+Moderation now runs as a layered pipeline:
+
+1. input normalization
+2. local category rules
+3. optional structured-model classifier
+4. final decision resolution
+
+The public moderation result is still backward compatible:
+
+- `decision` remains `allowed` or `censored`
+- `provider` reflects the decisive stage:
+  - `local` when local rules already decide the outcome
+  - `llm` when the classifier becomes the decisive stage
+
+Enable the classifier with:
+
+```yaml
+moderation:
+  classifier:
+    enabled: true
+```
+
+Environment override:
+
+- `MODERATION_LLM_ENABLED=true|false`
+
+Mode behavior stays explicit:
+
+- `off`: bypass moderation
+- `local`: normalization plus local rules only
+- `auto`: local rules first, then classifier if enabled
+- `paranoid`: same pipeline, but stricter censor behavior for categories such as
+  `self_harm`, `violence`, `illicit`, and `prompt_injection`
+
+Local rules are now organized by category instead of a single flat pattern
+list. Current built-in categories include:
+
+- `abuse`
+- `sexual`
+- `self_harm`
+- `violence`
+- `illicit`
+- `prompt_injection`
+- `jailbreak`
 
 ## Practical Setup Patterns
 

@@ -215,6 +215,47 @@ This is especially important for flows such as:
 Read [Delegation Contracts](./delegation-contracts.md) for the exact contract
 model.
 
+## Moderation Pipeline In The Engine
+
+Moderation still exposes the same public runtime shape:
+
+- `decision: allowed | censored`
+- `provider`
+- `reason`
+- `categories`
+- `jailbreak`
+
+But the implementation is now layered instead of being one flat matcher.
+
+The moderation pipeline is:
+
+1. normalize the input
+2. evaluate local category rules
+3. optionally run the structured-model classifier
+4. resolve the final decision
+
+This keeps two things true at the same time:
+
+- the public moderation contract stays stable
+- the internal implementation can grow by category and stage instead of piling
+  more ad hoc phrase checks into one function
+
+The decisive provider is still explicit:
+
+- `local` means local rules were sufficient
+- `llm` means the classifier became the decisive stage
+
+Mode behavior is still config-driven, not inferred from the model:
+
+- `off`
+- `local`
+- `auto`
+- `paranoid`
+
+`paranoid` uses the same pipeline, but with a stricter censor posture for
+unsafe categories such as self-harm, violence, illicit guidance, and prompt
+injection.
+
 ## Extraction Surfaces
 
 There are now three different kinds of extraction in the engine, and they
@@ -260,6 +301,54 @@ The distinction matters:
 - learning extraction creates durable memory/proposals
 - tool-argument extraction helps run tools
 - delegation-contract extraction helps verify delegated resources
+
+## Retrieval Outcomes And Grounding
+
+The retriever stage now emits a typed retrieval outcome instead of relying on
+raw result-count heuristics.
+
+`RetrieverStageResult` includes:
+
+- `results`
+- `transient_guidelines`
+- `knowledge_snapshot_id`
+- `outcome`
+
+The typed `outcome` carries:
+
+- `attempted`
+- `state`
+- `has_usable_evidence`
+- `grounding_required`
+
+Current retrieval states are:
+
+- `not_attempted`
+- `evidence_available`
+- `guidance_available`
+- `insufficient`
+- `no_results`
+
+Why this matters:
+
+- `evidence_available` means retrieval produced usable grounded material
+- `guidance_available` means the retriever returned transient guidance that
+  should count as successful retrieval even without citations or structured
+  data payloads
+- `insufficient` means retrieval ran but could not produce usable evidence
+- `no_results` means retrieval ran and returned nothing usable
+
+The renderer and prompt composer now consume this typed outcome instead of
+checking only whether retrieved results exist.
+
+Practical behavior:
+
+- if grounded evidence exists, the engine stays on the grounded composition
+  path
+- if only transient retriever guidance exists, the engine can still follow that
+  guidance without being forced into a grounded-miss path
+- if retrieval completed but evidence was insufficient, the engine can compose
+  an honest miss instead of silently falling back to generic guideline text
 
 ```mermaid
 flowchart LR
