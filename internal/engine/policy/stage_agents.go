@@ -8,58 +8,74 @@ import (
 	"github.com/sahal/parmesan/internal/model"
 )
 
-func resolveAgentExposure(associations []policy.GuidelineAgentAssociation, guidelines []policy.Guideline, state *policy.JourneyNode, isolation policy.CapabilityIsolation) []string {
+func resolveAgentExposure(associations []policy.GuidelineAgentAssociation, guidelines []policy.Guideline, state *policy.JourneyNode, isolation policy.CapabilityIsolation) ([]string, []ExposedAgentBinding) {
 	activeGuidelines := map[string]struct{}{}
 	for _, item := range guidelines {
 		activeGuidelines[item.ID] = struct{}{}
 	}
 	seen := map[string]struct{}{}
 	var out []string
-	add := func(agentID string) {
+	bindingSeen := map[string]struct{}{}
+	var bindings []ExposedAgentBinding
+	add := func(agentID, workflowID string) {
 		agentID = strings.TrimSpace(agentID)
+		workflowID = strings.TrimSpace(workflowID)
 		if agentID == "" || !isolation.AllowsAgent(agentID) {
 			return
 		}
 		if _, ok := seen[agentID]; ok {
+		} else {
+			seen[agentID] = struct{}{}
+			out = append(out, agentID)
+		}
+		key := agentID + "::" + workflowID
+		if _, ok := bindingSeen[key]; ok {
 			return
 		}
-		seen[agentID] = struct{}{}
-		out = append(out, agentID)
+		bindingSeen[key] = struct{}{}
+		bindings = append(bindings, ExposedAgentBinding{AgentID: agentID, WorkflowID: workflowID})
 	}
 	for _, assoc := range associations {
 		if _, ok := activeGuidelines[assoc.GuidelineID]; !ok {
 			continue
 		}
-		add(assoc.AgentID)
+		add(assoc.AgentID, assoc.WorkflowID)
 	}
 	for _, item := range guidelines {
 		for _, agentID := range item.Agents {
-			add(agentID)
+			add(agentID, "")
+		}
+		for _, binding := range item.AgentBindings {
+			add(binding.AgentID, binding.WorkflowID)
 		}
 	}
 	if state != nil {
-		add(state.Agent)
+		add(state.Agent, "")
 	}
-	return out
+	return out, bindings
 }
 
 func buildAgentStageResults(ctx context.Context, router *model.Router, matchCtx MatchingContext, state *matchingState) AgentDecisionStageResult {
 	exposed := append([]string(nil), state.agentExposureStage.ExposedAgents...)
-	selected, rationale := selectAgentCandidate(ctx, router, matchCtx, state, exposed)
+	bindings := append([]ExposedAgentBinding(nil), state.agentExposureStage.ExposedBindings...)
+	selected, workflowID, rationale := selectAgentCandidate(ctx, router, matchCtx, state, exposed, bindings)
 	decision := AgentDecision{
-		SelectedAgent: selected,
-		CanRun:        strings.TrimSpace(selected) != "",
-		Rationale:     rationale,
-		Grounded:      len(strings.TrimSpace(matchCtx.LatestCustomerText)) > 0,
+		SelectedAgent:      selected,
+		SelectedWorkflowID: workflowID,
+		CanRun:             strings.TrimSpace(selected) != "",
+		Rationale:          rationale,
+		Grounded:           len(strings.TrimSpace(matchCtx.LatestCustomerText)) > 0,
 	}
 	return AgentDecisionStageResult{
 		Decision: decision,
 		Evaluation: AgentDecisionEvaluation{
-			ExposedAgents: exposed,
-			SelectedAgent: selected,
-			FinalAgent:    selected,
-			Rationale:     rationale,
-			Grounded:      decision.Grounded,
+			ExposedAgents:      exposed,
+			ExposedBindings:    bindings,
+			SelectedAgent:      selected,
+			SelectedWorkflowID: workflowID,
+			FinalAgent:         selected,
+			Rationale:          rationale,
+			Grounded:           decision.Grounded,
 		},
 	}
 }
@@ -110,21 +126,21 @@ func buildCapabilityDecisionStageResult(ctx context.Context, router *model.Route
 	}
 }
 
-func selectAgentCandidate(ctx context.Context, router *model.Router, matchCtx MatchingContext, state *matchingState, exposed []string) (string, string) {
+func selectAgentCandidate(ctx context.Context, router *model.Router, matchCtx MatchingContext, state *matchingState, exposed []string, bindings []ExposedAgentBinding) (string, string, string) {
 	if state.activeJourneyState != nil {
 		if selected := strings.TrimSpace(state.activeJourneyState.Agent); selected != "" {
 			for _, item := range exposed {
 				if item == selected {
-					return selected, "current journey state explicitly requires an agent"
+					return selected, selectedWorkflowForAgent(selected, bindings), "current journey state explicitly requires an agent"
 				}
 			}
 		}
 	}
 	if len(exposed) == 0 {
-		return "", ""
+		return "", "", ""
 	}
 	if len(exposed) == 1 {
-		return exposed[0], "matched policy exposes one delegated agent"
+		return exposed[0], selectedWorkflowForAgent(exposed[0], bindings), "matched policy exposes one delegated agent"
 	}
 	if router != nil {
 		var structured struct {
@@ -149,12 +165,37 @@ func selectAgentCandidate(ctx context.Context, router *model.Router, matchCtx Ma
 			selected := strings.TrimSpace(structured.SelectedAgent)
 			for _, item := range exposed {
 				if item == selected {
-					return selected, strings.TrimSpace(structured.Rationale)
+					return selected, selectedWorkflowForAgent(selected, bindings), strings.TrimSpace(structured.Rationale)
 				}
 			}
 		}
 	}
-	return exposed[0], "first exposed delegated agent selected by fallback"
+	return exposed[0], selectedWorkflowForAgent(exposed[0], bindings), "first exposed delegated agent selected by fallback"
+}
+
+func selectedWorkflowForAgent(agentID string, bindings []ExposedAgentBinding) string {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return ""
+	}
+	var workflowID string
+	for _, item := range bindings {
+		if !strings.EqualFold(strings.TrimSpace(item.AgentID), agentID) {
+			continue
+		}
+		current := strings.TrimSpace(item.WorkflowID)
+		if current == "" {
+			continue
+		}
+		if workflowID == "" {
+			workflowID = current
+			continue
+		}
+		if !strings.EqualFold(workflowID, current) {
+			return "__ambiguous__"
+		}
+	}
+	return workflowID
 }
 
 func selectCapabilityKind(ctx context.Context, router *model.Router, matchCtx MatchingContext, state *matchingState, agentDecision AgentDecision, toolDecision ToolDecision) string {

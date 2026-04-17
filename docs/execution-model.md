@@ -258,6 +258,14 @@ That means the flow is:
 So delegated follow-up behavior is part of durable background execution, not a
 special synchronous ingress shortcut.
 
+The same execution path now also covers:
+
+- workflow-bound ACP delegation, where policy attaches a specific workflow brief
+  to the selected delegated agent
+- response-capability rendering, where tool-backed direct responses are turned
+  into normalized facts, example-guided model prompts, and deterministic
+  fallbacks
+
 One useful distinction from the live integration tests:
 
 - direct MCP/tool flows currently provide the clearest proof of durable

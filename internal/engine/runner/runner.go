@@ -624,23 +624,62 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			return err
 		}
 		respMessages := renderResponseMessages(view, toolOutput)
+		responseCapability, responseFacts := responseCapabilityFacts(view, toolOutput)
 		if len(respMessages) == 0 {
-			prompt := composePrompt(view, events, toolOutput)
-			r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
-				ResponseID:  responseRecord.ID,
-				SessionID:   exec.SessionID,
-				ExecutionID: exec.ID,
-				TraceID:     exec.TraceID,
-				Kind:        "message.generate",
-				Name:        generationMode,
-				Status:      "started",
-				StartedAt:   time.Now().UTC(),
-			})
-			resp, err := r.router.Generate(ctx, model.CapabilityReasoning, model.RequestWithContextOverride(ctx, model.CapabilityReasoning, model.Request{Prompt: prompt}))
-			if err != nil {
-				return err
+			mode := ""
+			if responseCapability != nil {
+				mode = strings.ToLower(strings.TrimSpace(responseCapability.Mode))
 			}
-			respMessages = parseResponseEnvelope(resp.Text)
+			if mode == "always" && len(responseFacts) > 0 {
+				respMessages, err = r.renderResponseCapability(ctx, *exec, &responseRecord, view, events, *responseCapability, responseFacts)
+				if err != nil {
+					if fallback := responseCapabilityFallback(responseCapability, responseFacts); len(fallback) > 0 {
+						respMessages = fallback
+					} else {
+						return err
+					}
+				}
+			} else {
+				prompt := composePrompt(view, events, toolOutput)
+				r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
+					ResponseID:  responseRecord.ID,
+					SessionID:   exec.SessionID,
+					ExecutionID: exec.ID,
+					TraceID:     exec.TraceID,
+					Kind:        "message.generate",
+					Name:        generationMode,
+					Status:      "started",
+					StartedAt:   time.Now().UTC(),
+				})
+				resp, err := r.router.Generate(ctx, model.CapabilityReasoning, model.RequestWithContextOverride(ctx, model.CapabilityReasoning, model.Request{Prompt: prompt}))
+				if err != nil {
+					if fallback := responseCapabilityFallback(responseCapability, responseFacts); len(fallback) > 0 {
+						respMessages = fallback
+					} else {
+						return err
+					}
+				} else {
+					respMessages = parseResponseEnvelope(resp.Text)
+					if strings.HasPrefix(strings.TrimSpace(resp.Text), "provider stub: ") {
+						if responseCapability != nil && len(responseFacts) > 0 {
+							if rendered, renderErr := r.renderResponseCapability(ctx, *exec, &responseRecord, view, events, *responseCapability, responseFacts); renderErr != nil {
+								if fallback := responseCapabilityFallback(responseCapability, responseFacts); len(fallback) > 0 {
+									respMessages = fallback
+								} else {
+									return renderErr
+								}
+							} else if len(rendered) > 0 {
+								respMessages = rendered
+							}
+						}
+						if len(respMessages) == 0 {
+							if synthesized := synthesizeToolBackedResponse(view, toolOutput); len(synthesized) > 0 {
+								respMessages = synthesized
+							}
+						}
+					}
+				}
+			}
 		}
 		respMessages = normalizeResponseMessages(respMessages)
 		respText := strings.Join(respMessages, "\n\n")
@@ -1845,6 +1884,9 @@ func (r *Runner) maybeDelegateAgent(ctx context.Context, exec execution.TurnExec
 	if serverID == "" || !decision.CanRun {
 		return nil, nil
 	}
+	if strings.EqualFold(strings.TrimSpace(decision.SelectedWorkflowID), "__ambiguous__") {
+		return r.failedDelegatedAgentOutput(ctx, exec, serverID, "ambiguous workflow binding for delegated agent")
+	}
 	if r.agentPeers == nil || !r.agentPeers.Has(serverID) {
 		return map[string]any{
 			"delegated_agent": map[string]any{
@@ -1863,18 +1905,36 @@ func (r *Runner) maybeDelegateAgent(ctx context.Context, exec execution.TurnExec
 	if err != nil {
 		return nil, err
 	}
+	workflow, hasWorkflow := delegatedAgentWorkflow(view)
+	if hasWorkflow {
+		for _, step := range workflow.Steps {
+			for _, toolID := range step.ToolIDs {
+				if _, ok := findCatalogEntry(r.repo, toolID); !ok {
+					return r.failedDelegatedAgentOutput(ctx, exec, serverID, "delegation workflow references unknown tool "+strings.TrimSpace(toolID))
+				}
+			}
+		}
+	}
+	contract, hasContract := delegatedAgentContractForServer(view, serverID)
 	childSessionID := stableID("delegate", exec.SessionID, exec.ID, serverID)
+	metadata := map[string]any{
+		"delegation_parent_session_id":   exec.SessionID,
+		"delegation_parent_execution_id": exec.ID,
+		"delegation_parent_agent_id":     sess.AgentID,
+		"delegation_server_id":           serverID,
+		"delegation_mode":                "sync",
+	}
+	if hasWorkflow {
+		metadata["delegation_workflow_id"] = workflow.ID
+	}
+	if hasContract {
+		metadata["delegation_contract_id"] = contract.ID
+	}
 	req := acppeer.Request{
 		SessionID: childSessionID,
 		CWD:       currentWorkingDirectory(),
 		Prompt:    delegatedAgentPrompt(exec, view, events),
-		Metadata: map[string]any{
-			"delegation_parent_session_id":   exec.SessionID,
-			"delegation_parent_execution_id": exec.ID,
-			"delegation_parent_agent_id":     sess.AgentID,
-			"delegation_server_id":           serverID,
-			"delegation_mode":                "sync",
-		},
+		Metadata:  metadata,
 	}
 	result, err := r.agentPeers.Delegate(ctx, serverID, req)
 	status := result.Status
@@ -1947,6 +2007,36 @@ func (r *Runner) maybeDelegateAgent(ctx context.Context, exec execution.TurnExec
 	if verificationErr != nil {
 		return map[string]any{"delegated_agent": fields}, nil
 	}
+	return map[string]any{"delegated_agent": fields}, nil
+}
+
+func (r *Runner) failedDelegatedAgentOutput(ctx context.Context, exec execution.TurnExecution, serverID string, reason string) (map[string]any, error) {
+	fields := map[string]any{
+		"server_id": serverID,
+		"status":    "failed",
+		"error":     reason,
+	}
+	_, _ = r.sessions.CreateEvent(ctx, sessionsvc.CreateEventParams{
+		SessionID:   exec.SessionID,
+		Source:      "runtime",
+		Kind:        "agent.failed",
+		Data:        fields,
+		Metadata:    map[string]any{"internal_only": true},
+		ExecutionID: exec.ID,
+		TraceID:     exec.TraceID,
+		CreatedAt:   time.Now().UTC(),
+		Async:       false,
+	})
+	r.appendTrace(ctx, audit.Record{
+		ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+		Kind:        "agent.failed",
+		SessionID:   exec.SessionID,
+		ExecutionID: exec.ID,
+		TraceID:     exec.TraceID,
+		Message:     delegatedAgentTraceMessage("agent.failed"),
+		Fields:      fields,
+		CreatedAt:   time.Now().UTC(),
+	})
 	return map[string]any{"delegated_agent": fields}, nil
 }
 
@@ -2943,11 +3033,23 @@ func suppressedIDs(items []policyruntime.SuppressedGuideline) []string {
 
 func delegatedAgentPrompt(exec execution.TurnExecution, view resolvedView, events []session.Event) string {
 	var parts []string
+	if workflow, ok := delegatedAgentWorkflow(view); ok {
+		var contract *policy.DelegationContract
+		if item, ok := delegatedAgentContractForServer(view, view.AgentDecisionStage.Decision.SelectedAgent); ok {
+			contract = &item
+		}
+		if workflowPrompt := delegatedWorkflowPrompt(workflow, contract); workflowPrompt != "" {
+			parts = append(parts, workflowPrompt)
+		}
+	}
 	if latest := latestText(events); latest != "" {
 		parts = append(parts, "Customer request: "+latest)
 	}
 	if len(view.MatchFinalizeStage.MatchedGuidelines) > 0 {
 		parts = append(parts, "Matched guideline IDs: "+strings.Join(idsFromGuidelines(view.MatchFinalizeStage.MatchedGuidelines), ", "))
+	}
+	if history := compactConversationExcerpt(events); history != "" {
+		parts = append(parts, "Recent conversation:\n"+history)
 	}
 	parts = append(parts, "Parent execution ID: "+exec.ID)
 	parts = append(parts, "Solve the task and return a concise final answer for the parent agent. Do not ask the parent agent to inspect your internal process.")
@@ -3240,6 +3342,44 @@ func parseResponseEnvelope(raw string) []string {
 		}
 	}
 	return []string{trimmed}
+}
+
+func (r *Runner) renderResponseCapability(ctx context.Context, exec execution.TurnExecution, responseRecord *responsedomain.Response, view resolvedView, events []session.Event, capability policy.ResponseCapability, facts map[string]any) ([]string, error) {
+	prompt := buildResponseCapabilityPrompt(view, events, capability, facts)
+	r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
+		ResponseID:  responseRecord.ID,
+		SessionID:   exec.SessionID,
+		ExecutionID: exec.ID,
+		TraceID:     exec.TraceID,
+		Kind:        "message.generate",
+		Name:        "response_capability:" + capability.ID,
+		Status:      "started",
+		StartedAt:   time.Now().UTC(),
+		Fields: map[string]any{
+			"response_capability_id": capability.ID,
+		},
+	})
+	resp, err := r.router.Generate(ctx, model.CapabilityReasoning, model.RequestWithContextOverride(ctx, model.CapabilityReasoning, model.Request{Prompt: prompt}))
+	if err != nil {
+		if fallback := responseCapabilityFallback(&capability, facts); len(fallback) > 0 {
+			return fallback, nil
+		}
+		return nil, err
+	}
+	if !strings.HasPrefix(strings.TrimSpace(resp.Text), "provider stub: ") {
+		messages := parseResponseEnvelope(resp.Text)
+		if len(messages) > 0 {
+			return messages, nil
+		}
+	}
+	return renderDeterministicResponseCapability(capability, facts), nil
+}
+
+func responseCapabilityFallback(capability *policy.ResponseCapability, facts map[string]any) []string {
+	if capability == nil || len(facts) == 0 {
+		return nil
+	}
+	return renderDeterministicResponseCapability(*capability, facts)
 }
 
 func normalizeResponseMessages(messages []string) []string {

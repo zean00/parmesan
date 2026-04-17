@@ -48,6 +48,8 @@ agent_servers:
       OPENAI_API_KEY: "${OPENAI_API_KEY}"
       OPENAI_BASE_URL: "${OPENAI_BASE_URL}"
       OPENROUTER_BASE_URL: "${OPENROUTER_BASE_URL}"
+      HOME: "${OPENCODE_HOME_ORBYTE_MINIMAL}"
+      XDG_CONFIG_HOME: "${OPENCODE_XDG_CONFIG_HOME_ORBYTE_MINIMAL}"
     acp:
       model: "${OPENCODE_MODEL}"
       prompt_prefix: |
@@ -83,10 +85,6 @@ agent_servers:
         Do not wrap it in markdown.
         Do not add commentary.
         Do not return JSON missing ticket_id or ticket_number unless both are empty and status is failed.
-      mcp_servers:
-        - type: http
-          name: Orbyte Minimal
-          url: "${ORBYTE_MINIMAL_MCP_URL}"
 
 mcp:
   providers:

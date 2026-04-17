@@ -377,6 +377,7 @@ func clonePreviouslyAppliedStageResult(src PreviouslyAppliedStageResult) Previou
 func cloneResponseAnalysisEvaluation(src ResponseAnalysisEvaluation) ResponseAnalysisEvaluation {
 	src.Coverage = cloneActionCoverage(src.Coverage)
 	src.AnalyzedGuidelines = append([]AnalyzedGuideline(nil), src.AnalyzedGuidelines...)
+	src.ResponseCapabilityCandidates = append([]string(nil), src.ResponseCapabilityCandidates...)
 	return src
 }
 
@@ -439,11 +440,13 @@ func cloneToolDecisionStageResult(src ToolDecisionStageResult) ToolDecisionStage
 
 func cloneAgentExposureStageResult(src AgentExposureStageResult) AgentExposureStageResult {
 	src.ExposedAgents = append([]string(nil), src.ExposedAgents...)
+	src.ExposedBindings = append([]ExposedAgentBinding(nil), src.ExposedBindings...)
 	return src
 }
 
 func cloneAgentDecisionStageResult(src AgentDecisionStageResult) AgentDecisionStageResult {
 	src.Evaluation.ExposedAgents = append([]string(nil), src.Evaluation.ExposedAgents...)
+	src.Evaluation.ExposedBindings = append([]ExposedAgentBinding(nil), src.Evaluation.ExposedBindings...)
 	return src
 }
 
@@ -543,7 +546,7 @@ func (genericStrategy) CreateResponseAnalysisBatches(_ matchingSnapshot) []respo
 	return []responseAnalysisBatch{
 		makeResponseBatch("response_analysis", "generic", promptVersion("response_analysis"), func(ctx context.Context, snapshot matchingSnapshot) (StageResult, error) {
 			templates := collectTemplates(snapshot.bundle, snapshot.activeJourney, snapshot.activeJourneyState, snapshot.context)
-			return buildResponseAnalysisStageResult(ctx, snapshot.router, snapshot.context, snapshot.bundle, snapshot.matchFinalizeStage.MatchedGuidelines, templates, snapshot.responseAnalysisStage.Evaluation.Coverage), nil
+			return buildResponseAnalysisStageResult(ctx, snapshot.router, snapshot.context, snapshot.bundle, snapshot.activeJourneyState, snapshot.matchFinalizeStage.MatchedGuidelines, templates, snapshot.responseAnalysisStage.Evaluation.Coverage), nil
 		}),
 	}
 }

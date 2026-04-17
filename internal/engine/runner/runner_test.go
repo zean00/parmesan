@@ -1058,6 +1058,34 @@ func TestComposePromptIncludesSoulGuidance(t *testing.T) {
 	}
 }
 
+func TestRenderResponseCapabilityFallsBackWhenProviderUnavailable(t *testing.T) {
+	repo := memory.New()
+	r := New(repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), "test-runner")
+	messages, err := r.renderResponseCapability(context.Background(), execution.TurnExecution{
+		ID:        "exec_response_capability",
+		SessionID: "sess_response_capability",
+		TraceID:   "trace_response_capability",
+	}, &responsedomain.Response{
+		ID:          "resp_response_capability",
+		ExecutionID: "exec_response_capability",
+	}, resolvedView{}, nil, policy.ResponseCapability{
+		ID: "product_response",
+		DeterministicFallback: policy.ResponseDeterministicFallback{
+			Messages: []policy.ResponseDeterministicMessage{
+				{Text: "{{facts.product_name}} is available.", WhenPresent: []string{"product_name"}},
+			},
+		},
+	}, map[string]any{
+		"product_name": "Espresso Double",
+	})
+	if err != nil {
+		t.Fatalf("renderResponseCapability() error = %v", err)
+	}
+	if len(messages) != 1 || messages[0] != "Espresso Double is available." {
+		t.Fatalf("messages = %#v, want deterministic fallback", messages)
+	}
+}
+
 func TestResolveViewFiltersCatalogByCapabilityIsolation(t *testing.T) {
 	repo := memory.New()
 	r := New(repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), "test-runner")
@@ -1443,6 +1471,50 @@ func TestRunnerDelegatesToExternalAgentPeer(t *testing.T) {
 	}
 	if delegated["prompt_prefix_applied"] != true || delegated["prompt_suffix_applied"] != true {
 		t.Fatalf("delegated output = %#v, want prompt flags", delegated)
+	}
+}
+
+func TestDelegatedAgentPromptIncludesWorkflowBrief(t *testing.T) {
+	prompt := delegatedAgentPrompt(execution.TurnExecution{ID: "exec_1"}, resolvedView{
+		Bundle: &policy.Bundle{
+			DelegationContracts: []policy.DelegationContract{{
+				ID:                 "complaint_ticket",
+				AgentIDs:           []string{"OpenCode"},
+				ResultTextField:    "user_message",
+				RequiredResultKeys: []string{"ticket_id", "ticket_number", "status"},
+			}},
+			DelegationWorkflows: []policy.DelegationWorkflow{{
+				ID:    "wf_complaint",
+				Title: "Complaint Intake",
+				Goal:  "Create and verify a complaint ticket.",
+				Steps: []policy.DelegationWorkflowStep{{
+					ID:          "resolve_customer",
+					Instruction: "Resolve the customer first.",
+					ToolIDs:     []string{"orbyte_full.crm.customer.summary"},
+				}},
+				Constraints:     []string{"Do not invent ids."},
+				SuccessCriteria: []string{"Return confirmed ticket fields."},
+			}},
+		},
+		AgentDecisionStage: policyruntime.AgentDecisionStageResult{
+			Decision: policyruntime.AgentDecision{
+				SelectedAgent:      "OpenCode",
+				SelectedWorkflowID: "wf_complaint",
+			},
+		},
+	}, []session.Event{{
+		Source:  "customer",
+		Content: []session.ContentPart{{Type: "text", Text: "My product arrived damaged."}},
+	}})
+	for _, want := range []string{
+		"Delegation workflow: Complaint Intake (wf_complaint)",
+		"Tools: orbyte_full.crm.customer.summary",
+		"Required output fields: ticket_id, ticket_number, status, user_message",
+		"Customer request: My product arrived damaged.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want substring %q", prompt, want)
+		}
 	}
 }
 

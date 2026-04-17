@@ -21,9 +21,11 @@ Policy bundles can define:
 - guidelines
 - journeys
 - templates
+- response capabilities
 - style / SOUL guidance
 - tool exposure
 - delegated-agent exposure
+- delegation workflows
 - delegation contracts
 - capability isolation
 
@@ -39,7 +41,9 @@ usable until policy exposes them.
 | `domain_boundary` | what the agent should stay inside or redirect away from |
 | `guidelines` | conditional behavior rules |
 | `templates` | deterministic direct replies |
+| `response_capabilities` | tool-backed fact extraction plus example-guided response rendering |
 | `journeys` | structured step-based flows |
+| `delegation_workflows` | workflow briefs attached to delegated ACP turns |
 | capability exposure | which tools, MCP servers, or delegated agents are even eligible |
 
 ## Authoring Model
@@ -117,8 +121,16 @@ Put differently:
 - direct response paths for common cases, especially strict clarifications or
   deterministic replies
 
+`response_capabilities`
+- tool-backed response rendering that extracts normalized facts from tool
+  outputs and can use examples plus deterministic fact fallback
+
 `journeys`
 - step-oriented policy flows when the conversation must move through a sequence
+
+`delegation_workflows`
+- structured execution briefs that Parmesan can attach to delegated ACP turns
+  after policy already chose the agent
 
 `delegation_contracts`
 - post-delegation verification rules that turn delegated structured output into
@@ -179,6 +191,126 @@ The policy bundle still references delegated agents by string id only. External
 ACP invocation defaults such as delegated model selection, delegated MCP
 servers, and delegated prompt prefix/suffix are configured on the corresponding
 `agent_servers.<id>` entry rather than inline in the policy bundle.
+
+## Delegation Workflows
+
+`delegation_workflows` are policy-owned execution briefs for delegated ACP
+turns.
+
+Use them when:
+
+- policy already chose the delegated agent
+- the delegated peer should not also discover which workflow to use
+- the delegated turn needs ordered tool-use guidance across one or more MCP
+  providers
+
+The important distinction is:
+
+- policy decides **whether** to delegate and **which agent** to use
+- a delegation workflow tells that selected agent **how** to execute
+- a delegation contract still tells Parmesan **what verified result must come
+  back**
+
+Typical workflow contents:
+
+- workflow id and title
+- goal
+- ordered steps
+- provider-qualified tool ids per step
+- constraints
+- success criteria
+
+Guidelines can bind an agent directly to a workflow through
+`agent_bindings`:
+
+```yaml
+guidelines:
+  - id: complaint_delegate
+    when: customer reports a damaged product complaint
+    then: delegate the complaint intake workflow
+    agent_bindings:
+      - agent_id: OpenCodeOrbyteFull
+        workflow_id: orbyte_full_complaint_ticket_intake
+```
+
+That means the delegated agent does not spend tokens choosing a workflow. The
+workflow is attached by Parmesan as execution context during delegation.
+
+## Response Capabilities
+
+`response_capabilities` are the policy-owned response layer for tool-backed
+direct replies.
+
+They are designed for cases where:
+
+- tools succeeded
+- the answer should stay grounded in tool facts
+- policy wants better authoring ergonomics than raw path-heavy templates
+- no-model or stubbed environments still need a deterministic fallback
+
+Each response capability combines three things:
+
+1. a structured fact contract
+2. sample-based response examples
+3. a deterministic fact-key fallback
+
+The fact contract maps tool output into a flat fact bag:
+
+```yaml
+response_capabilities:
+  - id: product_lookup_and_lead_response
+    mode: always
+    facts:
+      - key: product_name
+        required: true
+        sources:
+          - tool_id: orbyte_full.commercial_core.item.get
+            path: structuredContent.name
+```
+
+The sample-based response layer then gives the model:
+
+- the current customer message
+- normalized facts
+- response instructions
+- a few grounded examples
+
+The deterministic fallback is limited to declared fact keys only:
+
+```yaml
+deterministic_fallback:
+  messages:
+    - text: "{{facts.product_name}} is available."
+      when_present: [product_name]
+```
+
+This keeps core runtime generic:
+
+- the engine knows how to extract facts and render examples
+- policy owns the use-case-specific fact mapping and wording examples
+
+Guidelines and journey states can both select a response capability:
+
+```yaml
+guidelines:
+  - id: product_lookup_and_lead
+    when: customer asks for product information
+    then: retrieve the product details and follow up
+    response_capability_id: product_lookup_and_lead_response
+```
+
+Resolution precedence is:
+
+1. active journey state `response_capability_id`
+2. first distinct matched guideline `response_capability_id`
+3. none
+
+Current v1 scope:
+
+- tool-backed direct responses only
+- not delegated-agent result text
+- no advanced transforms beyond first-non-empty source resolution and
+  `when_present`
 
 ## Delegation Contracts
 

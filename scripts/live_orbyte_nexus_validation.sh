@@ -15,6 +15,11 @@ DEFAULT_STRUCTURED_PROVIDER="${DEFAULT_STRUCTURED_PROVIDER:-$DEFAULT_REASONING_P
 DEFAULT_EMBEDDING_PROVIDER="${DEFAULT_EMBEDDING_PROVIDER:-$DEFAULT_REASONING_PROVIDER}"
 OPENCODE_COMMAND="${OPENCODE_COMMAND:-opencode}"
 OPENCODE_MODEL="${OPENCODE_MODEL:-openrouter/openai/gpt-4.1-mini}"
+OPENCODE_HOME_ROOT="${OPENCODE_HOME_ROOT:-$RUN_DIR/opencode}"
+OPENCODE_HOME_ORBYTE_FULL="${OPENCODE_HOME_ORBYTE_FULL:-$OPENCODE_HOME_ROOT/orbyte-full}"
+OPENCODE_HOME_ORBYTE_MINIMAL="${OPENCODE_HOME_ORBYTE_MINIMAL:-$OPENCODE_HOME_ROOT/orbyte-minimal}"
+OPENCODE_XDG_CONFIG_HOME_ORBYTE_FULL="${OPENCODE_XDG_CONFIG_HOME_ORBYTE_FULL:-$OPENCODE_HOME_ORBYTE_FULL/.config}"
+OPENCODE_XDG_CONFIG_HOME_ORBYTE_MINIMAL="${OPENCODE_XDG_CONFIG_HOME_ORBYTE_MINIMAL:-$OPENCODE_HOME_ORBYTE_MINIMAL/.config}"
 
 ORBYTE_FULL_ADDR="${ORBYTE_FULL_ADDR:-127.0.0.1:18110}"
 ORBYTE_MINIMAL_ADDR="${ORBYTE_MINIMAL_ADDR:-127.0.0.1:18111}"
@@ -44,6 +49,8 @@ REPORT_OUT="${REPORT_OUT:-$RUN_DIR/integrated-validation-report.json}"
 PARMESAN_CONFIG="${PARMESAN_CONFIG:-$ROOT/integrations/orbyte_nexus/config/parmesan.orbyte_nexus.yaml}"
 PARMESAN_AGENTS_DIR="${PARMESAN_AGENTS_DIR:-$ROOT/integrations/orbyte_nexus/agents}"
 VALIDATION_AGENT_ID="${VALIDATION_AGENT_ID:-agent_orbyte_nexus_validation}"
+VALIDATION_SCRIPT="${VALIDATION_SCRIPT:-$ROOT/integrations/orbyte_nexus/conversations/integrated_validation.json.tmpl}"
+COMPLAINT_MCP_URL="${COMPLAINT_MCP_URL:-$ORBYTE_MINIMAL_MCP_URL}"
 
 cleanup() {
   set +e
@@ -79,6 +86,37 @@ wait_http() {
   done
   echo "$name did not become ready at $url" >&2
   return 1
+}
+
+write_opencode_config() {
+  local home_dir="$1"
+  local xdg_config_home="$2"
+  local server_name="$3"
+  local server_url="$4"
+  local config_dir="${xdg_config_home}/opencode"
+  mkdir -p "$config_dir"
+  python3 - <<'PY' "$config_dir/opencode.json" "$server_name" "$server_url"
+import json
+import os
+import sys
+
+config_path, server_name, server_url = sys.argv[1:4]
+snippet = {
+    "$schema": "https://opencode.ai/config.json",
+    "permission": {"*": "allow"},
+    "mcp": {
+        server_name: {
+            "type": "remote",
+            "url": server_url,
+            "enabled": True,
+            "timeout": 120000,
+        }
+    },
+}
+with open(config_path, "w", encoding="utf-8") as fh:
+    json.dump(snippet, fh, indent=2)
+    fh.write("\n")
+PY
 }
 
 start_bg() {
@@ -215,6 +253,8 @@ orbyte_login "$ORBYTE_FULL_BASE_URL" "$FULL_COOKIE" "$FULL_CSRF"
 orbyte_login "$ORBYTE_MINIMAL_BASE_URL" "$MIN_COOKIE" "$MIN_CSRF"
 orbyte_set_mcp_mode "$ORBYTE_FULL_BASE_URL" "full" "$FULL_COOKIE" "$FULL_CSRF"
 orbyte_set_mcp_mode "$ORBYTE_MINIMAL_BASE_URL" "minimal" "$MIN_COOKIE" "$MIN_CSRF"
+write_opencode_config "$OPENCODE_HOME_ORBYTE_FULL" "$OPENCODE_XDG_CONFIG_HOME_ORBYTE_FULL" "orbyte-full" "$ORBYTE_FULL_MCP_URL"
+write_opencode_config "$OPENCODE_HOME_ORBYTE_MINIMAL" "$OPENCODE_XDG_CONFIG_HOME_ORBYTE_MINIMAL" "orbyte-minimal" "$ORBYTE_MINIMAL_MCP_URL"
 (
   cd "$ORBYTE_ROOT"
   DATABASE_URL="$ORBYTE_FULL_DATABASE_URL" CRM_SEED=1 rtk go test -count=1 -run TestSeedCRMSyntheticScenario -v ./internal/platform/app
@@ -245,6 +285,10 @@ echo "[4/8] Migrate and bootstrap Parmesan"
   export OPENROUTER_BASE_URL="${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
   export OPENAI_API_KEY="${OPENAI_API_KEY:-}"
   export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+  export OPENCODE_HOME_ORBYTE_FULL="$OPENCODE_HOME_ORBYTE_FULL"
+  export OPENCODE_XDG_CONFIG_HOME_ORBYTE_FULL="$OPENCODE_XDG_CONFIG_HOME_ORBYTE_FULL"
+  export OPENCODE_HOME_ORBYTE_MINIMAL="$OPENCODE_HOME_ORBYTE_MINIMAL"
+  export OPENCODE_XDG_CONFIG_HOME_ORBYTE_MINIMAL="$OPENCODE_XDG_CONFIG_HOME_ORBYTE_MINIMAL"
   rtk go run ./cmd/migrate
   rtk go run ./cmd/bootstrap
 )
@@ -269,6 +313,10 @@ start_bg "parmesan-api" "$ROOT" env \
   OPENROUTER_BASE_URL="${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}" \
   OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
   OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}" \
+  OPENCODE_HOME_ORBYTE_FULL="$OPENCODE_HOME_ORBYTE_FULL" \
+  OPENCODE_XDG_CONFIG_HOME_ORBYTE_FULL="$OPENCODE_XDG_CONFIG_HOME_ORBYTE_FULL" \
+  OPENCODE_HOME_ORBYTE_MINIMAL="$OPENCODE_HOME_ORBYTE_MINIMAL" \
+  OPENCODE_XDG_CONFIG_HOME_ORBYTE_MINIMAL="$OPENCODE_XDG_CONFIG_HOME_ORBYTE_MINIMAL" \
   rtk go run ./cmd/api
 start_bg "parmesan-worker" "$ROOT" env \
   DATABASE_URL="$PARMESAN_DATABASE_URL" \
@@ -289,6 +337,10 @@ start_bg "parmesan-worker" "$ROOT" env \
   OPENROUTER_BASE_URL="${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}" \
   OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
   OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}" \
+  OPENCODE_HOME_ORBYTE_FULL="$OPENCODE_HOME_ORBYTE_FULL" \
+  OPENCODE_XDG_CONFIG_HOME_ORBYTE_FULL="$OPENCODE_XDG_CONFIG_HOME_ORBYTE_FULL" \
+  OPENCODE_HOME_ORBYTE_MINIMAL="$OPENCODE_HOME_ORBYTE_MINIMAL" \
+  OPENCODE_XDG_CONFIG_HOME_ORBYTE_MINIMAL="$OPENCODE_XDG_CONFIG_HOME_ORBYTE_MINIMAL" \
   rtk go run ./cmd/worker
 wait_http "${PARMESAN_BASE_URL}/healthz" "Parmesan"
 
@@ -322,11 +374,12 @@ echo "[7/8] Run integrated validation"
     --parmesan-operator-key "$OPERATOR_API_KEY" \
     --orbyte-full-mcp-url "$ORBYTE_FULL_MCP_URL" \
     --orbyte-minimal-mcp-url "$ORBYTE_MINIMAL_MCP_URL" \
+    --complaint-mcp-url "$COMPLAINT_MCP_URL" \
     --agent-id "$VALIDATION_AGENT_ID" \
     --crm-manifest "$CRM_MANIFEST_FULL" \
     --crm-manifest-minimal "$CRM_MANIFEST_MINIMAL" \
     --showcase-manifest "$SHOWCASE_MANIFEST_FULL" \
-    --script "$ROOT/integrations/orbyte_nexus/conversations/integrated_validation.json.tmpl" \
+    --script "$VALIDATION_SCRIPT" \
     --report-out "$REPORT_OUT"
 )
 

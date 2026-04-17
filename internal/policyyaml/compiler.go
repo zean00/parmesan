@@ -3,6 +3,7 @@ package policyyaml
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,7 +51,16 @@ func ValidateBundle(bundle policy.Bundle) error {
 	if err := validateWatchCapabilities(bundle.WatchCapabilities); err != nil {
 		return err
 	}
+	if err := validateDelegationWorkflows(bundle.DelegationWorkflows); err != nil {
+		return err
+	}
+	if err := validateResponseCapabilities(bundle.ResponseCapabilities); err != nil {
+		return err
+	}
 	if err := validateDelegationContracts(bundle.DelegationContracts, bundle.WatchCapabilities); err != nil {
+		return err
+	}
+	if err := validateGuidelineAgentBindings(bundle); err != nil {
 		return err
 	}
 	if err := validateQualityProfile(bundle.QualityProfile); err != nil {
@@ -88,6 +98,9 @@ func ValidateBundle(bundle policy.Bundle) error {
 		if err := validateNonEmptyUnique("guideline.agents", item.Agents); err != nil {
 			return fmt.Errorf("guideline %q: %w", item.ID, err)
 		}
+		if err := validateResponseCapabilityReference("guideline "+strconv.Quote(item.ID), item.ResponseCapabilityID, bundle.ResponseCapabilities); err != nil {
+			return err
+		}
 		if err := validateMCPRef(item.MCP); err != nil {
 			return fmt.Errorf("guideline %q: %w", item.ID, err)
 		}
@@ -116,6 +129,9 @@ func ValidateBundle(bundle policy.Bundle) error {
 					return fmt.Errorf("journey %q state %q: %w", item.ID, state.ID, err)
 				}
 			}
+			if err := validateResponseCapabilityReference("journey "+strconv.Quote(item.ID)+" state "+strconv.Quote(state.ID), state.ResponseCapabilityID, bundle.ResponseCapabilities); err != nil {
+				return err
+			}
 			if err := validateMCPRef(state.MCP); err != nil {
 				return fmt.Errorf("journey %q state %q: %w", item.ID, state.ID, err)
 			}
@@ -139,6 +155,9 @@ func ValidateBundle(bundle policy.Bundle) error {
 			}
 			if err := validateNonEmptyUnique("journey guideline.agents", guideline.Agents); err != nil {
 				return fmt.Errorf("journey %q guideline %q: %w", item.ID, guideline.ID, err)
+			}
+			if err := validateResponseCapabilityReference("journey guideline "+strconv.Quote(guideline.ID), guideline.ResponseCapabilityID, bundle.ResponseCapabilities); err != nil {
+				return err
 			}
 		}
 		for _, template := range item.Templates {
@@ -470,6 +489,159 @@ func validateDelegationContracts(items []policy.DelegationContract, watches []po
 	return nil
 }
 
+func validateDelegationWorkflows(items []policy.DelegationWorkflow) error {
+	seen := map[string]struct{}{}
+	for _, item := range items {
+		if err := validateID("delegation_workflow", item.ID, seen); err != nil {
+			return err
+		}
+		stepSeen := map[string]struct{}{}
+		for _, step := range item.Steps {
+			if err := validateID("delegation_workflow step", step.ID, stepSeen); err != nil {
+				return fmt.Errorf("delegation_workflow %q: %w", item.ID, err)
+			}
+			if strings.TrimSpace(step.Instruction) == "" {
+				return fmt.Errorf("delegation_workflow %q step %q requires instruction", item.ID, step.ID)
+			}
+			if err := validateNonEmptyUnique("delegation_workflow.step.tool_ids", step.ToolIDs); err != nil {
+				return fmt.Errorf("delegation_workflow %q step %q: %w", item.ID, step.ID, err)
+			}
+			for _, toolID := range step.ToolIDs {
+				if !strings.Contains(strings.TrimSpace(toolID), ".") {
+					return fmt.Errorf("delegation_workflow %q step %q requires provider-qualified tool_id %q", item.ID, step.ID, toolID)
+				}
+			}
+		}
+		if err := validateNonEmptyUnique("delegation_workflow.constraints", item.Constraints); err != nil {
+			return fmt.Errorf("delegation_workflow %q: %w", item.ID, err)
+		}
+		if err := validateNonEmptyUnique("delegation_workflow.success_criteria", item.SuccessCriteria); err != nil {
+			return fmt.Errorf("delegation_workflow %q: %w", item.ID, err)
+		}
+	}
+	return nil
+}
+
+func validateResponseCapabilities(items []policy.ResponseCapability) error {
+	seen := map[string]struct{}{}
+	for _, item := range items {
+		if err := validateID("response_capability", item.ID, seen); err != nil {
+			return err
+		}
+		mode := strings.TrimSpace(item.Mode)
+		switch mode {
+		case "", "always", "fallback_only":
+		default:
+			return fmt.Errorf("response_capability %q has unsupported mode %q", item.ID, item.Mode)
+		}
+		factKeys := map[string]struct{}{}
+		for _, fact := range item.Facts {
+			key := strings.TrimSpace(fact.Key)
+			if key == "" {
+				return fmt.Errorf("response_capability %q requires fact key", item.ID)
+			}
+			if _, ok := factKeys[key]; ok {
+				return fmt.Errorf("response_capability %q contains duplicate fact key %q", item.ID, key)
+			}
+			factKeys[key] = struct{}{}
+			if len(fact.Sources) == 0 {
+				return fmt.Errorf("response_capability %q fact %q requires at least one source", item.ID, key)
+			}
+			for _, source := range fact.Sources {
+				if !strings.Contains(strings.TrimSpace(source.ToolID), ".") {
+					return fmt.Errorf("response_capability %q fact %q requires provider-qualified tool_id %q", item.ID, key, source.ToolID)
+				}
+				if strings.TrimSpace(source.Path) == "" {
+					return fmt.Errorf("response_capability %q fact %q requires source path", item.ID, key)
+				}
+			}
+		}
+		if err := validateNonEmptyUnique("response_capability.instructions", item.Instructions); err != nil {
+			return fmt.Errorf("response_capability %q: %w", item.ID, err)
+		}
+		for idx, example := range item.Examples {
+			if len(example.Messages) == 0 {
+				return fmt.Errorf("response_capability %q example %d requires messages", item.ID, idx)
+			}
+			for key := range example.Facts {
+				if _, ok := factKeys[strings.TrimSpace(key)]; !ok {
+					return fmt.Errorf("response_capability %q example %d references unknown fact %q", item.ID, idx, key)
+				}
+			}
+		}
+		for idx, message := range item.DeterministicFallback.Messages {
+			if strings.TrimSpace(message.Text) == "" {
+				return fmt.Errorf("response_capability %q deterministic_fallback message %d requires text", item.ID, idx)
+			}
+			for _, key := range extractFactTemplateKeys(message.Text) {
+				if _, ok := factKeys[key]; !ok {
+					return fmt.Errorf("response_capability %q deterministic_fallback message %d references unknown fact %q", item.ID, idx, key)
+				}
+			}
+			if containsUnsupportedTemplateRef(message.Text) {
+				return fmt.Errorf("response_capability %q deterministic_fallback message %d may only reference {{facts.<key>}}", item.ID, idx)
+			}
+			for _, key := range message.WhenPresent {
+				if _, ok := factKeys[strings.TrimSpace(key)]; !ok {
+					return fmt.Errorf("response_capability %q deterministic_fallback message %d references unknown when_present fact %q", item.ID, idx, key)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateResponseCapabilityReference(owner string, capabilityID string, items []policy.ResponseCapability) error {
+	capabilityID = strings.TrimSpace(capabilityID)
+	if capabilityID == "" {
+		return nil
+	}
+	for _, item := range items {
+		if strings.TrimSpace(item.ID) == capabilityID {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s references unknown response_capability_id %q", owner, capabilityID)
+}
+
+func extractFactTemplateKeys(text string) []string {
+	var keys []string
+	for {
+		start := strings.Index(text, "{{")
+		if start < 0 {
+			break
+		}
+		end := strings.Index(text[start+2:], "}}")
+		if end < 0 {
+			break
+		}
+		token := strings.TrimSpace(text[start+2 : start+2+end])
+		if strings.HasPrefix(token, "facts.") {
+			keys = append(keys, strings.TrimSpace(strings.TrimPrefix(token, "facts.")))
+		}
+		text = text[start+2+end+2:]
+	}
+	return keys
+}
+
+func containsUnsupportedTemplateRef(text string) bool {
+	for {
+		start := strings.Index(text, "{{")
+		if start < 0 {
+			return false
+		}
+		end := strings.Index(text[start+2:], "}}")
+		if end < 0 {
+			return true
+		}
+		token := strings.TrimSpace(text[start+2 : start+2+end])
+		if !strings.HasPrefix(token, "facts.") {
+			return true
+		}
+		text = text[start+2+end+2:]
+	}
+}
+
 func validateDelegationVerification(item policy.DelegationContract) error {
 	verification := item.Verification
 	if strings.TrimSpace(verification.PrimaryToolID) == "" && len(verification.FallbackTools) == 0 && len(verification.ExtractPaths) == 0 {
@@ -502,6 +674,54 @@ func validateDelegationFieldAliases(field string, contractID string, aliases []p
 		seen[target] = struct{}{}
 		if err := validateNonEmptyUnique(field+".sources", item.Sources); err != nil {
 			return fmt.Errorf("delegation_contract %q: %w", contractID, err)
+		}
+	}
+	return nil
+}
+
+func validateGuidelineAgentBindings(bundle policy.Bundle) error {
+	workflowIDs := map[string]struct{}{}
+	for _, item := range bundle.DelegationWorkflows {
+		workflowIDs[strings.TrimSpace(item.ID)] = struct{}{}
+	}
+	validate := func(owner string, agents []string, bindings []policy.GuidelineAgentBinding) error {
+		seenAgents := map[string]struct{}{}
+		for _, agentID := range agents {
+			agentID = strings.TrimSpace(agentID)
+			if agentID == "" {
+				continue
+			}
+			seenAgents[agentID] = struct{}{}
+		}
+		for _, binding := range bindings {
+			agentID := strings.TrimSpace(binding.AgentID)
+			if agentID == "" {
+				return fmt.Errorf("%s agent_binding requires agent_id", owner)
+			}
+			if _, ok := seenAgents[agentID]; ok {
+				return fmt.Errorf("%s agent %q cannot appear in both agents and agent_bindings", owner, agentID)
+			}
+			seenAgents[agentID] = struct{}{}
+			workflowID := strings.TrimSpace(binding.WorkflowID)
+			if workflowID == "" {
+				return fmt.Errorf("%s agent_binding for %q requires workflow_id", owner, agentID)
+			}
+			if _, ok := workflowIDs[workflowID]; !ok {
+				return fmt.Errorf("%s agent_binding for %q references unknown workflow_id %q", owner, agentID, workflowID)
+			}
+		}
+		return nil
+	}
+	for _, guideline := range bundle.Guidelines {
+		if err := validate("guideline "+strconv.Quote(guideline.ID), guideline.Agents, guideline.AgentBindings); err != nil {
+			return err
+		}
+	}
+	for _, journey := range bundle.Journeys {
+		for _, guideline := range journey.Guidelines {
+			if err := validate("journey guideline "+strconv.Quote(guideline.ID), guideline.Agents, guideline.AgentBindings); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -831,13 +1051,14 @@ func compileGuidelineToolAssociations(bundle policy.Bundle) []policy.GuidelineTo
 func compileGuidelineAgentAssociations(bundle policy.Bundle) []policy.GuidelineAgentAssociation {
 	seen := map[string]struct{}{}
 	var out []policy.GuidelineAgentAssociation
-	add := func(guidelineID, agentID string) {
+	add := func(guidelineID, agentID, workflowID string) {
 		guidelineID = strings.TrimSpace(guidelineID)
 		agentID = strings.TrimSpace(agentID)
+		workflowID = strings.TrimSpace(workflowID)
 		if guidelineID == "" || agentID == "" {
 			return
 		}
-		key := guidelineID + "::" + agentID
+		key := guidelineID + "::" + agentID + "::" + workflowID
 		if _, ok := seen[key]; ok {
 			return
 		}
@@ -845,18 +1066,25 @@ func compileGuidelineAgentAssociations(bundle policy.Bundle) []policy.GuidelineA
 		out = append(out, policy.GuidelineAgentAssociation{
 			GuidelineID: guidelineID,
 			AgentID:     agentID,
+			WorkflowID:  workflowID,
 		})
 	}
 
 	for _, guideline := range bundle.Guidelines {
 		for _, agentID := range guideline.Agents {
-			add(guideline.ID, agentID)
+			add(guideline.ID, agentID, "")
+		}
+		for _, binding := range guideline.AgentBindings {
+			add(guideline.ID, binding.AgentID, binding.WorkflowID)
 		}
 	}
 	for _, flow := range bundle.Journeys {
 		for _, guideline := range flow.Guidelines {
 			for _, agentID := range guideline.Agents {
-				add(guideline.ID, agentID)
+				add(guideline.ID, agentID, "")
+			}
+			for _, binding := range guideline.AgentBindings {
+				add(guideline.ID, binding.AgentID, binding.WorkflowID)
 			}
 		}
 	}

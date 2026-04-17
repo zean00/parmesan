@@ -70,6 +70,7 @@ The runtime resolves the effective policy for the turn:
 - guidelines
 - journeys
 - templates
+- response capabilities
 - capability isolation
 - allowed tools
 - allowed delegated agents
@@ -77,6 +78,11 @@ The runtime resolves the effective policy for the turn:
 
 This stage decides the behavioral envelope for the turn before generation or
 tool use proceeds.
+
+That envelope can now also carry:
+
+- a `workflow_id` bound to a delegated ACP agent
+- a `response_capability_id` bound to a tool-backed direct response path
 
 ### 4. Retrieval
 
@@ -103,11 +109,19 @@ an explicit behavioral boundary.
 Responses may be:
 
 - strict template outputs
+- response-capability outputs
 - generated outputs
 - multiple ordered messages when the policy/template requires them
 
 Templates, tool output, and generation are all part of the same response path,
 but policy determines which one wins.
+
+For tool-backed direct responses, the current order is:
+
+1. strict or selected templates
+2. response-capability rendering when configured
+3. general model composition
+4. deterministic fallback when generation is stubbed or unavailable
 
 ### 7. Delivery And Tracing
 
@@ -189,6 +203,35 @@ Practical implication:
 - a delegated ACP peer is one possible policy-selected capability
 - it is not a hidden planner/executor layer running outside policy governance
 
+## Workflow-Bound Delegation
+
+Delegated ACP turns can now carry a policy-owned workflow binding.
+
+The runtime model is:
+
+1. policy chooses the delegated agent
+2. policy may bind that agent to a specific `workflow_id`
+3. the engine resolves that workflow from the bundle
+4. the workflow is injected as execution context into the delegated prompt and
+   delegation metadata
+5. the ACP peer executes within that workflow guidance
+
+This is deliberately different from provider-native skill discovery.
+
+The delegated peer does not need to spend tokens choosing which workflow to
+use when policy already made that decision. That reduces drift and makes
+delegated behavior more inspectable.
+
+The engine remains generic here:
+
+- it validates workflow references
+- it validates provider-qualified workflow tool ids against the live catalog
+- it attaches the rendered execution brief
+
+It does not become the tool orchestrator for the delegated turn. The ACP peer
+still executes the work, and the delegation contract still defines the hard
+verification boundary afterward.
+
 ## Delegation Contracts In The Engine
 
 Delegation and verification are now separate runtime concerns.
@@ -214,6 +257,73 @@ This is especially important for flows such as:
 
 Read [Delegation Contracts](./delegation-contracts.md) for the exact contract
 model.
+
+## Response Capabilities In The Engine
+
+`response_capabilities` are now the generic engine mechanism for grounded,
+tool-backed direct replies.
+
+They replace the older pattern where core runtime contained use-case-specific
+rendering logic.
+
+The engine now does four generic things:
+
+1. resolve the active response capability from policy
+2. extract normalized facts from tool outputs
+3. build a sample-based render prompt when a model is available
+4. fall back to deterministic fact-key rendering when generation is stubbed,
+   unavailable, or invalid
+
+That means core runtime no longer needs to know business-domain semantics such
+as:
+
+- which product fields matter
+- how to phrase a lead follow-up
+- which provider-specific tools are special
+
+Those choices now live in policy config instead of Go code.
+
+### Fact Extraction
+
+Fact extraction is intentionally simple in v1:
+
+- each fact declares one or more provider-qualified tool sources
+- each source declares a dotted path
+- the first non-empty source wins
+
+This produces one flat fact bag used by both:
+
+- sample-based rendering
+- deterministic fallback rendering
+
+### Sample-Based Rendering
+
+When a response capability is usable, the engine builds a second-stage render
+prompt from:
+
+- current customer message
+- normalized facts
+- response instructions
+- example fact bags and message sequences
+
+The model is asked to return the same envelope the runtime already understands:
+
+- plain text
+- or JSON with `{"messages":[...]}`
+
+### Deterministic Fallback
+
+If the model path is stubbed or unavailable, the engine uses
+`deterministic_fallback`.
+
+That fallback is deliberately constrained:
+
+- it may reference only `{{facts.<key>}}`
+- it may gate a line with `when_present`
+- it may not reach raw tool paths directly
+
+This keeps the deterministic path generic and policy-authored rather than
+hardcoded in core runtime.
 
 ## Moderation Pipeline In The Engine
 

@@ -208,18 +208,26 @@ type ToolDecision struct {
 }
 
 type AgentDecision struct {
-	SelectedAgent string `json:"selected_agent,omitempty"`
-	CanRun        bool   `json:"can_run"`
-	Rationale     string `json:"rationale,omitempty"`
-	Grounded      bool   `json:"grounded"`
+	SelectedAgent      string `json:"selected_agent,omitempty"`
+	SelectedWorkflowID string `json:"selected_workflow_id,omitempty"`
+	CanRun             bool   `json:"can_run"`
+	Rationale          string `json:"rationale,omitempty"`
+	Grounded           bool   `json:"grounded"`
 }
 
 type AgentDecisionEvaluation struct {
-	ExposedAgents []string `json:"exposed_agents,omitempty"`
-	SelectedAgent string   `json:"selected_agent,omitempty"`
-	FinalAgent    string   `json:"final_agent,omitempty"`
-	Rationale     string   `json:"rationale,omitempty"`
-	Grounded      bool     `json:"grounded"`
+	ExposedAgents      []string             `json:"exposed_agents,omitempty"`
+	ExposedBindings    []ExposedAgentBinding `json:"exposed_bindings,omitempty"`
+	SelectedAgent      string               `json:"selected_agent,omitempty"`
+	SelectedWorkflowID string               `json:"selected_workflow_id,omitempty"`
+	FinalAgent         string               `json:"final_agent,omitempty"`
+	Rationale          string               `json:"rationale,omitempty"`
+	Grounded           bool                 `json:"grounded"`
+}
+
+type ExposedAgentBinding struct {
+	AgentID    string `json:"agent_id,omitempty"`
+	WorkflowID string `json:"workflow_id,omitempty"`
 }
 
 type CapabilityDecision struct {
@@ -361,6 +369,9 @@ type ResponseAnalysisEvaluation struct {
 	NeedsStrictMode     bool                              `json:"needs_strict_mode,omitempty"`
 	RecommendedTemplate string                            `json:"recommended_template,omitempty"`
 	Rationale           string                            `json:"rationale,omitempty"`
+	ResponseCapabilityID string                           `json:"response_capability_id,omitempty"`
+	ResponseCapabilitySource string                       `json:"response_capability_source,omitempty"`
+	ResponseCapabilityCandidates []string                 `json:"response_capability_candidates,omitempty"`
 }
 
 type VerificationResult struct {

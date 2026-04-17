@@ -33,15 +33,12 @@ operator:
 bootstrap:
   agents_dir: "${PARMESAN_AGENTS_DIR}"
 
-knowledge:
-  root: "${KNOWLEDGE_SOURCE_ROOT}"
-
 acp:
   response_coalesce_ms: 500
   delegation_timeout_seconds: 420
 
 agent_servers:
-  OpenCodeOrbyteMinimal:
+  OpenCodeOrbyteFull:
     command: "${OPENCODE_COMMAND}"
     args: ["acp", "--pure"]
     startup_timeout_seconds: 20
@@ -51,30 +48,18 @@ agent_servers:
       OPENAI_API_KEY: "${OPENAI_API_KEY}"
       OPENAI_BASE_URL: "${OPENAI_BASE_URL}"
       OPENROUTER_BASE_URL: "${OPENROUTER_BASE_URL}"
-      HOME: "${OPENCODE_HOME_ORBYTE_MINIMAL}"
-      XDG_CONFIG_HOME: "${OPENCODE_XDG_CONFIG_HOME_ORBYTE_MINIMAL}"
+      HOME: "${OPENCODE_HOME_ORBYTE_FULL}"
+      XDG_CONFIG_HOME: "${OPENCODE_XDG_CONFIG_HOME_ORBYTE_FULL}"
     acp:
       model: "${OPENCODE_MODEL}"
       prompt_prefix: |
-        You are the delegated CRM complaint intake worker for the parent agent.
-        Use Orbyte minimal MCP only.
-        Use exact skill id crm_customer_complaint_ticket_intake.
-        Execute the shortest successful path only.
-        Required order:
-        1. crm.customer.summary
-        2. crm.ticket.search
-        3. if needed crm.ticket.create with confirm_apply=true
-        4. confirm the final ticket reference
-        Never stop after a narrative description alone.
-        Your task is incomplete until you have a real final ticket reference from MCP output.
-        Do not invent ids.
-        Do not omit fields.
-        ticket_id must be copied from a real MCP ticket record id or canonical ticket reference.
-        ticket_number must be copied from a real MCP ticket record.
-        Return only one JSON object with keys:
-        user_message, ticket_id, ticket_number, queue_code, status
+        You are a delegated workflow worker for the parent agent.
+        Follow the attached delegation workflow exactly.
+        Use only the tools referenced by the workflow unless the parent metadata explicitly allows otherwise.
+        Do not invent ids, ticket numbers, queue codes, or statuses.
+        The task is incomplete until the workflow success criteria and required output fields are satisfied.
       prompt_suffix: |
-        Return only valid JSON.
+        Return only one valid JSON object using the required output fields.
         Do not wrap it in markdown.
         Do not add commentary.
 
@@ -88,20 +73,6 @@ mcp:
       name: Orbyte Minimal MCP
       kind: mcp_remote
       base_url: "${ORBYTE_MINIMAL_MCP_URL}"
-
-moderation:
-  alerts:
-    enabled: true
-    notify_on_censored: true
-    notify_on_jailbreak: true
-    notify_categories:
-      - abuse
-      - sexual
-      - self_harm
-      - violence
-      - illicit
-      - prompt_injection
-      - jailbreak
 
 observability:
   metrics_address: "${PARMESAN_METRICS_ADDR}"

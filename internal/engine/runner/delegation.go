@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -107,6 +108,82 @@ func delegatedAgentContract(view resolvedView, delegated map[string]any) (policy
 		}
 	}
 	return policy.DelegationContract{}, false
+}
+
+func delegatedAgentContractForServer(view resolvedView, serverID string) (policy.DelegationContract, bool) {
+	serverID = strings.TrimSpace(serverID)
+	if serverID == "" || view.Bundle == nil {
+		return policy.DelegationContract{}, false
+	}
+	for _, item := range view.Bundle.DelegationContracts {
+		for _, agentID := range item.AgentIDs {
+			if strings.EqualFold(strings.TrimSpace(agentID), serverID) {
+				return item, true
+			}
+		}
+	}
+	return policy.DelegationContract{}, false
+}
+
+func delegatedAgentWorkflow(view resolvedView) (policy.DelegationWorkflow, bool) {
+	if view.Bundle == nil {
+		return policy.DelegationWorkflow{}, false
+	}
+	workflowID := strings.TrimSpace(view.AgentDecisionStage.Decision.SelectedWorkflowID)
+	if workflowID == "" || workflowID == "__ambiguous__" {
+		return policy.DelegationWorkflow{}, false
+	}
+	for _, item := range view.Bundle.DelegationWorkflows {
+		if strings.EqualFold(strings.TrimSpace(item.ID), workflowID) {
+			return item, true
+		}
+	}
+	return policy.DelegationWorkflow{}, false
+}
+
+func delegatedWorkflowPrompt(workflow policy.DelegationWorkflow, contract *policy.DelegationContract) string {
+	if strings.TrimSpace(workflow.ID) == "" {
+		return ""
+	}
+	var parts []string
+	title := strings.TrimSpace(workflow.Title)
+	if title == "" {
+		title = workflow.ID
+	}
+	parts = append(parts, "Delegation workflow: "+title+" ("+workflow.ID+")")
+	if goal := strings.TrimSpace(workflow.Goal); goal != "" {
+		parts = append(parts, "Goal: "+goal)
+	}
+	if len(workflow.Steps) > 0 {
+		lines := make([]string, 0, len(workflow.Steps))
+		for idx, step := range workflow.Steps {
+			line := fmt.Sprintf("%d. [%s] %s", idx+1, strings.TrimSpace(step.ID), strings.TrimSpace(step.Instruction))
+			if len(step.ToolIDs) > 0 {
+				line += " | Tools: " + strings.Join(step.ToolIDs, ", ")
+			}
+			lines = append(lines, line)
+		}
+		parts = append(parts, "Required execution order:\n"+strings.Join(lines, "\n"))
+	}
+	if len(workflow.Constraints) > 0 {
+		parts = append(parts, "Constraints:\n- "+strings.Join(workflow.Constraints, "\n- "))
+	}
+	if len(workflow.SuccessCriteria) > 0 {
+		parts = append(parts, "Success criteria:\n- "+strings.Join(workflow.SuccessCriteria, "\n- "))
+	}
+	if contract != nil {
+		required := append([]string(nil), contract.RequiredResultKeys...)
+		if textField := strings.TrimSpace(contract.ResultTextField); textField != "" && !slices.Contains(required, textField) {
+			required = append(required, textField)
+		}
+		if len(required) > 0 {
+			parts = append(parts, "Required output fields: "+strings.Join(required, ", "))
+		}
+		if strings.TrimSpace(contract.FailureUserMessage) != "" {
+			parts = append(parts, "If verification cannot be completed, use this failure message exactly: "+strings.TrimSpace(contract.FailureUserMessage))
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func delegatedApplyContract(contract policy.DelegationContract, fields map[string]any) {

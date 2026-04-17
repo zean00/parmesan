@@ -1,0 +1,271 @@
+id: bundle_orbyte_nexus_full_workflow_validation
+version: v1
+composition_mode: guided
+no_match: I can help with product questions, complaint intake, and follow-up updates for this validation flow. Please tell me whether you want product information or help with a complaint.
+domain_boundary:
+  mode: soft_redirect
+  allowed_topics:
+    - product information
+    - product fit
+    - tell me the key product details
+    - evaluating this product
+    - compact counter setup
+    - complaint intake
+    - issue tickets
+    - complaint ticket
+    - open a complaint ticket
+    - damaged product
+    - cracked product
+    - status updates
+    - keep me updated
+    - email me updates
+    - sales follow-up
+    - have sales follow up
+  adjacent_topics:
+    - customer contact preferences
+  adjacent_action: redirect
+  uncertainty_action: redirect
+  out_of_scope_reply: I can help with product information, complaint intake, ticket updates, and sales follow-up for this demo.
+soul:
+  identity: Orbyte Full Workflow Validation Agent
+  role: Customer-facing support and product concierge
+  brand: Parmesan
+  default_language: en
+  supported_languages:
+    - en
+  tone: calm
+  formality: professional
+  verbosity: concise
+  style_rules:
+    - Answer directly and keep the conversation practical.
+    - Use the retrieved product or CRM facts instead of guessing.
+    - When a complaint is created, confirm that the customer will receive updates.
+  avoid_rules:
+    - Do not invent ticket ids, lead ids, or product details.
+    - Do not claim that a lead or ticket was created unless the tools or delegated agent returned it.
+semantics:
+  signals:
+    - id: complaint_issue
+      phrases:
+        - my order arrived damaged
+        - the product is broken
+        - the product arrived cracked
+        - i want to file a complaint
+        - please create a complaint ticket
+    - id: update_request
+      phrases:
+        - keep me updated
+        - let me know the status
+        - email me updates
+        - tell me when there is a status update
+    - id: product_interest
+      phrases:
+        - tell me about this product
+        - i want product information
+        - i am evaluating this product
+        - have sales follow up
+        - i want someone to contact me about this product
+watch_capabilities:
+  - id: orbyte_full.crm.ticket.get
+    kind: crm_ticket_status
+    schedule_strategy: poll
+    trigger_signals:
+      - update_request
+    subject_keys:
+      - ticket_id
+    required_fields:
+      - ticket_id
+    status_keys:
+      - status
+    poll_interval_seconds: 5
+    stop_values:
+      - resolved
+      - closed
+    delivery_template: "I have an update on ticket {{ticket_number}}: status is now {{status}}."
+delegation_contracts:
+  - id: complaint_ticket
+    agent_ids:
+      - OpenCodeOrbyteFull
+    resource_type: support_ticket
+    result_text_field: user_message
+    required_result_fields:
+      - ticket_id
+      - ticket_number
+      - status
+    field_aliases:
+      - target: resource.id
+        sources: [ticket_id]
+      - target: resource.display_id
+        sources: [ticket_number]
+      - target: resource.status
+        sources: [status]
+      - target: resource.attributes.party_id
+        sources: [party_id]
+      - target: resource.attributes.party_name
+        sources: [party_name]
+      - target: resource.attributes.queue_code
+        sources: [queue_code]
+    verification:
+      primary_tool_id: orbyte_full.crm.ticket.get
+      primary_args:
+        ticket_id: "{{resource.id}}"
+      fallback_tools:
+        - tool_id: orbyte_full.crm.ticket.search
+          args:
+            query: "{{resource.display_id}}"
+            party_id: "{{resource.attributes.party_id}}"
+            queue_code: "{{resource.attributes.queue_code}}"
+            page: "1"
+            page_size: "10"
+      extract_paths:
+        - target: resource.id
+          sources: [structuredContent.id, structuredContent.values.ticket_id, record_id, record.id, id]
+        - target: resource.display_id
+          sources: [structuredContent.values.ticket_number, values.ticket_number, record.values.ticket_number, ticket_number]
+        - target: resource.status
+          sources: [structuredContent.values.status, values.status, record.values.status, status]
+        - target: resource.attributes.party_id
+          sources: [structuredContent.values.party_id, values.party_id, record.values.party_id, party_id]
+        - target: resource.attributes.party_name
+          sources: [structuredContent.values.party_name, values.party_name, record.values.party_name, party_name]
+        - target: resource.attributes.queue_code
+          sources: [structuredContent.values.queue_code, values.queue_code, record.values.queue_code, queue_code]
+      require_match_on:
+        - resource.id
+        - resource.display_id
+    watch_capability_id: orbyte_full.crm.ticket.get
+    failure_user_message: I could not confirm ticket creation yet.
+delegation_workflows:
+  - id: orbyte_full_complaint_ticket_intake
+    title: Orbyte Full Complaint Ticket Intake
+    goal: Resolve the customer, check for duplicate complaint tickets, create a complaint ticket if needed, and confirm the final ticket reference from Orbyte full MCP.
+    steps:
+      - id: resolve_customer
+        instruction: Resolve the customer context first so every later ticket step uses the correct party.
+        tool_ids:
+          - orbyte_full.crm.customer.summary
+      - id: check_duplicates
+        instruction: Search for existing relevant tickets for the same customer and complaint pattern before creating a new one.
+        tool_ids:
+          - orbyte_full.crm.ticket.search
+      - id: create_ticket_if_needed
+        instruction: If no matching open ticket already covers the complaint, create a new complaint ticket with confirm_apply=true and the requested queue.
+        tool_ids:
+          - orbyte_full.crm.ticket.create
+      - id: confirm_ticket
+        instruction: Confirm the created or reused ticket reference. Use crm.ticket.get when you have a real internal ticket id, otherwise recover it with crm.ticket.search using the returned ticket number, customer context, and queue.
+        tool_ids:
+          - orbyte_full.crm.ticket.get
+          - orbyte_full.crm.ticket.search
+    constraints:
+      - Do not invent ids, queue codes, statuses, or ticket numbers.
+      - Do not create a duplicate complaint ticket when an active ticket already covers the complaint.
+      - Do not finish until both ticket_id and ticket_number are confirmed from MCP output.
+    success_criteria:
+      - Return one JSON object with user_message, ticket_id, ticket_number, queue_code, status, and any confirmed party context fields.
+      - user_message must confirm the complaint ticket and that updates will follow.
+response_capabilities:
+  - id: product_lookup_and_lead_response
+    mode: always
+    facts:
+      - key: product_name
+        required: true
+        sources:
+          - tool_id: orbyte_full.commercial_core.item.get
+            path: structuredContent.name
+      - key: item_type
+        sources:
+          - tool_id: orbyte_full.commercial_core.item.get
+            path: structuredContent.item_type
+      - key: unit_price
+        sources:
+          - tool_id: orbyte_full.commercial_core.item.get
+            path: structuredContent.record.values.unit_price
+          - tool_id: orbyte_full.commercial_core.item.get
+            path: structuredContent.base_price
+      - key: status
+        sources:
+          - tool_id: orbyte_full.commercial_core.item.get
+            path: structuredContent.status
+      - key: inventory_tracking
+        sources:
+          - tool_id: orbyte_full.commercial_core.item.get
+            path: structuredContent.inventory_tracking_mode
+      - key: replenishment_mode
+        sources:
+          - tool_id: orbyte_full.commercial_core.item.get
+            path: structuredContent.replenishment_mode
+      - key: description
+        sources:
+          - tool_id: orbyte_full.commercial_core.item.get
+            path: structuredContent.description
+      - key: lead_number
+        sources:
+          - tool_id: orbyte_full.crm.lead.find_or_create_for_product_interest
+            path: structuredContent.lead.values.lead_number
+      - key: lead_action
+        sources:
+          - tool_id: orbyte_full.crm.lead.find_or_create_for_product_interest
+            path: structuredContent.action
+      - key: customer_name
+        sources:
+          - tool_id: orbyte_full.crm.lead.find_or_create_for_product_interest
+            path: structuredContent.lead.values.party_name
+    instructions:
+      - Answer in one or two short paragraphs.
+      - Use only the provided facts.
+      - Mention concrete product details first.
+      - Explain compact-counter suitability in practical operational terms when inventory tracking or replenishment facts exist.
+      - Mention sales follow-up only when a lead_number fact exists.
+      - Do not invent missing details.
+    examples:
+      - facts:
+          product_name: Espresso Double
+          item_type: product
+          unit_price: 28000
+          status: active
+          inventory_tracking: none
+          replenishment_mode: manual
+          lead_number: LEAD-123
+          customer_name: CRM Demo Customer
+        messages:
+          - Espresso Double is an active product priced at 28,000.
+          - For a compact counter setup, it looks operationally lightweight because inventory tracking is none and replenishment is manual. I also created sales follow-up lead LEAD-123 for CRM Demo Customer.
+      - facts:
+          product_name: Espresso Double
+          item_type: product
+          unit_price: 28000
+          status: active
+          inventory_tracking: batch
+          replenishment_mode: automatic
+        messages:
+          - Espresso Double is an active product priced at 28,000.
+          - For a compact counter setup, it may need a bit more operating discipline because inventory tracking is batch-based and replenishment is automatic.
+    deterministic_fallback:
+      messages:
+        - text: "{{facts.product_name}} is type {{facts.item_type}}, price {{facts.unit_price}}, status {{facts.status}}."
+          when_present: [product_name, item_type, unit_price, status]
+        - text: "For a compact counter setup, the current record suggests a lightweight operational fit because it uses inventory tracking {{facts.inventory_tracking}} and replenishment {{facts.replenishment_mode}}."
+          when_present: [inventory_tracking, replenishment_mode]
+        - text: "I also created sales follow-up lead {{facts.lead_number}} for {{facts.customer_name}}."
+          when_present: [lead_number, customer_name]
+guidelines:
+  - id: complaint_delegate
+    when: customer reports a product complaint or damaged product and expects updates
+    then: delegate the complaint intake to the external CRM complaint workflow and tell the customer you will track the ticket status.
+    agent_bindings:
+      - agent_id: OpenCodeOrbyteFull
+        workflow_id: orbyte_full_complaint_ticket_intake
+  - id: product_lookup_and_lead
+    when: customer asks for product information and wants a commercial follow-up
+    then: retrieve the product information from Orbyte and create or update the CRM lead for follow-up.
+    response_capability_id: product_lookup_and_lead_response
+    tools:
+      - commercial_core.item.search
+      - commercial_core.item.get
+      - crm.lead.find_or_create_for_product_interest
+capability_isolation:
+  allowed_provider_ids:
+    - orbyte_full
+  allowed_agent_ids:
+    - OpenCodeOrbyteFull

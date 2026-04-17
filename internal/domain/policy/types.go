@@ -26,6 +26,8 @@ type Bundle struct {
 	Semantics                  SemanticsPolicy             `json:"semantics,omitempty" yaml:"semantics,omitempty"`
 	WatchCapabilities          []WatchCapability           `json:"watch_capabilities,omitempty" yaml:"watch_capabilities,omitempty"`
 	DelegationContracts        []DelegationContract        `json:"delegation_contracts,omitempty" yaml:"delegation_contracts,omitempty"`
+	DelegationWorkflows        []DelegationWorkflow        `json:"delegation_workflows,omitempty" yaml:"delegation_workflows,omitempty"`
+	ResponseCapabilities       []ResponseCapability        `json:"response_capabilities,omitempty" yaml:"response_capabilities,omitempty"`
 	QualityProfile             QualityProfile              `json:"quality_profile,omitempty" yaml:"quality_profile,omitempty"`
 	LifecyclePolicy            LifecyclePolicy             `json:"lifecycle_policy,omitempty" yaml:"lifecycle_policy,omitempty"`
 	CapabilityIsolation        CapabilityIsolation         `json:"capability_isolation,omitempty" yaml:"capability_isolation,omitempty"`
@@ -131,6 +133,55 @@ type DelegationContract struct {
 	Verification       DelegationVerification `json:"verification,omitempty" yaml:"verification,omitempty"`
 	WatchCapabilityID  string                 `json:"watch_capability_id,omitempty" yaml:"watch_capability_id,omitempty"`
 	FailureUserMessage string                 `json:"failure_user_message,omitempty" yaml:"failure_user_message,omitempty"`
+}
+
+type DelegationWorkflow struct {
+	ID              string                   `json:"id" yaml:"id"`
+	Title           string                   `json:"title,omitempty" yaml:"title,omitempty"`
+	Goal            string                   `json:"goal,omitempty" yaml:"goal,omitempty"`
+	Steps           []DelegationWorkflowStep `json:"steps,omitempty" yaml:"steps,omitempty"`
+	Constraints     []string                 `json:"constraints,omitempty" yaml:"constraints,omitempty"`
+	SuccessCriteria []string                 `json:"success_criteria,omitempty" yaml:"success_criteria,omitempty"`
+}
+
+type DelegationWorkflowStep struct {
+	ID          string   `json:"id" yaml:"id"`
+	Instruction string   `json:"instruction" yaml:"instruction"`
+	ToolIDs     []string `json:"tool_ids,omitempty" yaml:"tool_ids,omitempty"`
+}
+
+type ResponseCapability struct {
+	ID                    string                        `json:"id" yaml:"id"`
+	Mode                  string                        `json:"mode,omitempty" yaml:"mode,omitempty"`
+	Facts                 []ResponseFact                `json:"facts,omitempty" yaml:"facts,omitempty"`
+	Instructions          []string                      `json:"instructions,omitempty" yaml:"instructions,omitempty"`
+	Examples              []ResponseExample             `json:"examples,omitempty" yaml:"examples,omitempty"`
+	DeterministicFallback ResponseDeterministicFallback `json:"deterministic_fallback,omitempty" yaml:"deterministic_fallback,omitempty"`
+}
+
+type ResponseFact struct {
+	Key      string               `json:"key" yaml:"key"`
+	Required bool                 `json:"required,omitempty" yaml:"required,omitempty"`
+	Sources  []ResponseFactSource `json:"sources,omitempty" yaml:"sources,omitempty"`
+}
+
+type ResponseFactSource struct {
+	ToolID string `json:"tool_id" yaml:"tool_id"`
+	Path   string `json:"path" yaml:"path"`
+}
+
+type ResponseExample struct {
+	Facts    map[string]any `json:"facts,omitempty" yaml:"facts,omitempty"`
+	Messages []string       `json:"messages,omitempty" yaml:"messages,omitempty"`
+}
+
+type ResponseDeterministicFallback struct {
+	Messages []ResponseDeterministicMessage `json:"messages,omitempty" yaml:"messages,omitempty"`
+}
+
+type ResponseDeterministicMessage struct {
+	Text        string   `json:"text" yaml:"text"`
+	WhenPresent []string `json:"when_present,omitempty" yaml:"when_present,omitempty"`
 }
 
 type DelegationFieldAlias struct {
@@ -239,6 +290,8 @@ type Guideline struct {
 	Then         string            `json:"then" yaml:"then"`
 	Tools        []string          `json:"tools,omitempty" yaml:"tools,omitempty"`
 	Agents       []string          `json:"agents,omitempty" yaml:"agents,omitempty"`
+	AgentBindings []GuidelineAgentBinding `json:"agent_bindings,omitempty" yaml:"agent_bindings,omitempty"`
+	ResponseCapabilityID string           `json:"response_capability_id,omitempty" yaml:"response_capability_id,omitempty"`
 	MCP          *MCPRef           `json:"mcp,omitempty" yaml:"mcp,omitempty"`
 	Scope        string            `json:"scope,omitempty" yaml:"scope,omitempty"`
 	Matcher      string            `json:"matcher,omitempty" yaml:"matcher,omitempty"`
@@ -280,6 +333,7 @@ type JourneyNode struct {
 	Description     string            `json:"description,omitempty" yaml:"description,omitempty"`
 	Tool            string            `json:"tool,omitempty" yaml:"tool,omitempty"`
 	Agent           string            `json:"agent,omitempty" yaml:"agent,omitempty"`
+	ResponseCapabilityID string       `json:"response_capability_id,omitempty" yaml:"response_capability_id,omitempty"`
 	MCP             *MCPRef           `json:"mcp,omitempty" yaml:"mcp,omitempty"`
 	When            []string          `json:"when,omitempty" yaml:"when,omitempty"`
 	Next            []string          `json:"next,omitempty" yaml:"next,omitempty"`
@@ -336,4 +390,10 @@ type GuidelineToolAssociation struct {
 type GuidelineAgentAssociation struct {
 	GuidelineID string `json:"guideline_id"`
 	AgentID     string `json:"agent_id"`
+	WorkflowID  string `json:"workflow_id,omitempty"`
+}
+
+type GuidelineAgentBinding struct {
+	AgentID    string `json:"agent_id" yaml:"agent_id"`
+	WorkflowID string `json:"workflow_id,omitempty" yaml:"workflow_id,omitempty"`
 }

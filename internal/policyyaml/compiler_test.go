@@ -79,6 +79,56 @@ journeys:
 	}
 }
 
+func TestParseBundleCompilesGuidelineAgentWorkflowAssociations(t *testing.T) {
+	raw := []byte(`
+id: bundle-1
+version: v1
+delegation_workflows:
+  - id: wf_ticket
+    goal: create and verify a complaint ticket
+    steps:
+      - id: resolve
+        instruction: resolve the customer
+        tool_ids: [orbyte_full.crm.customer.summary]
+guidelines:
+  - id: orchestrate
+    when: customer asks for a complaint workflow
+    then: delegate the complaint workflow
+    agent_bindings:
+      - agent_id: OpenCode
+        workflow_id: wf_ticket
+`)
+
+	bundle, err := ParseBundle(raw)
+	if err != nil {
+		t.Fatalf("ParseBundle() error = %v", err)
+	}
+	if len(bundle.GuidelineAgentAssociations) != 1 {
+		t.Fatalf("guideline agent associations = %#v, want 1 compiled association", bundle.GuidelineAgentAssociations)
+	}
+	if bundle.GuidelineAgentAssociations[0].WorkflowID != "wf_ticket" {
+		t.Fatalf("guideline agent association = %#v, want workflow binding", bundle.GuidelineAgentAssociations[0])
+	}
+}
+
+func TestParseBundleRejectsUnknownGuidelineWorkflowBinding(t *testing.T) {
+	raw := []byte(`
+id: bundle-1
+version: v1
+guidelines:
+  - id: orchestrate
+    when: customer asks for a complaint workflow
+    then: delegate the complaint workflow
+    agent_bindings:
+      - agent_id: OpenCode
+        workflow_id: missing
+`)
+
+	if _, err := ParseBundle(raw); err == nil {
+		t.Fatal("ParseBundle() error = nil, want unknown workflow_id error")
+	}
+}
+
 func TestValidateBundleRejectsDuplicateIDs(t *testing.T) {
 	raw := []byte(`
 id: bundle-1
@@ -320,5 +370,89 @@ domain_boundary:
 
 	if _, err := ParseBundle(raw); err == nil {
 		t.Fatal("ParseBundle() error = nil, want missing out_of_scope_reply error for blocked topics")
+	}
+}
+
+func TestParseBundleSupportsResponseCapabilities(t *testing.T) {
+	raw := []byte(`
+id: response-capability-bundle
+version: v1
+response_capabilities:
+  - id: product_response
+    mode: always
+    facts:
+      - key: product_name
+        required: true
+        sources:
+          - tool_id: orbyte_full.commercial_core.item.get
+            path: structuredContent.name
+      - key: lead_number
+        sources:
+          - tool_id: orbyte_full.crm.lead.find_or_create_for_product_interest
+            path: structuredContent.lead.values.lead_number
+    instructions:
+      - Use only the provided facts.
+    examples:
+      - facts:
+          product_name: Espresso Double
+        messages:
+          - Espresso Double is available.
+    deterministic_fallback:
+      messages:
+        - text: "{{facts.product_name}} is available."
+          when_present: [product_name]
+guidelines:
+  - id: product_lookup
+    when: customer asks for product information
+    then: answer with the tool-backed product details
+    response_capability_id: product_response
+`)
+
+	bundle, err := ParseBundle(raw)
+	if err != nil {
+		t.Fatalf("ParseBundle() error = %v", err)
+	}
+	if len(bundle.ResponseCapabilities) != 1 {
+		t.Fatalf("response capabilities len = %d, want 1", len(bundle.ResponseCapabilities))
+	}
+	if bundle.Guidelines[0].ResponseCapabilityID != "product_response" {
+		t.Fatalf("guideline response_capability_id = %q, want product_response", bundle.Guidelines[0].ResponseCapabilityID)
+	}
+}
+
+func TestParseBundleRejectsUnknownResponseCapabilityReference(t *testing.T) {
+	raw := []byte(`
+id: response-capability-bundle
+version: v1
+guidelines:
+  - id: product_lookup
+    when: customer asks for product information
+    then: answer with the tool-backed product details
+    response_capability_id: missing_capability
+`)
+
+	if _, err := ParseBundle(raw); err == nil {
+		t.Fatal("ParseBundle() error = nil, want unknown response capability error")
+	}
+}
+
+func TestParseBundleRejectsInvalidResponseCapabilityFallbackTemplate(t *testing.T) {
+	raw := []byte(`
+id: response-capability-bundle
+version: v1
+response_capabilities:
+  - id: product_response
+    facts:
+      - key: product_name
+        sources:
+          - tool_id: orbyte_full.commercial_core.item.get
+            path: structuredContent.name
+    deterministic_fallback:
+      messages:
+        - text: "{{tool.orbyte_full.commercial_core.item.get.structuredContent.name}}"
+`)
+
+	if _, err := ParseBundle(raw); err == nil {
+		t.Fatal("ParseBundle() error = nil, want unsupported template ref error")
 	}
 }

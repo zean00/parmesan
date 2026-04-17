@@ -1,0 +1,11 @@
+id: agent_orbyte_nexus_full_workflow_validation
+name: Orbyte Nexus Full Workflow Validation Agent
+description: End-to-end validation agent for workflow-guided complaint delegation over Orbyte full MCP, plus direct product and lead flows across Nexus, Parmesan, OpenCode, and Orbyte.
+status: active
+policy_bundle_path: ../policy/orbyte_nexus_full_workflow_validation_policy.yaml
+default_knowledge_scope:
+  kind: agent
+  id: agent_orbyte_nexus_full_workflow_validation
+metadata:
+  integration: orbyte_nexus_full_workflow
+  channel: acp

@@ -74,8 +74,8 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	}
 	exposedTools, toolApprovals := resolveToolExposure(bundle.GuidelineToolAssociations, state.observationStage.Observations, state.matchFinalizeStage.MatchedGuidelines, state.activeJourneyState, bundle.ToolPolicies, catalog)
 	ToolExposureStageResult{ExposedTools: exposedTools, ToolApprovals: toolApprovals}.Apply(state)
-	exposedAgents := resolveAgentExposure(bundle.GuidelineAgentAssociations, state.matchFinalizeStage.MatchedGuidelines, state.activeJourneyState, bundle.CapabilityIsolation)
-	AgentExposureStageResult{ExposedAgents: exposedAgents}.Apply(state)
+	exposedAgents, exposedBindings := resolveAgentExposure(bundle.GuidelineAgentAssociations, state.matchFinalizeStage.MatchedGuidelines, state.activeJourneyState, bundle.CapabilityIsolation)
+	AgentExposureStageResult{ExposedAgents: exposedAgents, ExposedBindings: exposedBindings}.Apply(state)
 	toolPlanResult, toolDecisionResult := buildToolStageResults(ctx, options.Router, state.context, state, bundle.Relationships, catalog, options.ArgumentResolver)
 	toolPlanResult.Apply(state)
 	toolDecisionResult.Apply(state)
@@ -749,7 +749,7 @@ func rebuildProjectedGuidelineStages(ctx context.Context, state *matchingState) 
 	buildRelationshipResolutionStageResult(state.bundle, state.context, state.observationStage.Observations, state.matchFinalizeStage.GuidelineMatches, state.matchFinalizeStage.MatchedGuidelines, state.activeJourney, state.activeJourneyState).Apply(state)
 	buildDisambiguationStageResult(ctx, state.router, state.bundle, state.context, state.matchFinalizeStage.GuidelineMatches, state.matchFinalizeStage.MatchedGuidelines, effectiveSuppressedGuidelines(state.relationshipResolutionStage, state.disambiguationStage), effectiveResolutionRecords(state.relationshipResolutionStage, state.disambiguationStage), effectiveDisambiguationPrompt(state.relationshipResolutionStage, state.disambiguationStage)).Apply(state)
 	templates := collectTemplates(state.bundle, state.activeJourney, state.activeJourneyState, state.context)
-	buildResponseAnalysisStageResult(ctx, state.router, state.context, state.bundle, state.matchFinalizeStage.MatchedGuidelines, templates, state.responseAnalysisStage.Evaluation.Coverage).Apply(state)
+	buildResponseAnalysisStageResult(ctx, state.router, state.context, state.bundle, state.activeJourneyState, state.matchFinalizeStage.MatchedGuidelines, templates, state.responseAnalysisStage.Evaluation.Coverage).Apply(state)
 }
 
 func syncFinalizeStageToState(state *matchingState) {

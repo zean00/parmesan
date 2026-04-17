@@ -252,14 +252,15 @@ func (p *peer) delegate(ctx context.Context, req Request) (Result, error) {
 		p.unsubscribe(sessionID, updates)
 	}()
 
-	var sessionResp map[string]any
-	if err := p.call(ctx, "session/new", map[string]any{
+	sessionParams := map[string]any{
 		"sessionId":  sessionID,
 		"cwd":        req.CWD,
 		"mcpServers": p.sessionMCPServers(),
 		"_meta":      cloneAnyMap(req.Metadata),
 		"metadata":   req.Metadata,
-	}, &sessionResp); err != nil {
+	}
+	var sessionResp map[string]any
+	if err := p.call(ctx, "session/new", sessionParams, &sessionResp); err != nil {
 		return Result{}, err
 	}
 	if returnedSessionID := firstNonEmpty(stringField(sessionResp, "sessionId"), stringField(sessionResp, "session_id")); returnedSessionID != "" {
@@ -309,6 +310,42 @@ func (p *peer) delegate(ctx context.Context, req Request) (Result, error) {
 	var chunks []string
 	var promptResp map[string]any
 	turnCompleted := false
+	const promptCompletionStreamGrace = 150 * time.Millisecond
+	var completionTimer *time.Timer
+	var completionTimerC <-chan time.Time
+	stopCompletionTimer := func() {
+		if completionTimer == nil {
+			return
+		}
+		if !completionTimer.Stop() {
+			select {
+			case <-completionTimer.C:
+			default:
+			}
+		}
+		completionTimer = nil
+		completionTimerC = nil
+	}
+	resetCompletionTimer := func() {
+		text := strings.TrimSpace(strings.Join(chunks, ""))
+		if !promptCallCompleted(promptResp) || turnCompleted || text == "" || promptResponseText(promptResp) != "" {
+			stopCompletionTimer()
+			return
+		}
+		if completionTimer == nil {
+			completionTimer = time.NewTimer(promptCompletionStreamGrace)
+		} else {
+			if !completionTimer.Stop() {
+				select {
+				case <-completionTimer.C:
+				default:
+				}
+			}
+			completionTimer.Reset(promptCompletionStreamGrace)
+		}
+		completionTimerC = completionTimer.C
+	}
+	defer stopCompletionTimer()
 	for {
 		select {
 		case <-waitCtx.Done():
@@ -329,14 +366,17 @@ func (p *peer) delegate(ctx context.Context, req Request) (Result, error) {
 			if text := promptResponseText(promptResp); text != "" {
 				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text, Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, nil
 			}
+			resetCompletionTimer()
 		case item := <-updates:
 			typ := firstNonEmpty(stringField(item.Update, "type"), stringField(item.Update, "sessionUpdate"))
 			switch typ {
 			case "agent_message_chunk":
 				if text := updateText(item.Update); strings.TrimSpace(text) != "" {
 					chunks = append(chunks, text)
+					resetCompletionTimer()
 				}
 			case "agent_turn_complete", "turn_complete", "agent_message":
+				stopCompletionTimer()
 				turnCompleted = true
 				text := strings.TrimSpace(strings.Join(chunks, ""))
 				if text == "" {
@@ -347,8 +387,14 @@ func (p *peer) delegate(ctx context.Context, req Request) (Result, error) {
 				}
 				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text, Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, nil
 			case "error", "agent_turn_error":
+				stopCompletionTimer()
 				msg := firstNonEmpty(stringField(item.Update, "message"), stringField(item.Update, "error"), updateText(item.Update), "delegated agent failed")
 				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "failed", Error: msg, Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, errors.New(msg)
+			}
+		case <-completionTimerC:
+			stopCompletionTimer()
+			if text := strings.TrimSpace(strings.Join(chunks, "")); text != "" && promptCallCompleted(promptResp) {
+				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text, Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, nil
 			}
 		}
 	}

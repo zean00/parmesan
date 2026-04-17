@@ -17,7 +17,7 @@ Parmesan configuration is split across three file layers:
 | --- | --- | --- |
 | global runtime config | provider, database, MCP, ACP peer, operator, enrichment settings | `config/parmesan.yaml` |
 | agent definition | one durable agent profile | `agents/*.yaml` |
-| policy bundle | behavioral rules, templates, journeys, capability exposure | referenced from the agent file |
+| policy bundle | behavioral rules, templates, journeys, response capabilities, workflow bindings, capability exposure | referenced from the agent file |
 
 ## Configuration Layers
 
@@ -70,7 +70,7 @@ behavior.
 
 - put provider, database, operator, MCP, ACP peer, and enrichment settings here
 - put agent identity and default knowledge scope in the agent file
-- put decision logic, templates, journeys, and capability exposure in the policy bundle
+- put decision logic, templates, journeys, response capabilities, delegation workflows, and capability exposure in the policy bundle
 
 ### Minimal Example
 

@@ -93,6 +93,7 @@ func run() error {
 		parmesanOperatorKey  = flag.String("parmesan-operator-key", "", "Parmesan operator API key")
 		orbyteFullMCPURL     = flag.String("orbyte-full-mcp-url", "http://127.0.0.1:18110/mcp", "Orbyte full MCP URL")
 		orbyteMinimalMCPURL  = flag.String("orbyte-minimal-mcp-url", "http://127.0.0.1:18111/mcp", "Orbyte minimal MCP URL")
+		complaintMCPURL      = flag.String("complaint-mcp-url", "", "MCP URL used to resolve and update complaint tickets; defaults to orbyte-minimal-mcp-url")
 		agentID              = flag.String("agent-id", "agent_orbyte_nexus_validation", "Parmesan agent id")
 		crmManifestPath      = flag.String("crm-manifest", "", "Path to Orbyte full CRM seed manifest JSON")
 		crmManifestMinimal   = flag.String("crm-manifest-minimal", "", "Path to Orbyte minimal CRM seed manifest JSON; defaults to --crm-manifest")
@@ -152,7 +153,11 @@ func run() error {
 	}
 
 	fullMCP := &httpJSONClient{baseURL: strings.TrimRight(*orbyteFullMCPURL, "/"), client: &http.Client{Timeout: 30 * time.Second}}
-	minimalMCP := &httpJSONClient{baseURL: strings.TrimRight(*orbyteMinimalMCPURL, "/"), client: &http.Client{Timeout: 30 * time.Second}}
+	complaintResolveURL := strings.TrimSpace(*complaintMCPURL)
+	if complaintResolveURL == "" {
+		complaintResolveURL = *orbyteMinimalMCPURL
+	}
+	complaintMCP := &httpJSONClient{baseURL: strings.TrimRight(complaintResolveURL, "/"), client: &http.Client{Timeout: 30 * time.Second}}
 
 	script, err := loadScript(*scriptPath, map[string]string{
 		"ComplaintCustomerName":    complaintCustomer,
@@ -229,7 +234,7 @@ func run() error {
 		return fmt.Errorf("delegated complaint result did not include ticket_id: %#v", delegated)
 	}
 
-	if _, err := callOrbyteMinimalResolve(minimalMCP, ticketID); err != nil {
+	if _, err := callOrbyteComplaintResolve(complaintMCP, ticketID); err != nil {
 		return err
 	}
 	proactiveUpdate, transcript, err := waitForAssistantMessage(nexus, login, parmesan, parmesanSessionID, seen, seenParmesan, script.ProactiveUpdateExpectContains, *timeout)
@@ -288,7 +293,7 @@ func run() error {
 		DelegatedAgent:           delegated,
 		SessionWatches:           lifecycle.Watches,
 		LearnedPreferences:       preferences,
-		ResolvedTicket:           map[string]any{"ticket_id": ticketID},
+		ResolvedTicket:           map[string]any{"ticket_id": ticketID, "mcp_url": complaintResolveURL},
 		LeadSearchResult:         leadSearch,
 		Transcript:               transcript,
 		ConversationInputs: map[string]string{
@@ -580,7 +585,7 @@ func getParmesanPreferences(client *httpJSONClient, agentID, customerID string) 
 	return out, err
 }
 
-func callOrbyteMinimalResolve(client *httpJSONClient, ticketID string) (map[string]any, error) {
+func callOrbyteComplaintResolve(client *httpJSONClient, ticketID string) (map[string]any, error) {
 	return orbyteMCPCall(client, "tools/call", map[string]any{
 		"name": "crm.ticket.resolve",
 		"arguments": map[string]any{
