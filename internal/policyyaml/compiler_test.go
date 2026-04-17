@@ -456,3 +456,85 @@ response_capabilities:
 		t.Fatal("ParseBundle() error = nil, want unsupported template ref error")
 	}
 }
+
+func TestParseBundleSupportsResponseStyleProfiles(t *testing.T) {
+	raw := []byte(`
+id: response-style-bundle
+version: v1
+soul:
+  style_profile_id: default_style
+response_style_profiles:
+  - id: default_style
+    description: concise and direct
+    usage_context: default support tone
+    tone:
+      formality: professional
+      directness: high
+    structure:
+      max_messages: 2
+      opening_style: direct_answer_first
+    examples:
+      - messages:
+          - Your ticket has been created.
+guidelines:
+  - id: support_reply
+    when: customer asks for help
+    then: respond with support guidance
+    style_profile_id: default_style
+journeys:
+  - id: support_flow
+    when: [customer asks for status]
+    states:
+      - id: reply
+        type: message
+        style_profile_id: default_style
+`)
+
+	bundle, err := ParseBundle(raw)
+	if err != nil {
+		t.Fatalf("ParseBundle() error = %v", err)
+	}
+	if len(bundle.ResponseStyleProfiles) != 1 {
+		t.Fatalf("response style profiles len = %d, want 1", len(bundle.ResponseStyleProfiles))
+	}
+	if bundle.Soul.StyleProfileID != "default_style" {
+		t.Fatalf("soul style_profile_id = %q, want default_style", bundle.Soul.StyleProfileID)
+	}
+	if bundle.Guidelines[0].StyleProfileID != "default_style" {
+		t.Fatalf("guideline style_profile_id = %q, want default_style", bundle.Guidelines[0].StyleProfileID)
+	}
+	if bundle.Journeys[0].States[0].StyleProfileID != "default_style" {
+		t.Fatalf("journey state style_profile_id = %q, want default_style", bundle.Journeys[0].States[0].StyleProfileID)
+	}
+}
+
+func TestParseBundleRejectsUnknownStyleProfileReference(t *testing.T) {
+	raw := []byte(`
+id: response-style-bundle
+version: v1
+guidelines:
+  - id: support_reply
+    when: customer asks for help
+    then: respond with support guidance
+    style_profile_id: missing_style
+`)
+
+	if _, err := ParseBundle(raw); err == nil {
+		t.Fatal("ParseBundle() error = nil, want unknown style profile error")
+	}
+}
+
+func TestParseBundleRejectsInvalidResponseStyleProfileValue(t *testing.T) {
+	raw := []byte(`
+id: response-style-bundle
+version: v1
+response_style_profiles:
+  - id: default_style
+    tone:
+      formality: extremely_formal
+`)
+
+	if _, err := ParseBundle(raw); err == nil {
+		t.Fatal("ParseBundle() error = nil, want invalid style profile field error")
+	}
+}

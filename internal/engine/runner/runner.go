@@ -633,7 +633,7 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			if mode == "always" && len(responseFacts) > 0 {
 				respMessages, err = r.renderResponseCapability(ctx, *exec, &responseRecord, view, events, *responseCapability, responseFacts)
 				if err != nil {
-					if fallback := responseCapabilityFallback(responseCapability, responseFacts); len(fallback) > 0 {
+					if fallback := responseCapabilityFallback(view, responseCapability, responseFacts); len(fallback) > 0 {
 						respMessages = fallback
 					} else {
 						return err
@@ -653,7 +653,7 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 				})
 				resp, err := r.router.Generate(ctx, model.CapabilityReasoning, model.RequestWithContextOverride(ctx, model.CapabilityReasoning, model.Request{Prompt: prompt}))
 				if err != nil {
-					if fallback := responseCapabilityFallback(responseCapability, responseFacts); len(fallback) > 0 {
+					if fallback := responseCapabilityFallback(view, responseCapability, responseFacts); len(fallback) > 0 {
 						respMessages = fallback
 					} else {
 						return err
@@ -663,7 +663,7 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 					if strings.HasPrefix(strings.TrimSpace(resp.Text), "provider stub: ") {
 						if responseCapability != nil && len(responseFacts) > 0 {
 							if rendered, renderErr := r.renderResponseCapability(ctx, *exec, &responseRecord, view, events, *responseCapability, responseFacts); renderErr != nil {
-								if fallback := responseCapabilityFallback(responseCapability, responseFacts); len(fallback) > 0 {
+								if fallback := responseCapabilityFallback(view, responseCapability, responseFacts); len(fallback) > 0 {
 									respMessages = fallback
 								} else {
 									return renderErr
@@ -2766,6 +2766,9 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 	if soul := soulPrompt(bundleSoul(view.Bundle)); soul != "" {
 		parts = append(parts, "Agent SOUL style and brand rules:\n"+soul)
 	}
+	if style := styleProfilePrompt(selectedStyleProfile(view)); style != "" {
+		parts = append(parts, "Active response style profile:\n"+style)
+	}
 	if view.ActiveJourneyState != nil && strings.TrimSpace(view.ActiveJourneyState.Instruction) != "" {
 		parts = append(parts, "Current journey instruction: "+view.ActiveJourneyState.Instruction)
 	}
@@ -3361,7 +3364,7 @@ func (r *Runner) renderResponseCapability(ctx context.Context, exec execution.Tu
 	})
 	resp, err := r.router.Generate(ctx, model.CapabilityReasoning, model.RequestWithContextOverride(ctx, model.CapabilityReasoning, model.Request{Prompt: prompt}))
 	if err != nil {
-		if fallback := responseCapabilityFallback(&capability, facts); len(fallback) > 0 {
+		if fallback := responseCapabilityFallback(view, &capability, facts); len(fallback) > 0 {
 			return fallback, nil
 		}
 		return nil, err
@@ -3369,17 +3372,18 @@ func (r *Runner) renderResponseCapability(ctx context.Context, exec execution.Tu
 	if !strings.HasPrefix(strings.TrimSpace(resp.Text), "provider stub: ") {
 		messages := parseResponseEnvelope(resp.Text)
 		if len(messages) > 0 {
-			return messages, nil
+			messages = normalizeResponseMessages(messages)
+			return applyStyleProfileMessageLimit(messages, selectedStyleProfile(view)), nil
 		}
 	}
-	return renderDeterministicResponseCapability(capability, facts), nil
+	return renderResponseCapabilityFallback(view, capability, facts), nil
 }
 
-func responseCapabilityFallback(capability *policy.ResponseCapability, facts map[string]any) []string {
+func responseCapabilityFallback(view resolvedView, capability *policy.ResponseCapability, facts map[string]any) []string {
 	if capability == nil || len(facts) == 0 {
 		return nil
 	}
-	return renderDeterministicResponseCapability(*capability, facts)
+	return renderResponseCapabilityFallback(view, *capability, facts)
 }
 
 func normalizeResponseMessages(messages []string) []string {

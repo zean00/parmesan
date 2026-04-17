@@ -325,6 +325,48 @@ That fallback is deliberately constrained:
 This keeps the deterministic path generic and policy-authored rather than
 hardcoded in core runtime.
 
+## Response Style Profiles In The Engine
+
+`response_style_profiles` are the generic engine mechanism for shaping how
+generated replies sound and how they are structured.
+
+They are resolved independently from `response_capabilities` with this
+precedence:
+
+1. active journey state `style_profile_id`
+2. first distinct matched guideline `style_profile_id`
+3. `soul.style_profile_id`
+4. none
+
+The runtime uses them only in generation/rendering.
+
+They do not affect:
+
+- planning
+- tool execution
+- moderation
+- delegation verification
+
+The normal `composePrompt()` path now layers:
+
+1. quality and policy guidance
+2. customer preferences and prompt-safe context
+3. SOUL baseline
+4. active response style profile
+5. retrieval/tool output context
+
+The response-capability render path uses the same style profile after SOUL and
+before normalized facts, capability instructions, and grounded examples.
+
+Each style profile is hybrid:
+
+- structured style fields for reliable control
+- `description` and `usage_context` for authoring clarity
+- style-only example messages for phrasing texture
+
+SOUL remains the baseline persona/brand layer. The selected style profile
+narrows local response shape for the current turn.
+
 ## Moderation Pipeline In The Engine
 
 Moderation still exposes the same public runtime shape:

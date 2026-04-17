@@ -39,9 +39,6 @@ func ValidateBundle(bundle policy.Bundle) error {
 	if strings.TrimSpace(bundle.Version) == "" {
 		return errors.New("bundle.version is required")
 	}
-	if err := validateSoul(bundle.Soul); err != nil {
-		return err
-	}
 	if err := validatePerceivedPerformance(bundle.PerceivedPerformance); err != nil {
 		return err
 	}
@@ -55,6 +52,12 @@ func ValidateBundle(bundle policy.Bundle) error {
 		return err
 	}
 	if err := validateResponseCapabilities(bundle.ResponseCapabilities); err != nil {
+		return err
+	}
+	if err := validateResponseStyleProfiles(bundle.ResponseStyleProfiles); err != nil {
+		return err
+	}
+	if err := validateSoul(bundle.Soul, bundle.ResponseStyleProfiles); err != nil {
 		return err
 	}
 	if err := validateDelegationContracts(bundle.DelegationContracts, bundle.WatchCapabilities); err != nil {
@@ -101,6 +104,9 @@ func ValidateBundle(bundle policy.Bundle) error {
 		if err := validateResponseCapabilityReference("guideline "+strconv.Quote(item.ID), item.ResponseCapabilityID, bundle.ResponseCapabilities); err != nil {
 			return err
 		}
+		if err := validateResponseStyleProfileReference("guideline "+strconv.Quote(item.ID), item.StyleProfileID, bundle.ResponseStyleProfiles); err != nil {
+			return err
+		}
 		if err := validateMCPRef(item.MCP); err != nil {
 			return fmt.Errorf("guideline %q: %w", item.ID, err)
 		}
@@ -132,6 +138,9 @@ func ValidateBundle(bundle policy.Bundle) error {
 			if err := validateResponseCapabilityReference("journey "+strconv.Quote(item.ID)+" state "+strconv.Quote(state.ID), state.ResponseCapabilityID, bundle.ResponseCapabilities); err != nil {
 				return err
 			}
+			if err := validateResponseStyleProfileReference("journey "+strconv.Quote(item.ID)+" state "+strconv.Quote(state.ID), state.StyleProfileID, bundle.ResponseStyleProfiles); err != nil {
+				return err
+			}
 			if err := validateMCPRef(state.MCP); err != nil {
 				return fmt.Errorf("journey %q state %q: %w", item.ID, state.ID, err)
 			}
@@ -157,6 +166,9 @@ func ValidateBundle(bundle policy.Bundle) error {
 				return fmt.Errorf("journey %q guideline %q: %w", item.ID, guideline.ID, err)
 			}
 			if err := validateResponseCapabilityReference("journey guideline "+strconv.Quote(guideline.ID), guideline.ResponseCapabilityID, bundle.ResponseCapabilities); err != nil {
+				return err
+			}
+			if err := validateResponseStyleProfileReference("journey guideline "+strconv.Quote(guideline.ID), guideline.StyleProfileID, bundle.ResponseStyleProfiles); err != nil {
 				return err
 			}
 		}
@@ -266,7 +278,10 @@ func validateCapabilityIsolation(item policy.CapabilityIsolation) error {
 	return nil
 }
 
-func validateSoul(soul policy.Soul) error {
+func validateSoul(soul policy.Soul, styles []policy.ResponseStyleProfile) error {
+	if err := validateResponseStyleProfileReference("soul", soul.StyleProfileID, styles); err != nil {
+		return err
+	}
 	if strings.TrimSpace(soul.DefaultLanguage) != "" {
 		if err := validateLanguageCode("soul.default_language", soul.DefaultLanguage); err != nil {
 			return err
@@ -293,6 +308,80 @@ func validateSoul(soul policy.Soul) error {
 		return err
 	}
 	return nil
+}
+
+func validateResponseStyleProfiles(items []policy.ResponseStyleProfile) error {
+	seen := map[string]struct{}{}
+	for _, item := range items {
+		if err := validateID("response_style_profile", item.ID, seen); err != nil {
+			return err
+		}
+		if err := validateStyleField("response_style_profile "+strconv.Quote(item.ID)+" tone.formality", item.Tone.Formality, "", "casual", "neutral", "professional", "formal"); err != nil {
+			return err
+		}
+		if err := validateStyleField("response_style_profile "+strconv.Quote(item.ID)+" tone.warmth", item.Tone.Warmth, "", "low", "medium", "high"); err != nil {
+			return err
+		}
+		if err := validateStyleField("response_style_profile "+strconv.Quote(item.ID)+" tone.directness", item.Tone.Directness, "", "low", "medium", "high"); err != nil {
+			return err
+		}
+		if err := validateStyleField("response_style_profile "+strconv.Quote(item.ID)+" tone.empathy", item.Tone.Empathy, "", "low", "medium", "high"); err != nil {
+			return err
+		}
+		if err := validateStyleField("response_style_profile "+strconv.Quote(item.ID)+" verbosity.overall", item.Verbosity.Overall, "", "concise", "balanced", "detailed"); err != nil {
+			return err
+		}
+		if err := validateStyleField("response_style_profile "+strconv.Quote(item.ID)+" verbosity.explanation_depth", item.Verbosity.ExplanationDepth, "", "shallow", "medium", "deep"); err != nil {
+			return err
+		}
+		if err := validateStyleField("response_style_profile "+strconv.Quote(item.ID)+" structure.paragraph_style", item.Structure.ParagraphStyle, "", "short", "medium", "long"); err != nil {
+			return err
+		}
+		if err := validateStyleField("response_style_profile "+strconv.Quote(item.ID)+" structure.opening_style", item.Structure.OpeningStyle, "", "direct_answer_first", "context_first"); err != nil {
+			return err
+		}
+		if err := validateStyleField("response_style_profile "+strconv.Quote(item.ID)+" structure.closing_style", item.Structure.ClosingStyle, "", "minimal", "inviting", "action_oriented"); err != nil {
+			return err
+		}
+		if err := validateStyleField("response_style_profile "+strconv.Quote(item.ID)+" wording.hedging_level", item.Wording.HedgingLevel, "", "low", "medium", "high"); err != nil {
+			return err
+		}
+		if item.Structure.MaxMessages < 0 {
+			return fmt.Errorf("response_style_profile %q structure.max_messages cannot be negative", item.ID)
+		}
+		for idx, example := range item.Examples {
+			if !hasTemplateMessages(example.Messages) {
+				return fmt.Errorf("response_style_profile %q example %d requires messages", item.ID, idx)
+			}
+		}
+	}
+	return nil
+}
+
+func validateResponseStyleProfileReference(owner string, profileID string, items []policy.ResponseStyleProfile) error {
+	profileID = strings.TrimSpace(profileID)
+	if profileID == "" {
+		return nil
+	}
+	for _, item := range items {
+		if strings.TrimSpace(item.ID) == profileID {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s references unknown style_profile_id %q", owner, profileID)
+}
+
+func validateStyleField(field string, value string, allowed ...string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	for _, item := range allowed {
+		if value == item {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s has unsupported value %q", field, value)
 }
 
 func validateDomainBoundary(boundary policy.DomainBoundary) error {

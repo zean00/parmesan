@@ -42,6 +42,7 @@ usable until policy exposes them.
 | `guidelines` | conditional behavior rules |
 | `templates` | deterministic direct replies |
 | `response_capabilities` | tool-backed fact extraction plus example-guided response rendering |
+| `response_style_profiles` | reusable response-shape profiles with structured style fields and examples |
 | `journeys` | structured step-based flows |
 | `delegation_workflows` | workflow briefs attached to delegated ACP turns |
 | capability exposure | which tools, MCP servers, or delegated agents are even eligible |
@@ -312,6 +313,63 @@ Current v1 scope:
 - no advanced transforms beyond first-non-empty source resolution and
   `when_present`
 
+## Response Style Profiles
+
+`response_style_profiles` are the policy-owned style layer for generated
+responses.
+
+They shape:
+
+- tone
+- structure
+- wording
+- interaction style
+- grounding posture
+
+without changing:
+
+- planning
+- tool execution
+- moderation
+- delegation verification
+
+Each profile is hybrid:
+
+1. structured style fields for reliable control
+2. authoring metadata such as `description` and `usage_context`
+3. style examples for phrasing texture
+
+Example:
+
+```yaml
+response_style_profiles:
+  - id: concise_professional_support
+    description: concise and direct support tone
+    usage_context: default support replies
+    tone:
+      formality: professional
+      directness: high
+    structure:
+      max_messages: 2
+      opening_style: direct_answer_first
+    examples:
+      - messages:
+          - Your ticket has been created.
+```
+
+Profiles can be selected from:
+
+- `soul.style_profile_id`
+- `guideline.style_profile_id`
+- `journey.state.style_profile_id`
+
+Resolution precedence is:
+
+1. active journey state style profile
+2. first distinct matched guideline style profile
+3. SOUL default style profile
+4. none
+
 ## Delegation Contracts
 
 `delegation_contracts` are the generic policy mechanism for post-delegation
@@ -364,6 +422,11 @@ SOUL influences style, but it does not override:
 - approval requirements
 
 Treat SOUL as style and posture, not as a substitute for business logic.
+
+When `soul.style_profile_id` is set, SOUL remains the baseline persona and
+brand layer. The selected response style profile refines local response shape
+for generated replies without overriding hard policy or explicit customer
+constraints.
 
 ## Rollouts And Governance
 

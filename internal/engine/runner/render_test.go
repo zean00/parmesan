@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sahal/parmesan/internal/domain/policy"
+	"github.com/sahal/parmesan/internal/domain/session"
 	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 	knowledgeretriever "github.com/sahal/parmesan/internal/knowledge/retriever"
 )
@@ -209,6 +210,10 @@ func TestRenderResponseDefersToComposerWhenGroundedRetrievalMisses(t *testing.T)
 func TestSynthesizeToolBackedResponseUsesResponseCapabilityFallback(t *testing.T) {
 	view := resolvedView{
 		Bundle: &policy.Bundle{
+			ResponseStyleProfiles: []policy.ResponseStyleProfile{{
+				ID:        "concise_style",
+				Structure: policy.ResponseStyleStructure{MaxMessages: 2},
+			}},
 			ResponseCapabilities: []policy.ResponseCapability{{
 				ID:   "product_lookup_and_lead_response",
 				Mode: "always",
@@ -234,6 +239,7 @@ func TestSynthesizeToolBackedResponseUsesResponseCapabilityFallback(t *testing.T
 		ResponseAnalysisStage: policyruntime.ResponseAnalysisStageResult{
 			Evaluation: policyruntime.ResponseAnalysisEvaluation{
 				ResponseCapabilityID: "product_lookup_and_lead_response",
+				StyleProfileID:       "concise_style",
 			},
 		},
 	}
@@ -269,7 +275,7 @@ func TestSynthesizeToolBackedResponseUsesResponseCapabilityFallback(t *testing.T
 		},
 	})
 	if len(got) != 3 {
-		t.Fatalf("messages len = %d, want 3 (%#v)", len(got), got)
+		t.Fatalf("messages len = %d, want all fallback fact messages preserved (%#v)", len(got), got)
 	}
 	for _, want := range []string{
 		"Espresso Double is type product, price 28,000, status active.",
@@ -288,6 +294,44 @@ func TestSynthesizeToolBackedResponseUsesResponseCapabilityFallback(t *testing.T
 		if !found {
 			t.Fatalf("messages = %#v, want substring %q", got, want)
 		}
+	}
+}
+
+func TestBuildResponseCapabilityPromptIncludesStyleProfile(t *testing.T) {
+	view := resolvedView{
+		Bundle: &policy.Bundle{
+			Soul: policy.Soul{Brand: "Parmesan"},
+			ResponseStyleProfiles: []policy.ResponseStyleProfile{{
+				ID:           "default_style",
+				Description:  "playful but clear",
+				UsageContext: "use for lightweight product answers",
+				Tone:         policy.ResponseStyleTone{Warmth: "medium", Directness: "high"},
+				Examples: []policy.ResponseStyleExample{{
+					Messages: []string{"That one is active and ready to go."},
+				}},
+			}},
+		},
+		ResponseAnalysisStage: policyruntime.ResponseAnalysisStageResult{
+			Evaluation: policyruntime.ResponseAnalysisEvaluation{StyleProfileID: "default_style"},
+		},
+	}
+	prompt := buildResponseCapabilityPrompt(view, []session.Event{{
+		Source: "customer",
+		Kind:   "message",
+		Content: []session.ContentPart{{
+			Type: "text",
+			Text: "Tell me about Espresso Double",
+		}},
+	}}, policy.ResponseCapability{
+		ID:           "product_response",
+		Instructions: []string{"Use only the provided facts."},
+	}, map[string]any{"product_name": "Espresso Double"})
+	if !strings.Contains(prompt, "Agent SOUL style and brand rules:") ||
+		!strings.Contains(prompt, "Active response style profile:") ||
+		!strings.Contains(prompt, "Description: playful but clear") ||
+		!strings.Contains(prompt, "Usage context: use for lightweight product answers") ||
+		!strings.Contains(prompt, "Style example 1:\nThat one is active and ready to go.") {
+		t.Fatalf("prompt = %q, want style profile context", prompt)
 	}
 }
 

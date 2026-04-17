@@ -25,9 +25,9 @@ import (
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/domain/toolrun"
+	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 	knowledgeretriever "github.com/sahal/parmesan/internal/knowledge/retriever"
 	"github.com/sahal/parmesan/internal/model"
-	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/store/memory"
@@ -39,6 +39,28 @@ type blockingExecutionRepo struct {
 	current  atomic.Int32
 	max      atomic.Int32
 	getCalls atomic.Int32
+}
+
+type runnerStubProvider struct {
+	name       string
+	capability model.Capability
+	text       string
+	err        error
+}
+
+func (p runnerStubProvider) Name() string {
+	return p.name
+}
+
+func (p runnerStubProvider) Capability() model.Capability {
+	return p.capability
+}
+
+func (p runnerStubProvider) Generate(_ context.Context, _ model.Request) (model.Response, error) {
+	if p.err != nil {
+		return model.Response{}, p.err
+	}
+	return model.Response{Provider: p.name, Text: p.text}, nil
 }
 
 func (r *blockingExecutionRepo) GetExecution(ctx context.Context, executionID string) (execution.TurnExecution, []execution.ExecutionStep, error) {
@@ -1008,13 +1030,29 @@ func TestResolveViewUsesAgentProfileDefaultBundle(t *testing.T) {
 
 func TestComposePromptIncludesSoulGuidance(t *testing.T) {
 	prompt := composePrompt(resolvedView{
-		Bundle: &policy.Bundle{Soul: policy.Soul{
-			Brand:           "Parmesan",
-			DefaultLanguage: "en",
-			Tone:            "calm",
-			StyleRules:      []string{"ask one question at a time"},
-			AvoidRules:      []string{"unsupported promises"},
-		}},
+		Bundle: &policy.Bundle{
+			Soul: policy.Soul{
+				Brand:           "Parmesan",
+				DefaultLanguage: "en",
+				Tone:            "calm",
+				StyleRules:      []string{"ask one question at a time"},
+				AvoidRules:      []string{"unsupported promises"},
+				StyleProfileID:  "default_style",
+			},
+			ResponseStyleProfiles: []policy.ResponseStyleProfile{{
+				ID:           "default_style",
+				Description:  "concise and direct",
+				UsageContext: "default support tone",
+				Tone:         policy.ResponseStyleTone{Formality: "professional", Directness: "high"},
+				Structure:    policy.ResponseStyleStructure{MaxMessages: 2, OpeningStyle: "direct_answer_first"},
+				Examples: []policy.ResponseStyleExample{{
+					Messages: []string{"Your ticket has been created."},
+				}},
+			}},
+		},
+		ResponseAnalysisStage: policyruntime.ResponseAnalysisStageResult{
+			Evaluation: policyruntime.ResponseAnalysisEvaluation{StyleProfileID: "default_style"},
+		},
 		CustomerPreferences: []customer.Preference{{
 			Key:   "preferred_name",
 			Value: "Alex",
@@ -1045,6 +1083,11 @@ func TestComposePromptIncludesSoulGuidance(t *testing.T) {
 		!strings.Contains(prompt, "Brand: Parmesan") ||
 		!strings.Contains(prompt, "ask one question at a time") ||
 		!strings.Contains(prompt, "Avoid rules: unsupported promises") ||
+		!strings.Contains(prompt, "Active response style profile:") ||
+		!strings.Contains(prompt, "Description: concise and direct") ||
+		!strings.Contains(prompt, "Usage context: default support tone") ||
+		!strings.Contains(prompt, "Tone formality: professional") ||
+		!strings.Contains(prompt, "Style example 1:\nYour ticket has been created.") ||
 		!strings.Contains(prompt, "Customer preferences (soft constraints):\npreferred_name: Alex") ||
 		!strings.Contains(prompt, "Customer context:\nname: Ada\ntier: vip") ||
 		strings.Contains(prompt, "ada@example.com") ||
@@ -1083,6 +1126,134 @@ func TestRenderResponseCapabilityFallsBackWhenProviderUnavailable(t *testing.T) 
 	}
 	if len(messages) != 1 || messages[0] != "Espresso Double is available." {
 		t.Fatalf("messages = %#v, want deterministic fallback", messages)
+	}
+}
+
+func TestRenderResponseCapabilityFallbackPreservesAllFactMessages(t *testing.T) {
+	repo := memory.New()
+	r := New(repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), "test-runner")
+	view := resolvedView{
+		Bundle: &policy.Bundle{
+			ResponseStyleProfiles: []policy.ResponseStyleProfile{{
+				ID:        "concise_style",
+				Structure: policy.ResponseStyleStructure{MaxMessages: 1},
+			}},
+		},
+		ResponseAnalysisStage: policyruntime.ResponseAnalysisStageResult{
+			Evaluation: policyruntime.ResponseAnalysisEvaluation{StyleProfileID: "concise_style"},
+		},
+	}
+	messages, err := r.renderResponseCapability(context.Background(), execution.TurnExecution{
+		ID:        "exec_response_capability_style",
+		SessionID: "sess_response_capability_style",
+		TraceID:   "trace_response_capability_style",
+	}, &responsedomain.Response{
+		ID:          "resp_response_capability_style",
+		ExecutionID: "exec_response_capability_style",
+	}, view, nil, policy.ResponseCapability{
+		ID: "product_response",
+		DeterministicFallback: policy.ResponseDeterministicFallback{
+			Messages: []policy.ResponseDeterministicMessage{
+				{Text: "{{facts.product_name}} is available.", WhenPresent: []string{"product_name"}},
+				{Text: "A follow-up is already in progress.", WhenPresent: []string{"product_name"}},
+			},
+		},
+	}, map[string]any{
+		"product_name": "Espresso Double",
+	})
+	if err != nil {
+		t.Fatalf("renderResponseCapability() error = %v", err)
+	}
+	if len(messages) != 2 || messages[0] != "Espresso Double is available." || messages[1] != "A follow-up is already in progress." {
+		t.Fatalf("messages = %#v, want all deterministic fallback messages preserved", messages)
+	}
+}
+
+func TestRenderResponseCapabilityGeneratedMessagesHonorStyleProfileMessageLimit(t *testing.T) {
+	repo := memory.New()
+	router := model.NewRouter(config.ProviderConfig{
+		DefaultReasoning:  "test",
+		DefaultStructured: "openrouter",
+		DefaultEmbedding:  "openrouter",
+	})
+	router.Register(runnerStubProvider{
+		name:       "test",
+		capability: model.CapabilityReasoning,
+		text:       `{"messages":["one","two","three"]}`,
+	})
+	r := New(repo, nil, sse.NewBroker(), router, "test-runner")
+	view := resolvedView{
+		Bundle: &policy.Bundle{
+			ResponseStyleProfiles: []policy.ResponseStyleProfile{{
+				ID:        "concise_style",
+				Structure: policy.ResponseStyleStructure{MaxMessages: 2},
+			}},
+		},
+		ResponseAnalysisStage: policyruntime.ResponseAnalysisStageResult{
+			Evaluation: policyruntime.ResponseAnalysisEvaluation{StyleProfileID: "concise_style"},
+		},
+	}
+	messages, err := r.renderResponseCapability(context.Background(), execution.TurnExecution{
+		ID:        "exec_response_capability_generated",
+		SessionID: "sess_response_capability_generated",
+		TraceID:   "trace_response_capability_generated",
+	}, &responsedomain.Response{
+		ID:          "resp_response_capability_generated",
+		ExecutionID: "exec_response_capability_generated",
+	}, view, nil, policy.ResponseCapability{
+		ID: "product_response",
+	}, map[string]any{
+		"product_name": "Espresso Double",
+	})
+	if err != nil {
+		t.Fatalf("renderResponseCapability() error = %v", err)
+	}
+	if len(messages) != 2 || messages[0] != "one" || messages[1] != "two" {
+		t.Fatalf("messages = %#v, want generated messages truncated to style limit", messages)
+	}
+}
+
+func TestRenderResponseCapabilityGeneratedMessagesNormalizeBeforeStyleLimit(t *testing.T) {
+	repo := memory.New()
+	router := model.NewRouter(config.ProviderConfig{
+		DefaultReasoning:  "test",
+		DefaultStructured: "openrouter",
+		DefaultEmbedding:  "openrouter",
+	})
+	router.Register(runnerStubProvider{
+		name:       "test",
+		capability: model.CapabilityReasoning,
+		text:       `{"messages":["","actual answer"]}`,
+	})
+	r := New(repo, nil, sse.NewBroker(), router, "test-runner")
+	view := resolvedView{
+		Bundle: &policy.Bundle{
+			ResponseStyleProfiles: []policy.ResponseStyleProfile{{
+				ID:        "concise_style",
+				Structure: policy.ResponseStyleStructure{MaxMessages: 1},
+			}},
+		},
+		ResponseAnalysisStage: policyruntime.ResponseAnalysisStageResult{
+			Evaluation: policyruntime.ResponseAnalysisEvaluation{StyleProfileID: "concise_style"},
+		},
+	}
+	messages, err := r.renderResponseCapability(context.Background(), execution.TurnExecution{
+		ID:        "exec_response_capability_generated_normalized",
+		SessionID: "sess_response_capability_generated_normalized",
+		TraceID:   "trace_response_capability_generated_normalized",
+	}, &responsedomain.Response{
+		ID:          "resp_response_capability_generated_normalized",
+		ExecutionID: "exec_response_capability_generated_normalized",
+	}, view, nil, policy.ResponseCapability{
+		ID: "product_response",
+	}, map[string]any{
+		"product_name": "Espresso Double",
+	})
+	if err != nil {
+		t.Fatalf("renderResponseCapability() error = %v", err)
+	}
+	if len(messages) != 1 || messages[0] != "actual answer" {
+		t.Fatalf("messages = %#v, want normalized answer preserved under style limit", messages)
 	}
 }
 

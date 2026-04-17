@@ -250,16 +250,19 @@ func (r ResponseAnalysisStageResult) Apply(state *matchingState) {
 
 func (r ResponseAnalysisStageResult) BatchOutput() map[string]any {
 	return map[string]any{
-		"evaluation":           r.Evaluation,
-		"coverage":             r.Evaluation.Coverage,
-		"analyzed_guidelines":  r.Analysis.AnalyzedGuidelines,
-		"needs_revision":       r.Analysis.NeedsRevision,
-		"needs_strict_mode":    r.Analysis.NeedsStrictMode,
-		"recommended_template": r.Analysis.RecommendedTemplate,
-		"rationale":            r.Analysis.Rationale,
-		"response_capability_id": r.Evaluation.ResponseCapabilityID,
-		"response_capability_source": r.Evaluation.ResponseCapabilitySource,
+		"evaluation":                     r.Evaluation,
+		"coverage":                       r.Evaluation.Coverage,
+		"analyzed_guidelines":            r.Analysis.AnalyzedGuidelines,
+		"needs_revision":                 r.Analysis.NeedsRevision,
+		"needs_strict_mode":              r.Analysis.NeedsStrictMode,
+		"recommended_template":           r.Analysis.RecommendedTemplate,
+		"rationale":                      r.Analysis.Rationale,
+		"response_capability_id":         r.Evaluation.ResponseCapabilityID,
+		"response_capability_source":     r.Evaluation.ResponseCapabilitySource,
 		"response_capability_candidates": r.Evaluation.ResponseCapabilityCandidates,
+		"style_profile_id":               r.Evaluation.StyleProfileID,
+		"style_profile_source":           r.Evaluation.StyleProfileSource,
+		"style_profile_candidates":       r.Evaluation.StyleProfileCandidates,
 	}
 }
 
@@ -353,12 +356,12 @@ func (r AgentDecisionStageResult) Apply(state *matchingState) {
 
 func (r AgentDecisionStageResult) BatchOutput() map[string]any {
 	return map[string]any{
-		"evaluation":            r.Evaluation,
-		"selected_agent":        r.Decision.SelectedAgent,
-		"selected_workflow_id":  r.Decision.SelectedWorkflowID,
-		"can_run":               r.Decision.CanRun,
-		"grounded":              r.Decision.Grounded,
-		"rationale":             r.Decision.Rationale,
+		"evaluation":           r.Evaluation,
+		"selected_agent":       r.Decision.SelectedAgent,
+		"selected_workflow_id": r.Decision.SelectedWorkflowID,
+		"can_run":              r.Decision.CanRun,
+		"grounded":             r.Decision.Grounded,
+		"rationale":            r.Decision.Rationale,
 	}
 }
 

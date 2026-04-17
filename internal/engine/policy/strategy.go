@@ -7,9 +7,9 @@ import (
 	"github.com/sahal/parmesan/internal/domain/journey"
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/tool"
+	semantics "github.com/sahal/parmesan/internal/engine/semantics"
 	retrieverdomain "github.com/sahal/parmesan/internal/knowledge/retriever"
 	"github.com/sahal/parmesan/internal/model"
-	semantics "github.com/sahal/parmesan/internal/engine/semantics"
 )
 
 type guidelineMatchingBatch interface {
@@ -378,6 +378,7 @@ func cloneResponseAnalysisEvaluation(src ResponseAnalysisEvaluation) ResponseAna
 	src.Coverage = cloneActionCoverage(src.Coverage)
 	src.AnalyzedGuidelines = append([]AnalyzedGuideline(nil), src.AnalyzedGuidelines...)
 	src.ResponseCapabilityCandidates = append([]string(nil), src.ResponseCapabilityCandidates...)
+	src.StyleProfileCandidates = append([]string(nil), src.StyleProfileCandidates...)
 	return src
 }
 

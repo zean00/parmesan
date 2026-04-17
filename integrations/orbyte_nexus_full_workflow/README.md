@@ -42,12 +42,15 @@ complaint skill. Instead:
 The product path remains the same direct full-MCP flow.
 
 The current version of this pack also uses a policy-owned
-`response_capability` for the product leg. That means:
+`response_capability` for the product leg, plus a policy-owned
+`response_style_profile` for generated reply shape. That means:
 
 - the product tools run directly against `orbyte_full`
 - Parmesan extracts normalized product and lead facts from tool output
 - the final product reply is rendered through the generic response-capability
   path instead of core hardcoded Orbyte logic
+- reply wording and structure are shaped by policy rather than provider-native
+  skills or core-engine special cases
 
 ## Companion Command
 

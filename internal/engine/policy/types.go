@@ -8,9 +8,9 @@ import (
 	"github.com/sahal/parmesan/internal/domain/journey"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/policy"
+	"github.com/sahal/parmesan/internal/engine/semantics"
 	retrieverdomain "github.com/sahal/parmesan/internal/knowledge/retriever"
 	"github.com/sahal/parmesan/internal/model"
-	"github.com/sahal/parmesan/internal/engine/semantics"
 )
 
 type MatchingContext struct {
@@ -216,13 +216,13 @@ type AgentDecision struct {
 }
 
 type AgentDecisionEvaluation struct {
-	ExposedAgents      []string             `json:"exposed_agents,omitempty"`
+	ExposedAgents      []string              `json:"exposed_agents,omitempty"`
 	ExposedBindings    []ExposedAgentBinding `json:"exposed_bindings,omitempty"`
-	SelectedAgent      string               `json:"selected_agent,omitempty"`
-	SelectedWorkflowID string               `json:"selected_workflow_id,omitempty"`
-	FinalAgent         string               `json:"final_agent,omitempty"`
-	Rationale          string               `json:"rationale,omitempty"`
-	Grounded           bool                 `json:"grounded"`
+	SelectedAgent      string                `json:"selected_agent,omitempty"`
+	SelectedWorkflowID string                `json:"selected_workflow_id,omitempty"`
+	FinalAgent         string                `json:"final_agent,omitempty"`
+	Rationale          string                `json:"rationale,omitempty"`
+	Grounded           bool                  `json:"grounded"`
 }
 
 type ExposedAgentBinding struct {
@@ -363,15 +363,18 @@ type ResponseAnalysis struct {
 }
 
 type ResponseAnalysisEvaluation struct {
-	Coverage            map[string]ActionCoverageEvidence `json:"coverage,omitempty"`
-	AnalyzedGuidelines  []AnalyzedGuideline               `json:"analyzed_guidelines,omitempty"`
-	NeedsRevision       bool                              `json:"needs_revision,omitempty"`
-	NeedsStrictMode     bool                              `json:"needs_strict_mode,omitempty"`
-	RecommendedTemplate string                            `json:"recommended_template,omitempty"`
-	Rationale           string                            `json:"rationale,omitempty"`
-	ResponseCapabilityID string                           `json:"response_capability_id,omitempty"`
-	ResponseCapabilitySource string                       `json:"response_capability_source,omitempty"`
-	ResponseCapabilityCandidates []string                 `json:"response_capability_candidates,omitempty"`
+	Coverage                     map[string]ActionCoverageEvidence `json:"coverage,omitempty"`
+	AnalyzedGuidelines           []AnalyzedGuideline               `json:"analyzed_guidelines,omitempty"`
+	NeedsRevision                bool                              `json:"needs_revision,omitempty"`
+	NeedsStrictMode              bool                              `json:"needs_strict_mode,omitempty"`
+	RecommendedTemplate          string                            `json:"recommended_template,omitempty"`
+	Rationale                    string                            `json:"rationale,omitempty"`
+	ResponseCapabilityID         string                            `json:"response_capability_id,omitempty"`
+	ResponseCapabilitySource     string                            `json:"response_capability_source,omitempty"`
+	ResponseCapabilityCandidates []string                          `json:"response_capability_candidates,omitempty"`
+	StyleProfileID               string                            `json:"style_profile_id,omitempty"`
+	StyleProfileSource           string                            `json:"style_profile_source,omitempty"`
+	StyleProfileCandidates       []string                          `json:"style_profile_candidates,omitempty"`
 }
 
 type VerificationResult struct {

@@ -28,6 +28,7 @@ type Bundle struct {
 	DelegationContracts        []DelegationContract        `json:"delegation_contracts,omitempty" yaml:"delegation_contracts,omitempty"`
 	DelegationWorkflows        []DelegationWorkflow        `json:"delegation_workflows,omitempty" yaml:"delegation_workflows,omitempty"`
 	ResponseCapabilities       []ResponseCapability        `json:"response_capabilities,omitempty" yaml:"response_capabilities,omitempty"`
+	ResponseStyleProfiles      []ResponseStyleProfile      `json:"response_style_profiles,omitempty" yaml:"response_style_profiles,omitempty"`
 	QualityProfile             QualityProfile              `json:"quality_profile,omitempty" yaml:"quality_profile,omitempty"`
 	LifecyclePolicy            LifecyclePolicy             `json:"lifecycle_policy,omitempty" yaml:"lifecycle_policy,omitempty"`
 	CapabilityIsolation        CapabilityIsolation         `json:"capability_isolation,omitempty" yaml:"capability_isolation,omitempty"`
@@ -184,6 +185,60 @@ type ResponseDeterministicMessage struct {
 	WhenPresent []string `json:"when_present,omitempty" yaml:"when_present,omitempty"`
 }
 
+type ResponseStyleProfile struct {
+	ID           string                   `json:"id" yaml:"id"`
+	Description  string                   `json:"description,omitempty" yaml:"description,omitempty"`
+	UsageContext string                   `json:"usage_context,omitempty" yaml:"usage_context,omitempty"`
+	Tone         ResponseStyleTone        `json:"tone,omitempty" yaml:"tone,omitempty"`
+	Verbosity    ResponseStyleVerbosity   `json:"verbosity,omitempty" yaml:"verbosity,omitempty"`
+	Structure    ResponseStyleStructure   `json:"structure,omitempty" yaml:"structure,omitempty"`
+	Wording      ResponseStyleWording     `json:"wording,omitempty" yaml:"wording,omitempty"`
+	Interaction  ResponseStyleInteraction `json:"interaction,omitempty" yaml:"interaction,omitempty"`
+	Grounding    ResponseStyleGrounding   `json:"grounding,omitempty" yaml:"grounding,omitempty"`
+	Examples     []ResponseStyleExample   `json:"examples,omitempty" yaml:"examples,omitempty"`
+}
+
+type ResponseStyleTone struct {
+	Formality  string `json:"formality,omitempty" yaml:"formality,omitempty"`
+	Warmth     string `json:"warmth,omitempty" yaml:"warmth,omitempty"`
+	Directness string `json:"directness,omitempty" yaml:"directness,omitempty"`
+	Empathy    string `json:"empathy,omitempty" yaml:"empathy,omitempty"`
+}
+
+type ResponseStyleVerbosity struct {
+	Overall          string `json:"overall,omitempty" yaml:"overall,omitempty"`
+	ExplanationDepth string `json:"explanation_depth,omitempty" yaml:"explanation_depth,omitempty"`
+}
+
+type ResponseStyleStructure struct {
+	MaxMessages    int    `json:"max_messages,omitempty" yaml:"max_messages,omitempty"`
+	ParagraphStyle string `json:"paragraph_style,omitempty" yaml:"paragraph_style,omitempty"`
+	OpeningStyle   string `json:"opening_style,omitempty" yaml:"opening_style,omitempty"`
+	ClosingStyle   string `json:"closing_style,omitempty" yaml:"closing_style,omitempty"`
+	PrefersLists   bool   `json:"prefers_lists,omitempty" yaml:"prefers_lists,omitempty"`
+}
+
+type ResponseStyleWording struct {
+	Contractions bool   `json:"contractions,omitempty" yaml:"contractions,omitempty"`
+	AvoidsJargon bool   `json:"avoids_jargon,omitempty" yaml:"avoids_jargon,omitempty"`
+	HedgingLevel string `json:"hedging_level,omitempty" yaml:"hedging_level,omitempty"`
+}
+
+type ResponseStyleInteraction struct {
+	AsksAtMostOneQuestion    bool `json:"asks_at_most_one_question,omitempty" yaml:"asks_at_most_one_question,omitempty"`
+	StatesLimitsExplicitly   bool `json:"states_limits_explicitly,omitempty" yaml:"states_limits_explicitly,omitempty"`
+	ConfirmsBeforeCommitment bool `json:"confirms_before_commitment,omitempty" yaml:"confirms_before_commitment,omitempty"`
+}
+
+type ResponseStyleGrounding struct {
+	CiteFactsExplicitly       bool `json:"cite_facts_explicitly,omitempty" yaml:"cite_facts_explicitly,omitempty"`
+	MentionMissingInfoPlainly bool `json:"mention_missing_info_plainly,omitempty" yaml:"mention_missing_info_plainly,omitempty"`
+}
+
+type ResponseStyleExample struct {
+	Messages []string `json:"messages,omitempty" yaml:"messages,omitempty"`
+}
+
 type DelegationFieldAlias struct {
 	Target  string   `json:"target" yaml:"target"`
 	Sources []string `json:"sources,omitempty" yaml:"sources,omitempty"`
@@ -253,6 +308,7 @@ type Soul struct {
 	Identity           string   `json:"identity,omitempty" yaml:"identity,omitempty"`
 	Role               string   `json:"role,omitempty" yaml:"role,omitempty"`
 	Brand              string   `json:"brand,omitempty" yaml:"brand,omitempty"`
+	StyleProfileID     string   `json:"style_profile_id,omitempty" yaml:"style_profile_id,omitempty"`
 	DefaultLanguage    string   `json:"default_language,omitempty" yaml:"default_language,omitempty"`
 	SupportedLanguages []string `json:"supported_languages,omitempty" yaml:"supported_languages,omitempty"`
 	LanguageMatching   string   `json:"language_matching,omitempty" yaml:"language_matching,omitempty"`
@@ -284,22 +340,23 @@ type Observation struct {
 }
 
 type Guideline struct {
-	ID           string            `json:"id" yaml:"id"`
-	ArtifactMeta artifactmeta.Meta `json:"artifact_meta,omitempty" yaml:"-"`
-	When         string            `json:"when" yaml:"when"`
-	Then         string            `json:"then" yaml:"then"`
-	Tools        []string          `json:"tools,omitempty" yaml:"tools,omitempty"`
-	Agents       []string          `json:"agents,omitempty" yaml:"agents,omitempty"`
-	AgentBindings []GuidelineAgentBinding `json:"agent_bindings,omitempty" yaml:"agent_bindings,omitempty"`
-	ResponseCapabilityID string           `json:"response_capability_id,omitempty" yaml:"response_capability_id,omitempty"`
-	MCP          *MCPRef           `json:"mcp,omitempty" yaml:"mcp,omitempty"`
-	Scope        string            `json:"scope,omitempty" yaml:"scope,omitempty"`
-	Matcher      string            `json:"matcher,omitempty" yaml:"matcher,omitempty"`
-	Criticality  string            `json:"criticality,omitempty" yaml:"criticality,omitempty"`
-	Tags         []string          `json:"tags,omitempty" yaml:"tags,omitempty"`
-	Track        bool              `json:"track,omitempty" yaml:"track,omitempty"`
-	Continuous   bool              `json:"continuous,omitempty" yaml:"continuous,omitempty"`
-	Priority     int               `json:"priority,omitempty" yaml:"priority,omitempty"`
+	ID                   string                  `json:"id" yaml:"id"`
+	ArtifactMeta         artifactmeta.Meta       `json:"artifact_meta,omitempty" yaml:"-"`
+	When                 string                  `json:"when" yaml:"when"`
+	Then                 string                  `json:"then" yaml:"then"`
+	Tools                []string                `json:"tools,omitempty" yaml:"tools,omitempty"`
+	Agents               []string                `json:"agents,omitempty" yaml:"agents,omitempty"`
+	AgentBindings        []GuidelineAgentBinding `json:"agent_bindings,omitempty" yaml:"agent_bindings,omitempty"`
+	ResponseCapabilityID string                  `json:"response_capability_id,omitempty" yaml:"response_capability_id,omitempty"`
+	StyleProfileID       string                  `json:"style_profile_id,omitempty" yaml:"style_profile_id,omitempty"`
+	MCP                  *MCPRef                 `json:"mcp,omitempty" yaml:"mcp,omitempty"`
+	Scope                string                  `json:"scope,omitempty" yaml:"scope,omitempty"`
+	Matcher              string                  `json:"matcher,omitempty" yaml:"matcher,omitempty"`
+	Criticality          string                  `json:"criticality,omitempty" yaml:"criticality,omitempty"`
+	Tags                 []string                `json:"tags,omitempty" yaml:"tags,omitempty"`
+	Track                bool                    `json:"track,omitempty" yaml:"track,omitempty"`
+	Continuous           bool                    `json:"continuous,omitempty" yaml:"continuous,omitempty"`
+	Priority             int                     `json:"priority,omitempty" yaml:"priority,omitempty"`
 }
 
 type Relationship struct {
@@ -326,23 +383,24 @@ type Journey struct {
 }
 
 type JourneyNode struct {
-	ID              string            `json:"id" yaml:"id"`
-	ArtifactMeta    artifactmeta.Meta `json:"artifact_meta,omitempty" yaml:"-"`
-	Type            string            `json:"type" yaml:"type"`
-	Instruction     string            `json:"instruction,omitempty" yaml:"instruction,omitempty"`
-	Description     string            `json:"description,omitempty" yaml:"description,omitempty"`
-	Tool            string            `json:"tool,omitempty" yaml:"tool,omitempty"`
-	Agent           string            `json:"agent,omitempty" yaml:"agent,omitempty"`
-	ResponseCapabilityID string       `json:"response_capability_id,omitempty" yaml:"response_capability_id,omitempty"`
-	MCP             *MCPRef           `json:"mcp,omitempty" yaml:"mcp,omitempty"`
-	When            []string          `json:"when,omitempty" yaml:"when,omitempty"`
-	Next            []string          `json:"next,omitempty" yaml:"next,omitempty"`
-	Mode            string            `json:"mode,omitempty" yaml:"mode,omitempty"`
-	Kind            string            `json:"kind,omitempty" yaml:"kind,omitempty"`
-	Labels          []string          `json:"labels,omitempty" yaml:"labels,omitempty"`
-	Metadata        map[string]any    `json:"metadata,omitempty" yaml:"metadata,omitempty"`
-	CompositionMode string            `json:"composition_mode,omitempty" yaml:"composition_mode,omitempty"`
-	Priority        int               `json:"priority,omitempty" yaml:"priority,omitempty"`
+	ID                   string            `json:"id" yaml:"id"`
+	ArtifactMeta         artifactmeta.Meta `json:"artifact_meta,omitempty" yaml:"-"`
+	Type                 string            `json:"type" yaml:"type"`
+	Instruction          string            `json:"instruction,omitempty" yaml:"instruction,omitempty"`
+	Description          string            `json:"description,omitempty" yaml:"description,omitempty"`
+	Tool                 string            `json:"tool,omitempty" yaml:"tool,omitempty"`
+	Agent                string            `json:"agent,omitempty" yaml:"agent,omitempty"`
+	ResponseCapabilityID string            `json:"response_capability_id,omitempty" yaml:"response_capability_id,omitempty"`
+	StyleProfileID       string            `json:"style_profile_id,omitempty" yaml:"style_profile_id,omitempty"`
+	MCP                  *MCPRef           `json:"mcp,omitempty" yaml:"mcp,omitempty"`
+	When                 []string          `json:"when,omitempty" yaml:"when,omitempty"`
+	Next                 []string          `json:"next,omitempty" yaml:"next,omitempty"`
+	Mode                 string            `json:"mode,omitempty" yaml:"mode,omitempty"`
+	Kind                 string            `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Labels               []string          `json:"labels,omitempty" yaml:"labels,omitempty"`
+	Metadata             map[string]any    `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	CompositionMode      string            `json:"composition_mode,omitempty" yaml:"composition_mode,omitempty"`
+	Priority             int               `json:"priority,omitempty" yaml:"priority,omitempty"`
 }
 
 type JourneyEdge struct {

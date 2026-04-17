@@ -126,7 +126,7 @@ func strictNoMatchText(configured string) string {
 func synthesizeToolBackedResponse(view resolvedView, toolOutput map[string]any) []string {
 	capability, facts := responseCapabilityFacts(view, toolOutput)
 	if capability != nil && len(facts) > 0 {
-		if rendered := renderDeterministicResponseCapability(*capability, facts); len(rendered) > 0 {
+		if rendered := renderResponseCapabilityFallback(view, *capability, facts); len(rendered) > 0 {
 			return rendered
 		}
 	}
@@ -207,6 +207,23 @@ func selectedResponseCapability(view resolvedView) *policy.ResponseCapability {
 	return nil
 }
 
+func selectedStyleProfile(view resolvedView) *policy.ResponseStyleProfile {
+	if view.Bundle == nil {
+		return nil
+	}
+	profileID := strings.TrimSpace(view.ResponseAnalysisStage.Evaluation.StyleProfileID)
+	if profileID == "" {
+		return nil
+	}
+	for i := range view.Bundle.ResponseStyleProfiles {
+		item := &view.Bundle.ResponseStyleProfiles[i]
+		if strings.TrimSpace(item.ID) == profileID {
+			return item
+		}
+	}
+	return nil
+}
+
 func extractResponseCapabilityFacts(capability policy.ResponseCapability, tools map[string]any) map[string]any {
 	facts := map[string]any{}
 	for _, fact := range capability.Facts {
@@ -278,6 +295,14 @@ func renderDeterministicResponseCapability(capability policy.ResponseCapability,
 	return nil
 }
 
+func renderResponseCapabilityFallback(view resolvedView, capability policy.ResponseCapability, facts map[string]any) []string {
+	rendered := renderDeterministicResponseCapability(capability, facts)
+	if len(rendered) == 0 {
+		return nil
+	}
+	return rendered
+}
+
 func allFactsPresent(facts map[string]any, keys []string) bool {
 	for _, key := range keys {
 		if isDelegatedEmpty(facts[strings.TrimSpace(key)]) {
@@ -322,8 +347,20 @@ func synthesizeGenericToolResponse(tools map[string]any) []string {
 func buildResponseCapabilityPrompt(view resolvedView, events []session.Event, capability policy.ResponseCapability, facts map[string]any) string {
 	parts := []string{
 		"Customer message: " + latestText(events),
-		"Normalized facts:\n" + mustJSON(facts),
 	}
+	if prefs := customerPreferenceText(view.CustomerPreferences); prefs != "" {
+		parts = append(parts, "Customer preferences (soft constraints):\n"+prefs)
+	}
+	if ctx := customerContextPromptText(view.CustomerContext, view.CustomerContextPromptSafeFields); ctx != "" {
+		parts = append(parts, "Customer context:\n"+ctx)
+	}
+	if soul := soulPrompt(bundleSoul(view.Bundle)); soul != "" {
+		parts = append(parts, "Agent SOUL style and brand rules:\n"+soul)
+	}
+	if style := styleProfilePrompt(selectedStyleProfile(view)); style != "" {
+		parts = append(parts, "Active response style profile:\n"+style)
+	}
+	parts = append(parts, "Normalized facts:\n"+mustJSON(facts))
 	if len(capability.Instructions) > 0 {
 		parts = append(parts, "Response instructions:\n- "+strings.Join(capability.Instructions, "\n- "))
 	}
@@ -336,6 +373,94 @@ func buildResponseCapabilityPrompt(view resolvedView, events []session.Event, ca
 	}
 	parts = append(parts, `Use only the normalized facts provided. Do not invent missing facts. Return JSON only with this schema: {"messages":["first assistant message","optional follow-up message"]}.`)
 	return strings.Join(parts, "\n\n")
+}
+
+func styleProfilePrompt(profile *policy.ResponseStyleProfile) string {
+	if profile == nil {
+		return ""
+	}
+	var parts []string
+	if desc := strings.TrimSpace(profile.Description); desc != "" {
+		parts = append(parts, "Description: "+desc)
+	}
+	if usage := strings.TrimSpace(profile.UsageContext); usage != "" {
+		parts = append(parts, "Usage context: "+usage)
+	}
+	if summary := styleProfileSummary(*profile); summary != "" {
+		parts = append(parts, "Structured guidance:\n"+summary)
+	}
+	if len(profile.Examples) > 0 {
+		rendered := make([]string, 0, len(profile.Examples))
+		for i, example := range profile.Examples {
+			if len(example.Messages) == 0 {
+				continue
+			}
+			rendered = append(rendered, fmt.Sprintf("Style example %d:\n%s", i+1, strings.Join(example.Messages, "\n")))
+		}
+		if len(rendered) > 0 {
+			parts = append(parts, strings.Join(rendered, "\n\n"))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	parts = append(parts, "Apply this profile as local response-shape guidance. Do not let it override hard policy, moderation, strict templates, or explicit customer constraints.")
+	return strings.Join(parts, "\n")
+}
+
+func styleProfileSummary(profile policy.ResponseStyleProfile) string {
+	var lines []string
+	add := func(label, value string) {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			lines = append(lines, label+": "+value)
+		}
+	}
+	add("Tone formality", profile.Tone.Formality)
+	add("Tone warmth", profile.Tone.Warmth)
+	add("Tone directness", profile.Tone.Directness)
+	add("Tone empathy", profile.Tone.Empathy)
+	add("Verbosity overall", profile.Verbosity.Overall)
+	add("Explanation depth", profile.Verbosity.ExplanationDepth)
+	if profile.Structure.MaxMessages > 0 {
+		lines = append(lines, fmt.Sprintf("Max messages: %d", profile.Structure.MaxMessages))
+	}
+	add("Paragraph style", profile.Structure.ParagraphStyle)
+	add("Opening style", profile.Structure.OpeningStyle)
+	add("Closing style", profile.Structure.ClosingStyle)
+	if profile.Structure.PrefersLists {
+		lines = append(lines, "Prefers lists: true")
+	}
+	if profile.Wording.Contractions {
+		lines = append(lines, "Use contractions: true")
+	}
+	if profile.Wording.AvoidsJargon {
+		lines = append(lines, "Avoid jargon: true")
+	}
+	add("Hedging level", profile.Wording.HedgingLevel)
+	if profile.Interaction.AsksAtMostOneQuestion {
+		lines = append(lines, "Ask at most one question: true")
+	}
+	if profile.Interaction.StatesLimitsExplicitly {
+		lines = append(lines, "State limits explicitly: true")
+	}
+	if profile.Interaction.ConfirmsBeforeCommitment {
+		lines = append(lines, "Confirm before commitment: true")
+	}
+	if profile.Grounding.CiteFactsExplicitly {
+		lines = append(lines, "Cite facts explicitly: true")
+	}
+	if profile.Grounding.MentionMissingInfoPlainly {
+		lines = append(lines, "Mention missing information plainly: true")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func applyStyleProfileMessageLimit(messages []string, profile *policy.ResponseStyleProfile) []string {
+	if profile == nil || profile.Structure.MaxMessages <= 0 || len(messages) <= profile.Structure.MaxMessages {
+		return messages
+	}
+	return append([]string(nil), messages[:profile.Structure.MaxMessages]...)
 }
 
 func formatFactValue(value any) string {
