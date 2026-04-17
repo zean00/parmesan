@@ -89,6 +89,15 @@ runs background work”.
 
 One worker process can now run multiple executions concurrently.
 
+The code that implements this now lives under the generic engine tree:
+
+- policy resolution and matching: `internal/engine/policy/`
+- execution runner and delegated capability handling: `internal/engine/runner/`
+- semantic helpers used by planning and stage evaluation: `internal/engine/semantics/`
+
+That split is intentional. The worker process is a deployable shell around the
+engine, not the engine itself.
+
 ## What “Async Execution” Means Here
 
 When a customer message arrives, the API does not try to do all response work
@@ -168,6 +177,75 @@ That means:
 
 So Parmesan is no longer a single global execution lane, but it is also not a
 fully async event-loop runtime inside one turn.
+
+## Worker Concurrency In Practice
+
+The worker now has two distinct concurrency controls:
+
+- `runtime.execution_concurrency`
+- `runtime.async_write_workers`
+
+These govern different bottlenecks:
+
+- execution concurrency controls how many turn executions a worker process can
+  process at once
+- async write workers control how many queued persistence jobs can be flushed in
+  parallel
+
+This matters because increasing execution concurrency without enough async write
+capacity can simply move the bottleneck from execution to persistence.
+
+## Durable Retry And Resume
+
+Durability in Parmesan is not limited to process restarts. It also covers
+retryable downstream failures during execution, such as MCP/tool providers being
+temporarily unavailable.
+
+The important behavior is:
+
+- the execution keeps the same `execution_id`
+- the failing step records its retryable error durably
+- the execution can move into `waiting` until the next retry window
+- once the dependency recovers, the same execution can continue from stored
+  state instead of creating a new turn
+
+In the live Orbyte + Nexus validation, this was exercised by:
+
+1. sending the product inquiry flow through Nexus
+2. stopping `orbyte_full` before the direct MCP product tools executed
+3. observing `compose_response` enter `waiting` with a retryable MCP
+   connection-refused error
+4. restarting `orbyte_full`
+5. observing the same execution resume and complete successfully on a later
+   attempt
+
+This is the runtime model to expect for retryable dependency outages: durable
+state, resumable execution, and the same execution record carrying the turn to
+completion.
+
+## Where Delegated Verification Sits
+
+Delegated result verification and watch creation happen inside worker/runtime
+execution, not at ingress time.
+
+That means the flow is:
+
+1. ingress persists the customer event
+2. a worker picks up the execution
+3. the runtime may delegate to an ACP peer
+4. the runtime may verify the delegated result through a contract
+5. the runtime may create a watch from the verified resource
+
+So delegated follow-up behavior is part of durable background execution, not a
+special synchronous ingress shortcut.
+
+One useful distinction from the live integration tests:
+
+- direct MCP/tool flows currently provide the clearest proof of durable
+  retry/resume
+- delegated complaint intake in the Orbyte integration currently tends to fail
+  soft when Orbyte minimal is unavailable, so it is not the best durability
+  proof path
 
 ## Runtime Knobs
 

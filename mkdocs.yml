@@ -33,6 +33,7 @@ nav:
   - Architecture: architecture.md
   - Engine: engine.md
   - Policies: policies.md
+  - Delegation Contracts: delegation-contracts.md
   - Feedback Loop / Learning: feedback-learning.md
   - Operations / Dashboard: operations-dashboard.md
   - ACP Contract: acp/README.md

@@ -24,6 +24,7 @@ Policy bundles can define:
 - style / SOUL guidance
 - tool exposure
 - delegated-agent exposure
+- delegation contracts
 - capability isolation
 
 In practice, a policy bundle is the place where you turn runtime inventory into
@@ -119,6 +120,10 @@ Put differently:
 `journeys`
 - step-oriented policy flows when the conversation must move through a sequence
 
+`delegation_contracts`
+- post-delegation verification rules that turn delegated structured output into
+  a verified resource and optional runtime watch
+
 ## Annotated Stock Example
 
 In the current `live_support` sample:
@@ -175,9 +180,39 @@ ACP invocation defaults such as delegated model selection, delegated MCP
 servers, and delegated prompt prefix/suffix are configured on the corresponding
 `agent_servers.<id>` entry rather than inline in the policy bundle.
 
+## Delegation Contracts
+
+`delegation_contracts` are the generic policy mechanism for post-delegation
+verification.
+
+They let Parmesan:
+
+- accept structured result data from a delegated agent
+- verify that result against real external tool output
+- normalize it into a canonical resource shape
+- create a watch only after the resource is verified
+
+That means the engine does not need domain-specific logic such as “support
+ticket verification” built into core runtime.
+
+Typical contract responsibilities:
+
+- require result fields such as ids or status
+- map those fields into `resource.id`, `resource.display_id`, and
+  `resource.status`
+- call a verification tool and optional fallbacks
+- bind the verified resource to a watch capability
+- define the failure message if verification does not succeed
+
+This is a generic engine feature. A complaint-ticket contract is just one
+integration-specific instance of that mechanism.
+
+Read [Delegation Contracts](./delegation-contracts.md) for the full model.
+
 For the connection layer, use:
 
 - [Configuration](./configuration.md)
+- [Delegation Contracts](./delegation-contracts.md)
 
 ## SOUL And Style
 

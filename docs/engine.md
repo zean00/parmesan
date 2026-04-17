@@ -141,6 +141,27 @@ effort state.
 That design is what makes retries, operator recovery, and trace inspection
 work reliably.
 
+### Retryable Dependency Failures
+
+Durability also applies to downstream dependency outages during a turn.
+
+If a retryable MCP or tool call fails while a step is running:
+
+- the error is written onto the durable execution step
+- the execution can move into `waiting`
+- the same execution id can resume later on a new attempt
+- the runtime does not need to create a replacement turn to recover
+
+This was validated against the live Orbyte + Nexus stack by stopping
+`orbyte_full` during the product flow, observing retryable MCP failures in
+`compose_response`, restarting Orbyte, and then watching the same execution
+complete successfully on a later attempt.
+
+This is different from graceful fail-soft behavior. Some delegated flows may
+choose to degrade gracefully instead of leaving the execution in a retryable
+blocked state. That is integration behavior layered on top of the same durable
+engine.
+
 ## Runtime Constraints
 
 The engine is intentionally constrained:
@@ -167,6 +188,78 @@ Practical implication:
 
 - a delegated ACP peer is one possible policy-selected capability
 - it is not a hidden planner/executor layer running outside policy governance
+
+## Delegation Contracts In The Engine
+
+Delegation and verification are now separate runtime concerns.
+
+The engine can:
+
+1. delegate a turn to an ACP peer
+2. receive structured delegated output
+3. match that output to a policy-defined `delegation_contract`
+4. verify the delegated resource through configured tools
+5. create a watch only after verification succeeds
+
+So a delegated peer is not automatically trusted just because it returned a
+plausible answer. The engine can require confirmation before it treats the
+result as a durable resource for follow-up behavior.
+
+This is especially important for flows such as:
+
+- complaint or support tickets
+- orders or shipments
+- approvals
+- external jobs
+
+Read [Delegation Contracts](./delegation-contracts.md) for the exact contract
+model.
+
+## Extraction Surfaces
+
+There are now three different kinds of extraction in the engine, and they
+should not be confused with each other.
+
+### 1. Learning Extraction
+
+This is post-turn extraction that produces durable learning artifacts such as:
+
+- `preferred_name`
+- `contact_channel`
+
+It feeds the learning system and customer preferences. It does not directly run
+tools or verify delegated resources.
+
+### 2. Tool-Argument Extraction
+
+This is runtime argument inference used to help populate tool inputs from the
+current turn context.
+
+Examples:
+
+- inferring a product name for a product lookup tool
+- inferring a customer name for a CRM follow-up tool
+
+This happens during planning/runtime execution and is adapter-aware through the
+tool argument resolver boundary.
+
+### 3. Delegation-Contract Extraction
+
+This is post-delegation extraction that maps delegated result fields and
+verification output into a canonical resource shape such as:
+
+- `resource.id`
+- `resource.display_id`
+- `resource.status`
+
+This drives delegated verification and watch creation, not general learning or
+tool argument inference.
+
+The distinction matters:
+
+- learning extraction creates durable memory/proposals
+- tool-argument extraction helps run tools
+- delegation-contract extraction helps verify delegated resources
 
 ```mermaid
 flowchart LR

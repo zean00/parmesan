@@ -42,6 +42,22 @@ Supporting infrastructure:
 | `dashboard` | operator-facing UI |
 | Postgres | system of record for sessions, executions, traces, knowledge, and governance state |
 
+## Repository Boundaries
+
+The repository is now split along clearer runtime boundaries:
+
+- `internal/engine/`
+  - generic execution engine code such as policy resolution, runner logic, and semantics
+- `internal/integrations/`
+  - provider or system adapters that plug into the engine without hardcoding domain behavior into core runtime
+- `integrations/`
+  - checked-in integration packs, example policy bundles, config templates, and conversation assets
+- `cmd/integration-*`
+  - integration-specific validation or utility commands rather than core product entrypoints
+
+This is meant to keep core runtime behavior reusable while letting integration logic
+and validation harnesses evolve independently.
+
 ```mermaid
 flowchart LR
     Client["ACP Client / Channel"]
@@ -87,9 +103,14 @@ The worker handles asynchronous work such as:
 - maintainer and learning jobs
 - media enrichment
 - background evaluation and replay support
+- durable turn retries and resumptions when downstream dependencies recover
 
 The worker exists so the runtime path does not need to inline all slower or
 backgroundable work inside customer-facing request handling.
+
+This includes retryable MCP/tool outages. A turn can remain durable in Postgres,
+move into a resumable waiting state, and later continue on the same execution
+record once the dependency comes back.
 
 ### Bootstrap
 
@@ -193,6 +214,9 @@ allowing local development to point at repo files directly.
 ## Implementation References
 
 - application wiring: `internal/app/app.go`
+- engine policy layer: `internal/engine/policy/`
+- engine runner: `internal/engine/runner/`
+- engine semantics: `internal/engine/semantics/`
 - HTTP API server: `internal/api/http/server.go`
 - operator notification API: `internal/api/http/operator_dashboard.go`
 - worker entrypoint: `internal/worker/server.go`

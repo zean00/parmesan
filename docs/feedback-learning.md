@@ -109,6 +109,56 @@ Customer preference learning is intentionally narrower than policy change. A
 preference can personalize behavior inside allowed boundaries; it does not
 override hard rules.
 
+## Post-Turn Learning Lifecycle
+
+Learning is a real post-turn runtime path, not just a conceptual future hook.
+
+The current lifecycle is:
+
+1. a customer turn finishes
+2. Parmesan evaluates explicit conversation signals and feedback signals
+3. the learning compiler produces durable artifacts such as preferences or
+   proposals
+4. those artifacts are stored and become operator-visible
+5. later turns may consume prompt-safe preference fields where allowed
+
+This is important operationally:
+
+- learning happens after the turn, not inline during main response composition
+- learned artifacts are durable records, not ephemeral prompt memory
+- policy still governs what the runtime may do with those artifacts later
+
+## Current Explicit Preference Extraction
+
+The current system can deterministically extract some customer preferences from
+conversation history when the signal is explicit enough.
+
+Examples include:
+
+- `preferred_name`
+- `contact_channel`
+
+These are treated as customer preference artifacts, not policy mutations.
+
+That means:
+
+- `Call me Rina` can produce a durable `preferred_name`
+- `Email me updates` can produce a durable `contact_channel`
+
+Those preferences are then available for future turns subject to prompt-safety
+and policy boundaries.
+
+## What Learning Does Not Do
+
+The learning path does not:
+
+- silently rewrite active policy
+- override hard business or safety rules
+- turn every conversational hint into durable memory
+- bypass operator review for shared knowledge or policy proposals
+
+This keeps the system improvable without making runtime behavior opaque.
+
 ## Operator Role
 
 Operators remain central to learning:

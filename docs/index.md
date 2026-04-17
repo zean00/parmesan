@@ -24,8 +24,9 @@ where a visual reference is more useful than another block of prose.
 5. [Architecture](./architecture.md)
 6. [Engine](./engine.md)
 7. [Policies](./policies.md)
-8. [Feedback Loop / Learning](./feedback-learning.md)
-9. [Operations / Dashboard](./operations-dashboard.md)
+8. [Delegation Contracts](./delegation-contracts.md)
+9. [Feedback Loop / Learning](./feedback-learning.md)
+10. [Operations / Dashboard](./operations-dashboard.md)
 
 ## Pick By Task
 
@@ -38,6 +39,7 @@ where a visual reference is more useful than another block of prose.
 | inspect component boundaries and flow | [Architecture](./architecture.md) |
 | understand turn execution | [Engine](./engine.md) |
 | author or review policy bundles | [Policies](./policies.md) |
+| understand delegated result verification and watch creation | [Delegation Contracts](./delegation-contracts.md) |
 | understand feedback, maintainer jobs, and learning | [Feedback Loop / Learning](./feedback-learning.md) |
 | operate sessions and use the dashboard | [Operations / Dashboard](./operations-dashboard.md) |
 
