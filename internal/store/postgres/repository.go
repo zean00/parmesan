@@ -918,6 +918,32 @@ func (c *Client) UpdateSession(ctx context.Context, sess session.Session) error 
 	return err
 }
 
+func (c *Client) ClaimLifecycleSession(ctx context.Context, sessionID string, now time.Time, claimBefore time.Time) (session.Session, bool, error) {
+	row := c.sessionQuery().QueryRow(ctx, `
+		UPDATE sessions
+		SET idle_checked_at = $2
+		WHERE id = $1
+		  AND (idle_checked_at IS NULL OR idle_checked_at <= $3)
+		RETURNING id, channel, COALESCE(customer_id,''), COALESCE(agent_id,''), COALESCE(mode,''), COALESCE(status,'active'), COALESCE(title,''), metadata_json, labels_json, COALESCE(last_activity_at, created_at), COALESCE(idle_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(awaiting_customer_since, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(closed_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(close_reason,''), COALESCE(keep_reason,''), COALESCE(followup_count,0), created_at
+	`, sessionID, now, claimBefore)
+	var sess session.Session
+	var metadata []byte
+	var labels []byte
+	var status string
+	if err := row.Scan(&sess.ID, &sess.Channel, &sess.CustomerID, &sess.AgentID, &sess.Mode, &status, &sess.Title, &metadata, &labels, &sess.LastActivityAt, &sess.IdleCheckedAt, &sess.AwaitingCustomerSince, &sess.ClosedAt, &sess.CloseReason, &sess.KeepReason, &sess.FollowupCount, &sess.CreatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return session.Session{}, false, nil
+		}
+		return session.Session{}, false, err
+	}
+	sess.Status = session.Status(status)
+	sess.ArtifactMeta, sess.Metadata, _ = decodeMetadata(metadata)
+	if len(labels) > 0 {
+		_ = json.Unmarshal(labels, &sess.Labels)
+	}
+	return sess, true, nil
+}
+
 func (c *Client) ListSessions(ctx context.Context) ([]session.Session, error) {
 	rows, err := c.sessionQuery().Query(ctx, `SELECT id, channel, COALESCE(customer_id,''), COALESCE(agent_id,''), COALESCE(mode,''), COALESCE(status,'active'), COALESCE(title,''), metadata_json, labels_json, COALESCE(last_activity_at, created_at), COALESCE(idle_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(awaiting_customer_since, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(closed_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(close_reason,''), COALESCE(keep_reason,''), COALESCE(followup_count,0), created_at FROM sessions ORDER BY created_at DESC`)
 	if err != nil {
@@ -949,8 +975,8 @@ func (c *Client) SaveSessionWatch(ctx context.Context, watch session.Watch) erro
 		return err
 	}
 	_, err = c.sessionQuery().Exec(ctx, `
-		INSERT INTO session_watches (id, session_id, kind, status, source, subject_ref, tool_id, arguments_json, poll_interval_seconds, next_run_at, stop_condition, dedupe_key, last_result_hash, last_checked_at, metadata_json, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10, TIMESTAMPTZ '0001-01-01 00:00:00+00'),$11,$12,$13,NULLIF($14, TIMESTAMPTZ '0001-01-01 00:00:00+00'),$15,$16,$17)
+		INSERT INTO session_watches (id, session_id, kind, status, source, subject_ref, tool_id, arguments_json, poll_interval_seconds, next_run_at, stop_condition, dedupe_key, last_result_hash, last_checked_at, metadata_json, lease_owner, lease_expires_at, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10, TIMESTAMPTZ '0001-01-01 00:00:00+00'),$11,$12,$13,NULLIF($14, TIMESTAMPTZ '0001-01-01 00:00:00+00'),$15,$16,NULLIF($17, TIMESTAMPTZ '0001-01-01 00:00:00+00'),$18,$19)
 		ON CONFLICT (id) DO UPDATE SET
 		    session_id = EXCLUDED.session_id,
 		    kind = EXCLUDED.kind,
@@ -966,19 +992,21 @@ func (c *Client) SaveSessionWatch(ctx context.Context, watch session.Watch) erro
 		    last_result_hash = EXCLUDED.last_result_hash,
 		    last_checked_at = EXCLUDED.last_checked_at,
 		    metadata_json = EXCLUDED.metadata_json,
+		    lease_owner = EXCLUDED.lease_owner,
+		    lease_expires_at = EXCLUDED.lease_expires_at,
 		    updated_at = EXCLUDED.updated_at
-	`, watch.ID, watch.SessionID, watch.Kind, string(watch.Status), nullString(watch.Source), nullString(watch.SubjectRef), nullString(watch.ToolID), arguments, int(watch.PollInterval/time.Second), watch.NextRunAt, nullString(watch.StopCondition), nullString(watch.DedupeKey), nullString(watch.LastResultHash), watch.LastCheckedAt, metadataJSON(watchMetadata(watch), watch.ArtifactMeta), watch.CreatedAt, watch.UpdatedAt)
+	`, watch.ID, watch.SessionID, watch.Kind, string(watch.Status), nullString(watch.Source), nullString(watch.SubjectRef), nullString(watch.ToolID), arguments, int(watch.PollInterval/time.Second), watch.NextRunAt, nullString(watch.StopCondition), nullString(watch.DedupeKey), nullString(watch.LastResultHash), watch.LastCheckedAt, metadataJSON(watchMetadata(watch), watch.ArtifactMeta), nullString(watch.LeaseOwner), watch.LeaseExpiresAt, watch.CreatedAt, watch.UpdatedAt)
 	return err
 }
 
 func (c *Client) GetSessionWatch(ctx context.Context, watchID string) (session.Watch, error) {
-	row := c.sessionQuery().QueryRow(ctx, `SELECT id, session_id, kind, status, COALESCE(source,''), COALESCE(subject_ref,''), COALESCE(tool_id,''), arguments_json, poll_interval_seconds, COALESCE(next_run_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(stop_condition,''), COALESCE(dedupe_key,''), COALESCE(last_result_hash,''), COALESCE(last_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), metadata_json, created_at, updated_at FROM session_watches WHERE id = $1`, watchID)
+	row := c.sessionQuery().QueryRow(ctx, `SELECT id, session_id, kind, status, COALESCE(source,''), COALESCE(subject_ref,''), COALESCE(tool_id,''), arguments_json, poll_interval_seconds, COALESCE(next_run_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(stop_condition,''), COALESCE(dedupe_key,''), COALESCE(last_result_hash,''), COALESCE(last_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), metadata_json, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at FROM session_watches WHERE id = $1`, watchID)
 	var item session.Watch
 	var status string
 	var arguments []byte
 	var metadata []byte
 	var pollSeconds int
-	if err := row.Scan(&item.ID, &item.SessionID, &item.Kind, &status, &item.Source, &item.SubjectRef, &item.ToolID, &arguments, &pollSeconds, &item.NextRunAt, &item.StopCondition, &item.DedupeKey, &item.LastResultHash, &item.LastCheckedAt, &metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	if err := row.Scan(&item.ID, &item.SessionID, &item.Kind, &status, &item.Source, &item.SubjectRef, &item.ToolID, &arguments, &pollSeconds, &item.NextRunAt, &item.StopCondition, &item.DedupeKey, &item.LastResultHash, &item.LastCheckedAt, &metadata, &item.LeaseOwner, &item.LeaseExpiresAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return session.Watch{}, errors.New("session watch not found")
 		}
@@ -995,7 +1023,7 @@ func (c *Client) GetSessionWatch(ctx context.Context, watchID string) (session.W
 }
 
 func (c *Client) ListSessionWatches(ctx context.Context, query session.WatchQuery) ([]session.Watch, error) {
-	sql := `SELECT id, session_id, kind, status, COALESCE(source,''), COALESCE(subject_ref,''), COALESCE(tool_id,''), arguments_json, poll_interval_seconds, COALESCE(next_run_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(stop_condition,''), COALESCE(dedupe_key,''), COALESCE(last_result_hash,''), COALESCE(last_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), metadata_json, created_at, updated_at FROM session_watches WHERE ($1 = '' OR session_id = $1) AND ($2 = '' OR status = $2) ORDER BY created_at DESC`
+	sql := `SELECT id, session_id, kind, status, COALESCE(source,''), COALESCE(subject_ref,''), COALESCE(tool_id,''), arguments_json, poll_interval_seconds, COALESCE(next_run_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(stop_condition,''), COALESCE(dedupe_key,''), COALESCE(last_result_hash,''), COALESCE(last_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), metadata_json, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at FROM session_watches WHERE ($1 = '' OR session_id = $1) AND ($2 = '' OR status = $2) ORDER BY created_at DESC`
 	rows, err := c.sessionQuery().Query(ctx, sql, query.SessionID, query.Status)
 	if err != nil {
 		return nil, err
@@ -1008,7 +1036,7 @@ func (c *Client) ListSessionWatches(ctx context.Context, query session.WatchQuer
 		var arguments []byte
 		var metadata []byte
 		var pollSeconds int
-		if err := rows.Scan(&item.ID, &item.SessionID, &item.Kind, &status, &item.Source, &item.SubjectRef, &item.ToolID, &arguments, &pollSeconds, &item.NextRunAt, &item.StopCondition, &item.DedupeKey, &item.LastResultHash, &item.LastCheckedAt, &metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.Kind, &status, &item.Source, &item.SubjectRef, &item.ToolID, &arguments, &pollSeconds, &item.NextRunAt, &item.StopCondition, &item.DedupeKey, &item.LastResultHash, &item.LastCheckedAt, &metadata, &item.LeaseOwner, &item.LeaseExpiresAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		item.Status = session.WatchStatus(status)
@@ -1024,7 +1052,7 @@ func (c *Client) ListSessionWatches(ctx context.Context, query session.WatchQuer
 }
 
 func (c *Client) ListRunnableSessionWatches(ctx context.Context, now time.Time) ([]session.Watch, error) {
-	rows, err := c.sessionQuery().Query(ctx, `SELECT id, session_id, kind, status, COALESCE(source,''), COALESCE(subject_ref,''), COALESCE(tool_id,''), arguments_json, poll_interval_seconds, COALESCE(next_run_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(stop_condition,''), COALESCE(dedupe_key,''), COALESCE(last_result_hash,''), COALESCE(last_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), metadata_json, created_at, updated_at FROM session_watches WHERE status = 'active' AND (next_run_at IS NULL OR next_run_at <= $1) ORDER BY next_run_at ASC, created_at ASC`, now)
+	rows, err := c.sessionQuery().Query(ctx, `SELECT id, session_id, kind, status, COALESCE(source,''), COALESCE(subject_ref,''), COALESCE(tool_id,''), arguments_json, poll_interval_seconds, COALESCE(next_run_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(stop_condition,''), COALESCE(dedupe_key,''), COALESCE(last_result_hash,''), COALESCE(last_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), metadata_json, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at FROM session_watches WHERE status = 'active' AND (next_run_at IS NULL OR next_run_at <= $1) AND (lease_owner IS NULL OR lease_owner = '' OR lease_expires_at IS NULL OR lease_expires_at < $1) ORDER BY next_run_at ASC, created_at ASC`, now)
 	if err != nil {
 		return nil, err
 	}
@@ -1036,7 +1064,7 @@ func (c *Client) ListRunnableSessionWatches(ctx context.Context, now time.Time) 
 		var arguments []byte
 		var metadata []byte
 		var pollSeconds int
-		if err := rows.Scan(&item.ID, &item.SessionID, &item.Kind, &status, &item.Source, &item.SubjectRef, &item.ToolID, &arguments, &pollSeconds, &item.NextRunAt, &item.StopCondition, &item.DedupeKey, &item.LastResultHash, &item.LastCheckedAt, &metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.Kind, &status, &item.Source, &item.SubjectRef, &item.ToolID, &arguments, &pollSeconds, &item.NextRunAt, &item.StopCondition, &item.DedupeKey, &item.LastResultHash, &item.LastCheckedAt, &metadata, &item.LeaseOwner, &item.LeaseExpiresAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		item.Status = session.WatchStatus(status)
@@ -1049,6 +1077,54 @@ func (c *Client) ListRunnableSessionWatches(ctx context.Context, now time.Time) 
 		out = append(out, item)
 	}
 	return out, rows.Err()
+}
+
+func (c *Client) ClaimSessionWatch(ctx context.Context, watchID string, owner string, now time.Time, leaseExpiresAt time.Time) (session.Watch, bool, error) {
+	row := c.sessionQuery().QueryRow(ctx, `
+		UPDATE session_watches
+		SET lease_owner = $2,
+		    lease_expires_at = $4,
+		    updated_at = $3
+		WHERE id = $1
+		  AND status = 'active'
+		  AND (next_run_at IS NULL OR next_run_at <= $3)
+		  AND (lease_owner IS NULL OR lease_owner = '' OR lease_expires_at IS NULL OR lease_expires_at < $3)
+		RETURNING id, session_id, kind, status, COALESCE(source,''), COALESCE(subject_ref,''), COALESCE(tool_id,''), arguments_json, poll_interval_seconds, COALESCE(next_run_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(stop_condition,''), COALESCE(dedupe_key,''), COALESCE(last_result_hash,''), COALESCE(last_checked_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), metadata_json, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at
+	`, watchID, owner, now, leaseExpiresAt)
+	var item session.Watch
+	var status string
+	var arguments []byte
+	var metadata []byte
+	var pollSeconds int
+	if err := row.Scan(&item.ID, &item.SessionID, &item.Kind, &status, &item.Source, &item.SubjectRef, &item.ToolID, &arguments, &pollSeconds, &item.NextRunAt, &item.StopCondition, &item.DedupeKey, &item.LastResultHash, &item.LastCheckedAt, &metadata, &item.LeaseOwner, &item.LeaseExpiresAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return session.Watch{}, false, nil
+		}
+		return session.Watch{}, false, err
+	}
+	item.Status = session.WatchStatus(status)
+	item.PollInterval = time.Duration(pollSeconds) * time.Second
+	if len(arguments) > 0 {
+		_ = json.Unmarshal(arguments, &item.Arguments)
+	}
+	item.ArtifactMeta, _, _ = decodeMetadata(metadata)
+	applyWatchMetadata(metadata, &item)
+	return item, true, nil
+}
+
+func (c *Client) RenewSessionWatchLease(ctx context.Context, watchID string, owner string, now time.Time, leaseExpiresAt time.Time) (bool, error) {
+	tag, err := c.sessionQuery().Exec(ctx, `
+		UPDATE session_watches
+		SET lease_expires_at = $4,
+		    updated_at = $3
+		WHERE id = $1
+		  AND status = 'active'
+		  AND lease_owner = $2
+	`, watchID, owner, now, leaseExpiresAt)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 func (c *Client) AppendEvent(ctx context.Context, event session.Event) error {
@@ -1338,8 +1414,8 @@ func (c *Client) ListMaintainerWorkspaces(ctx context.Context, query maintainer.
 func (c *Client) SaveMaintainerJob(ctx context.Context, item maintainer.Job) error {
 	metadata := metadataJSON(item.Metadata, item.ArtifactMeta)
 	_, err := c.sessionQuery().Exec(ctx, `
-		INSERT INTO knowledge_maintainer_jobs (id, workspace_id, scope_kind, scope_id, agent_id, customer_id, mode, trigger, status, requested_by, source_id, session_id, feedback_id, response_id, run_id, error, metadata_json, created_at, started_at, finished_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+		INSERT INTO knowledge_maintainer_jobs (id, workspace_id, scope_kind, scope_id, agent_id, customer_id, mode, trigger, status, requested_by, source_id, session_id, feedback_id, response_id, run_id, error, metadata_json, lease_owner, lease_expires_at, created_at, started_at, finished_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NULLIF($19, TIMESTAMPTZ '0001-01-01 00:00:00+00'),$20,$21,$22)
 		ON CONFLICT (id) DO UPDATE
 		SET workspace_id = EXCLUDED.workspace_id,
 		    status = EXCLUDED.status,
@@ -1348,9 +1424,11 @@ func (c *Client) SaveMaintainerJob(ctx context.Context, item maintainer.Job) err
 		    run_id = EXCLUDED.run_id,
 		    error = EXCLUDED.error,
 		    metadata_json = EXCLUDED.metadata_json,
+		    lease_owner = EXCLUDED.lease_owner,
+		    lease_expires_at = EXCLUDED.lease_expires_at,
 		    started_at = EXCLUDED.started_at,
 		    finished_at = EXCLUDED.finished_at
-	`, item.ID, item.WorkspaceID, item.ScopeKind, item.ScopeID, item.AgentID, item.CustomerID, item.Mode, item.Trigger, item.Status, item.RequestedBy, item.SourceID, item.SessionID, item.FeedbackID, item.ResponseID, item.RunID, item.Error, metadata, item.CreatedAt, item.StartedAt, item.FinishedAt)
+	`, item.ID, item.WorkspaceID, item.ScopeKind, item.ScopeID, item.AgentID, item.CustomerID, item.Mode, item.Trigger, item.Status, item.RequestedBy, item.SourceID, item.SessionID, item.FeedbackID, item.ResponseID, item.RunID, item.Error, metadata, nullString(item.LeaseOwner), item.LeaseExpiresAt, item.CreatedAt, item.StartedAt, item.FinishedAt)
 	if err != nil {
 		return err
 	}
@@ -1363,12 +1441,12 @@ func (c *Client) SaveMaintainerJob(ctx context.Context, item maintainer.Job) err
 
 func (c *Client) GetMaintainerJob(ctx context.Context, jobID string) (maintainer.Job, error) {
 	row := c.sessionQuery().QueryRow(ctx, `
-		SELECT id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(requested_by,''), COALESCE(source_id,''), COALESCE(session_id,''), COALESCE(feedback_id,''), COALESCE(response_id,''), COALESCE(run_id,''), COALESCE(error,''), metadata_json, created_at, started_at, finished_at
+		SELECT id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(requested_by,''), COALESCE(source_id,''), COALESCE(session_id,''), COALESCE(feedback_id,''), COALESCE(response_id,''), COALESCE(run_id,''), COALESCE(error,''), metadata_json, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, started_at, finished_at
 		FROM knowledge_maintainer_jobs WHERE id = $1
 	`, jobID)
 	var item maintainer.Job
 	var metadata []byte
-	if err := row.Scan(&item.ID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.RequestedBy, &item.SourceID, &item.SessionID, &item.FeedbackID, &item.ResponseID, &item.RunID, &item.Error, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+	if err := row.Scan(&item.ID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.RequestedBy, &item.SourceID, &item.SessionID, &item.FeedbackID, &item.ResponseID, &item.RunID, &item.Error, &metadata, &item.LeaseOwner, &item.LeaseExpiresAt, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return maintainer.Job{}, errors.New("maintainer job not found")
 		}
@@ -1384,7 +1462,7 @@ func (c *Client) ListMaintainerJobs(ctx context.Context, query maintainer.JobQue
 		limit = 1000
 	}
 	rows, err := c.sessionQuery().Query(ctx, `
-		SELECT id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(requested_by,''), COALESCE(source_id,''), COALESCE(session_id,''), COALESCE(feedback_id,''), COALESCE(response_id,''), COALESCE(run_id,''), COALESCE(error,''), metadata_json, created_at, started_at, finished_at
+		SELECT id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(requested_by,''), COALESCE(source_id,''), COALESCE(session_id,''), COALESCE(feedback_id,''), COALESCE(response_id,''), COALESCE(run_id,''), COALESCE(error,''), metadata_json, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, started_at, finished_at
 		FROM knowledge_maintainer_jobs
 		WHERE ($1 = '' OR scope_kind = $1)
 		  AND ($2 = '' OR scope_id = $2)
@@ -1404,7 +1482,7 @@ func (c *Client) ListMaintainerJobs(ctx context.Context, query maintainer.JobQue
 	for rows.Next() {
 		var item maintainer.Job
 		var metadata []byte
-		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.RequestedBy, &item.SourceID, &item.SessionID, &item.FeedbackID, &item.ResponseID, &item.RunID, &item.Error, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.RequestedBy, &item.SourceID, &item.SessionID, &item.FeedbackID, &item.ResponseID, &item.RunID, &item.Error, &metadata, &item.LeaseOwner, &item.LeaseExpiresAt, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
 			return nil, err
 		}
 		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
@@ -1415,9 +1493,10 @@ func (c *Client) ListMaintainerJobs(ctx context.Context, query maintainer.JobQue
 
 func (c *Client) ListRunnableMaintainerJobs(ctx context.Context) ([]maintainer.Job, error) {
 	rows, err := c.sessionQuery().Query(ctx, `
-		SELECT id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(requested_by,''), COALESCE(source_id,''), COALESCE(session_id,''), COALESCE(feedback_id,''), COALESCE(response_id,''), COALESCE(run_id,''), COALESCE(error,''), metadata_json, created_at, started_at, finished_at
+		SELECT id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(requested_by,''), COALESCE(source_id,''), COALESCE(session_id,''), COALESCE(feedback_id,''), COALESCE(response_id,''), COALESCE(run_id,''), COALESCE(error,''), metadata_json, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, started_at, finished_at
 		FROM knowledge_maintainer_jobs
-		WHERE status IN ('queued','running')
+		WHERE status = 'queued'
+		   OR (status = 'running' AND (lease_owner IS NULL OR lease_owner = '' OR lease_expires_at IS NULL OR lease_expires_at < NOW()))
 		ORDER BY created_at ASC
 	`)
 	if err != nil {
@@ -1428,13 +1507,54 @@ func (c *Client) ListRunnableMaintainerJobs(ctx context.Context) ([]maintainer.J
 	for rows.Next() {
 		var item maintainer.Job
 		var metadata []byte
-		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.RequestedBy, &item.SourceID, &item.SessionID, &item.FeedbackID, &item.ResponseID, &item.RunID, &item.Error, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.RequestedBy, &item.SourceID, &item.SessionID, &item.FeedbackID, &item.ResponseID, &item.RunID, &item.Error, &metadata, &item.LeaseOwner, &item.LeaseExpiresAt, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
 			return nil, err
 		}
 		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
 		out = append(out, item)
 	}
 	return out, rows.Err()
+}
+
+func (c *Client) ClaimMaintainerJob(ctx context.Context, jobID string, owner string, now time.Time, leaseExpiresAt time.Time) (maintainer.Job, bool, error) {
+	row := c.sessionQuery().QueryRow(ctx, `
+		UPDATE knowledge_maintainer_jobs
+		SET status = 'running',
+		    lease_owner = $2,
+		    lease_expires_at = $4,
+		    started_at = COALESCE(started_at, $3)
+		WHERE id = $1
+		  AND (
+			status = 'queued'
+			OR (status = 'running' AND (lease_owner IS NULL OR lease_owner = '' OR lease_expires_at IS NULL OR lease_expires_at < $3))
+		  )
+		RETURNING id, COALESCE(workspace_id,''), scope_kind, scope_id, COALESCE(agent_id,''), COALESCE(customer_id,''), mode, trigger, status, COALESCE(requested_by,''), COALESCE(source_id,''), COALESCE(session_id,''), COALESCE(feedback_id,''), COALESCE(response_id,''), COALESCE(run_id,''), COALESCE(error,''), metadata_json, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, started_at, finished_at
+	`, jobID, owner, now, leaseExpiresAt)
+	var item maintainer.Job
+	var metadata []byte
+	if err := row.Scan(&item.ID, &item.WorkspaceID, &item.ScopeKind, &item.ScopeID, &item.AgentID, &item.CustomerID, &item.Mode, &item.Trigger, &item.Status, &item.RequestedBy, &item.SourceID, &item.SessionID, &item.FeedbackID, &item.ResponseID, &item.RunID, &item.Error, &metadata, &item.LeaseOwner, &item.LeaseExpiresAt, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return maintainer.Job{}, false, nil
+		}
+		return maintainer.Job{}, false, err
+	}
+	item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
+	return item, true, nil
+}
+
+func (c *Client) RenewMaintainerJobLease(ctx context.Context, jobID string, owner string, now time.Time, leaseExpiresAt time.Time) (bool, error) {
+	tag, err := c.sessionQuery().Exec(ctx, `
+		UPDATE knowledge_maintainer_jobs
+		SET lease_expires_at = $4,
+		    started_at = COALESCE(started_at, $3)
+		WHERE id = $1
+		  AND status = 'running'
+		  AND lease_owner = $2
+	`, jobID, owner, now, leaseExpiresAt)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 func (c *Client) SaveMaintainerRun(ctx context.Context, item maintainer.Run) error {
@@ -1533,8 +1653,8 @@ func (c *Client) ListMaintainerRuns(ctx context.Context, query maintainer.RunQue
 func (c *Client) SaveKnowledgeSyncJob(ctx context.Context, job knowledge.SyncJob) error {
 	metadata := metadataJSON(job.Metadata, job.ArtifactMeta)
 	_, err := c.sessionQuery().Exec(ctx, `
-		INSERT INTO knowledge_source_sync_jobs (id, source_id, status, force, requested_by, error, old_checksum, new_checksum, snapshot_id, changed, metadata_json, created_at, started_at, finished_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		INSERT INTO knowledge_source_sync_jobs (id, source_id, status, force, requested_by, error, old_checksum, new_checksum, snapshot_id, changed, metadata_json, lease_owner, lease_expires_at, created_at, started_at, finished_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NULLIF($13, TIMESTAMPTZ '0001-01-01 00:00:00+00'),$14,$15,$16)
 		ON CONFLICT (id) DO UPDATE
 		SET status = EXCLUDED.status,
 		    force = EXCLUDED.force,
@@ -1545,9 +1665,11 @@ func (c *Client) SaveKnowledgeSyncJob(ctx context.Context, job knowledge.SyncJob
 		    snapshot_id = EXCLUDED.snapshot_id,
 		    changed = EXCLUDED.changed,
 		    metadata_json = EXCLUDED.metadata_json,
+		    lease_owner = EXCLUDED.lease_owner,
+		    lease_expires_at = EXCLUDED.lease_expires_at,
 		    started_at = EXCLUDED.started_at,
 		    finished_at = EXCLUDED.finished_at
-	`, job.ID, job.SourceID, job.Status, job.Force, nullString(job.RequestedBy), nullString(job.Error), nullString(job.OldChecksum), nullString(job.NewChecksum), nullString(job.SnapshotID), job.Changed, metadata, job.CreatedAt, job.StartedAt, job.FinishedAt)
+	`, job.ID, job.SourceID, job.Status, job.Force, nullString(job.RequestedBy), nullString(job.Error), nullString(job.OldChecksum), nullString(job.NewChecksum), nullString(job.SnapshotID), job.Changed, metadata, nullString(job.LeaseOwner), job.LeaseExpiresAt, job.CreatedAt, job.StartedAt, job.FinishedAt)
 	if err != nil {
 		return err
 	}
@@ -1560,12 +1682,12 @@ func (c *Client) SaveKnowledgeSyncJob(ctx context.Context, job knowledge.SyncJob
 
 func (c *Client) GetKnowledgeSyncJob(ctx context.Context, jobID string) (knowledge.SyncJob, error) {
 	row := c.sessionQuery().QueryRow(ctx, `
-		SELECT id, source_id, status, force, COALESCE(requested_by,''), COALESCE(error,''), COALESCE(old_checksum,''), COALESCE(new_checksum,''), COALESCE(snapshot_id,''), changed, metadata_json, created_at, started_at, finished_at
+		SELECT id, source_id, status, force, COALESCE(requested_by,''), COALESCE(error,''), COALESCE(old_checksum,''), COALESCE(new_checksum,''), COALESCE(snapshot_id,''), changed, metadata_json, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, started_at, finished_at
 		FROM knowledge_source_sync_jobs WHERE id = $1
 	`, jobID)
 	var item knowledge.SyncJob
 	var metadata []byte
-	if err := row.Scan(&item.ID, &item.SourceID, &item.Status, &item.Force, &item.RequestedBy, &item.Error, &item.OldChecksum, &item.NewChecksum, &item.SnapshotID, &item.Changed, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+	if err := row.Scan(&item.ID, &item.SourceID, &item.Status, &item.Force, &item.RequestedBy, &item.Error, &item.OldChecksum, &item.NewChecksum, &item.SnapshotID, &item.Changed, &metadata, &item.LeaseOwner, &item.LeaseExpiresAt, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return knowledge.SyncJob{}, errors.New("knowledge sync job not found")
 		}
@@ -1581,7 +1703,7 @@ func (c *Client) ListKnowledgeSyncJobs(ctx context.Context, query knowledge.Sync
 		limit = 1000
 	}
 	rows, err := c.sessionQuery().Query(ctx, `
-		SELECT id, source_id, status, force, COALESCE(requested_by,''), COALESCE(error,''), COALESCE(old_checksum,''), COALESCE(new_checksum,''), COALESCE(snapshot_id,''), changed, metadata_json, created_at, started_at, finished_at
+		SELECT id, source_id, status, force, COALESCE(requested_by,''), COALESCE(error,''), COALESCE(old_checksum,''), COALESCE(new_checksum,''), COALESCE(snapshot_id,''), changed, metadata_json, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, started_at, finished_at
 		FROM knowledge_source_sync_jobs
 		WHERE ($1 = '' OR source_id = $1)
 		  AND ($2 = '' OR status = $2)
@@ -1596,7 +1718,7 @@ func (c *Client) ListKnowledgeSyncJobs(ctx context.Context, query knowledge.Sync
 	for rows.Next() {
 		var item knowledge.SyncJob
 		var metadata []byte
-		if err := rows.Scan(&item.ID, &item.SourceID, &item.Status, &item.Force, &item.RequestedBy, &item.Error, &item.OldChecksum, &item.NewChecksum, &item.SnapshotID, &item.Changed, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.SourceID, &item.Status, &item.Force, &item.RequestedBy, &item.Error, &item.OldChecksum, &item.NewChecksum, &item.SnapshotID, &item.Changed, &metadata, &item.LeaseOwner, &item.LeaseExpiresAt, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
 			return nil, err
 		}
 		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
@@ -1607,9 +1729,10 @@ func (c *Client) ListKnowledgeSyncJobs(ctx context.Context, query knowledge.Sync
 
 func (c *Client) ListRunnableKnowledgeSyncJobs(ctx context.Context) ([]knowledge.SyncJob, error) {
 	rows, err := c.sessionQuery().Query(ctx, `
-		SELECT id, source_id, status, force, COALESCE(requested_by,''), COALESCE(error,''), COALESCE(old_checksum,''), COALESCE(new_checksum,''), COALESCE(snapshot_id,''), changed, metadata_json, created_at, started_at, finished_at
+		SELECT id, source_id, status, force, COALESCE(requested_by,''), COALESCE(error,''), COALESCE(old_checksum,''), COALESCE(new_checksum,''), COALESCE(snapshot_id,''), changed, metadata_json, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, started_at, finished_at
 		FROM knowledge_source_sync_jobs
-		WHERE status IN ('queued','running')
+		WHERE status = 'queued'
+		   OR (status = 'running' AND (lease_owner IS NULL OR lease_owner = '' OR lease_expires_at IS NULL OR lease_expires_at < NOW()))
 		ORDER BY created_at ASC
 	`)
 	if err != nil {
@@ -1620,13 +1743,54 @@ func (c *Client) ListRunnableKnowledgeSyncJobs(ctx context.Context) ([]knowledge
 	for rows.Next() {
 		var item knowledge.SyncJob
 		var metadata []byte
-		if err := rows.Scan(&item.ID, &item.SourceID, &item.Status, &item.Force, &item.RequestedBy, &item.Error, &item.OldChecksum, &item.NewChecksum, &item.SnapshotID, &item.Changed, &metadata, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.SourceID, &item.Status, &item.Force, &item.RequestedBy, &item.Error, &item.OldChecksum, &item.NewChecksum, &item.SnapshotID, &item.Changed, &metadata, &item.LeaseOwner, &item.LeaseExpiresAt, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
 			return nil, err
 		}
 		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
 		out = append(out, item)
 	}
 	return out, rows.Err()
+}
+
+func (c *Client) ClaimKnowledgeSyncJob(ctx context.Context, jobID string, owner string, now time.Time, leaseExpiresAt time.Time) (knowledge.SyncJob, bool, error) {
+	row := c.sessionQuery().QueryRow(ctx, `
+		UPDATE knowledge_source_sync_jobs
+		SET status = 'running',
+		    lease_owner = $2,
+		    lease_expires_at = $4,
+		    started_at = COALESCE(started_at, $3)
+		WHERE id = $1
+		  AND (
+			status = 'queued'
+			OR (status = 'running' AND (lease_owner IS NULL OR lease_owner = '' OR lease_expires_at IS NULL OR lease_expires_at < $3))
+		  )
+		RETURNING id, source_id, status, force, COALESCE(requested_by,''), COALESCE(error,''), COALESCE(old_checksum,''), COALESCE(new_checksum,''), COALESCE(snapshot_id,''), changed, metadata_json, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, started_at, finished_at
+	`, jobID, owner, now, leaseExpiresAt)
+	var item knowledge.SyncJob
+	var metadata []byte
+	if err := row.Scan(&item.ID, &item.SourceID, &item.Status, &item.Force, &item.RequestedBy, &item.Error, &item.OldChecksum, &item.NewChecksum, &item.SnapshotID, &item.Changed, &metadata, &item.LeaseOwner, &item.LeaseExpiresAt, &item.CreatedAt, &item.StartedAt, &item.FinishedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return knowledge.SyncJob{}, false, nil
+		}
+		return knowledge.SyncJob{}, false, err
+	}
+	item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
+	return item, true, nil
+}
+
+func (c *Client) RenewKnowledgeSyncJobLease(ctx context.Context, jobID string, owner string, now time.Time, leaseExpiresAt time.Time) (bool, error) {
+	tag, err := c.sessionQuery().Exec(ctx, `
+		UPDATE knowledge_source_sync_jobs
+		SET lease_expires_at = $4,
+		    started_at = COALESCE(started_at, $3)
+		WHERE id = $1
+		  AND status = 'running'
+		  AND lease_owner = $2
+	`, jobID, owner, now, leaseExpiresAt)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 func (c *Client) SaveKnowledgePage(ctx context.Context, page knowledge.Page, chunks []knowledge.Chunk) error {
@@ -2448,6 +2612,155 @@ func (c *Client) UpdateExecutionStep(ctx context.Context, step execution.Executi
 	return err
 }
 
+func (c *Client) ClaimExecution(ctx context.Context, executionID string, owner string, now time.Time, leaseExpiresAt time.Time) (execution.TurnExecution, bool, error) {
+	row := c.Pool.QueryRow(ctx, `
+		UPDATE turn_executions
+		SET status = 'running',
+		    lease_owner = $2,
+		    lease_expires_at = $4,
+		    blocked_reason = NULL,
+		    resume_signal = NULL,
+		    updated_at = $3
+		WHERE id = $1
+		  AND (
+			(status IN ('pending', 'running') AND (lease_expires_at IS NULL OR lease_expires_at < $3 OR lease_owner IS NULL OR lease_owner = ''))
+			OR (status = 'waiting' AND (lease_expires_at IS NULL OR lease_expires_at < $3))
+		  )
+		RETURNING id, session_id, trigger_event_id, trigger_event_ids, COALESCE(policy_bundle_id,''), COALESCE(proposal_id,''), COALESCE(rollout_id,''), COALESCE(selection_reason,''), COALESCE(trace_id,''), status, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), created_at, updated_at, metadata_json
+	`, executionID, owner, now, leaseExpiresAt)
+	var exec execution.TurnExecution
+	var raw []byte
+	var metadata []byte
+	if err := row.Scan(&exec.ID, &exec.SessionID, &exec.TriggerEventID, &raw, &exec.PolicyBundleID, &exec.ProposalID, &exec.RolloutID, &exec.SelectionReason, &exec.TraceID, &exec.Status, &exec.LeaseOwner, &exec.LeaseExpiresAt, &exec.BlockedReason, &exec.ResumeSignal, &exec.CreatedAt, &exec.UpdatedAt, &metadata); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return execution.TurnExecution{}, false, nil
+		}
+		return execution.TurnExecution{}, false, err
+	}
+	_ = json.Unmarshal(raw, &exec.TriggerEventIDs)
+	exec.ArtifactMeta, _, _ = decodeMetadata(metadata)
+	applyExecutionMetadata(metadata, &exec)
+	return exec, true, nil
+}
+
+func (c *Client) ClaimExecutionStep(ctx context.Context, stepID string, owner string, now time.Time, leaseExpiresAt time.Time) (execution.ExecutionStep, bool, error) {
+	row := c.Pool.QueryRow(ctx, `
+		UPDATE execution_steps
+		SET status = 'running',
+		    attempt = attempt + 1,
+		    lease_owner = $2,
+		    lease_expires_at = $4,
+		    next_attempt_at = NULL,
+		    blocked_reason = NULL,
+		    resume_signal = NULL,
+		    started_at = COALESCE(started_at, $3),
+		    updated_at = $3
+		WHERE id = $1
+		  AND (
+			(status IN ('pending', 'waiting') AND (next_attempt_at IS NULL OR next_attempt_at <= $3))
+			OR (status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at < $3 OR lease_owner IS NULL OR lease_owner = ''))
+		  )
+		RETURNING id, execution_id, name, status, attempt, recomputable, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), idempotency_key, COALESCE(last_error,''), COALESCE(next_attempt_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(max_attempts, 0), COALESCE(max_elapsed_seconds, 0), COALESCE(backoff_seconds, 0), COALESCE(retry_reason,''), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), COALESCE(started_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(finished_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at, metadata_json
+	`, stepID, owner, now, leaseExpiresAt)
+	var step execution.ExecutionStep
+	var metadata []byte
+	if err := row.Scan(&step.ID, &step.ExecutionID, &step.Name, &step.Status, &step.Attempt, &step.Recomputable, &step.LeaseOwner, &step.LeaseExpiresAt, &step.IdempotencyKey, &step.LastError, &step.NextAttemptAt, &step.MaxAttempts, &step.MaxElapsedSeconds, &step.BackoffSeconds, &step.RetryReason, &step.BlockedReason, &step.ResumeSignal, &step.StartedAt, &step.FinishedAt, &step.CreatedAt, &step.UpdatedAt, &metadata); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return execution.ExecutionStep{}, false, nil
+		}
+		return execution.ExecutionStep{}, false, err
+	}
+	step.ArtifactMeta, _, _ = decodeMetadata(metadata)
+	return step, true, nil
+}
+
+func (c *Client) UpdateExecutionIfOwned(ctx context.Context, exec execution.TurnExecution, owner string) (bool, error) {
+	tag, err := c.Pool.Exec(ctx, `
+		UPDATE turn_executions
+		SET session_id = $2,
+		    trigger_event_id = $3,
+		    trigger_event_ids = $4,
+		    policy_bundle_id = $5,
+		    proposal_id = $6,
+		    rollout_id = $7,
+		    selection_reason = $8,
+		    trace_id = $9,
+		    status = $10,
+		    lease_owner = $11,
+		    lease_expires_at = $12,
+		    blocked_reason = $13,
+		    resume_signal = $14,
+		    updated_at = $15,
+		    metadata_json = $16
+		WHERE id = $1
+		  AND lease_owner = $17
+	`, exec.ID, exec.SessionID, exec.TriggerEventID, mustJSONValue(triggerEventIDs(exec)), nullString(exec.PolicyBundleID), nullString(exec.ProposalID), nullString(exec.RolloutID), nullString(exec.SelectionReason), nullString(exec.TraceID), exec.Status, nullString(exec.LeaseOwner), nullTime(exec.LeaseExpiresAt), nullString(exec.BlockedReason), nullString(exec.ResumeSignal), exec.UpdatedAt, metadataJSON(executionMetadata(exec), exec.ArtifactMeta), owner)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (c *Client) UpdateExecutionStepIfOwned(ctx context.Context, step execution.ExecutionStep, owner string) (bool, error) {
+	tag, err := c.Pool.Exec(ctx, `
+		UPDATE execution_steps
+		SET status = $2,
+		    attempt = $3,
+		    recomputable = $4,
+		    lease_owner = $5,
+		    lease_expires_at = $6,
+		    idempotency_key = $7,
+		    last_error = $8,
+		    next_attempt_at = $9,
+		    max_attempts = $10,
+		    max_elapsed_seconds = $11,
+		    backoff_seconds = $12,
+		    retry_reason = $13,
+		    blocked_reason = $14,
+		    resume_signal = $15,
+		    started_at = $16,
+		    finished_at = $17,
+		    updated_at = $18,
+		    metadata_json = $19
+		WHERE id = $1
+		  AND lease_owner = $20
+	`, step.ID, step.Status, step.Attempt, step.Recomputable, nullString(step.LeaseOwner), nullTime(step.LeaseExpiresAt), step.IdempotencyKey, nullString(step.LastError), nullTime(step.NextAttemptAt), stepMaxAttemptsForStore(step), step.MaxElapsedSeconds, stepBackoffSecondsForStore(step), nullString(step.RetryReason), nullString(step.BlockedReason), nullString(step.ResumeSignal), nullTime(step.StartedAt), nullTime(step.FinishedAt), step.UpdatedAt, metadataJSON(nil, step.ArtifactMeta), owner)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (c *Client) RenewExecutionLease(ctx context.Context, executionID string, owner string, now time.Time, leaseExpiresAt time.Time) (bool, error) {
+	tag, err := c.Pool.Exec(ctx, `
+		UPDATE turn_executions
+		SET lease_expires_at = $4,
+		    updated_at = $3
+		WHERE id = $1
+		  AND status = 'running'
+		  AND lease_owner = $2
+	`, executionID, owner, now, leaseExpiresAt)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (c *Client) RenewExecutionStepLease(ctx context.Context, stepID string, owner string, now time.Time, leaseExpiresAt time.Time) (bool, error) {
+	tag, err := c.Pool.Exec(ctx, `
+		UPDATE execution_steps
+		SET lease_expires_at = $4,
+		    updated_at = $3
+		WHERE id = $1
+		  AND status = 'running'
+		  AND lease_owner = $2
+	`, stepID, owner, now, leaseExpiresAt)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 func (c *Client) ListRunnableExecutions(ctx context.Context, now time.Time) ([]execution.TurnExecution, error) {
 	rows, err := c.Pool.Query(ctx, `
 		SELECT id, session_id, trigger_event_id, trigger_event_ids, COALESCE(policy_bundle_id,''), COALESCE(proposal_id,''), COALESCE(rollout_id,''), COALESCE(selection_reason,''), COALESCE(trace_id,''), status, COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(blocked_reason,''), COALESCE(resume_signal,''), created_at, updated_at, metadata_json
@@ -2956,7 +3269,7 @@ func (c *Client) SaveToolRun(ctx context.Context, run toolrun.Run) error {
 	_, err = c.Pool.Exec(ctx, `
 		INSERT INTO tool_runs (id, execution_id, tool_id, status, idempotency_key, input_json, output_json, created_at, metadata_json)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-		ON CONFLICT (id) DO UPDATE
+		ON CONFLICT (idempotency_key) DO UPDATE
 		SET status = EXCLUDED.status,
 		    input_json = EXCLUDED.input_json,
 		    output_json = EXCLUDED.output_json,
@@ -2991,7 +3304,7 @@ func (c *Client) SaveDeliveryAttempt(ctx context.Context, attempt delivery.Attem
 	_, err := c.Pool.Exec(ctx, `
 		INSERT INTO delivery_attempts (id, session_id, execution_id, event_id, channel, status, idempotency_key, created_at, metadata_json)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-		ON CONFLICT (id) DO UPDATE
+		ON CONFLICT (idempotency_key) DO UPDATE
 		SET status = EXCLUDED.status,
 		    metadata_json = EXCLUDED.metadata_json
 	`, attempt.ID, attempt.SessionID, attempt.ExecutionID, attempt.EventID, attempt.Channel, attempt.Status, attempt.IdempotencyKey, attempt.CreatedAt, metadataJSON(nil, attempt.ArtifactMeta))
@@ -3022,10 +3335,10 @@ func (c *Client) ListDeliveryAttempts(ctx context.Context, executionID string) (
 
 func (c *Client) CreateEvalRun(ctx context.Context, run replay.Run) error {
 	_, err := c.Pool.Exec(ctx, `
-		INSERT INTO eval_runs (id, type, source_execution_id, proposal_id, active_bundle_id, shadow_bundle_id, status, result_json, diff_json, last_error, created_at, updated_at, metadata_json)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		INSERT INTO eval_runs (id, type, source_execution_id, proposal_id, active_bundle_id, shadow_bundle_id, status, result_json, diff_json, last_error, lease_owner, lease_expires_at, created_at, updated_at, metadata_json)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12, TIMESTAMPTZ '0001-01-01 00:00:00+00'),$13,$14,$15)
 		ON CONFLICT (id) DO NOTHING
-	`, run.ID, run.Type, run.SourceExecutionID, nullString(run.ProposalID), nullString(run.ActiveBundleID), nullString(run.ShadowBundleID), run.Status, mustJSON(run.ResultJSON), mustJSON(run.DiffJSON), nullString(run.LastError), run.CreatedAt, run.UpdatedAt, metadataJSON(nil, run.ArtifactMeta))
+	`, run.ID, run.Type, run.SourceExecutionID, nullString(run.ProposalID), nullString(run.ActiveBundleID), nullString(run.ShadowBundleID), run.Status, mustJSON(run.ResultJSON), mustJSON(run.DiffJSON), nullString(run.LastError), nullString(run.LeaseOwner), run.LeaseExpiresAt, run.CreatedAt, run.UpdatedAt, metadataJSON(nil, run.ArtifactMeta))
 	return err
 }
 
@@ -3039,21 +3352,23 @@ func (c *Client) UpdateEvalRun(ctx context.Context, run replay.Run) error {
 		    result_json = $6,
 		    diff_json = $7,
 		    last_error = $8,
-		    updated_at = $9,
-		    metadata_json = $10
+		    lease_owner = $9,
+		    lease_expires_at = $10,
+		    updated_at = $11,
+		    metadata_json = $12
 		WHERE id = $1
-	`, run.ID, nullString(run.ProposalID), nullString(run.ActiveBundleID), nullString(run.ShadowBundleID), run.Status, mustJSON(run.ResultJSON), mustJSON(run.DiffJSON), nullString(run.LastError), run.UpdatedAt, metadataJSON(nil, run.ArtifactMeta))
+	`, run.ID, nullString(run.ProposalID), nullString(run.ActiveBundleID), nullString(run.ShadowBundleID), run.Status, mustJSON(run.ResultJSON), mustJSON(run.DiffJSON), nullString(run.LastError), nullString(run.LeaseOwner), nullTime(run.LeaseExpiresAt), run.UpdatedAt, metadataJSON(nil, run.ArtifactMeta))
 	return err
 }
 
 func (c *Client) GetEvalRun(ctx context.Context, runID string) (replay.Run, error) {
 	row := c.Pool.QueryRow(ctx, `
-		SELECT id, type, source_execution_id, COALESCE(proposal_id,''), COALESCE(active_bundle_id,''), COALESCE(shadow_bundle_id,''), status, result_json::text, diff_json::text, COALESCE(last_error,''), created_at, updated_at, metadata_json
+		SELECT id, type, source_execution_id, COALESCE(proposal_id,''), COALESCE(active_bundle_id,''), COALESCE(shadow_bundle_id,''), status, result_json::text, diff_json::text, COALESCE(last_error,''), COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at, metadata_json
 		FROM eval_runs WHERE id = $1
 	`, runID)
 	var run replay.Run
 	var metadata []byte
-	if err := row.Scan(&run.ID, &run.Type, &run.SourceExecutionID, &run.ProposalID, &run.ActiveBundleID, &run.ShadowBundleID, &run.Status, &run.ResultJSON, &run.DiffJSON, &run.LastError, &run.CreatedAt, &run.UpdatedAt, &metadata); err != nil {
+	if err := row.Scan(&run.ID, &run.Type, &run.SourceExecutionID, &run.ProposalID, &run.ActiveBundleID, &run.ShadowBundleID, &run.Status, &run.ResultJSON, &run.DiffJSON, &run.LastError, &run.LeaseOwner, &run.LeaseExpiresAt, &run.CreatedAt, &run.UpdatedAt, &metadata); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return replay.Run{}, errors.New("eval run not found")
 		}
@@ -3065,7 +3380,7 @@ func (c *Client) GetEvalRun(ctx context.Context, runID string) (replay.Run, erro
 
 func (c *Client) ListEvalRuns(ctx context.Context) ([]replay.Run, error) {
 	rows, err := c.Pool.Query(ctx, `
-		SELECT id, type, source_execution_id, COALESCE(proposal_id,''), COALESCE(active_bundle_id,''), COALESCE(shadow_bundle_id,''), status, result_json::text, diff_json::text, COALESCE(last_error,''), created_at, updated_at, metadata_json
+		SELECT id, type, source_execution_id, COALESCE(proposal_id,''), COALESCE(active_bundle_id,''), COALESCE(shadow_bundle_id,''), status, result_json::text, diff_json::text, COALESCE(last_error,''), COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at, metadata_json
 		FROM eval_runs ORDER BY created_at DESC
 	`)
 	if err != nil {
@@ -3076,7 +3391,7 @@ func (c *Client) ListEvalRuns(ctx context.Context) ([]replay.Run, error) {
 	for rows.Next() {
 		var run replay.Run
 		var metadata []byte
-		if err := rows.Scan(&run.ID, &run.Type, &run.SourceExecutionID, &run.ProposalID, &run.ActiveBundleID, &run.ShadowBundleID, &run.Status, &run.ResultJSON, &run.DiffJSON, &run.LastError, &run.CreatedAt, &run.UpdatedAt, &metadata); err != nil {
+		if err := rows.Scan(&run.ID, &run.Type, &run.SourceExecutionID, &run.ProposalID, &run.ActiveBundleID, &run.ShadowBundleID, &run.Status, &run.ResultJSON, &run.DiffJSON, &run.LastError, &run.LeaseOwner, &run.LeaseExpiresAt, &run.CreatedAt, &run.UpdatedAt, &metadata); err != nil {
 			return nil, err
 		}
 		run.ArtifactMeta, _, _ = decodeMetadata(metadata)
@@ -3086,11 +3401,11 @@ func (c *Client) ListEvalRuns(ctx context.Context) ([]replay.Run, error) {
 }
 
 func (c *Client) ListRunnableEvalRuns(ctx context.Context, now time.Time) ([]replay.Run, error) {
-	_ = now
 	rows, err := c.Pool.Query(ctx, `
-		SELECT id, type, source_execution_id, COALESCE(proposal_id,''), COALESCE(active_bundle_id,''), COALESCE(shadow_bundle_id,''), status, result_json::text, diff_json::text, COALESCE(last_error,''), created_at, updated_at, metadata_json
+		SELECT id, type, source_execution_id, COALESCE(proposal_id,''), COALESCE(active_bundle_id,''), COALESCE(shadow_bundle_id,''), status, result_json::text, diff_json::text, COALESCE(last_error,''), COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at, metadata_json
 		FROM eval_runs
-		WHERE status IN ('pending', 'running')
+		WHERE status = 'pending'
+		   OR (status = 'running' AND (lease_owner IS NULL OR lease_owner = '' OR lease_expires_at IS NULL OR lease_expires_at < $1))
 		ORDER BY created_at ASC
 	`)
 	if err != nil {
@@ -3101,13 +3416,54 @@ func (c *Client) ListRunnableEvalRuns(ctx context.Context, now time.Time) ([]rep
 	for rows.Next() {
 		var run replay.Run
 		var metadata []byte
-		if err := rows.Scan(&run.ID, &run.Type, &run.SourceExecutionID, &run.ProposalID, &run.ActiveBundleID, &run.ShadowBundleID, &run.Status, &run.ResultJSON, &run.DiffJSON, &run.LastError, &run.CreatedAt, &run.UpdatedAt, &metadata); err != nil {
+		if err := rows.Scan(&run.ID, &run.Type, &run.SourceExecutionID, &run.ProposalID, &run.ActiveBundleID, &run.ShadowBundleID, &run.Status, &run.ResultJSON, &run.DiffJSON, &run.LastError, &run.LeaseOwner, &run.LeaseExpiresAt, &run.CreatedAt, &run.UpdatedAt, &metadata); err != nil {
 			return nil, err
 		}
 		run.ArtifactMeta, _, _ = decodeMetadata(metadata)
 		out = append(out, run)
 	}
 	return out, rows.Err()
+}
+
+func (c *Client) ClaimEvalRun(ctx context.Context, runID string, owner string, now time.Time, leaseExpiresAt time.Time) (replay.Run, bool, error) {
+	row := c.Pool.QueryRow(ctx, `
+		UPDATE eval_runs
+		SET status = 'running',
+		    lease_owner = $2,
+		    lease_expires_at = $4,
+		    updated_at = $3
+		WHERE id = $1
+		  AND (
+			status = 'pending'
+			OR (status = 'running' AND (lease_owner IS NULL OR lease_owner = '' OR lease_expires_at IS NULL OR lease_expires_at < $3))
+		  )
+		RETURNING id, type, source_execution_id, COALESCE(proposal_id,''), COALESCE(active_bundle_id,''), COALESCE(shadow_bundle_id,''), status, result_json::text, diff_json::text, COALESCE(last_error,''), COALESCE(lease_owner,''), COALESCE(lease_expires_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), created_at, updated_at, metadata_json
+	`, runID, owner, now, leaseExpiresAt)
+	var run replay.Run
+	var metadata []byte
+	if err := row.Scan(&run.ID, &run.Type, &run.SourceExecutionID, &run.ProposalID, &run.ActiveBundleID, &run.ShadowBundleID, &run.Status, &run.ResultJSON, &run.DiffJSON, &run.LastError, &run.LeaseOwner, &run.LeaseExpiresAt, &run.CreatedAt, &run.UpdatedAt, &metadata); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return replay.Run{}, false, nil
+		}
+		return replay.Run{}, false, err
+	}
+	run.ArtifactMeta, _, _ = decodeMetadata(metadata)
+	return run, true, nil
+}
+
+func (c *Client) RenewEvalRunLease(ctx context.Context, runID string, owner string, now time.Time, leaseExpiresAt time.Time) (bool, error) {
+	tag, err := c.Pool.Exec(ctx, `
+		UPDATE eval_runs
+		SET lease_expires_at = $4,
+		    updated_at = $3
+		WHERE id = $1
+		  AND status = 'running'
+		  AND lease_owner = $2
+	`, runID, owner, now, leaseExpiresAt)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 func (c *Client) SaveProposal(ctx context.Context, proposal rollout.Proposal) error {

@@ -43,27 +43,29 @@ type Workspace struct {
 }
 
 type Job struct {
-	ID           string            `json:"id"`
-	ArtifactMeta artifactmeta.Meta `json:"artifact_meta,omitempty"`
-	WorkspaceID  string            `json:"workspace_id,omitempty"`
-	ScopeKind    string            `json:"scope_kind"`
-	ScopeID      string            `json:"scope_id"`
-	AgentID      string            `json:"agent_id,omitempty"`
-	CustomerID   string            `json:"customer_id,omitempty"`
-	Mode         string            `json:"mode"`
-	Trigger      string            `json:"trigger"`
-	Status       string            `json:"status"`
-	RequestedBy  string            `json:"requested_by,omitempty"`
-	SourceID     string            `json:"source_id,omitempty"`
-	SessionID    string            `json:"session_id,omitempty"`
-	FeedbackID   string            `json:"feedback_id,omitempty"`
-	ResponseID   string            `json:"response_id,omitempty"`
-	RunID        string            `json:"run_id,omitempty"`
-	Error        string            `json:"error,omitempty"`
-	Metadata     map[string]any    `json:"metadata,omitempty"`
-	CreatedAt    time.Time         `json:"created_at"`
-	StartedAt    *time.Time        `json:"started_at,omitempty"`
-	FinishedAt   *time.Time        `json:"finished_at,omitempty"`
+	ID             string            `json:"id"`
+	ArtifactMeta   artifactmeta.Meta `json:"artifact_meta,omitempty"`
+	WorkspaceID    string            `json:"workspace_id,omitempty"`
+	ScopeKind      string            `json:"scope_kind"`
+	ScopeID        string            `json:"scope_id"`
+	AgentID        string            `json:"agent_id,omitempty"`
+	CustomerID     string            `json:"customer_id,omitempty"`
+	Mode           string            `json:"mode"`
+	Trigger        string            `json:"trigger"`
+	Status         string            `json:"status"`
+	RequestedBy    string            `json:"requested_by,omitempty"`
+	SourceID       string            `json:"source_id,omitempty"`
+	SessionID      string            `json:"session_id,omitempty"`
+	FeedbackID     string            `json:"feedback_id,omitempty"`
+	ResponseID     string            `json:"response_id,omitempty"`
+	RunID          string            `json:"run_id,omitempty"`
+	Error          string            `json:"error,omitempty"`
+	Metadata       map[string]any    `json:"metadata,omitempty"`
+	LeaseOwner     string            `json:"lease_owner,omitempty"`
+	LeaseExpiresAt time.Time         `json:"lease_expires_at,omitempty"`
+	CreatedAt      time.Time         `json:"created_at"`
+	StartedAt      *time.Time        `json:"started_at,omitempty"`
+	FinishedAt     *time.Time        `json:"finished_at,omitempty"`
 }
 
 type Run struct {

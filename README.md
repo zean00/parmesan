@@ -247,6 +247,23 @@ Recent local benchmarks on a `4`-CPU harness showed:
 So the practical knee of the curve is around `4-6` execution workers on a
 `4 vCPU` machine.
 
+### Multi-instance workers and idempotency
+
+Multiple `cmd/worker` instances can safely share one Postgres database. Worker
+ownership is coordinated with database leases for turn executions, execution
+steps, session watches, replay evals, maintainer jobs, knowledge sync jobs, and
+idle lifecycle actions.
+
+Tool and delivery side effects use stable idempotency keys. Parmesan stores
+local `tool_runs` and `delivery_attempts` by idempotency key, and forwards tool
+idempotency to providers as `Idempotency-Key`, `X-Idempotency-Key`, and MCP
+`params._meta.idempotency_key`.
+
+Remote MCP/OpenAPI providers that create or mutate resources must honor those
+keys to provide true no-double-create behavior after crash/retry scenarios. See
+[docs/execution-model.md](./docs/execution-model.md) and
+[docs/configuration.md](./docs/configuration.md) for the operational details.
+
 Operator endpoints support single-tenant RBAC. `OPERATOR_API_KEY` remains a
 bootstrap admin credential; production operators can use stored operator API
 tokens or trusted identity headers via `OPERATOR_TRUSTED_ID_HEADER` and

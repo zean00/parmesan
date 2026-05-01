@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -396,7 +398,7 @@ func (s *Server) saveDelivery(ctx context.Context, binding gatewaydomain.Convers
 		}
 	}
 	attempt := delivery.Attempt{
-		ID:             fmt.Sprintf("delivery_%d", time.Now().UnixNano()),
+		ID:             stableDeliveryID(binding.ID, event.ID),
 		SessionID:      binding.SessionID,
 		ExecutionID:    event.ExecutionID,
 		EventID:        event.ID,
@@ -409,6 +411,11 @@ func (s *Server) saveDelivery(ctx context.Context, binding gatewaydomain.Convers
 		return s.writes.SaveDeliveryAttempt(ctx, attempt)
 	}
 	return s.repo.SaveDeliveryAttempt(ctx, attempt)
+}
+
+func stableDeliveryID(bindingID string, eventID string) string {
+	sum := sha1.Sum([]byte(strings.TrimSpace(bindingID) + "\x00" + strings.TrimSpace(eventID)))
+	return "delivery_" + hex.EncodeToString(sum[:8])
 }
 
 func (s *Server) deliveryLoop(ctx context.Context) {

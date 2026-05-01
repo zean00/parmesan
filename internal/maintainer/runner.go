@@ -34,18 +34,22 @@ func NewService(repo store.Repository) *Service {
 }
 
 type Runner struct {
-	repo     store.Repository
-	router   *model.Router
-	service  *Service
-	interval time.Duration
+	repo       store.Repository
+	router     *model.Router
+	service    *Service
+	interval   time.Duration
+	leaseOwner string
+	leaseTTL   time.Duration
 }
 
 func New(repo store.Repository, router *model.Router) *Runner {
 	return &Runner{
-		repo:     repo,
-		router:   router,
-		service:  NewService(repo),
-		interval: time.Second,
+		repo:       repo,
+		router:     router,
+		service:    NewService(repo),
+		interval:   time.Second,
+		leaseOwner: fmt.Sprintf("maintainer_%d", os.Getpid()),
+		leaseTTL:   30 * time.Second,
 	}
 }
 
@@ -70,15 +74,72 @@ func (r *Runner) runOnce(ctx context.Context) {
 	jobs, err := r.repo.ListRunnableKnowledgeSyncJobs(ctx)
 	if err == nil {
 		for _, job := range jobs {
-			_ = r.processKnowledgeSyncJob(ctx, job.ID)
+			now := time.Now().UTC()
+			claimedJob, claimed, err := r.repo.ClaimKnowledgeSyncJob(ctx, job.ID, r.leaseOwner, now, now.Add(r.leaseTTL))
+			if err != nil || !claimed {
+				continue
+			}
+			_ = r.withKnowledgeSyncLeaseRenewal(ctx, claimedJob.ID, func(leaseCtx context.Context) error {
+				return r.processClaimedKnowledgeSyncJob(leaseCtx, claimedJob)
+			})
 		}
 	}
 	maintainerJobs, err := r.repo.ListRunnableMaintainerJobs(ctx)
 	if err == nil {
 		for _, job := range maintainerJobs {
-			_ = r.processMaintainerJob(ctx, job.ID)
+			now := time.Now().UTC()
+			claimedJob, claimed, err := r.repo.ClaimMaintainerJob(ctx, job.ID, r.leaseOwner, now, now.Add(r.leaseTTL))
+			if err != nil || !claimed {
+				continue
+			}
+			_ = r.withMaintainerLeaseRenewal(ctx, claimedJob.ID, func(leaseCtx context.Context) error {
+				return r.processClaimedMaintainerJob(leaseCtx, claimedJob)
+			})
 		}
 	}
+}
+
+func (r *Runner) withMaintainerLeaseRenewal(ctx context.Context, jobID string, fn func(context.Context) error) error {
+	return r.withLeaseRenewal(ctx, func(now time.Time) (bool, error) {
+		return r.repo.RenewMaintainerJobLease(ctx, jobID, r.leaseOwner, now, now.Add(r.leaseTTL))
+	}, fn)
+}
+
+func (r *Runner) withKnowledgeSyncLeaseRenewal(ctx context.Context, jobID string, fn func(context.Context) error) error {
+	return r.withLeaseRenewal(ctx, func(now time.Time) (bool, error) {
+		return r.repo.RenewKnowledgeSyncJobLease(ctx, jobID, r.leaseOwner, now, now.Add(r.leaseTTL))
+	}, fn)
+}
+
+func (r *Runner) withLeaseRenewal(ctx context.Context, renew func(time.Time) (bool, error), fn func(context.Context) error) error {
+	renewEvery := r.leaseTTL / 3
+	if renewEvery < time.Second {
+		renewEvery = time.Second
+	}
+	leaseCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(renewEvery)
+		defer ticker.Stop()
+		defer close(done)
+		for {
+			select {
+			case <-leaseCtx.Done():
+				return
+			case now := <-ticker.C:
+				ok, err := renew(now.UTC())
+				if err != nil || !ok {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	err := fn(leaseCtx)
+	cancel()
+	<-done
+	return err
 }
 
 func (s *Service) QueueBootstrap(ctx context.Context, profile agent.Profile, requestedBy string) (maintainerdomain.Job, error) {
@@ -210,6 +271,10 @@ func (r *Runner) processKnowledgeSyncJob(ctx context.Context, jobID string) erro
 	if err != nil {
 		return err
 	}
+	return r.processClaimedKnowledgeSyncJob(ctx, job)
+}
+
+func (r *Runner) processClaimedKnowledgeSyncJob(ctx context.Context, job knowledge.SyncJob) error {
 	if job.Status == "succeeded" || job.Status == "failed" || job.Status == "skipped" {
 		return nil
 	}
@@ -221,9 +286,6 @@ func (r *Runner) processKnowledgeSyncJob(ctx context.Context, jobID string) erro
 		job.FinishedAt = &done
 		return r.repo.SaveKnowledgeSyncJob(ctx, job)
 	}
-	now := time.Now().UTC()
-	job.Status = "running"
-	job.StartedAt = &now
 	job.OldChecksum = source.Checksum
 	if err := r.repo.SaveKnowledgeSyncJob(ctx, job); err != nil {
 		return err
@@ -232,6 +294,8 @@ func (r *Runner) processKnowledgeSyncJob(ctx context.Context, jobID string) erro
 	if err != nil {
 		job.Status = "failed"
 		job.Error = err.Error()
+		job.LeaseOwner = ""
+		job.LeaseExpiresAt = time.Time{}
 		done := time.Now().UTC()
 		job.FinishedAt = &done
 		return r.repo.SaveKnowledgeSyncJob(ctx, job)
@@ -240,6 +304,8 @@ func (r *Runner) processKnowledgeSyncJob(ctx context.Context, jobID string) erro
 	if !job.Force && source.Checksum != "" && checksum == source.Checksum {
 		job.Status = "skipped"
 		job.Changed = false
+		job.LeaseOwner = ""
+		job.LeaseExpiresAt = time.Time{}
 		done := time.Now().UTC()
 		job.FinishedAt = &done
 		if job.Metadata == nil {
@@ -255,6 +321,8 @@ func (r *Runner) processKnowledgeSyncJob(ctx context.Context, jobID string) erro
 	if err != nil {
 		job.Status = "failed"
 		job.Error = err.Error()
+		job.LeaseOwner = ""
+		job.LeaseExpiresAt = time.Time{}
 		done := time.Now().UTC()
 		job.FinishedAt = &done
 		_ = r.repo.SaveKnowledgeSyncJob(ctx, job)
@@ -269,6 +337,8 @@ func (r *Runner) processKnowledgeSyncJob(ctx context.Context, jobID string) erro
 	job.Changed = true
 	job.SnapshotID = snapshot.ID
 	job.Error = ""
+	job.LeaseOwner = ""
+	job.LeaseExpiresAt = time.Time{}
 	job.FinishedAt = &done
 	if err := r.repo.SaveKnowledgeSyncJob(ctx, job); err != nil {
 		return err
@@ -281,6 +351,10 @@ func (r *Runner) processMaintainerJob(ctx context.Context, jobID string) error {
 	if err != nil {
 		return err
 	}
+	return r.processClaimedMaintainerJob(ctx, job)
+}
+
+func (r *Runner) processClaimedMaintainerJob(ctx context.Context, job maintainerdomain.Job) error {
 	if job.Status == maintainerdomain.StatusSucceeded || job.Status == maintainerdomain.StatusFailed || job.Status == maintainerdomain.StatusSkipped {
 		return nil
 	}
@@ -299,8 +373,6 @@ func (r *Runner) processMaintainerJob(ctx context.Context, jobID string) error {
 		CreatedAt:   now,
 		StartedAt:   &now,
 	}
-	job.Status = maintainerdomain.StatusRunning
-	job.StartedAt = &now
 	job.RunID = run.ID
 	if err := r.repo.SaveMaintainerRun(ctx, run); err != nil {
 		return err
@@ -309,6 +381,7 @@ func (r *Runner) processMaintainerJob(ctx context.Context, jobID string) error {
 		return err
 	}
 	var output map[string]any
+	var err error
 	switch job.Trigger {
 	case maintainerdomain.TriggerBootstrap:
 		output, err = r.processBootstrapJob(ctx, job, &run)
@@ -332,6 +405,8 @@ func (r *Runner) processMaintainerJob(ctx context.Context, jobID string) error {
 		run.Status = maintainerdomain.StatusSucceeded
 		job.Status = maintainerdomain.StatusSucceeded
 	}
+	job.LeaseOwner = ""
+	job.LeaseExpiresAt = time.Time{}
 	if saveErr := r.repo.SaveMaintainerRun(ctx, run); saveErr != nil {
 		return saveErr
 	}

@@ -20,6 +20,10 @@ type Invoker struct {
 	policy toolsecurity.ProviderURLPolicy
 }
 
+type InvokeOptions struct {
+	IdempotencyKey string
+}
+
 type ErrorClass string
 
 const (
@@ -51,32 +55,40 @@ func (i *Invoker) WithProviderURLPolicy(policy toolsecurity.ProviderURLPolicy) *
 }
 
 func (i *Invoker) Invoke(ctx context.Context, binding tool.ProviderBinding, auth tool.AuthBinding, entry tool.CatalogEntry, input map[string]any) (map[string]any, error) {
+	return i.InvokeWithOptions(ctx, binding, auth, entry, input, InvokeOptions{})
+}
+
+func (i *Invoker) InvokeWithOptions(ctx context.Context, binding tool.ProviderBinding, auth tool.AuthBinding, entry tool.CatalogEntry, input map[string]any, opts InvokeOptions) (map[string]any, error) {
 	if err := i.policy.Validate(binding.URI); err != nil {
 		return nil, classifyInvokeFailure(err, 0)
 	}
 	switch entry.RuntimeProtocol {
 	case "", "mcp":
-		return i.invokeMCP(ctx, binding, auth, entry, input)
+		return i.invokeMCP(ctx, binding, auth, entry, input, opts)
 	default:
 		return nil, fmt.Errorf("unsupported runtime protocol %q", entry.RuntimeProtocol)
 	}
 }
 
-func (i *Invoker) invokeMCP(ctx context.Context, binding tool.ProviderBinding, auth tool.AuthBinding, entry tool.CatalogEntry, input map[string]any) (map[string]any, error) {
+func (i *Invoker) invokeMCP(ctx context.Context, binding tool.ProviderBinding, auth tool.AuthBinding, entry tool.CatalogEntry, input map[string]any, opts InvokeOptions) (map[string]any, error) {
 	meta := parseMetadata(entry.MetadataJSON)
 	source, _ := meta["source"].(string)
 	if source == "openapi_import" {
-		return i.invokeOpenAPIImport(ctx, binding, auth, meta, input)
+		return i.invokeOpenAPIImport(ctx, binding, auth, meta, input, opts)
 	}
 
+	params := map[string]any{
+		"name":      entry.Name,
+		"arguments": input,
+	}
+	if meta := idempotencyMeta(opts); len(meta) > 0 {
+		params["_meta"] = meta
+	}
 	body, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"method":  "tools/call",
-		"params": map[string]any{
-			"name":      entry.Name,
-			"arguments": input,
-		},
+		"params":  params,
 	})
 	if err != nil {
 		return nil, err
@@ -86,6 +98,7 @@ func (i *Invoker) invokeMCP(ctx context.Context, binding tool.ProviderBinding, a
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	applyIdempotency(req, opts)
 	applyAuth(req, auth)
 	resp, err := i.httpClient().Do(req)
 	if err != nil {
@@ -110,7 +123,7 @@ func (i *Invoker) invokeMCP(ctx context.Context, binding tool.ProviderBinding, a
 	return decoded, nil
 }
 
-func (i *Invoker) invokeOpenAPIImport(ctx context.Context, binding tool.ProviderBinding, auth tool.AuthBinding, meta map[string]any, input map[string]any) (map[string]any, error) {
+func (i *Invoker) invokeOpenAPIImport(ctx context.Context, binding tool.ProviderBinding, auth tool.AuthBinding, meta map[string]any, input map[string]any, opts InvokeOptions) (map[string]any, error) {
 	method, _ := meta["method"].(string)
 	path, _ := meta["path"].(string)
 	if method == "" || path == "" {
@@ -147,6 +160,7 @@ func (i *Invoker) invokeOpenAPIImport(ctx context.Context, binding tool.Provider
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	applyIdempotency(req, opts)
 	applyAuth(req, auth)
 	resp, err := i.httpClient().Do(req)
 	if err != nil {
@@ -239,6 +253,23 @@ func applyAuth(req *http.Request, auth tool.AuthBinding) {
 			req.Header.Set(headerName, auth.Secret)
 		}
 	}
+}
+
+func applyIdempotency(req *http.Request, opts InvokeOptions) {
+	key := strings.TrimSpace(opts.IdempotencyKey)
+	if key == "" {
+		return
+	}
+	req.Header.Set("Idempotency-Key", key)
+	req.Header.Set("X-Idempotency-Key", key)
+}
+
+func idempotencyMeta(opts InvokeOptions) map[string]any {
+	key := strings.TrimSpace(opts.IdempotencyKey)
+	if key == "" {
+		return nil
+	}
+	return map[string]any{"idempotency_key": key}
 }
 
 func classifyInvokeFailure(err error, status int) error {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -12,24 +13,28 @@ import (
 	"github.com/sahal/parmesan/internal/domain/policy"
 	replaydomain "github.com/sahal/parmesan/internal/domain/replay"
 	"github.com/sahal/parmesan/internal/domain/session"
+	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 	"github.com/sahal/parmesan/internal/observability"
 	"github.com/sahal/parmesan/internal/quality"
-	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 )
 
 type Runner struct {
-	repo     store.Repository
-	writes   *asyncwrite.Queue
-	interval time.Duration
+	repo       store.Repository
+	writes     *asyncwrite.Queue
+	interval   time.Duration
+	leaseOwner string
+	leaseTTL   time.Duration
 }
 
 func New(repo store.Repository, writes *asyncwrite.Queue) *Runner {
 	return &Runner{
-		repo:     repo,
-		writes:   writes,
-		interval: time.Second,
+		repo:       repo,
+		writes:     writes,
+		interval:   time.Second,
+		leaseOwner: fmt.Sprintf("replay_%d", os.Getpid()),
+		leaseTTL:   30 * time.Second,
 	}
 }
 
@@ -56,8 +61,46 @@ func (r *Runner) runOnce(ctx context.Context) {
 		return
 	}
 	for _, item := range items {
-		_ = r.process(ctx, item)
+		now := time.Now().UTC()
+		run, claimed, err := r.repo.ClaimEvalRun(ctx, item.ID, r.leaseOwner, now, now.Add(r.leaseTTL))
+		if err != nil || !claimed {
+			continue
+		}
+		_ = r.withEvalLeaseRenewal(ctx, run.ID, func(leaseCtx context.Context) error {
+			return r.process(leaseCtx, run)
+		})
 	}
+}
+
+func (r *Runner) withEvalLeaseRenewal(ctx context.Context, runID string, fn func(context.Context) error) error {
+	renewEvery := r.leaseTTL / 3
+	if renewEvery < time.Second {
+		renewEvery = time.Second
+	}
+	leaseCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(renewEvery)
+		defer ticker.Stop()
+		defer close(done)
+		for {
+			select {
+			case <-leaseCtx.Done():
+				return
+			case now := <-ticker.C:
+				ok, err := r.repo.RenewEvalRunLease(ctx, runID, r.leaseOwner, now.UTC(), now.UTC().Add(r.leaseTTL))
+				if err != nil || !ok {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	err := fn(leaseCtx)
+	cancel()
+	<-done
+	return err
 }
 
 func (r *Runner) process(ctx context.Context, run replaydomain.Run) error {
@@ -66,13 +109,6 @@ func (r *Runner) process(ctx context.Context, run replaydomain.Run) error {
 	if run.Status == replaydomain.StatusSucceeded || run.Status == replaydomain.StatusFailed {
 		return nil
 	}
-	run.Status = replaydomain.StatusRunning
-	run.UpdatedAt = time.Now().UTC()
-	if err := r.repo.UpdateEvalRun(ctx, run); err != nil {
-		done("error")
-		return err
-	}
-
 	exec, _, err := r.repo.GetExecution(ctx, run.SourceExecutionID)
 	if err != nil {
 		return r.fail(ctx, run, err)
@@ -168,6 +204,8 @@ func (r *Runner) process(ctx context.Context, run replaydomain.Run) error {
 	run.ResultJSON = mustJSON(result)
 	run.DiffJSON = mustJSON(diff)
 	run.Status = replaydomain.StatusSucceeded
+	run.LeaseOwner = ""
+	run.LeaseExpiresAt = time.Time{}
 	run.UpdatedAt = time.Now().UTC()
 	if err := r.repo.UpdateEvalRun(ctx, run); err != nil {
 		return err
@@ -193,6 +231,8 @@ func (r *Runner) process(ctx context.Context, run replaydomain.Run) error {
 func (r *Runner) fail(ctx context.Context, run replaydomain.Run, err error) error {
 	run.Status = replaydomain.StatusFailed
 	run.LastError = err.Error()
+	run.LeaseOwner = ""
+	run.LeaseExpiresAt = time.Time{}
 	run.UpdatedAt = time.Now().UTC()
 	_ = r.repo.UpdateEvalRun(ctx, run)
 	return err

@@ -242,6 +242,97 @@ This is the runtime model to expect for retryable dependency outages: durable
 state, resumable execution, and the same execution record carrying the turn to
 completion.
 
+## Multi-Instance Deployment
+
+Parmesan supports running multiple `cmd/worker` instances against one shared
+Postgres database.
+
+Postgres is the coordination point. Workers do not coordinate through memory,
+process-local locks, or leader election. Every autonomous background worker
+path must claim durable work in the database before performing side effects.
+
+The shared-database model covers:
+
+- turn executions
+- execution steps
+- session watches
+- replay eval runs
+- maintainer jobs
+- knowledge sync jobs
+- idle lifecycle session actions
+
+For turn execution, a worker atomically claims the `turn_executions` row, then
+atomically claims the next runnable `execution_steps` row. While the step is
+running, the worker renews both leases. State transitions from that runner are
+fenced by `lease_owner`, so a stale worker cannot overwrite a newer worker that
+resumed the same execution after lease expiry.
+
+For the other background loops, the worker claims the specific runnable row
+before acting:
+
+- session watches use a watch lease before polling or sending reminder updates
+- replay evals use an eval-run lease before scoring
+- maintainer and knowledge-sync jobs use job leases before processing
+- idle lifecycle handling claims the session by advancing `idle_checked_at`
+
+This means it is safe to horizontally scale workers as long as all instances
+share the same migrated Postgres database.
+
+What this guarantees:
+
+- two healthy workers should not execute the same claimed turn step at the same
+  time
+- expired work can be picked up by another worker after a crash or lost lease
+- stale workers are prevented from committing runner-owned execution state once
+  ownership has moved
+- local records for tool runs and delivery attempts are deduplicated by
+  idempotency key
+
+What this does not guarantee by itself:
+
+- an external MCP/OpenAPI provider will not repeat a side effect unless that
+  provider honors the idempotency key Parmesan sends
+- a non-idempotent remote operation cannot be made exactly-once by Parmesan
+  alone if the process crashes after the remote operation succeeds but before
+  the result is persisted
+
+## Side-Effect Idempotency
+
+Parmesan treats external side effects as at-least-once unless the downstream
+provider participates in idempotency.
+
+For tool calls, Parmesan computes a stable idempotency key from:
+
+- execution id
+- provider-qualified tool id
+- normalized tool arguments
+
+The runtime stores tool runs by that key. If a completed tool run already
+exists for the same execution/tool/arguments, Parmesan reuses the stored output
+instead of invoking the provider again.
+
+When invoking external tools, Parmesan also passes the same key to the provider:
+
+- HTTP header: `Idempotency-Key`
+- HTTP header: `X-Idempotency-Key`
+- MCP request metadata: `params._meta.idempotency_key`
+
+For OpenAPI-imported tools, the headers are attached to the outgoing HTTP
+request. For JSON-RPC/MCP tools, the headers are attached to the provider call
+and the key is also included in MCP `_meta`.
+
+Provider requirement:
+
+- MCP/OpenAPI providers that create or mutate remote resources should persist
+  and honor these idempotency keys.
+- If the same idempotency key is received again, the provider should return the
+  original result instead of creating a second resource.
+- Read-only tools may ignore the key safely, but should still tolerate it.
+
+Delivery attempts are also deduplicated by idempotency key. The key is derived
+from the gateway conversation binding and event id, so a restarted gateway does
+not create duplicate local delivery-attempt records for the same event.
+
 ## Where Delegated Verification Sits
 
 Delegated result verification and watch creation happen inside worker/runtime

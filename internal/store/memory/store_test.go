@@ -53,6 +53,74 @@ func TestListRunnableExecutionsHonorsWaitingRetryCursor(t *testing.T) {
 	}
 }
 
+func TestClaimExecutionIsExclusiveUntilLeaseExpires(t *testing.T) {
+	store := New()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := store.CreateExecution(ctx, execution.TurnExecution{
+		ID:        "exec_claim",
+		Status:    execution.StatusPending,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok, err := store.ClaimExecution(ctx, "exec_claim", "owner_1", now, now.Add(time.Minute)); err != nil || !ok {
+		t.Fatalf("first ClaimExecution() ok=%v err=%v, want claimed", ok, err)
+	}
+	if _, ok, err := store.ClaimExecution(ctx, "exec_claim", "owner_2", now.Add(time.Second), now.Add(time.Minute)); err != nil || ok {
+		t.Fatalf("second ClaimExecution() ok=%v err=%v, want not claimed", ok, err)
+	}
+	if _, ok, err := store.ClaimExecution(ctx, "exec_claim", "owner_2", now.Add(2*time.Minute), now.Add(3*time.Minute)); err != nil || !ok {
+		t.Fatalf("expired ClaimExecution() ok=%v err=%v, want claimed", ok, err)
+	}
+}
+
+func TestOwnedExecutionUpdatesAreFenced(t *testing.T) {
+	store := New()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := store.CreateExecution(ctx, execution.TurnExecution{
+		ID:        "exec_fenced",
+		Status:    execution.StatusPending,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, []execution.ExecutionStep{{
+		ID:          "step_fenced",
+		ExecutionID: "exec_fenced",
+		Name:        "compose_response",
+		Status:      execution.StatusPending,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	exec, ok, err := store.ClaimExecution(ctx, "exec_fenced", "owner_1", now, now.Add(time.Minute))
+	if err != nil || !ok {
+		t.Fatalf("ClaimExecution() ok=%v err=%v, want claimed", ok, err)
+	}
+	step, ok, err := store.ClaimExecutionStep(ctx, "step_fenced", "owner_1", now, now.Add(time.Minute))
+	if err != nil || !ok {
+		t.Fatalf("ClaimExecutionStep() ok=%v err=%v, want claimed", ok, err)
+	}
+
+	exec.Status = execution.StatusSucceeded
+	if ok, err := store.UpdateExecutionIfOwned(ctx, exec, "owner_2"); err != nil || ok {
+		t.Fatalf("stale UpdateExecutionIfOwned() ok=%v err=%v, want fenced", ok, err)
+	}
+	step.Status = execution.StatusSucceeded
+	if ok, err := store.UpdateExecutionStepIfOwned(ctx, step, "owner_2"); err != nil || ok {
+		t.Fatalf("stale UpdateExecutionStepIfOwned() ok=%v err=%v, want fenced", ok, err)
+	}
+	if ok, err := store.RenewExecutionLease(ctx, "exec_fenced", "owner_2", now, now.Add(time.Minute)); err != nil || ok {
+		t.Fatalf("stale RenewExecutionLease() ok=%v err=%v, want fenced", ok, err)
+	}
+	if ok, err := store.RenewExecutionStepLease(ctx, "step_fenced", "owner_2", now, now.Add(time.Minute)); err != nil || ok {
+		t.Fatalf("stale RenewExecutionStepLease() ok=%v err=%v, want fenced", ok, err)
+	}
+}
+
 func TestSaveBundleMaterializesGraphSnapshot(t *testing.T) {
 	store := New()
 	now := time.Now().UTC()

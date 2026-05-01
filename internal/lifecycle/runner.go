@@ -29,22 +29,26 @@ import (
 )
 
 type Runner struct {
-	repo     store.Repository
-	writes   *asyncwrite.Queue
-	router   *model.Router
-	sessions *sessionsvc.Service
-	invoker  *toolruntime.Invoker
-	interval time.Duration
+	repo       store.Repository
+	writes     *asyncwrite.Queue
+	router     *model.Router
+	sessions   *sessionsvc.Service
+	invoker    *toolruntime.Invoker
+	interval   time.Duration
+	leaseOwner string
+	leaseTTL   time.Duration
 }
 
 func New(repo store.Repository, writes *asyncwrite.Queue, router *model.Router) *Runner {
 	return &Runner{
-		repo:     repo,
-		writes:   writes,
-		router:   router,
-		sessions: sessionsvc.New(repo, writes),
-		invoker:  toolruntime.New(),
-		interval: time.Second,
+		repo:       repo,
+		writes:     writes,
+		router:     router,
+		sessions:   sessionsvc.New(repo, writes),
+		invoker:    toolruntime.New(),
+		interval:   time.Second,
+		leaseOwner: fmt.Sprintf("lifecycle_%d", os.Getpid()),
+		leaseTTL:   30 * time.Second,
 	}
 }
 
@@ -99,6 +103,15 @@ func (r *Runner) processIdleSessions(ctx context.Context, now time.Time) {
 		if hasOpenExecutions(execs, sess.ID) {
 			continue
 		}
+		claimBefore := now.Add(-r.leaseTTL)
+		if sess.Status == session.StatusAwaitingCustomer || sess.Status == session.StatusSessionKeep {
+			claimBefore = now
+		}
+		claimedSession, claimed, err := r.repo.ClaimLifecycleSession(ctx, sess.ID, now, claimBefore)
+		if err != nil || !claimed {
+			continue
+		}
+		sess = claimedSession
 		decision, reason := r.decideLifecycleAction(ctx, sess, bundle)
 		switch decision {
 		case "ask_followup":
@@ -126,8 +139,45 @@ func (r *Runner) processRunnableWatches(ctx context.Context, now time.Time) {
 		return
 	}
 	for _, item := range items {
-		_ = r.processWatch(ctx, item, now)
+		watch, claimed, err := r.repo.ClaimSessionWatch(ctx, item.ID, r.leaseOwner, now, now.Add(r.leaseTTL))
+		if err != nil || !claimed {
+			continue
+		}
+		_ = r.withWatchLeaseRenewal(ctx, watch.ID, func(leaseCtx context.Context) error {
+			return r.processWatch(leaseCtx, watch, now)
+		})
 	}
+}
+
+func (r *Runner) withWatchLeaseRenewal(ctx context.Context, watchID string, fn func(context.Context) error) error {
+	renewEvery := r.leaseTTL / 3
+	if renewEvery < time.Second {
+		renewEvery = time.Second
+	}
+	leaseCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(renewEvery)
+		defer ticker.Stop()
+		defer close(done)
+		for {
+			select {
+			case <-leaseCtx.Done():
+				return
+			case now := <-ticker.C:
+				ok, err := r.repo.RenewSessionWatchLease(ctx, watchID, r.leaseOwner, now.UTC(), now.UTC().Add(r.leaseTTL))
+				if err != nil || !ok {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	err := fn(leaseCtx)
+	cancel()
+	<-done
+	return err
 }
 
 func (r *Runner) isLifecycleEligible(sess session.Session, bundle policy.Bundle, now time.Time) bool {
@@ -598,6 +648,8 @@ func (r *Runner) processWatch(ctx context.Context, watch session.Watch, now time
 	}
 	if sess.Status == session.StatusClosed {
 		watch.Status = session.WatchStatusStopped
+		watch.LeaseOwner = ""
+		watch.LeaseExpiresAt = time.Time{}
 		watch.UpdatedAt = now
 		return r.repo.SaveSessionWatch(ctx, watch)
 	}
@@ -619,6 +671,8 @@ func (r *Runner) processWatch(ctx context.Context, watch session.Watch, now time
 			return err
 		}
 		watch.Status = session.WatchStatusStopped
+		watch.LeaseOwner = ""
+		watch.LeaseExpiresAt = time.Time{}
 		watch.LastCheckedAt = now
 		watch.UpdatedAt = now
 		watch.LastResultHash = stableHash(message)
@@ -627,6 +681,8 @@ func (r *Runner) processWatch(ctx context.Context, watch session.Watch, now time
 	entry, ok := findCatalogEntryByID(ctx, r.repo, watch.ToolID)
 	if !ok {
 		watch.Status = session.WatchStatusFailed
+		watch.LeaseOwner = ""
+		watch.LeaseExpiresAt = time.Time{}
 		watch.UpdatedAt = now
 		return r.repo.SaveSessionWatch(ctx, watch)
 	}
@@ -638,17 +694,22 @@ func (r *Runner) processWatch(ctx context.Context, watch session.Watch, now time
 	if err != nil {
 		auth = tool.AuthBinding{}
 	}
-	output, err := r.invoker.Invoke(ctx, binding, auth, entry, watch.Arguments)
+	idempotencyKey := stableID("watch_tool", watch.ID, watch.ToolID, stableHash(mustJSONMap(watch.Arguments)))
+	output, err := r.invoker.InvokeWithOptions(ctx, binding, auth, entry, watch.Arguments, toolruntime.InvokeOptions{IdempotencyKey: idempotencyKey})
 	watch.LastCheckedAt = now
 	watch.UpdatedAt = now
 	previousHash := strings.TrimSpace(watch.LastResultHash)
 	if err != nil {
 		watch.NextRunAt = now.Add(watchPollInterval())
+		watch.LeaseOwner = ""
+		watch.LeaseExpiresAt = time.Time{}
 		return r.repo.SaveSessionWatch(ctx, watch)
 	}
 	hash := stableHash(mustJSONMap(output))
 	watch.NextRunAt = now.Add(watch.PollInterval)
 	watch.LastResultHash = hash
+	watch.LeaseOwner = ""
+	watch.LeaseExpiresAt = time.Time{}
 	if err := r.repo.SaveSessionWatch(ctx, watch); err != nil {
 		return err
 	}
@@ -670,6 +731,8 @@ func (r *Runner) processWatch(ctx context.Context, watch session.Watch, now time
 	}
 	if shouldStopWatch(capability, watch, output) {
 		watch.Status = session.WatchStatusStopped
+		watch.LeaseOwner = ""
+		watch.LeaseExpiresAt = time.Time{}
 		watch.UpdatedAt = now
 		return r.repo.SaveSessionWatch(ctx, watch)
 	}
@@ -889,6 +952,10 @@ func mustJSONMap(v map[string]any) string {
 func stableHash(parts ...string) string {
 	sum := sha1.Sum([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(sum[:8])
+}
+
+func stableID(prefix string, parts ...string) string {
+	return prefix + "_" + stableHash(parts...)
 }
 
 func traceIDForSession(sessionID, suffix string) string {

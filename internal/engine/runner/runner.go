@@ -212,42 +212,101 @@ func (r *Runner) releaseExecution(executionID string) {
 	delete(r.inFlight, executionID)
 }
 
+func (r *Runner) updateClaimedExecution(ctx context.Context, exec execution.TurnExecution) error {
+	ok, err := r.repo.UpdateExecutionIfOwned(ctx, exec, r.leaseOwner)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("execution lease lost")
+	}
+	return nil
+}
+
+func (r *Runner) updateClaimedStep(ctx context.Context, step execution.ExecutionStep) error {
+	ok, err := r.repo.UpdateExecutionStepIfOwned(ctx, step, r.leaseOwner)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("execution step lease lost")
+	}
+	return nil
+}
+
+func (r *Runner) withLeaseRenewal(ctx context.Context, executionID string, stepID string, fn func(context.Context) error) error {
+	renewEvery := r.leaseTTL / 3
+	if renewEvery < time.Second {
+		renewEvery = time.Second
+	}
+	leaseCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(renewEvery)
+		defer ticker.Stop()
+		defer close(done)
+		for {
+			select {
+			case <-leaseCtx.Done():
+				return
+			case now := <-ticker.C:
+				expiresAt := now.UTC().Add(r.leaseTTL)
+				ok, err := r.repo.RenewExecutionLease(ctx, executionID, r.leaseOwner, now.UTC(), expiresAt)
+				if err != nil || !ok {
+					cancel()
+					return
+				}
+				ok, err = r.repo.RenewExecutionStepLease(ctx, stepID, r.leaseOwner, now.UTC(), expiresAt)
+				if err != nil || !ok {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	err := fn(leaseCtx)
+	cancel()
+	<-done
+	return err
+}
+
 func (r *Runner) processExecution(ctx context.Context, executionID string) error {
 	ctx, done := observability.Current().StartSpan(ctx, "runner", "process_execution")
 	defer done("ok")
-	exec, steps, err := r.repo.GetExecution(ctx, executionID)
+	current, _, err := r.repo.GetExecution(ctx, executionID)
+	if err != nil {
+		done("error")
+		return err
+	}
+	if current.Status == execution.StatusSucceeded || current.Status == execution.StatusFailed || current.Status == execution.StatusAbandoned {
+		return nil
+	}
+	events, err := r.repo.ListEvents(ctx, current.SessionID)
+	if err != nil {
+		done("error")
+		return err
+	}
+	if !hasEvent(events, current.TriggerEventID) {
+		return nil
+	}
+	now := time.Now().UTC()
+	exec, claimed, err := r.repo.ClaimExecution(ctx, executionID, r.leaseOwner, now, now.Add(r.leaseTTL))
+	if err != nil {
+		done("error")
+		return err
+	}
+	if !claimed {
+		return nil
+	}
+	_, steps, err := r.repo.GetExecution(ctx, executionID)
 	if err != nil {
 		done("error")
 		return err
 	}
 	ctx = model.WithCapabilityOverrides(ctx, executionCapabilityOverrides(exec))
 	responseRecord, _ := r.ensureResponseRecord(ctx, exec)
-	if exec.Status == execution.StatusSucceeded || exec.Status == execution.StatusFailed || exec.Status == execution.StatusAbandoned {
-		return nil
-	}
-	events, err := r.repo.ListEvents(ctx, exec.SessionID)
-	if err != nil {
-		done("error")
-		return err
-	}
-	if !hasEvent(events, exec.TriggerEventID) {
-		return nil
-	}
 
-	now := time.Now().UTC()
-	if exec.Status == execution.StatusWaiting && exec.LeaseExpiresAt.After(now) {
-		return nil
-	}
-	exec.LeaseOwner = r.leaseOwner
-	exec.LeaseExpiresAt = now.Add(r.leaseTTL)
-	exec.Status = execution.StatusRunning
-	exec.BlockedReason = ""
-	exec.ResumeSignal = ""
-	exec.UpdatedAt = now
-	if err := r.repo.UpdateExecution(ctx, exec); err != nil {
-		done("error")
-		return err
-	}
 	_ = r.updateResponseState(ctx, responseRecord, responsedomain.StatusProcessing, "", func(record *responsedomain.Response) {
 		record.StartedAt = now
 	})
@@ -262,7 +321,7 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 			exec.LeaseOwner = ""
 			exec.LeaseExpiresAt = step.NextAttemptAt
 			exec.UpdatedAt = now
-			_ = r.repo.UpdateExecution(ctx, exec)
+			_ = r.updateClaimedExecution(ctx, exec)
 			_ = r.updateResponseState(ctx, responseRecord, responsedomain.StatusBlocked, step.BlockedReason, nil)
 			return nil
 		}
@@ -273,31 +332,22 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 			exec.LeaseOwner = ""
 			exec.LeaseExpiresAt = time.Time{}
 			exec.UpdatedAt = now
-			_ = r.repo.UpdateExecution(ctx, exec)
+			_ = r.updateClaimedExecution(ctx, exec)
 			return nil
 		}
-		if step.Status == execution.StatusRunning && step.LeaseExpiresAt.After(time.Now().UTC()) && step.LeaseOwner != "" && step.LeaseOwner != r.leaseOwner {
-			return nil
-		}
-
-		step.Status = execution.StatusRunning
-		step.Attempt++
-		step.LeaseOwner = r.leaseOwner
-		step.LeaseExpiresAt = time.Now().UTC().Add(r.leaseTTL)
-		step.NextAttemptAt = time.Time{}
-		step.BlockedReason = ""
-		step.ResumeSignal = ""
-		if step.StartedAt.IsZero() {
-			step.StartedAt = time.Now().UTC()
-		}
-		step.UpdatedAt = time.Now().UTC()
-		if err := r.repo.UpdateExecutionStep(ctx, step); err != nil {
+		step, claimed, err = r.repo.ClaimExecutionStep(ctx, step.ID, r.leaseOwner, now, now.Add(r.leaseTTL))
+		if err != nil {
 			return err
+		}
+		if !claimed {
+			return nil
 		}
 
 		r.publish(exec.SessionID, exec.ID, "runtime.step.started", map[string]any{"step": step.Name})
 		stepCtx := policyruntime.WithStructuredRetryAttempts(ctx, stepMaxAttempts(step))
-		err := r.executeStep(stepCtx, &exec, &step)
+		err := r.withLeaseRenewal(stepCtx, exec.ID, step.ID, func(leaseCtx context.Context) error {
+			return r.executeStep(leaseCtx, &exec, &step)
+		})
 		if err != nil {
 			if errors.Is(err, errApprovalRequired) {
 				step.Status = execution.StatusBlocked
@@ -307,14 +357,14 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 				step.LeaseOwner = ""
 				step.LeaseExpiresAt = time.Time{}
 				step.UpdatedAt = time.Now().UTC()
-				_ = r.repo.UpdateExecutionStep(ctx, step)
+				_ = r.updateClaimedStep(ctx, step)
 				exec.Status = execution.StatusBlocked
 				exec.BlockedReason = execution.BlockedReasonApprovalRequired
 				exec.ResumeSignal = execution.ResumeSignalApproval
 				exec.LeaseOwner = ""
 				exec.LeaseExpiresAt = time.Time{}
 				exec.UpdatedAt = time.Now().UTC()
-				_ = r.repo.UpdateExecution(ctx, exec)
+				_ = r.updateClaimedExecution(ctx, exec)
 				_ = r.updateResponseState(ctx, responseRecord, responsedomain.StatusBlocked, execution.BlockedReasonApprovalRequired, nil)
 				return nil
 			}
@@ -326,14 +376,14 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 				step.LeaseExpiresAt = time.Time{}
 				step.FinishedAt = time.Now().UTC()
 				step.UpdatedAt = time.Now().UTC()
-				_ = r.repo.UpdateExecutionStep(ctx, step)
+				_ = r.updateClaimedStep(ctx, step)
 				exec.Status = execution.StatusBlocked
 				exec.BlockedReason = "response_preparation_exhausted"
 				exec.ResumeSignal = "operator_retry"
 				exec.LeaseOwner = ""
 				exec.LeaseExpiresAt = time.Time{}
 				exec.UpdatedAt = time.Now().UTC()
-				_ = r.repo.UpdateExecution(ctx, exec)
+				_ = r.updateClaimedExecution(ctx, exec)
 				_ = r.updateResponseState(ctx, responseRecord, responsedomain.StatusBlocked, "response_preparation_exhausted", nil)
 				return nil
 			}
@@ -346,14 +396,14 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 				step.LeaseExpiresAt = nextAttempt
 				step.NextAttemptAt = nextAttempt
 				step.UpdatedAt = time.Now().UTC()
-				_ = r.repo.UpdateExecutionStep(ctx, step)
+				_ = r.updateClaimedStep(ctx, step)
 				exec.Status = execution.StatusWaiting
 				exec.LeaseOwner = ""
 				exec.LeaseExpiresAt = nextAttempt
 				exec.BlockedReason = ""
 				exec.ResumeSignal = ""
 				exec.UpdatedAt = time.Now().UTC()
-				_ = r.repo.UpdateExecution(ctx, exec)
+				_ = r.updateClaimedExecution(ctx, exec)
 				_ = r.updateResponseState(ctx, responseRecord, responsedomain.StatusPreparing, step.RetryReason, nil)
 				r.appendTrace(ctx, audit.Record{
 					ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
@@ -376,14 +426,14 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 				step.LeaseExpiresAt = time.Time{}
 				step.FinishedAt = time.Now().UTC()
 				step.UpdatedAt = time.Now().UTC()
-				_ = r.repo.UpdateExecutionStep(ctx, step)
+				_ = r.updateClaimedStep(ctx, step)
 				exec.Status = execution.StatusBlocked
 				exec.BlockedReason = execution.BlockedReasonRetryBudgetExhausted
 				exec.ResumeSignal = "operator_retry"
 				exec.LeaseOwner = ""
 				exec.LeaseExpiresAt = time.Time{}
 				exec.UpdatedAt = time.Now().UTC()
-				_ = r.repo.UpdateExecution(ctx, exec)
+				_ = r.updateClaimedExecution(ctx, exec)
 				_ = r.updateResponseState(ctx, responseRecord, responsedomain.StatusBlocked, execution.BlockedReasonRetryBudgetExhausted, nil)
 				r.appendTrace(ctx, audit.Record{
 					ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
@@ -403,12 +453,12 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 			step.LeaseExpiresAt = time.Time{}
 			step.FinishedAt = time.Now().UTC()
 			step.UpdatedAt = time.Now().UTC()
-			_ = r.repo.UpdateExecutionStep(ctx, step)
+			_ = r.updateClaimedStep(ctx, step)
 			exec.Status = execution.StatusFailed
 			exec.LeaseOwner = ""
 			exec.LeaseExpiresAt = time.Time{}
 			exec.UpdatedAt = time.Now().UTC()
-			_ = r.repo.UpdateExecution(ctx, exec)
+			_ = r.updateClaimedExecution(ctx, exec)
 			_ = r.updateResponseState(ctx, responseRecord, responsedomain.StatusFailed, err.Error(), func(record *responsedomain.Response) {
 				record.CompletedAt = time.Now().UTC()
 			})
@@ -431,9 +481,11 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 		step.BlockedReason = ""
 		step.ResumeSignal = ""
 		step.NextAttemptAt = time.Time{}
+		step.LeaseOwner = ""
+		step.LeaseExpiresAt = time.Time{}
 		step.FinishedAt = time.Now().UTC()
 		step.UpdatedAt = time.Now().UTC()
-		if err := r.repo.UpdateExecutionStep(ctx, step); err != nil {
+		if err := r.updateClaimedStep(ctx, step); err != nil {
 			return err
 		}
 		r.publish(exec.SessionID, exec.ID, "runtime.step.completed", map[string]any{"step": step.Name})
@@ -445,7 +497,7 @@ func (r *Runner) processExecution(ctx context.Context, executionID string) error
 	exec.LeaseOwner = ""
 	exec.LeaseExpiresAt = time.Time{}
 	exec.UpdatedAt = time.Now().UTC()
-	if err := r.repo.UpdateExecution(ctx, exec); err != nil {
+	if err := r.updateClaimedExecution(ctx, exec); err != nil {
 		return err
 	}
 	if err := r.learnFromExecution(ctx, exec); err != nil {
@@ -506,7 +558,11 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 		if view.Bundle != nil {
 			exec.PolicyBundleID = view.Bundle.ID
 			exec.UpdatedAt = time.Now().UTC()
-			if err := r.repo.UpdateExecution(ctx, *exec); err != nil {
+			if exec.LeaseOwner == "" {
+				if err := r.repo.UpdateExecution(ctx, *exec); err != nil {
+					return err
+				}
+			} else if err := r.updateClaimedExecution(ctx, *exec); err != nil {
 				return err
 			}
 		}
@@ -919,7 +975,11 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 		exec.RolloutID = selection.RolloutID
 		exec.SelectionReason = selection.Reason
 		exec.UpdatedAt = time.Now().UTC()
-		if err := r.repo.UpdateExecution(ctx, exec); err != nil {
+		if exec.LeaseOwner == "" {
+			if err := r.repo.UpdateExecution(ctx, exec); err != nil {
+				return resolvedView{}, nil, err
+			}
+		} else if err := r.updateClaimedExecution(ctx, exec); err != nil {
 			return resolvedView{}, nil, err
 		}
 	}
@@ -1923,6 +1983,7 @@ func (r *Runner) maybeDelegateAgent(ctx context.Context, exec execution.TurnExec
 		"delegation_parent_agent_id":     sess.AgentID,
 		"delegation_server_id":           serverID,
 		"delegation_mode":                "sync",
+		"idempotency_key":                stableID("delegate_call", exec.ID, serverID, childSessionID),
 	}
 	if hasWorkflow {
 		metadata["delegation_workflow_id"] = workflow.ID
@@ -2074,7 +2135,8 @@ func (r *Runner) verifyDelegatedAgentOutput(ctx context.Context, view resolvedVi
 			auth = tool.AuthBinding{}
 		}
 		args := delegatedVerificationArgs(verificationTool.Args, fields)
-		output, err := r.invoker.Invoke(ctx, binding, auth, entry, args)
+		idempotencyKey := stableID("verify_tool", fmt.Sprint(fields["server_id"]), entry.ProviderID, entry.Name, hashArguments(args))
+		output, err := r.invoker.InvokeWithOptions(ctx, binding, auth, entry, args, toolruntime.InvokeOptions{IdempotencyKey: idempotencyKey})
 		if err != nil {
 			lastErr = err
 			continue
@@ -2324,7 +2386,7 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 		return output, nil
 	}
 	run := toolrun.Run{
-		ID:             fmt.Sprintf("toolrun_%d", time.Now().UnixNano()),
+		ID:             stableID("toolrun", idempotencyKey),
 		ExecutionID:    exec.ID,
 		ToolID:         toolID,
 		Status:         "running",
@@ -2353,7 +2415,7 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 		StartedAt:   toolRunStarted,
 	})
 	r.publish(exec.SessionID, exec.ID, "runtime.tool.started", map[string]any{"tool": entry.Name})
-	output, err := r.invoker.Invoke(ctx, binding, auth, entry, decision.Arguments)
+	output, err := r.invoker.InvokeWithOptions(ctx, binding, auth, entry, decision.Arguments, toolruntime.InvokeOptions{IdempotencyKey: idempotencyKey})
 	if err != nil {
 		run.Status = "failed"
 		run.OutputJSON = mustJSON(toolErrorPayload(err))

@@ -222,6 +222,9 @@ Sizing guidance:
 
 - Parmesan is now concurrent across executions, but still blocking within a
   single execution. Slow LLM or tool calls occupy one execution worker.
+- Multiple worker instances may point at the same Postgres database. Work
+  ownership is coordinated through database leases, so scale total capacity by
+  multiplying `execution_concurrency` by the number of worker instances.
 - Start with `1.5-2` execution workers per vCPU for mixed workloads.
 - For a `4 vCPU` node, a practical starting point is:
   - `execution_concurrency: 6`
@@ -237,6 +240,50 @@ Recent local benchmark notes on a `4`-CPU test harness:
 - `8` workers improved peak throughput a little more, but tail latency rose
   noticeably
 - the practical knee of the curve was around `4-6` workers
+
+### Multi-Instance Deployment Checklist
+
+For horizontal worker deployment:
+
+- run all migrations before starting the new version
+- point every API, gateway, and worker instance at the same `DATABASE_URL`
+- keep `cmd/api` and `cmd/worker` on the same application version during a
+  rollout that changes durable schema
+- size Postgres for aggregate concurrency, not per-pod concurrency
+- monitor runnable executions, lease expiry, async write lag, and provider
+  latency when adding workers
+
+Multi-instance safety relies on these database-backed claims:
+
+- execution and execution-step leases
+- session-watch leases
+- replay eval-run leases
+- maintainer-job leases
+- knowledge-sync-job leases
+- idle lifecycle session claims
+
+Operator actions such as retry, unblock, abandon, cancel, and approval resolve
+are administrative overrides. They intentionally update durable state outside
+the autonomous worker-claim path.
+
+### Provider Idempotency
+
+Parmesan emits idempotency keys for external tool side effects, but the remote
+provider must honor them for true no-double-create behavior.
+
+Tool providers should accept:
+
+- `Idempotency-Key`
+- `X-Idempotency-Key`
+- MCP `params._meta.idempotency_key`
+
+For create/update operations, providers should store the key with the created
+resource or operation result. If the same key is received again, return the
+original result instead of repeating the mutation.
+
+Parmesan also stores local `tool_runs` and `delivery_attempts` by idempotency
+key, so retries do not duplicate local runtime records. This does not replace
+provider-side idempotency for remote systems.
 
 ### Runtime Retry Model Profiles
 

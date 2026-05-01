@@ -2,6 +2,7 @@ package toolruntime
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -31,6 +32,36 @@ func TestInvokeAppliesBearerAuthHeader(t *testing.T) {
 	}
 	if ok, _ := out["ok"].(bool); !ok {
 		t.Fatalf("output = %#v, want ok=true", out)
+	}
+}
+
+func TestInvokePropagatesIdempotencyToMCP(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Idempotency-Key"); got != "idem_123" {
+			t.Fatalf("Idempotency-Key = %q, want idem_123", got)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		params, _ := body["params"].(map[string]any)
+		meta, _ := params["_meta"].(map[string]any)
+		if got, _ := meta["idempotency_key"].(string); got != "idem_123" {
+			t.Fatalf("_meta.idempotency_key = %q, want idem_123", got)
+		}
+		_, _ = w.Write([]byte(`{"result":{"ok":true}}`))
+	}))
+	defer server.Close()
+
+	_, err := New().InvokeWithOptions(context.Background(),
+		tool.ProviderBinding{ID: "provider_1", URI: server.URL},
+		tool.AuthBinding{},
+		tool.CatalogEntry{ID: "tool_1", ProviderID: "provider_1", Name: "demo", RuntimeProtocol: "mcp"},
+		map[string]any{"a": 1},
+		InvokeOptions{IdempotencyKey: "idem_123"},
+	)
+	if err != nil {
+		t.Fatalf("InvokeWithOptions() error = %v", err)
 	}
 }
 

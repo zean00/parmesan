@@ -105,21 +105,23 @@ type LintFinding struct {
 }
 
 type SyncJob struct {
-	ID           string            `json:"id"`
-	ArtifactMeta artifactmeta.Meta `json:"artifact_meta,omitempty"`
-	SourceID     string            `json:"source_id"`
-	Status       string            `json:"status"`
-	Force        bool              `json:"force,omitempty"`
-	RequestedBy  string            `json:"requested_by,omitempty"`
-	Error        string            `json:"error,omitempty"`
-	OldChecksum  string            `json:"old_checksum,omitempty"`
-	NewChecksum  string            `json:"new_checksum,omitempty"`
-	SnapshotID   string            `json:"snapshot_id,omitempty"`
-	Changed      bool              `json:"changed,omitempty"`
-	Metadata     map[string]any    `json:"metadata,omitempty"`
-	CreatedAt    time.Time         `json:"created_at"`
-	StartedAt    *time.Time        `json:"started_at,omitempty"`
-	FinishedAt   *time.Time        `json:"finished_at,omitempty"`
+	ID             string            `json:"id"`
+	ArtifactMeta   artifactmeta.Meta `json:"artifact_meta,omitempty"`
+	SourceID       string            `json:"source_id"`
+	Status         string            `json:"status"`
+	Force          bool              `json:"force,omitempty"`
+	RequestedBy    string            `json:"requested_by,omitempty"`
+	Error          string            `json:"error,omitempty"`
+	OldChecksum    string            `json:"old_checksum,omitempty"`
+	NewChecksum    string            `json:"new_checksum,omitempty"`
+	SnapshotID     string            `json:"snapshot_id,omitempty"`
+	Changed        bool              `json:"changed,omitempty"`
+	Metadata       map[string]any    `json:"metadata,omitempty"`
+	LeaseOwner     string            `json:"lease_owner,omitempty"`
+	LeaseExpiresAt time.Time         `json:"lease_expires_at,omitempty"`
+	CreatedAt      time.Time         `json:"created_at"`
+	StartedAt      *time.Time        `json:"started_at,omitempty"`
+	FinishedAt     *time.Time        `json:"finished_at,omitempty"`
 }
 
 type SnapshotQuery struct {

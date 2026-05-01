@@ -581,6 +581,23 @@ func (s *Store) UpdateSession(_ context.Context, updated session.Session) error 
 	return errors.New("session not found")
 }
 
+func (s *Store) ClaimLifecycleSession(_ context.Context, sessionID string, now time.Time, claimBefore time.Time) (session.Session, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, sess := range s.sessions {
+		if sess.ID != sessionID {
+			continue
+		}
+		if !sess.IdleCheckedAt.IsZero() && sess.IdleCheckedAt.After(claimBefore) {
+			return sess, false, nil
+		}
+		sess.IdleCheckedAt = now
+		s.sessions[i] = sess
+		return sess, true, nil
+	}
+	return session.Session{}, false, errors.New("session not found")
+}
+
 func (s *Store) ListSessions(_ context.Context) ([]session.Session, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -640,10 +657,50 @@ func (s *Store) ListRunnableSessionWatches(_ context.Context, now time.Time) ([]
 		if !item.NextRunAt.IsZero() && item.NextRunAt.After(now) {
 			continue
 		}
+		if !runnableLease(item.LeaseOwner, item.LeaseExpiresAt, now) {
+			continue
+		}
 		out = append(out, item)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].NextRunAt.Before(out[j].NextRunAt) })
 	return out, nil
+}
+
+func (s *Store) ClaimSessionWatch(_ context.Context, watchID string, owner string, now time.Time, leaseExpiresAt time.Time) (session.Watch, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.sessionWatches {
+		if item.ID != watchID {
+			continue
+		}
+		if item.Status != session.WatchStatusActive || (!item.NextRunAt.IsZero() && item.NextRunAt.After(now)) || !runnableLease(item.LeaseOwner, item.LeaseExpiresAt, now) {
+			return item, false, nil
+		}
+		item.LeaseOwner = owner
+		item.LeaseExpiresAt = leaseExpiresAt
+		item.UpdatedAt = now
+		s.sessionWatches[i] = item
+		return item, true, nil
+	}
+	return session.Watch{}, false, errors.New("session watch not found")
+}
+
+func (s *Store) RenewSessionWatchLease(_ context.Context, watchID string, owner string, now time.Time, leaseExpiresAt time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.sessionWatches {
+		if item.ID != watchID {
+			continue
+		}
+		if item.Status != session.WatchStatusActive || item.LeaseOwner != owner {
+			return false, nil
+		}
+		item.LeaseExpiresAt = leaseExpiresAt
+		item.UpdatedAt = now
+		s.sessionWatches[i] = item
+		return true, nil
+	}
+	return false, errors.New("session watch not found")
 }
 
 func (s *Store) AppendEvent(_ context.Context, event session.Event) error {
@@ -822,11 +879,160 @@ func (s *Store) UpdateExecutionStep(_ context.Context, updated execution.Executi
 	return errors.New("step not found")
 }
 
+func (s *Store) ClaimExecution(_ context.Context, executionID string, owner string, now time.Time, leaseExpiresAt time.Time) (execution.TurnExecution, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, exec := range s.execs {
+		if exec.ID != executionID {
+			continue
+		}
+		if !executionClaimable(exec, now) {
+			return exec, false, nil
+		}
+		exec.Status = execution.StatusRunning
+		exec.LeaseOwner = owner
+		exec.LeaseExpiresAt = leaseExpiresAt
+		exec.BlockedReason = ""
+		exec.ResumeSignal = ""
+		exec.UpdatedAt = now
+		s.execs[i] = exec
+		return exec, true, nil
+	}
+	return execution.TurnExecution{}, false, errors.New("execution not found")
+}
+
+func (s *Store) ClaimExecutionStep(_ context.Context, stepID string, owner string, now time.Time, leaseExpiresAt time.Time) (execution.ExecutionStep, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for executionID, steps := range s.steps {
+		for i, step := range steps {
+			if step.ID != stepID {
+				continue
+			}
+			if !stepClaimable(step, now) {
+				return step, false, nil
+			}
+			step.Status = execution.StatusRunning
+			step.Attempt++
+			step.LeaseOwner = owner
+			step.LeaseExpiresAt = leaseExpiresAt
+			step.NextAttemptAt = time.Time{}
+			step.BlockedReason = ""
+			step.ResumeSignal = ""
+			if step.StartedAt.IsZero() {
+				step.StartedAt = now
+			}
+			step.UpdatedAt = now
+			steps[i] = step
+			s.steps[executionID] = steps
+			return step, true, nil
+		}
+	}
+	return execution.ExecutionStep{}, false, errors.New("step not found")
+}
+
+func (s *Store) UpdateExecutionIfOwned(_ context.Context, updated execution.TurnExecution, owner string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, exec := range s.execs {
+		if exec.ID != updated.ID {
+			continue
+		}
+		if exec.LeaseOwner != owner {
+			return false, nil
+		}
+		s.execs[i] = updated
+		return true, nil
+	}
+	return false, errors.New("execution not found")
+}
+
+func (s *Store) UpdateExecutionStepIfOwned(_ context.Context, updated execution.ExecutionStep, owner string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	steps := s.steps[updated.ExecutionID]
+	for i, step := range steps {
+		if step.ID != updated.ID {
+			continue
+		}
+		if step.LeaseOwner != owner {
+			return false, nil
+		}
+		steps[i] = updated
+		s.steps[updated.ExecutionID] = steps
+		return true, nil
+	}
+	return false, errors.New("step not found")
+}
+
+func (s *Store) RenewExecutionLease(_ context.Context, executionID string, owner string, now time.Time, leaseExpiresAt time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, exec := range s.execs {
+		if exec.ID != executionID {
+			continue
+		}
+		if exec.Status != execution.StatusRunning || exec.LeaseOwner != owner {
+			return false, nil
+		}
+		exec.LeaseExpiresAt = leaseExpiresAt
+		exec.UpdatedAt = now
+		s.execs[i] = exec
+		return true, nil
+	}
+	return false, errors.New("execution not found")
+}
+
+func (s *Store) RenewExecutionStepLease(_ context.Context, stepID string, owner string, now time.Time, leaseExpiresAt time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for executionID, steps := range s.steps {
+		for i, step := range steps {
+			if step.ID != stepID {
+				continue
+			}
+			if step.Status != execution.StatusRunning || step.LeaseOwner != owner {
+				return false, nil
+			}
+			step.LeaseExpiresAt = leaseExpiresAt
+			step.UpdatedAt = now
+			steps[i] = step
+			s.steps[executionID] = steps
+			return true, nil
+		}
+	}
+	return false, errors.New("step not found")
+}
+
 func (s *Store) ListExecutions(_ context.Context) ([]execution.TurnExecution, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := append([]execution.TurnExecution(nil), s.execs...)
 	return out, nil
+}
+
+func executionClaimable(exec execution.TurnExecution, now time.Time) bool {
+	if exec.Status == execution.StatusWaiting {
+		return exec.LeaseExpiresAt.IsZero() || !exec.LeaseExpiresAt.After(now)
+	}
+	if exec.Status == execution.StatusRunning || exec.Status == execution.StatusPending {
+		return exec.LeaseExpiresAt.IsZero() || exec.LeaseExpiresAt.Before(now) || exec.LeaseOwner == ""
+	}
+	return false
+}
+
+func stepClaimable(step execution.ExecutionStep, now time.Time) bool {
+	if step.Status == execution.StatusWaiting || step.Status == execution.StatusPending {
+		return step.NextAttemptAt.IsZero() || !step.NextAttemptAt.After(now)
+	}
+	if step.Status == execution.StatusRunning {
+		return step.LeaseExpiresAt.IsZero() || step.LeaseExpiresAt.Before(now) || step.LeaseOwner == ""
+	}
+	return false
+}
+
+func runnableLease(owner string, expiresAt time.Time, now time.Time) bool {
+	return owner == "" || expiresAt.IsZero() || expiresAt.Before(now)
 }
 
 func (s *Store) GetExecution(_ context.Context, executionID string) (execution.TurnExecution, []execution.ExecutionStep, error) {
@@ -1147,7 +1353,7 @@ func (s *Store) SaveToolRun(_ context.Context, run toolrun.Run) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, existing := range s.toolRuns {
-		if existing.ID == run.ID {
+		if existing.ID == run.ID || (existing.IdempotencyKey != "" && existing.IdempotencyKey == run.IdempotencyKey) {
 			s.toolRuns[i] = run
 			return nil
 		}
@@ -1172,7 +1378,7 @@ func (s *Store) SaveDeliveryAttempt(_ context.Context, attempt delivery.Attempt)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, existing := range s.deliveries {
-		if existing.ID == attempt.ID {
+		if existing.ID == attempt.ID || (existing.IdempotencyKey != "" && existing.IdempotencyKey == attempt.IdempotencyKey) {
 			s.deliveries[i] = attempt
 			return nil
 		}
@@ -1233,13 +1439,52 @@ func (s *Store) ListEvalRuns(_ context.Context) ([]replay.Run, error) {
 func (s *Store) ListRunnableEvalRuns(_ context.Context, _ time.Time) ([]replay.Run, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	now := time.Now().UTC()
 	var out []replay.Run
 	for _, run := range s.evalRuns {
-		if run.Status == replay.StatusPending || run.Status == replay.StatusRunning {
+		if run.Status == replay.StatusPending || (run.Status == replay.StatusRunning && runnableLease(run.LeaseOwner, run.LeaseExpiresAt, now)) {
 			out = append(out, run)
 		}
 	}
 	return out, nil
+}
+
+func (s *Store) ClaimEvalRun(_ context.Context, runID string, owner string, now time.Time, leaseExpiresAt time.Time) (replay.Run, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, run := range s.evalRuns {
+		if run.ID != runID {
+			continue
+		}
+		if run.Status != replay.StatusPending && !(run.Status == replay.StatusRunning && runnableLease(run.LeaseOwner, run.LeaseExpiresAt, now)) {
+			return run, false, nil
+		}
+		run.Status = replay.StatusRunning
+		run.LeaseOwner = owner
+		run.LeaseExpiresAt = leaseExpiresAt
+		run.UpdatedAt = now
+		s.evalRuns[i] = run
+		return run, true, nil
+	}
+	return replay.Run{}, false, errors.New("eval run not found")
+}
+
+func (s *Store) RenewEvalRunLease(_ context.Context, runID string, owner string, now time.Time, leaseExpiresAt time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, run := range s.evalRuns {
+		if run.ID != runID {
+			continue
+		}
+		if run.Status != replay.StatusRunning || run.LeaseOwner != owner {
+			return false, nil
+		}
+		run.LeaseExpiresAt = leaseExpiresAt
+		run.UpdatedAt = now
+		s.evalRuns[i] = run
+		return true, nil
+	}
+	return false, errors.New("eval run not found")
 }
 
 func (s *Store) SaveProposal(_ context.Context, proposal rollout.Proposal) error {
@@ -1481,14 +1726,58 @@ func (s *Store) ListMaintainerJobs(_ context.Context, query maintainer.JobQuery)
 func (s *Store) ListRunnableMaintainerJobs(_ context.Context) ([]maintainer.Job, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	now := time.Now().UTC()
 	var out []maintainer.Job
 	for _, item := range s.maintainerJobs {
-		if item.Status == maintainer.StatusQueued || item.Status == maintainer.StatusRunning {
+		if item.Status == maintainer.StatusQueued || (item.Status == maintainer.StatusRunning && runnableLease(item.LeaseOwner, item.LeaseExpiresAt, now)) {
 			out = append(out, item)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out, nil
+}
+
+func (s *Store) ClaimMaintainerJob(_ context.Context, jobID string, owner string, now time.Time, leaseExpiresAt time.Time) (maintainer.Job, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.maintainerJobs {
+		if item.ID != jobID {
+			continue
+		}
+		if item.Status != maintainer.StatusQueued && !(item.Status == maintainer.StatusRunning && runnableLease(item.LeaseOwner, item.LeaseExpiresAt, now)) {
+			return item, false, nil
+		}
+		item.Status = maintainer.StatusRunning
+		item.LeaseOwner = owner
+		item.LeaseExpiresAt = leaseExpiresAt
+		item.StartedAt = &now
+		s.maintainerJobs[i] = item
+		artifacts, edges := controlgraph.MaintainerJob(item)
+		s.savePolicyArtifactsLocked(artifacts)
+		s.savePolicyEdgesLocked(edges)
+		return item, true, nil
+	}
+	return maintainer.Job{}, false, errors.New("maintainer job not found")
+}
+
+func (s *Store) RenewMaintainerJobLease(_ context.Context, jobID string, owner string, now time.Time, leaseExpiresAt time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.maintainerJobs {
+		if item.ID != jobID {
+			continue
+		}
+		if item.Status != maintainer.StatusRunning || item.LeaseOwner != owner {
+			return false, nil
+		}
+		item.LeaseExpiresAt = leaseExpiresAt
+		s.maintainerJobs[i] = item
+		artifacts, edges := controlgraph.MaintainerJob(item)
+		s.savePolicyArtifactsLocked(artifacts)
+		s.savePolicyEdgesLocked(edges)
+		return true, nil
+	}
+	return false, errors.New("maintainer job not found")
 }
 
 func (s *Store) SaveMaintainerRun(_ context.Context, item maintainer.Run) error {
@@ -1603,14 +1892,58 @@ func (s *Store) ListKnowledgeSyncJobs(_ context.Context, query knowledge.SyncJob
 func (s *Store) ListRunnableKnowledgeSyncJobs(_ context.Context) ([]knowledge.SyncJob, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	now := time.Now().UTC()
 	var out []knowledge.SyncJob
 	for _, item := range s.knowledgeSyncJobs {
-		if item.Status == "queued" || item.Status == "running" {
+		if item.Status == "queued" || (item.Status == "running" && runnableLease(item.LeaseOwner, item.LeaseExpiresAt, now)) {
 			out = append(out, item)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out, nil
+}
+
+func (s *Store) ClaimKnowledgeSyncJob(_ context.Context, jobID string, owner string, now time.Time, leaseExpiresAt time.Time) (knowledge.SyncJob, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.knowledgeSyncJobs {
+		if item.ID != jobID {
+			continue
+		}
+		if item.Status != "queued" && !(item.Status == "running" && runnableLease(item.LeaseOwner, item.LeaseExpiresAt, now)) {
+			return item, false, nil
+		}
+		item.Status = "running"
+		item.LeaseOwner = owner
+		item.LeaseExpiresAt = leaseExpiresAt
+		item.StartedAt = &now
+		s.knowledgeSyncJobs[i] = item
+		artifacts, edges := controlgraph.KnowledgeSyncJob(item)
+		s.savePolicyArtifactsLocked(artifacts)
+		s.savePolicyEdgesLocked(edges)
+		return item, true, nil
+	}
+	return knowledge.SyncJob{}, false, errors.New("knowledge sync job not found")
+}
+
+func (s *Store) RenewKnowledgeSyncJobLease(_ context.Context, jobID string, owner string, now time.Time, leaseExpiresAt time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, item := range s.knowledgeSyncJobs {
+		if item.ID != jobID {
+			continue
+		}
+		if item.Status != "running" || item.LeaseOwner != owner {
+			return false, nil
+		}
+		item.LeaseExpiresAt = leaseExpiresAt
+		s.knowledgeSyncJobs[i] = item
+		artifacts, edges := controlgraph.KnowledgeSyncJob(item)
+		s.savePolicyArtifactsLocked(artifacts)
+		s.savePolicyEdgesLocked(edges)
+		return true, nil
+	}
+	return false, errors.New("knowledge sync job not found")
 }
 
 func (s *Store) SaveKnowledgePage(_ context.Context, page knowledge.Page, chunks []knowledge.Chunk) error {

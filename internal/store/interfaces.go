@@ -57,11 +57,14 @@ type Repository interface {
 	CreateSession(ctx context.Context, sess session.Session) error
 	GetSession(ctx context.Context, sessionID string) (session.Session, error)
 	UpdateSession(ctx context.Context, sess session.Session) error
+	ClaimLifecycleSession(ctx context.Context, sessionID string, now time.Time, claimBefore time.Time) (session.Session, bool, error)
 	ListSessions(ctx context.Context) ([]session.Session, error)
 	SaveSessionWatch(ctx context.Context, watch session.Watch) error
 	GetSessionWatch(ctx context.Context, watchID string) (session.Watch, error)
 	ListSessionWatches(ctx context.Context, query session.WatchQuery) ([]session.Watch, error)
 	ListRunnableSessionWatches(ctx context.Context, now time.Time) ([]session.Watch, error)
+	ClaimSessionWatch(ctx context.Context, watchID string, owner string, now time.Time, leaseExpiresAt time.Time) (session.Watch, bool, error)
+	RenewSessionWatchLease(ctx context.Context, watchID string, owner string, now time.Time, leaseExpiresAt time.Time) (bool, error)
 	AppendEvent(ctx context.Context, event session.Event) error
 	ReadEvent(ctx context.Context, sessionID string, eventID string) (session.Event, error)
 	UpdateEvent(ctx context.Context, event session.Event) error
@@ -76,6 +79,12 @@ type Repository interface {
 	GetExecution(ctx context.Context, executionID string) (execution.TurnExecution, []execution.ExecutionStep, error)
 	UpdateExecution(ctx context.Context, exec execution.TurnExecution) error
 	UpdateExecutionStep(ctx context.Context, step execution.ExecutionStep) error
+	ClaimExecution(ctx context.Context, executionID string, owner string, now time.Time, leaseExpiresAt time.Time) (execution.TurnExecution, bool, error)
+	ClaimExecutionStep(ctx context.Context, stepID string, owner string, now time.Time, leaseExpiresAt time.Time) (execution.ExecutionStep, bool, error)
+	UpdateExecutionIfOwned(ctx context.Context, exec execution.TurnExecution, owner string) (bool, error)
+	UpdateExecutionStepIfOwned(ctx context.Context, step execution.ExecutionStep, owner string) (bool, error)
+	RenewExecutionLease(ctx context.Context, executionID string, owner string, now time.Time, leaseExpiresAt time.Time) (bool, error)
+	RenewExecutionStepLease(ctx context.Context, stepID string, owner string, now time.Time, leaseExpiresAt time.Time) (bool, error)
 	ListRunnableExecutions(ctx context.Context, now time.Time) ([]execution.TurnExecution, error)
 	UpsertJourneyInstance(ctx context.Context, instance journey.Instance) error
 	ListJourneyInstances(ctx context.Context, sessionID string) ([]journey.Instance, error)
@@ -105,6 +114,8 @@ type Repository interface {
 	GetEvalRun(ctx context.Context, runID string) (replay.Run, error)
 	ListEvalRuns(ctx context.Context) ([]replay.Run, error)
 	ListRunnableEvalRuns(ctx context.Context, now time.Time) ([]replay.Run, error)
+	ClaimEvalRun(ctx context.Context, runID string, owner string, now time.Time, leaseExpiresAt time.Time) (replay.Run, bool, error)
+	RenewEvalRunLease(ctx context.Context, runID string, owner string, now time.Time, leaseExpiresAt time.Time) (bool, error)
 	SaveProposal(ctx context.Context, proposal rollout.Proposal) error
 	GetProposal(ctx context.Context, proposalID string) (rollout.Proposal, error)
 	ListProposals(ctx context.Context) ([]rollout.Proposal, error)
@@ -121,6 +132,8 @@ type Repository interface {
 	GetMaintainerJob(ctx context.Context, jobID string) (maintainer.Job, error)
 	ListMaintainerJobs(ctx context.Context, query maintainer.JobQuery) ([]maintainer.Job, error)
 	ListRunnableMaintainerJobs(ctx context.Context) ([]maintainer.Job, error)
+	ClaimMaintainerJob(ctx context.Context, jobID string, owner string, now time.Time, leaseExpiresAt time.Time) (maintainer.Job, bool, error)
+	RenewMaintainerJobLease(ctx context.Context, jobID string, owner string, now time.Time, leaseExpiresAt time.Time) (bool, error)
 	SaveMaintainerRun(ctx context.Context, item maintainer.Run) error
 	GetMaintainerRun(ctx context.Context, runID string) (maintainer.Run, error)
 	ListMaintainerRuns(ctx context.Context, query maintainer.RunQuery) ([]maintainer.Run, error)
@@ -128,6 +141,8 @@ type Repository interface {
 	GetKnowledgeSyncJob(ctx context.Context, jobID string) (knowledge.SyncJob, error)
 	ListKnowledgeSyncJobs(ctx context.Context, query knowledge.SyncJobQuery) ([]knowledge.SyncJob, error)
 	ListRunnableKnowledgeSyncJobs(ctx context.Context) ([]knowledge.SyncJob, error)
+	ClaimKnowledgeSyncJob(ctx context.Context, jobID string, owner string, now time.Time, leaseExpiresAt time.Time) (knowledge.SyncJob, bool, error)
+	RenewKnowledgeSyncJobLease(ctx context.Context, jobID string, owner string, now time.Time, leaseExpiresAt time.Time) (bool, error)
 	SaveKnowledgePage(ctx context.Context, page knowledge.Page, chunks []knowledge.Chunk) error
 	ListKnowledgePages(ctx context.Context, query knowledge.PageQuery) ([]knowledge.Page, error)
 	ListKnowledgeChunks(ctx context.Context, query knowledge.ChunkQuery) ([]knowledge.Chunk, error)

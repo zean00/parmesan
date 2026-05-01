@@ -94,6 +94,8 @@ type Watch struct {
 	DedupeKey      string            `json:"dedupe_key,omitempty"`
 	LastResultHash string            `json:"last_result_hash,omitempty"`
 	LastCheckedAt  time.Time         `json:"last_checked_at,omitempty"`
+	LeaseOwner     string            `json:"lease_owner,omitempty"`
+	LeaseExpiresAt time.Time         `json:"lease_expires_at,omitempty"`
 	CreatedAt      time.Time         `json:"created_at"`
 	UpdatedAt      time.Time         `json:"updated_at"`
 }

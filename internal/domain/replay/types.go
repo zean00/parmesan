@@ -34,6 +34,8 @@ type Run struct {
 	ResultJSON        string            `json:"result_json,omitempty"`
 	DiffJSON          string            `json:"diff_json,omitempty"`
 	LastError         string            `json:"last_error,omitempty"`
+	LeaseOwner        string            `json:"lease_owner,omitempty"`
+	LeaseExpiresAt    time.Time         `json:"lease_expires_at,omitempty"`
 	CreatedAt         time.Time         `json:"created_at"`
 	UpdatedAt         time.Time         `json:"updated_at"`
 }
