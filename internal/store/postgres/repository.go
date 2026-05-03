@@ -995,7 +995,7 @@ func (c *Client) SaveSessionWatch(ctx context.Context, watch session.Watch) erro
 		    lease_owner = EXCLUDED.lease_owner,
 		    lease_expires_at = EXCLUDED.lease_expires_at,
 		    updated_at = EXCLUDED.updated_at
-	`, watch.ID, watch.SessionID, watch.Kind, string(watch.Status), nullString(watch.Source), nullString(watch.SubjectRef), nullString(watch.ToolID), arguments, int(watch.PollInterval/time.Second), watch.NextRunAt, nullString(watch.StopCondition), nullString(watch.DedupeKey), nullString(watch.LastResultHash), watch.LastCheckedAt, metadataJSON(watchMetadata(watch), watch.ArtifactMeta), nullString(watch.LeaseOwner), watch.LeaseExpiresAt, watch.CreatedAt, watch.UpdatedAt)
+	`, watch.ID, watch.SessionID, watch.Kind, string(watch.Status), nullString(watch.Source), nullString(watch.SubjectRef), nullString(watch.ToolID), arguments, int(watch.PollInterval/time.Second), watch.NextRunAt, nullString(watch.StopCondition), nullString(watch.DedupeKey), nullString(watch.LastResultHash), watch.LastCheckedAt, metadataJSON(watchMetadata(watch), watch.ArtifactMeta), watch.LeaseOwner, watch.LeaseExpiresAt, watch.CreatedAt, watch.UpdatedAt)
 	return err
 }
 
@@ -1428,7 +1428,7 @@ func (c *Client) SaveMaintainerJob(ctx context.Context, item maintainer.Job) err
 		    lease_expires_at = EXCLUDED.lease_expires_at,
 		    started_at = EXCLUDED.started_at,
 		    finished_at = EXCLUDED.finished_at
-	`, item.ID, item.WorkspaceID, item.ScopeKind, item.ScopeID, item.AgentID, item.CustomerID, item.Mode, item.Trigger, item.Status, item.RequestedBy, item.SourceID, item.SessionID, item.FeedbackID, item.ResponseID, item.RunID, item.Error, metadata, nullString(item.LeaseOwner), item.LeaseExpiresAt, item.CreatedAt, item.StartedAt, item.FinishedAt)
+	`, item.ID, item.WorkspaceID, item.ScopeKind, item.ScopeID, item.AgentID, item.CustomerID, item.Mode, item.Trigger, item.Status, item.RequestedBy, item.SourceID, item.SessionID, item.FeedbackID, item.ResponseID, item.RunID, item.Error, metadata, item.LeaseOwner, item.LeaseExpiresAt, item.CreatedAt, item.StartedAt, item.FinishedAt)
 	if err != nil {
 		return err
 	}
@@ -1669,7 +1669,7 @@ func (c *Client) SaveKnowledgeSyncJob(ctx context.Context, job knowledge.SyncJob
 		    lease_expires_at = EXCLUDED.lease_expires_at,
 		    started_at = EXCLUDED.started_at,
 		    finished_at = EXCLUDED.finished_at
-	`, job.ID, job.SourceID, job.Status, job.Force, nullString(job.RequestedBy), nullString(job.Error), nullString(job.OldChecksum), nullString(job.NewChecksum), nullString(job.SnapshotID), job.Changed, metadata, nullString(job.LeaseOwner), job.LeaseExpiresAt, job.CreatedAt, job.StartedAt, job.FinishedAt)
+	`, job.ID, job.SourceID, job.Status, job.Force, nullString(job.RequestedBy), nullString(job.Error), nullString(job.OldChecksum), nullString(job.NewChecksum), nullString(job.SnapshotID), job.Changed, metadata, job.LeaseOwner, job.LeaseExpiresAt, job.CreatedAt, job.StartedAt, job.FinishedAt)
 	if err != nil {
 		return err
 	}
