@@ -41,6 +41,58 @@ journeys:
 	}
 }
 
+func TestParseBundleUnattendedToolPolicy(t *testing.T) {
+	raw := []byte(`
+id: bundle-1
+version: v1
+unattended:
+  ineligible_required_tools: reject
+tool_policies:
+  - id: approval_required
+    tool_ids:
+      - commerce.get_order
+    exposure: policy-gated
+    approval: required
+    unattended: allow
+`)
+
+	bundle, err := ParseBundle(raw)
+	if err != nil {
+		t.Fatalf("ParseBundle() error = %v", err)
+	}
+	if bundle.Unattended.IneligibleRequiredTools != "reject" {
+		t.Fatalf("unattended policy = %#v, want reject", bundle.Unattended)
+	}
+	if len(bundle.ToolPolicies) != 1 || bundle.ToolPolicies[0].Unattended != "allow" {
+		t.Fatalf("tool policies = %#v, want unattended allow", bundle.ToolPolicies)
+	}
+}
+
+func TestParseBundleRejectsInvalidUnattendedValues(t *testing.T) {
+	raw := []byte(`
+id: bundle-1
+version: v1
+unattended:
+  ineligible_required_tools: queue
+`)
+	if _, err := ParseBundle(raw); err == nil {
+		t.Fatal("ParseBundle() error = nil, want invalid unattended policy error")
+	}
+
+	raw = []byte(`
+id: bundle-1
+version: v1
+tool_policies:
+  - id: approval_required
+    tool_ids:
+      - commerce.get_order
+    unattended: always
+`)
+	if _, err := ParseBundle(raw); err == nil {
+		t.Fatal("ParseBundle() error = nil, want invalid tool policy unattended error")
+	}
+}
+
 func TestParseBundleCompilesGuidelineAgentAssociations(t *testing.T) {
 	raw := []byte(`
 id: bundle-1

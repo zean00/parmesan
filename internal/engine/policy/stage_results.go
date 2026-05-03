@@ -267,8 +267,11 @@ func (r ResponseAnalysisStageResult) BatchOutput() map[string]any {
 }
 
 type ToolExposureStageResult struct {
-	ExposedTools  []string
-	ToolApprovals map[string]string
+	ExposedTools                     []string
+	ToolApprovals                    map[string]string
+	UnattendedApprovals              map[string]string
+	UnattendedIneligibleRequired     map[string]string
+	UnattendedIneligibleToolBehavior string
 }
 
 func (r ToolExposureStageResult) Apply(state *matchingState) {
@@ -277,8 +280,11 @@ func (r ToolExposureStageResult) Apply(state *matchingState) {
 
 func (r ToolExposureStageResult) BatchOutput() map[string]any {
 	return map[string]any{
-		"exposed_tools":  append([]string(nil), r.ExposedTools...),
-		"tool_approvals": cloneStringMap(r.ToolApprovals),
+		"exposed_tools":                       append([]string(nil), r.ExposedTools...),
+		"tool_approvals":                      cloneStringMap(r.ToolApprovals),
+		"unattended_approvals":                cloneStringMap(r.UnattendedApprovals),
+		"unattended_ineligible_required":      cloneStringMap(r.UnattendedIneligibleRequired),
+		"unattended_ineligible_tool_behavior": r.UnattendedIneligibleToolBehavior,
 	}
 }
 

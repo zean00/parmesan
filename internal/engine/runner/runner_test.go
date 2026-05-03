@@ -444,6 +444,88 @@ func TestRunnerBlocksForApprovalRequiredTool(t *testing.T) {
 	}
 }
 
+func TestApprovalStatusAutoApprovesUnattendedEligibleTool(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	r := New(repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), "test-runner")
+	now := time.Now().UTC()
+	_ = repo.CreateSession(ctx, session.Session{ID: "sess", Channel: "web", Mode: "unattended", CreatedAt: now})
+	exec := execution.TurnExecution{ID: "exec_1", SessionID: "sess", TraceID: "trace_1", Status: execution.StatusPending, CreatedAt: now, UpdatedAt: now}
+	entry := tool.CatalogEntry{ID: "commerce_get_order", ProviderID: "commerce", Name: "get_order"}
+	view := resolvedView{ToolExposureStage: policyruntime.ToolExposureStageResult{
+		ToolApprovals:       map[string]string{"commerce.get_order": "required"},
+		UnattendedApprovals: map[string]string{"commerce.get_order": "allow"},
+	}}
+
+	status, err := r.approvalStatus(ctx, exec, entry, view)
+	if err != nil {
+		t.Fatalf("approvalStatus() error = %v", err)
+	}
+	if status != string(approval.StatusApproved) {
+		t.Fatalf("status = %q, want approved", status)
+	}
+	approvals, err := repo.ListApprovalSessions(ctx, "sess")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(approvals) != 1 || approvals[0].Status != approval.StatusApproved || approvals[0].Decision != "unattended_auto_approve" {
+		t.Fatalf("approvals = %#v, want unattended approved approval", approvals)
+	}
+	events, err := repo.ListEvents(ctx, "sess")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resolved bool
+	for _, event := range events {
+		if event.Kind == "approval.resolved" {
+			resolved = true
+			break
+		}
+	}
+	if !resolved {
+		t.Fatalf("events = %#v, want approval.resolved event", events)
+	}
+}
+
+func TestApprovalStatusRejectsUnattendedIneligibleToolWithoutApprovalRecord(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	r := New(repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), "test-runner")
+	now := time.Now().UTC()
+	_ = repo.CreateSession(ctx, session.Session{ID: "sess", Channel: "web", Mode: "unattended", CreatedAt: now})
+	exec := execution.TurnExecution{ID: "exec_1", SessionID: "sess", TraceID: "trace_1", Status: execution.StatusPending, CreatedAt: now, UpdatedAt: now}
+	entry := tool.CatalogEntry{ID: "commerce_get_order", ProviderID: "commerce", Name: "get_order"}
+	view := resolvedView{ToolExposureStage: policyruntime.ToolExposureStageResult{
+		ToolApprovals:                map[string]string{"commerce.get_order": "required"},
+		UnattendedIneligibleRequired: map[string]string{"commerce.get_order": "reject"},
+	}}
+
+	status, err := r.approvalStatus(ctx, exec, entry, view)
+	if err != nil {
+		t.Fatalf("approvalStatus() error = %v", err)
+	}
+	if status != string(approval.StatusRejected) {
+		t.Fatalf("status = %q, want rejected", status)
+	}
+	approvals, err := repo.ListApprovalSessions(ctx, "sess")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(approvals) != 0 {
+		t.Fatalf("approvals = %#v, want none for unattended ineligible rejection", approvals)
+	}
+}
+
 func TestReuseToolRunReturnsCompletedOutput(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)

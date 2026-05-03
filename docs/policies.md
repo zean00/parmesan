@@ -45,6 +45,7 @@ usable until policy exposes them.
 | `response_style_profiles` | reusable response-shape profiles with structured style fields and examples |
 | `journeys` | structured step-based flows |
 | `delegation_workflows` | workflow briefs attached to delegated ACP turns |
+| `unattended` | autonomous handling for required tool approvals when the session mode is `unattended` |
 | capability exposure | which tools, MCP servers, or delegated agents are even eligible |
 
 ## Authoring Model
@@ -62,6 +63,8 @@ Key example:
 id: bundle_live_support_v2
 version: v2
 composition_mode: strict
+unattended:
+  ineligible_required_tools: hide
 no_match: I can help with customer support questions about orders, shipping, returns, refunds, and account help. Please tell me the support issue.
 domain_boundary:
   mode: soft_redirect
@@ -81,6 +84,35 @@ templates:
     when: customer asks for customer support help
     text: Hi, I can help with that. Please tell me the issue and any relevant order or account detail.
 ```
+
+## Unattended Tool Approvals
+
+Session mode `unattended` is for autonomous operation when no operator is
+available. It does not remove approval policy globally. A required tool approval
+is bypassed only when the tool policy explicitly opts in:
+
+```yaml
+unattended:
+  ineligible_required_tools: hide # hide | reject, defaults to hide
+
+tool_policies:
+  - id: order-status-tools
+    tool_ids:
+      - commerce.get_order
+    exposure: policy-gated
+    approval: required
+    unattended: allow
+```
+
+If an approval-required tool is not opted in, `hide` removes it from planning
+for unattended sessions. `reject` leaves it visible to planning but the runtime
+does not invoke it and returns a rejected approval result to response
+composition.
+
+The `unattended: allow` opt-in only applies when the session mode is
+`unattended`; the same tool still follows normal approval flow in `auto` mode.
+Tool references are matched across supported aliases such as catalog id,
+tool name, and `provider.tool`.
 
 The stock example includes all of these shapes in a real bundle:
 

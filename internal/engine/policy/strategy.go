@@ -408,6 +408,8 @@ func cloneToolPlanEvaluation(src ToolPlanEvaluation) ToolPlanEvaluation {
 func cloneToolExposureStageResult(src ToolExposureStageResult) ToolExposureStageResult {
 	src.ExposedTools = append([]string(nil), src.ExposedTools...)
 	src.ToolApprovals = cloneStringMap(src.ToolApprovals)
+	src.UnattendedApprovals = cloneStringMap(src.UnattendedApprovals)
+	src.UnattendedIneligibleRequired = cloneStringMap(src.UnattendedIneligibleRequired)
 	return src
 }
 

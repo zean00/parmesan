@@ -13,8 +13,8 @@ import (
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
-	"github.com/sahal/parmesan/internal/model"
 	semantics "github.com/sahal/parmesan/internal/engine/semantics"
+	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/sessionwatch"
 )
 
@@ -72,8 +72,8 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 			rebuildProjectedGuidelineStages(ctx, state)
 		}
 	}
-	exposedTools, toolApprovals := resolveToolExposure(bundle.GuidelineToolAssociations, state.observationStage.Observations, state.matchFinalizeStage.MatchedGuidelines, state.activeJourneyState, bundle.ToolPolicies, catalog)
-	ToolExposureStageResult{ExposedTools: exposedTools, ToolApprovals: toolApprovals}.Apply(state)
+	exposedTools, toolApprovals, unattendedApprovals, unattendedIneligible, unattendedBehavior := resolveToolExposure(bundle.GuidelineToolAssociations, state.observationStage.Observations, state.matchFinalizeStage.MatchedGuidelines, state.activeJourneyState, bundle.ToolPolicies, catalog, options.SessionMode, bundle.Unattended)
+	ToolExposureStageResult{ExposedTools: exposedTools, ToolApprovals: toolApprovals, UnattendedApprovals: unattendedApprovals, UnattendedIneligibleRequired: unattendedIneligible, UnattendedIneligibleToolBehavior: unattendedBehavior}.Apply(state)
 	exposedAgents, exposedBindings := resolveAgentExposure(bundle.GuidelineAgentAssociations, state.matchFinalizeStage.MatchedGuidelines, state.activeJourneyState, bundle.CapabilityIsolation)
 	AgentExposureStageResult{ExposedAgents: exposedAgents, ExposedBindings: exposedBindings}.Apply(state)
 	toolPlanResult, toolDecisionResult := buildToolStageResults(ctx, options.Router, state.context, state, bundle.Relationships, catalog, options.ArgumentResolver)
@@ -2205,10 +2205,15 @@ func evaluateLatentSiblingSuppression(bundle policy.Bundle, _ MatchingContext, c
 	}
 }
 
-func resolveToolExposure(associations []policy.GuidelineToolAssociation, observations []policy.Observation, guidelines []policy.Guideline, state *policy.JourneyNode, toolPolicies []policy.ToolPolicy, catalog []tool.CatalogEntry) ([]string, map[string]string) {
+func resolveToolExposure(associations []policy.GuidelineToolAssociation, observations []policy.Observation, guidelines []policy.Guideline, state *policy.JourneyNode, toolPolicies []policy.ToolPolicy, catalog []tool.CatalogEntry, sessionMode string, unattended policy.UnattendedPolicy) ([]string, map[string]string, map[string]string, map[string]string, string) {
 	allowed := map[string]struct{}{}
 	serverAllowed := map[string]struct{}{}
 	approvals := map[string]string{}
+	unattendedApprovals := map[string]string{}
+	unattendedIneligible := map[string]string{}
+	unattendedEligibility := map[string]string{}
+	unattendedMode := strings.EqualFold(strings.TrimSpace(sessionMode), "unattended")
+	unattendedBehavior := unattendedIneligibleRequiredToolBehavior(unattended)
 
 	addApprovalAliases := func(entry tool.CatalogEntry, approval string) {
 		if approval == "" {
@@ -2218,12 +2223,23 @@ func resolveToolExposure(associations []policy.GuidelineToolAssociation, observa
 		approvals[entry.Name] = approval
 		approvals[entry.ProviderID+"."+entry.Name] = approval
 	}
+	addUnattendedAliases := func(target map[string]string, entry tool.CatalogEntry, value string) {
+		if strings.TrimSpace(value) == "" {
+			return
+		}
+		target[entry.ID] = value
+		target[entry.Name] = value
+		target[entry.ProviderID+"."+entry.Name] = value
+	}
 
 	for _, item := range toolPolicies {
 		for _, id := range item.ToolIDs {
 			allowed[id] = struct{}{}
 			if strings.TrimSpace(item.Approval) != "" {
 				approvals[id] = item.Approval
+			}
+			if strings.TrimSpace(item.Unattended) != "" {
+				unattendedEligibility[id] = item.Unattended
 			}
 		}
 	}
@@ -2277,26 +2293,102 @@ func resolveToolExposure(associations []policy.GuidelineToolAssociation, observa
 	var out []string
 	for _, entry := range catalog {
 		if _, ok := allowed[entry.ID]; ok {
+			if unattendedMode {
+				addUnattendedAliases(unattendedApprovals, entry, toolUnattendedValue(entry, unattendedEligibility))
+			}
+			if unattendedRequiredToolIneligible(unattendedMode, entry, approvals, unattendedEligibility) {
+				addUnattendedAliases(unattendedIneligible, entry, unattendedBehavior)
+				if unattendedBehavior == "hide" {
+					continue
+				}
+			}
 			out = append(out, entry.Name)
 			addApprovalAliases(entry, approvals[entry.ID])
 			continue
 		}
 		if _, ok := allowed[entry.Name]; ok {
+			if unattendedMode {
+				addUnattendedAliases(unattendedApprovals, entry, toolUnattendedValue(entry, unattendedEligibility))
+			}
+			if unattendedRequiredToolIneligible(unattendedMode, entry, approvals, unattendedEligibility) {
+				addUnattendedAliases(unattendedIneligible, entry, unattendedBehavior)
+				if unattendedBehavior == "hide" {
+					continue
+				}
+			}
 			out = append(out, entry.Name)
 			addApprovalAliases(entry, approvals[entry.Name])
 			continue
 		}
 		if _, ok := allowed[entry.ProviderID+"."+entry.Name]; ok {
+			if unattendedMode {
+				addUnattendedAliases(unattendedApprovals, entry, toolUnattendedValue(entry, unattendedEligibility))
+			}
+			if unattendedRequiredToolIneligible(unattendedMode, entry, approvals, unattendedEligibility) {
+				addUnattendedAliases(unattendedIneligible, entry, unattendedBehavior)
+				if unattendedBehavior == "hide" {
+					continue
+				}
+			}
 			out = append(out, entry.Name)
 			addApprovalAliases(entry, approvals[entry.ProviderID+"."+entry.Name])
 			continue
 		}
 		if _, ok := serverAllowed[entry.ProviderID]; ok {
+			if unattendedMode {
+				addUnattendedAliases(unattendedApprovals, entry, toolUnattendedValue(entry, unattendedEligibility))
+			}
+			if unattendedRequiredToolIneligible(unattendedMode, entry, approvals, unattendedEligibility) {
+				addUnattendedAliases(unattendedIneligible, entry, unattendedBehavior)
+				if unattendedBehavior == "hide" {
+					continue
+				}
+			}
 			out = append(out, entry.Name)
 		}
 	}
 	sort.Strings(out)
-	return dedupe(out), approvals
+	return dedupe(out), approvals, unattendedApprovals, unattendedIneligible, unattendedBehavior
+}
+
+func unattendedIneligibleRequiredToolBehavior(unattended policy.UnattendedPolicy) string {
+	mode := strings.ToLower(strings.TrimSpace(unattended.IneligibleRequiredTools))
+	if mode == "" {
+		return "hide"
+	}
+	return mode
+}
+
+func unattendedRequiredToolIneligible(unattendedMode bool, entry tool.CatalogEntry, approvals map[string]string, unattendedEligibility map[string]string) bool {
+	if !unattendedMode {
+		return false
+	}
+	if !toolApprovalRequired(entry, approvals) {
+		return false
+	}
+	return !toolUnattendedAllowed(entry, unattendedEligibility)
+}
+
+func toolApprovalRequired(entry tool.CatalogEntry, approvals map[string]string) bool {
+	for _, key := range []string{entry.ID, entry.Name, entry.ProviderID + "." + entry.Name} {
+		if strings.EqualFold(strings.TrimSpace(approvals[key]), "required") {
+			return true
+		}
+	}
+	return false
+}
+
+func toolUnattendedAllowed(entry tool.CatalogEntry, unattendedEligibility map[string]string) bool {
+	return strings.EqualFold(toolUnattendedValue(entry, unattendedEligibility), "allow")
+}
+
+func toolUnattendedValue(entry tool.CatalogEntry, unattendedEligibility map[string]string) string {
+	for _, key := range []string{entry.ID, entry.Name, entry.ProviderID + "." + entry.Name} {
+		if value := strings.TrimSpace(unattendedEligibility[key]); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func runJourneyProgressStructuredARQ(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode) (JourneyDecision, bool) {

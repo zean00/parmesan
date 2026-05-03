@@ -14,8 +14,8 @@ import (
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
-	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/engine/semantics"
+	"github.com/sahal/parmesan/internal/model"
 )
 
 func TestResolveBuildsARQDrivenView(t *testing.T) {
@@ -136,6 +136,177 @@ func TestResolveBuildsARQDrivenView(t *testing.T) {
 	}
 	if view.ToolDecisionStage.Evaluation.PlannedSelectedTool == "" {
 		t.Fatalf("tool decision evaluation = %#v, want persisted tool decision artifact on the resolved view", view.ToolDecisionStage.Evaluation)
+	}
+}
+
+func TestResolveUnattendedHidesIneligibleRequiredToolByDefault(t *testing.T) {
+	now := time.Now().UTC()
+	view, err := ResolveWithOptions(
+		context.Background(),
+		[]session.Event{{
+			ID:        "evt_1",
+			SessionID: "sess_1",
+			Source:    "customer",
+			Kind:      "message",
+			CreatedAt: now,
+			Content:   []session.ContentPart{{Type: "text", Text: "check my order"}},
+		}},
+		[]policy.Bundle{{
+			ID:      "bundle_1",
+			Version: "v1",
+			Guidelines: []policy.Guideline{{
+				ID:   "lookup",
+				When: "order",
+				Then: "Check the order first.",
+				MCP:  &policy.MCPRef{Server: "commerce", Tool: "get_order"},
+			}},
+			ToolPolicies: []policy.ToolPolicy{{
+				ID:       "approval_required",
+				ToolIDs:  []string{"commerce.get_order"},
+				Approval: "required",
+			}},
+		}},
+		nil,
+		[]tool.CatalogEntry{{ID: "commerce_get_order", ProviderID: "commerce", Name: "get_order"}},
+		ResolveOptions{SessionMode: "unattended"},
+	)
+	if err != nil {
+		t.Fatalf("ResolveWithOptions() error = %v", err)
+	}
+	if len(view.ToolExposureStage.ExposedTools) != 0 {
+		t.Fatalf("exposed tools = %#v, want none for hidden unattended ineligible tool", view.ToolExposureStage.ExposedTools)
+	}
+	if view.ToolExposureStage.UnattendedIneligibleRequired["commerce.get_order"] != "hide" {
+		t.Fatalf("unattended ineligible = %#v, want hide marker", view.ToolExposureStage.UnattendedIneligibleRequired)
+	}
+}
+
+func TestResolveUnattendedAllowsEligibleRequiredTool(t *testing.T) {
+	now := time.Now().UTC()
+	view, err := ResolveWithOptions(
+		context.Background(),
+		[]session.Event{{
+			ID:        "evt_1",
+			SessionID: "sess_1",
+			Source:    "customer",
+			Kind:      "message",
+			CreatedAt: now,
+			Content:   []session.ContentPart{{Type: "text", Text: "check my order"}},
+		}},
+		[]policy.Bundle{{
+			ID:      "bundle_1",
+			Version: "v1",
+			Guidelines: []policy.Guideline{{
+				ID:   "lookup",
+				When: "order",
+				Then: "Check the order first.",
+				MCP:  &policy.MCPRef{Server: "commerce", Tool: "get_order"},
+			}},
+			ToolPolicies: []policy.ToolPolicy{{
+				ID:         "approval_required",
+				ToolIDs:    []string{"commerce.get_order"},
+				Approval:   "required",
+				Unattended: "allow",
+			}},
+		}},
+		nil,
+		[]tool.CatalogEntry{{ID: "commerce_get_order", ProviderID: "commerce", Name: "get_order"}},
+		ResolveOptions{SessionMode: "unattended"},
+	)
+	if err != nil {
+		t.Fatalf("ResolveWithOptions() error = %v", err)
+	}
+	if len(view.ToolExposureStage.ExposedTools) != 1 || view.ToolExposureStage.ExposedTools[0] != "get_order" {
+		t.Fatalf("exposed tools = %#v, want get_order", view.ToolExposureStage.ExposedTools)
+	}
+	if view.ToolExposureStage.UnattendedApprovals["commerce.get_order"] != "allow" {
+		t.Fatalf("unattended approvals = %#v, want allow marker", view.ToolExposureStage.UnattendedApprovals)
+	}
+}
+
+func TestResolveDoesNotExposeUnattendedApprovalMarkersOutsideUnattendedMode(t *testing.T) {
+	now := time.Now().UTC()
+	view, err := ResolveWithOptions(
+		context.Background(),
+		[]session.Event{{
+			ID:        "evt_1",
+			SessionID: "sess_1",
+			Source:    "customer",
+			Kind:      "message",
+			CreatedAt: now,
+			Content:   []session.ContentPart{{Type: "text", Text: "check my order"}},
+		}},
+		[]policy.Bundle{{
+			ID:      "bundle_1",
+			Version: "v1",
+			Guidelines: []policy.Guideline{{
+				ID:   "lookup",
+				When: "order",
+				Then: "Check the order first.",
+				MCP:  &policy.MCPRef{Server: "commerce", Tool: "get_order"},
+			}},
+			ToolPolicies: []policy.ToolPolicy{{
+				ID:         "approval_required",
+				ToolIDs:    []string{"commerce.get_order"},
+				Approval:   "required",
+				Unattended: "allow",
+			}},
+		}},
+		nil,
+		[]tool.CatalogEntry{{ID: "commerce_get_order", ProviderID: "commerce", Name: "get_order"}},
+		ResolveOptions{SessionMode: "auto"},
+	)
+	if err != nil {
+		t.Fatalf("ResolveWithOptions() error = %v", err)
+	}
+	if len(view.ToolExposureStage.ExposedTools) != 1 || view.ToolExposureStage.ExposedTools[0] != "get_order" {
+		t.Fatalf("exposed tools = %#v, want get_order", view.ToolExposureStage.ExposedTools)
+	}
+	if len(view.ToolExposureStage.UnattendedApprovals) != 0 {
+		t.Fatalf("unattended approvals = %#v, want none outside unattended mode", view.ToolExposureStage.UnattendedApprovals)
+	}
+}
+
+func TestResolveUnattendedEligibilityUsesAllToolAliases(t *testing.T) {
+	now := time.Now().UTC()
+	view, err := ResolveWithOptions(
+		context.Background(),
+		[]session.Event{{
+			ID:        "evt_1",
+			SessionID: "sess_1",
+			Source:    "customer",
+			Kind:      "message",
+			CreatedAt: now,
+			Content:   []session.ContentPart{{Type: "text", Text: "check my order"}},
+		}},
+		[]policy.Bundle{{
+			ID:      "bundle_1",
+			Version: "v1",
+			Guidelines: []policy.Guideline{{
+				ID:    "lookup",
+				When:  "order",
+				Then:  "Check the order first.",
+				Tools: []string{"commerce_get_order"},
+			}},
+			ToolPolicies: []policy.ToolPolicy{{
+				ID:         "approval_required",
+				ToolIDs:    []string{"get_order"},
+				Approval:   "required",
+				Unattended: "allow",
+			}},
+		}},
+		nil,
+		[]tool.CatalogEntry{{ID: "commerce_get_order", ProviderID: "commerce", Name: "get_order"}},
+		ResolveOptions{SessionMode: "unattended"},
+	)
+	if err != nil {
+		t.Fatalf("ResolveWithOptions() error = %v", err)
+	}
+	if len(view.ToolExposureStage.ExposedTools) != 1 || view.ToolExposureStage.ExposedTools[0] != "get_order" {
+		t.Fatalf("exposed tools = %#v, want get_order", view.ToolExposureStage.ExposedTools)
+	}
+	if view.ToolExposureStage.UnattendedApprovals["commerce.get_order"] != "allow" {
+		t.Fatalf("unattended approvals = %#v, want allow marker from alias lookup", view.ToolExposureStage.UnattendedApprovals)
 	}
 }
 

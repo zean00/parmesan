@@ -42,6 +42,9 @@ func ValidateBundle(bundle policy.Bundle) error {
 	if err := validatePerceivedPerformance(bundle.PerceivedPerformance); err != nil {
 		return err
 	}
+	if err := validateUnattended(bundle.Unattended); err != nil {
+		return err
+	}
 	if err := validateSemantics(bundle.Semantics); err != nil {
 		return err
 	}
@@ -198,6 +201,9 @@ func ValidateBundle(bundle policy.Bundle) error {
 		if len(item.ToolIDs) == 0 {
 			return fmt.Errorf("tool_policy %q requires tool_ids", item.ID)
 		}
+		if err := validateToolPolicyUnattended(item); err != nil {
+			return err
+		}
 	}
 	for _, item := range bundle.Retrievers {
 		if err := validateID("retriever", item.ID, seen); err != nil {
@@ -231,6 +237,26 @@ func ValidateBundle(bundle policy.Bundle) error {
 	}
 
 	return nil
+}
+
+func validateUnattended(item policy.UnattendedPolicy) error {
+	mode := strings.ToLower(strings.TrimSpace(item.IneligibleRequiredTools))
+	switch mode {
+	case "", "hide", "reject":
+		return nil
+	default:
+		return fmt.Errorf("unattended.ineligible_required_tools has unsupported value %q", mode)
+	}
+}
+
+func validateToolPolicyUnattended(item policy.ToolPolicy) error {
+	mode := strings.ToLower(strings.TrimSpace(item.Unattended))
+	switch mode {
+	case "", "allow":
+		return nil
+	default:
+		return fmt.Errorf("tool_policy %q has unsupported unattended value %q", item.ID, mode)
+	}
 }
 
 func applyBundleDefaults(bundle policy.Bundle) policy.Bundle {

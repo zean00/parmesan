@@ -23,6 +23,7 @@ type Bundle struct {
 	Version                    string                      `json:"version" yaml:"version"`
 	CompositionMode            string                      `json:"composition_mode,omitempty" yaml:"composition_mode,omitempty"`
 	PerceivedPerformance       PerceivedPerformancePolicy  `json:"perceived_performance,omitempty" yaml:"perceived_performance,omitempty"`
+	Unattended                 UnattendedPolicy            `json:"unattended,omitempty" yaml:"unattended,omitempty"`
 	Semantics                  SemanticsPolicy             `json:"semantics,omitempty" yaml:"semantics,omitempty"`
 	WatchCapabilities          []WatchCapability           `json:"watch_capabilities,omitempty" yaml:"watch_capabilities,omitempty"`
 	DelegationContracts        []DelegationContract        `json:"delegation_contracts,omitempty" yaml:"delegation_contracts,omitempty"`
@@ -64,6 +65,10 @@ type PerceivedPerformancePolicy struct {
 	ProcessingUpdateDelayMS int      `json:"processing_update_delay_ms,omitempty" yaml:"processing_update_delay_ms,omitempty"`
 	Preambles               []string `json:"preambles,omitempty" yaml:"preambles,omitempty"`
 	AllowedRiskTiers        []string `json:"allowed_risk_tiers,omitempty" yaml:"allowed_risk_tiers,omitempty"`
+}
+
+type UnattendedPolicy struct {
+	IneligibleRequiredTools string `json:"ineligible_required_tools,omitempty" yaml:"ineligible_required_tools,omitempty"`
 }
 
 type SemanticsPolicy struct {
@@ -427,6 +432,7 @@ type ToolPolicy struct {
 	ToolIDs      []string          `json:"tool_ids" yaml:"tool_ids"`
 	Exposure     string            `json:"exposure" yaml:"exposure"`
 	Approval     string            `json:"approval,omitempty" yaml:"approval,omitempty"`
+	Unattended   string            `json:"unattended,omitempty" yaml:"unattended,omitempty"`
 }
 
 type RetrieverBinding struct {

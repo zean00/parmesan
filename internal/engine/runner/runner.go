@@ -954,6 +954,7 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 		KnowledgeSnapshot: knowledgeSnapshot,
 		KnowledgeChunks:   knowledgeChunks,
 		DerivedSignals:    derivedSignals,
+		SessionMode:       sess.Mode,
 	})
 	if err != nil {
 		return resolvedView{}, nil, err
@@ -2701,6 +2702,9 @@ func (r *Runner) approvalStatus(ctx context.Context, exec execution.TurnExecutio
 	}
 	for _, item := range approvals {
 		if item.ExecutionID == exec.ID && (item.ToolID == toolID || item.ToolID == entry.ID) {
+			if item.Status == approval.StatusPending && unattendedApprovalAllowed(entry, view) {
+				return string(approval.StatusApproved), r.approveToolUnattended(ctx, exec, entry, &item)
+			}
 			if item.Status == approval.StatusPending && item.ExpiresAt.Before(time.Now().UTC()) {
 				item.Status = approval.StatusExpired
 				item.UpdatedAt = time.Now().UTC()
@@ -2709,6 +2713,22 @@ func (r *Runner) approvalStatus(ctx context.Context, exec execution.TurnExecutio
 			}
 			return string(item.Status), nil
 		}
+	}
+	if unattendedApprovalAllowed(entry, view) {
+		return string(approval.StatusApproved), r.approveToolUnattended(ctx, exec, entry, nil)
+	}
+	if unattendedApprovalRejected(entry, view) {
+		r.appendTrace(ctx, audit.Record{
+			ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+			Kind:        "approval.unattended_rejected",
+			SessionID:   exec.SessionID,
+			ExecutionID: exec.ID,
+			TraceID:     exec.TraceID,
+			Message:     "required tool approval is not eligible for unattended mode",
+			Fields:      map[string]any{"tool": entry.Name, "provider_id": entry.ProviderID},
+			CreatedAt:   time.Now().UTC(),
+		})
+		return string(approval.StatusRejected), nil
 	}
 	now := time.Now().UTC()
 	item := approval.Session{
@@ -2754,6 +2774,75 @@ func (r *Runner) approvalStatus(ctx context.Context, exec execution.TurnExecutio
 	})
 	r.publish(exec.SessionID, exec.ID, "approval.requested", map[string]any{"approval_id": item.ID, "tool": entry.Name, "message": item.RequestText})
 	return string(approval.StatusPending), nil
+}
+
+func (r *Runner) approveToolUnattended(ctx context.Context, exec execution.TurnExecution, entry tool.CatalogEntry, existing *approval.Session) error {
+	toolID := policyruntime.QualifiedToolID(entry)
+	now := time.Now().UTC()
+	item := approval.Session{}
+	if existing != nil {
+		item = *existing
+	} else {
+		item = approval.Session{
+			ID:          fmt.Sprintf("approval_%d", now.UnixNano()),
+			SessionID:   exec.SessionID,
+			ExecutionID: exec.ID,
+			ToolID:      toolID,
+			RequestText: "Approval auto-approved in unattended mode before running " + entry.Name,
+			ExpiresAt:   now.Add(15 * time.Minute),
+			CreatedAt:   now,
+		}
+	}
+	item.Status = approval.StatusApproved
+	item.Decision = "unattended_auto_approve"
+	item.UpdatedAt = now
+	if strings.TrimSpace(item.ToolID) == "" {
+		item.ToolID = toolID
+	}
+	if strings.TrimSpace(item.RequestText) == "" {
+		item.RequestText = "Approval auto-approved in unattended mode before running " + entry.Name
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = now
+	}
+	if err := r.repo.SaveApprovalSession(ctx, item); err != nil {
+		return err
+	}
+	r.appendTrace(ctx, audit.Record{
+		ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
+		Kind:        "approval.unattended_auto_approved",
+		SessionID:   exec.SessionID,
+		ExecutionID: exec.ID,
+		TraceID:     exec.TraceID,
+		Message:     item.RequestText,
+		Fields:      map[string]any{"approval_id": item.ID, "tool": entry.Name, "provider_id": entry.ProviderID},
+		CreatedAt:   now,
+	})
+	_, _ = r.sessions.CreateApprovalResolvedEvent(ctx, exec.SessionID, "runtime", exec.ID, exec.TraceID, item.ID, item.ToolID, item.Decision, map[string]any{
+		"tool_name":        entry.Name,
+		"provider_id":      entry.ProviderID,
+		"catalog_entry_id": entry.ID,
+		"unattended":       true,
+	}, false)
+	r.publish(exec.SessionID, exec.ID, "approval.resolved", map[string]any{"approval_id": item.ID, "tool": entry.Name, "decision": item.Decision})
+	return nil
+}
+
+func unattendedApprovalAllowed(entry tool.CatalogEntry, view resolvedView) bool {
+	return toolExposureValue(entry, view.ToolExposureStage.UnattendedApprovals) == "allow"
+}
+
+func unattendedApprovalRejected(entry tool.CatalogEntry, view resolvedView) bool {
+	return toolExposureValue(entry, view.ToolExposureStage.UnattendedIneligibleRequired) == "reject"
+}
+
+func toolExposureValue(entry tool.CatalogEntry, values map[string]string) string {
+	for _, key := range []string{policyruntime.QualifiedToolID(entry), entry.ID, entry.Name, entry.ProviderID + "." + entry.Name} {
+		if value := strings.ToLower(strings.TrimSpace(values[key])); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (r *Runner) selectTool(view resolvedView) (tool.CatalogEntry, bool) {

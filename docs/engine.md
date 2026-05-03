@@ -46,6 +46,10 @@ ACP is the primary conversation edge. A customer message enters through:
 If the session is in manual mode, the message is persisted but no automated
 execution is started.
 
+If the session is in unattended mode, automated execution still starts. The
+only behavior change is tool approval handling: required approvals can be
+auto-approved for tool policies that explicitly allow unattended operation.
+
 That distinction matters operationally: manual mode changes execution behavior
 without losing the durable session history.
 

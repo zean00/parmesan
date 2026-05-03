@@ -1,6 +1,8 @@
 id: ecommerce-returns
 version: v1
 composition_mode: strict
+unattended:
+  ineligible_required_tools: hide
 no_match: I need to hand this to a specialist because I do not have an approved response for this case yet.
 observations:
   - id: refund_status_request
@@ -58,3 +60,5 @@ tool_policies:
       - claims.inspect_damage
       - payments.get_refund_status
     exposure: policy-gated
+    approval: required
+    unattended: allow

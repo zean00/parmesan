@@ -491,4 +491,5 @@ type ResolveOptions struct {
 	KnowledgeChunks   []knowledge.Chunk
 	DerivedSignals    []string
 	ArgumentResolver  ToolArgumentResolver
+	SessionMode       string
 }
