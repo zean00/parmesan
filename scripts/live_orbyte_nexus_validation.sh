@@ -43,6 +43,7 @@ ORBYTE_FULL_MCP_URL="${ORBYTE_FULL_MCP_URL:-${ORBYTE_FULL_BASE_URL}/mcp}"
 ORBYTE_MINIMAL_MCP_URL="${ORBYTE_MINIMAL_MCP_URL:-${ORBYTE_MINIMAL_BASE_URL}/mcp}"
 CRM_MANIFEST_FULL="${CRM_MANIFEST_FULL:-$RUN_DIR/orbyte-full-crm-seed.json}"
 CRM_MANIFEST_MINIMAL="${CRM_MANIFEST_MINIMAL:-$RUN_DIR/orbyte-minimal-crm-seed.json}"
+COMPLAINT_CRM_MANIFEST="${COMPLAINT_CRM_MANIFEST:-$CRM_MANIFEST_MINIMAL}"
 SHOWCASE_MANIFEST_FULL="${SHOWCASE_MANIFEST_FULL:-$RUN_DIR/orbyte-full-showcase-seed.json}"
 REPORT_OUT="${REPORT_OUT:-$RUN_DIR/integrated-validation-report.json}"
 
@@ -377,7 +378,7 @@ echo "[7/8] Run integrated validation"
     --complaint-mcp-url "$COMPLAINT_MCP_URL" \
     --agent-id "$VALIDATION_AGENT_ID" \
     --crm-manifest "$CRM_MANIFEST_FULL" \
-    --crm-manifest-minimal "$CRM_MANIFEST_MINIMAL" \
+    --crm-manifest-minimal "$COMPLAINT_CRM_MANIFEST" \
     --showcase-manifest "$SHOWCASE_MANIFEST_FULL" \
     --script "$VALIDATION_SCRIPT" \
     --report-out "$REPORT_OUT"

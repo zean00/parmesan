@@ -185,7 +185,7 @@ delegation_workflows:
         tool_ids:
           - orbyte_full.crm.ticket.create
       - id: confirm_ticket
-        instruction: Confirm the created or reused ticket reference. Use crm.ticket.get when you have a real internal ticket id, otherwise recover it with crm.ticket.search using the returned ticket number, customer context, and queue.
+        instruction: Confirm the created or reused ticket reference. Use crm.ticket.get only when you have a real internal crm_ticket:... id. If create returns a human ticket number like CRM-..., treat it as ticket_number, not ticket_id, and recover the internal ticket id with crm.ticket.search using that ticket number plus the same customer and queue. Do not restrict the recovery search to status=open because newly created tickets can still be new.
         tool_ids:
           - orbyte_full.crm.ticket.get
           - orbyte_full.crm.ticket.search
@@ -193,6 +193,8 @@ delegation_workflows:
       - Do not invent ids, queue codes, statuses, or ticket numbers.
       - Do not create a duplicate complaint ticket when an active ticket already covers the complaint.
       - Do not finish until both ticket_id and ticket_number are confirmed from MCP output.
+      - Never use a CRM-... ticket number as ticket_id; ticket_id must be an internal crm_ticket:... record id.
+      - Recovery searches after create must not filter to status=open.
     success_criteria:
       - Return one JSON object with user_message, ticket_id, ticket_number, queue_code, status, and any confirmed party context fields.
       - user_message must confirm the complaint ticket and that updates will follow.
