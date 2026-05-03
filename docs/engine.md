@@ -43,8 +43,17 @@ ACP is the primary conversation edge. A customer message enters through:
 - `POST /v1/acp/sessions/{id}/messages`
 - or the agent-scoped ACP equivalent
 
+Session creation can also opt into an immediate greeting with
+`allow_greeting: true`. The greeting is queued as a system-triggered response
+and applies in `auto`, `manual`, and `unattended` sessions. Greeting trigger
+instructions are scoped to the greeting execution and do not affect later
+customer-message turns.
+
 If the session is in manual mode, the message is persisted but no automated
-execution is started.
+execution is started. A manual session can opt into one automated first-message
+response with `allow_first_message_response: true`; only the first customer
+message gets an execution, and later manual messages remain persist-only unless
+an operator explicitly processes them.
 
 If the session is in unattended mode, automated execution still starts. The
 only behavior change is tool approval handling: required approvals can be

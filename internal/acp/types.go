@@ -20,17 +20,19 @@ const (
 )
 
 type Session struct {
-	ID         string          `json:"id"`
-	Channel    string          `json:"channel"`
-	CustomerID string          `json:"customer_id,omitempty"`
-	AgentID    string          `json:"agent_id,omitempty"`
-	Mode       string          `json:"mode,omitempty"`
-	Title      string          `json:"title,omitempty"`
-	Meta       map[string]any  `json:"_meta,omitempty"`
-	Metadata   map[string]any  `json:"metadata,omitempty"`
-	Labels     []string        `json:"labels,omitempty"`
-	Summary    *SessionSummary `json:"summary,omitempty"`
-	CreatedAt  time.Time       `json:"created_at"`
+	ID                        string          `json:"id"`
+	Channel                   string          `json:"channel"`
+	CustomerID                string          `json:"customer_id,omitempty"`
+	AgentID                   string          `json:"agent_id,omitempty"`
+	Mode                      string          `json:"mode,omitempty"`
+	Title                     string          `json:"title,omitempty"`
+	AllowGreeting             bool            `json:"allow_greeting,omitempty"`
+	AllowFirstMessageResponse bool            `json:"allow_first_message_response,omitempty"`
+	Meta                      map[string]any  `json:"_meta,omitempty"`
+	Metadata                  map[string]any  `json:"metadata,omitempty"`
+	Labels                    []string        `json:"labels,omitempty"`
+	Summary                   *SessionSummary `json:"summary,omitempty"`
+	CreatedAt                 time.Time       `json:"created_at"`
 }
 
 type SessionSummary struct {
@@ -188,23 +190,34 @@ func requireDataStrings(data map[string]any, keys ...string) error {
 func SessionFromDomain(src session.Session) Session {
 	metadata := cloneAnyMap(src.Metadata)
 	return Session{
-		ID:         src.ID,
-		Channel:    src.Channel,
-		CustomerID: src.CustomerID,
-		AgentID:    src.AgentID,
-		Mode:       src.Mode,
-		Title:      src.Title,
-		Meta:       mapField(metadata, "_meta"),
-		Metadata:   metadata,
-		Labels:     append([]string(nil), src.Labels...),
-		Summary:    nil,
-		CreatedAt:  src.CreatedAt,
+		ID:                        src.ID,
+		Channel:                   src.Channel,
+		CustomerID:                src.CustomerID,
+		AgentID:                   src.AgentID,
+		Mode:                      src.Mode,
+		Title:                     src.Title,
+		AllowGreeting:             boolMetadata(metadata, "allow_greeting"),
+		AllowFirstMessageResponse: boolMetadata(metadata, "allow_first_message_response"),
+		Meta:                      mapField(metadata, "_meta"),
+		Metadata:                  metadata,
+		Labels:                    append([]string(nil), src.Labels...),
+		Summary:                   nil,
+		CreatedAt:                 src.CreatedAt,
 	}
 }
 
 func SessionToDomain(src Session) session.Session {
 	customerID := CustomerIDFromSessionContext(src.CustomerID, src.Metadata, src.Meta)
 	metadata := NormalizeSessionMetadataWithCustomerID(src.Metadata, src.Meta, customerID)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	if src.AllowGreeting {
+		metadata["allow_greeting"] = true
+	}
+	if src.AllowFirstMessageResponse {
+		metadata["allow_first_message_response"] = true
+	}
 	return session.Session{
 		ID:         src.ID,
 		Channel:    src.Channel,
@@ -308,6 +321,21 @@ func mapField(values map[string]any, key string) map[string]any {
 		return typed
 	}
 	return nil
+}
+
+func boolMetadata(values map[string]any, key string) bool {
+	raw, ok := values[key]
+	if !ok {
+		return false
+	}
+	switch typed := raw.(type) {
+	case bool:
+		return typed
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true")
+	default:
+		return false
+	}
 }
 
 func valueAt(values map[string]any, path ...string) any {

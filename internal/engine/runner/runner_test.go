@@ -1159,7 +1159,7 @@ func TestComposePromptIncludesSoulGuidance(t *testing.T) {
 		Source:  "customer",
 		Kind:    "message",
 		Content: []session.ContentPart{{Type: "text", Text: "I need help"}},
-	}}, nil)
+	}}, nil, responsedomain.Response{})
 
 	if !strings.Contains(prompt, "Agent SOUL style and brand rules:") ||
 		!strings.Contains(prompt, "Brand: Parmesan") ||
@@ -1180,6 +1180,50 @@ func TestComposePromptIncludesSoulGuidance(t *testing.T) {
 		!strings.Contains(prompt, "High-risk response contract:") ||
 		!strings.Contains(prompt, "cite the supporting source identifier or URI") {
 		t.Fatalf("prompt = %q, want SOUL style guidance", prompt)
+	}
+}
+
+func TestComposePromptScopesTriggerToCurrentResponse(t *testing.T) {
+	events := []session.Event{
+		{
+			ID:          "evt_greeting_trigger",
+			Source:      "system",
+			Kind:        "response.trigger",
+			ExecutionID: "exec_greeting",
+			TraceID:     "trace_greeting",
+			Data: map[string]any{
+				"trigger_source": "app",
+				"trigger_reason": "greeting",
+			},
+		},
+		{
+			ID:          "evt_customer",
+			Source:      "customer",
+			Kind:        "message",
+			ExecutionID: "exec_customer",
+			TraceID:     "trace_customer",
+			Content:     []session.ContentPart{{Type: "text", Text: "Where is my order?"}},
+		},
+	}
+
+	prompt := composePrompt(resolvedView{}, events, nil, responsedomain.Response{
+		ExecutionID:   "exec_customer",
+		TraceID:       "trace_customer",
+		TriggerSource: "customer",
+		TriggerReason: "unspecified",
+	})
+	if strings.Contains(prompt, "Conversation trigger: greeting") {
+		t.Fatalf("prompt = %q, want stale greeting trigger excluded", prompt)
+	}
+
+	greetingPrompt := composePrompt(resolvedView{}, events, nil, responsedomain.Response{
+		ExecutionID:   "exec_greeting",
+		TraceID:       "trace_greeting",
+		TriggerSource: "app",
+		TriggerReason: "greeting",
+	})
+	if !strings.Contains(greetingPrompt, "Conversation trigger: greeting") {
+		t.Fatalf("prompt = %q, want current greeting trigger included", greetingPrompt)
 	}
 }
 

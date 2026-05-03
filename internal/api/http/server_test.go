@@ -4050,6 +4050,148 @@ func TestACPMessageIngressManualModeStoresEventWithoutExecution(t *testing.T) {
 	}
 }
 
+func TestACPCreateSessionAllowGreetingQueuesTriggeredResponseForAllModes(t *testing.T) {
+	for _, mode := range []string{"auto", "manual", "unattended"} {
+		t.Run(mode, func(t *testing.T) {
+			repo := memory.New()
+			writes := asyncwrite.New(repo, 32)
+			srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+			body := fmt.Sprintf(`{"id":"sess_%s","channel":"acp","mode":%q,"allow_greeting":true}`, mode, mode)
+			req := httptest.NewRequest(http.MethodPost, "/v1/acp/sessions", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			srv.httpServer.Handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+			}
+
+			var created acp.Session
+			if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+				t.Fatal(err)
+			}
+			if !created.AllowGreeting {
+				t.Fatalf("allow_greeting = false, want true")
+			}
+			sess, err := repo.GetSession(context.Background(), created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sess.Metadata["allow_greeting"] != true {
+				t.Fatalf("metadata = %#v, want allow_greeting=true", sess.Metadata)
+			}
+			responses, err := repo.ListResponses(context.Background(), responsedomain.Query{SessionID: created.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(responses) != 1 || responses[0].TriggerReason != "greeting" || responses[0].DedupeKey != "session:"+created.ID+":greeting" {
+				t.Fatalf("responses = %#v, want one greeting response", responses)
+			}
+			events, err := repo.ListEvents(context.Background(), created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(events) != 1 || events[0].Source != "system" || events[0].Kind != "response.trigger" {
+				t.Fatalf("events = %#v, want internal greeting trigger event", events)
+			}
+		})
+	}
+}
+
+func TestACPCreateSessionWithoutGreetingDoesNotQueueResponse(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/sessions", strings.NewReader(`{"id":"sess_no_greeting","channel":"acp","allow_first_message_response":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/v1/acp/sessions/sess_no_greeting", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got acp.Session
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.AllowFirstMessageResponse || got.AllowGreeting {
+		t.Fatalf("session flags = greeting:%v first_message:%v, want false/true", got.AllowGreeting, got.AllowFirstMessageResponse)
+	}
+	responses, err := repo.ListResponses(context.Background(), responsedomain.Query{SessionID: "sess_no_greeting"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(responses) != 0 {
+		t.Fatalf("responses = %#v, want none", responses)
+	}
+}
+
+func TestACPMessageIngressManualFirstMessageResponseCreatesOnlyOneExecution(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_1", Channel: "acp", Mode: "manual", Metadata: map[string]any{"allow_first_message_response": true}, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/sessions/sess_1/messages", strings.NewReader(`{"id":"evt_1","text":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPost, "/v1/acp/sessions/sess_1/messages", strings.NewReader(`{"id":"evt_2","text":"second message"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("second status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	waitFor(t, time.Second, func() bool {
+		events, err := repo.ListEvents(context.Background(), "sess_1")
+		return err == nil && len(events) == 2
+	})
+	execs, err := repo.ListExecutions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(execs) != 1 || execs[0].TriggerEventID != "evt_1" {
+		t.Fatalf("executions = %#v, want one execution for first event", execs)
+	}
+	responses, err := repo.ListResponses(context.Background(), responsedomain.Query{ExecutionID: execs[0].ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(responses) != 1 || responses[0].TriggerReason != "first_message_response" {
+		t.Fatalf("responses = %#v, want first_message_response trigger", responses)
+	}
+	events, err := repo.ListEvents(context.Background(), "sess_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if events[0].Metadata["automation_allow_reason"] != "manual_first_message_response" {
+		t.Fatalf("first event metadata = %#v, want first-message allowance", events[0].Metadata)
+	}
+	if events[1].Metadata["automation_skipped"] != true {
+		t.Fatalf("second event metadata = %#v, want manual skip", events[1].Metadata)
+	}
+}
+
 func TestOperatorSessionLifecycleEndpointsAndFeedbackGate(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)

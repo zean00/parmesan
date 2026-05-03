@@ -696,7 +696,7 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 					}
 				}
 			} else {
-				prompt := composePrompt(view, events, toolOutput)
+				prompt := composePrompt(view, events, toolOutput, responseRecord)
 				r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
 					ResponseID:  responseRecord.ID,
 					SessionID:   exec.SessionID,
@@ -2863,8 +2863,11 @@ func findCatalogEntry(repo store.Repository, name string) (tool.CatalogEntry, bo
 	return entry, ok && err == nil
 }
 
-func composePrompt(view resolvedView, events []session.Event, toolOutput map[string]any) string {
+func composePrompt(view resolvedView, events []session.Event, toolOutput map[string]any, record responsedomain.Response) string {
 	var parts []string
+	if trigger := responseTriggerPrompt(events, record); trigger != "" {
+		parts = append(parts, trigger)
+	}
 	if latest := latestText(events); latest != "" {
 		parts = append(parts, "Customer message: "+latest)
 	}
@@ -2940,6 +2943,46 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 	}
 	parts = append(parts, `Return either plain text or JSON with this schema: {"messages":["first assistant message","optional follow-up message"]}. Use 1 to 3 messages. Split into multiple messages only when that makes the conversation more natural or when a template/policy calls for a sequence.`)
 	return strings.Join(parts, "\n")
+}
+
+func responseTriggerPrompt(events []session.Event, record responsedomain.Response) string {
+	if trigger := responseTriggerPromptFor(record.TriggerSource, record.TriggerReason); trigger != "" {
+		return trigger
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		event := events[i]
+		if event.Source != "system" || event.Kind != "response.trigger" {
+			continue
+		}
+		if record.ExecutionID != "" && event.ExecutionID != record.ExecutionID {
+			continue
+		}
+		if record.TraceID != "" && event.TraceID != record.TraceID {
+			continue
+		}
+		reason := strings.TrimSpace(fmt.Sprint(event.Data["trigger_reason"]))
+		source := strings.TrimSpace(fmt.Sprint(event.Data["trigger_source"]))
+		if trigger := responseTriggerPromptFor(source, reason); trigger != "" {
+			return trigger
+		}
+	}
+	return ""
+}
+
+func responseTriggerPromptFor(source, reason string) string {
+	source = strings.TrimSpace(source)
+	reason = strings.TrimSpace(reason)
+	switch reason {
+	case "greeting":
+		return "Conversation trigger: greeting. Send a concise opening message appropriate for the agent and channel; do not imply the customer has asked a question yet."
+	case "first_message_response":
+		return "Conversation trigger: first manual-mode customer message response. Respond to the customer's first message while keeping normal manual-session context in mind."
+	default:
+		if source != "" && source != "<nil>" && reason != "" && reason != "<nil>" && reason != "unspecified" {
+			return "Conversation trigger: " + source + " / " + reason + "."
+		}
+	}
+	return ""
 }
 
 func customerPreferenceText(items []customer.Preference) string {

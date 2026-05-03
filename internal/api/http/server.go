@@ -1829,25 +1829,39 @@ func (s *Server) acpCreateMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	if sessionMode(sess) == "manual" {
 		metadata = cloneMap(metadata)
-		metadata["automation_skipped"] = true
-		metadata["automation_skip_reason"] = "manual_mode"
-		event, err := s.sessions.CreateEvent(r.Context(), sessionsvc.CreateEventParams{
-			ID:        req.ID,
-			SessionID: sessionID,
-			Source:    req.Source,
-			Kind:      acp.EventKindMessage,
-			Content:   content,
-			Metadata:  metadata,
-			Async:     true,
-		})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		if s.manualFirstMessageResponseAllowed(r.Context(), sess, req.Source) {
+			metadata["automation_allowed"] = true
+			metadata["automation_allow_reason"] = "manual_first_message_response"
+			event, execID, _, err := s.enqueueSessionTurn(r.Context(), sessionID, req.ID, req.Source, acp.EventKindMessage, content, nil, metadata)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			_ = s.markResponseTrigger(r.Context(), execID, "customer", "first_message_response", "session:"+sessionID+":first_customer_message")
+			s.maybeAppendModerationAlert(r.Context(), sess, event, moderationPayload)
+			writeJSON(w, http.StatusCreated, acp.NormalizeEvent(event))
+			return
+		} else {
+			metadata["automation_skipped"] = true
+			metadata["automation_skip_reason"] = "manual_mode"
+			event, err := s.sessions.CreateEvent(r.Context(), sessionsvc.CreateEventParams{
+				ID:        req.ID,
+				SessionID: sessionID,
+				Source:    req.Source,
+				Kind:      acp.EventKindMessage,
+				Content:   content,
+				Metadata:  metadata,
+				Async:     true,
+			})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			s.maybeAppendModerationAlert(r.Context(), sess, event, moderationPayload)
+			s.publishSessionEvent(sessionID, event, "", event.TraceID, event.CreatedAt)
+			writeJSON(w, http.StatusCreated, acp.NormalizeEvent(event))
 			return
 		}
-		s.maybeAppendModerationAlert(r.Context(), sess, event, moderationPayload)
-		s.publishSessionEvent(sessionID, event, "", event.TraceID, event.CreatedAt)
-		writeJSON(w, http.StatusCreated, acp.NormalizeEvent(event))
-		return
 	}
 	event, _, _, err := s.enqueueSessionTurn(r.Context(), sessionID, req.ID, req.Source, acp.EventKindMessage, content, nil, metadata)
 	if err != nil {
@@ -1962,6 +1976,12 @@ func (s *Server) acpCreateSessionWithAgent(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if created.AllowGreeting {
+		if err := s.queueSessionGreeting(r.Context(), created.ID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	writeJSON(w, http.StatusCreated, created)
 }
@@ -7750,11 +7770,46 @@ func normalizeTriggerReason(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "", "unspecified":
 		return "unspecified"
-	case "follow_up", "background_complete", "buy_time", "approval_result", "retry_recovered":
+	case "follow_up", "background_complete", "buy_time", "approval_result", "retry_recovered", "greeting", "first_message_response":
 		return strings.ToLower(strings.TrimSpace(value))
 	default:
 		return ""
 	}
+}
+
+func (s *Server) queueSessionGreeting(ctx context.Context, sessionID string) error {
+	_, _, err := s.createTriggeredResponse(ctx, sessionID, "app", "greeting", "", "session:"+sessionID+":greeting")
+	return err
+}
+
+func (s *Server) markResponseTrigger(ctx context.Context, executionID, source, reason, dedupeKey string) error {
+	items, err := s.store.ListResponses(ctx, responsedomain.Query{ExecutionID: executionID, Limit: 1})
+	if err != nil || len(items) == 0 {
+		return err
+	}
+	record := items[0]
+	record.TriggerSource = source
+	record.TriggerReason = reason
+	record.DedupeKey = dedupeKey
+	record.UpdatedAt = time.Now().UTC()
+	return s.store.SaveResponse(ctx, record)
+}
+
+func (s *Server) manualFirstMessageResponseAllowed(ctx context.Context, sess session.Session, source string) bool {
+	if sessionMode(sess) != "manual" || !boolMetadata(sess.Metadata, "allow_first_message_response") {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(source), "customer") {
+		return false
+	}
+	events, err := s.sessions.ListEvents(ctx, session.EventQuery{
+		SessionID:      sess.ID,
+		Source:         "customer",
+		Kinds:          []string{acp.EventKindMessage},
+		ExcludeDeleted: true,
+		Limit:          1,
+	})
+	return err == nil && len(events) == 0
 }
 
 func (s *Server) createTriggeredResponse(ctx context.Context, sessionID, source, reason, message, dedupeKey string) (responsedomain.Response, bool, error) {
@@ -8759,6 +8814,13 @@ func stringMetadata(metadata map[string]any, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func boolMetadata(metadata map[string]any, key string) bool {
+	if metadata == nil {
+		return false
+	}
+	return boolValue(metadata[key])
 }
 
 func positiveIntQuery(w http.ResponseWriter, r *http.Request, key string) (int, bool) {
