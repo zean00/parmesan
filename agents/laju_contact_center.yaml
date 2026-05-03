@@ -1,0 +1,17 @@
+id: agent_profile_laju_contact_center
+name: Laju Contact Center Agent
+description: AI-assisted contact center agent for triage, customer support, ticket creation, and operator handoff.
+status: active
+policy_bundle_path: ../examples/laju_contact_center_policy.yaml
+knowledge_seed_path: live_support
+knowledge_source_id: source_laju_contact_center_seed
+default_knowledge_scope:
+  kind: agent
+  id: agent_profile_laju_contact_center
+metadata:
+  product: laju
+  channel: acp
+  contact_center_modes:
+    - manual
+    - auto
+    - unattended

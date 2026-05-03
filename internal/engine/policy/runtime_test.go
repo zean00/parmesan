@@ -310,6 +310,63 @@ func TestResolveUnattendedEligibilityUsesAllToolAliases(t *testing.T) {
 	}
 }
 
+func TestResolveInlineMCPToolDoesNotExposeWholeServer(t *testing.T) {
+	now := time.Now().UTC()
+	view, err := ResolveWithOptions(
+		context.Background(),
+		[]session.Event{{
+			ID:        "evt_1",
+			SessionID: "sess_1",
+			Source:    "customer",
+			Kind:      "message",
+			CreatedAt: now,
+			Content:   []session.ContentPart{{Type: "text", Text: "my replacement router arrived damaged, create a ticket"}},
+		}},
+		[]policy.Bundle{{
+			ID:      "bundle_1",
+			Version: "v1",
+			Guidelines: []policy.Guideline{{
+				ID:   "ticket",
+				When: "damaged device",
+				Then: "create a support ticket",
+				MCP:  &policy.MCPRef{Server: "laju", Tool: "create_ticket"},
+			}},
+			ToolPolicies: []policy.ToolPolicy{{
+				ID:         "laju_ticket",
+				ToolIDs:    []string{"laju.create_ticket"},
+				Approval:   "required",
+				Unattended: "allow",
+			}},
+		}},
+		nil,
+		[]tool.CatalogEntry{
+			{
+				ID:              "laju_create_ticket",
+				ProviderID:      "laju",
+				Name:            "create_ticket",
+				Description:     "create a support ticket",
+				RuntimeProtocol: "mcp_remote",
+				Schema:          `{"type":"object","properties":{"title":{"type":"string"},"customer":{"type":"string"},"summary":{"type":"string"},"channel":{"type":"string","default":"chat"},"priority":{"type":"string","default":"medium"}},"required":["title","customer","summary"]}`,
+			},
+			{
+				ID:              "laju_list_queues",
+				ProviderID:      "laju",
+				Name:            "list_queues",
+				Description:     "list support queues",
+				RuntimeProtocol: "mcp_remote",
+				Schema:          `{"type":"object"}`,
+			},
+		},
+		ResolveOptions{SessionMode: "unattended"},
+	)
+	if err != nil {
+		t.Fatalf("ResolveWithOptions() error = %v", err)
+	}
+	if !slices.Equal(view.ToolExposureStage.ExposedTools, []string{"create_ticket"}) {
+		t.Fatalf("exposed tools = %#v, want only create_ticket", view.ToolExposureStage.ExposedTools)
+	}
+}
+
 func TestResolveEmitsUpdateIntentArtifacts(t *testing.T) {
 	now := time.Date(2026, 4, 9, 10, 0, 0, 0, time.UTC)
 	view, err := Resolve(

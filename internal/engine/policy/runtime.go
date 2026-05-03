@@ -2268,7 +2268,7 @@ func resolveToolExposure(associations []policy.GuidelineToolAssociation, observa
 		if ref == nil {
 			return
 		}
-		if ref.Server != "" {
+		if ref.Server != "" && ref.Tool == "" && len(ref.Tools) == 0 {
 			serverAllowed[ref.Server] = struct{}{}
 		}
 		if ref.Tool != "" {
