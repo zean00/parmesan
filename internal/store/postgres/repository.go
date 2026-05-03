@@ -1669,7 +1669,7 @@ func (c *Client) SaveKnowledgeSyncJob(ctx context.Context, job knowledge.SyncJob
 		    lease_expires_at = EXCLUDED.lease_expires_at,
 		    started_at = EXCLUDED.started_at,
 		    finished_at = EXCLUDED.finished_at
-	`, job.ID, job.SourceID, job.Status, job.Force, nullString(job.RequestedBy), nullString(job.Error), nullString(job.OldChecksum), nullString(job.NewChecksum), nullString(job.SnapshotID), job.Changed, metadata, job.LeaseOwner, job.LeaseExpiresAt, job.CreatedAt, job.StartedAt, job.FinishedAt)
+	`, job.ID, job.SourceID, job.Status, job.Force, job.RequestedBy, job.Error, job.OldChecksum, job.NewChecksum, job.SnapshotID, job.Changed, metadata, job.LeaseOwner, job.LeaseExpiresAt, job.CreatedAt, job.StartedAt, job.FinishedAt)
 	if err != nil {
 		return err
 	}

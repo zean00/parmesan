@@ -2,9 +2,11 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"time"
 
+	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/observability"
 )
 
@@ -12,12 +14,18 @@ type Server struct {
 	httpServer *http.Server
 }
 
-func New(addr string) *Server {
+func New(addr string, router *model.Router) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok","service":"worker","queue":"postgres-jobs"}`))
 	})
+	if router != nil {
+		mux.HandleFunc("GET /v1/models/providers", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"providers": router.Snapshot()})
+		})
+	}
 	mux.Handle("GET /metrics", observability.Current().MetricsHandler())
 
 	return &Server{

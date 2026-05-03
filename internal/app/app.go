@@ -147,7 +147,7 @@ func RunWorker(ctx context.Context) error {
 	maintainerworker.New(repo, maintainerRouter).Start(ctx)
 	lifecycle.New(repo, writes, router).WithProviderURLPolicy(providerPolicy).Start(ctx)
 	replayrunner.New(repo, writes).Start(ctx)
-	return worker.New(cfg.HTTP.Address).Run(ctx)
+	return worker.New(cfg.HTTP.Address, router).Run(ctx)
 }
 
 func errDatabaseRequired(service string) error {
