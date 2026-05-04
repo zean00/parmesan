@@ -1604,7 +1604,7 @@ func (r *Runner) ingestMediaAssets(ctx context.Context, events []session.Event) 
 	}
 	for _, event := range events {
 		for i, part := range event.Content {
-			if part.Type == "" || part.Type == "text" {
+			if !isMediaContentPart(part) {
 				continue
 			}
 			assetID := mediaAssetID(event.ID, i)
@@ -1633,6 +1633,15 @@ func (r *Runner) ingestMediaAssets(ctx context.Context, events []session.Event) 
 		}
 	}
 	return nil
+}
+
+func isMediaContentPart(part session.ContentPart) bool {
+	switch strings.ToLower(strings.TrimSpace(part.Type)) {
+	case "", "text", "text/plain", "text/html", "structured_data", "artifact_ref":
+		return false
+	default:
+		return strings.TrimSpace(part.URL) != ""
+	}
 }
 
 func mediaAssetID(eventID string, partIndex int) string {
@@ -2907,6 +2916,9 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 	if latest := latestText(events); latest != "" {
 		parts = append(parts, "Customer message: "+latest)
 	}
+	if ctx := emailContextPrompt(events); ctx != "" {
+		parts = append(parts, "Trusted email context:\n"+ctx)
+	}
 	responsePlan := quality.BuildResponsePlan(view)
 	if plan := quality.FormatResponsePlan(responsePlan); plan != "" {
 		parts = append(parts, "Response quality plan: "+plan)
@@ -3019,6 +3031,78 @@ func responseTriggerPromptFor(source, reason string) string {
 		}
 	}
 	return ""
+}
+
+func emailContextPrompt(events []session.Event) string {
+	event := latestCustomerMessageEvent(events)
+	if event == nil {
+		return ""
+	}
+	lines := emailContextLines(*event)
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
+}
+
+func emailContextLines(event session.Event) []string {
+	var lines []string
+	for _, part := range event.Content {
+		if strings.EqualFold(strings.TrimSpace(part.Type), "structured_data") {
+			data := contentPartData(part)
+			if !strings.EqualFold(strings.TrimSpace(fmt.Sprint(data["kind"])), "email_context") {
+				continue
+			}
+			for _, key := range []string{"subject", "from", "from_name", "message_id", "thread_id", "in_reply_to"} {
+				if value := strings.TrimSpace(fmt.Sprint(data[key])); value != "" && value != "<nil>" {
+					lines = append(lines, key+": "+value)
+				}
+			}
+			if refs := stringListValue(data["references"]); len(refs) > 0 {
+				lines = append(lines, "references: "+strings.Join(refs, ", "))
+			}
+		}
+		if strings.EqualFold(strings.TrimSpace(part.Type), "artifact_ref") {
+			data := contentPartData(part)
+			id := strings.TrimSpace(fmt.Sprint(data["artifact_id"]))
+			if id == "" || id == "<nil>" {
+				continue
+			}
+			artifact := "attachment: " + id
+			if name := strings.TrimSpace(fmt.Sprint(data["name"])); name != "" && name != "<nil>" {
+				artifact += " (" + name + ")"
+			}
+			if mimeType := strings.TrimSpace(fmt.Sprint(data["mime_type"])); mimeType != "" && mimeType != "<nil>" {
+				artifact += " " + mimeType
+			}
+			lines = append(lines, artifact)
+		}
+	}
+	return lines
+}
+
+func contentPartData(part session.ContentPart) map[string]any {
+	if len(part.Data) > 0 {
+		return part.Data
+	}
+	return part.Meta
+}
+
+func stringListValue(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return typed
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(fmt.Sprint(item)); text != "" && text != "<nil>" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func customerPreferenceText(items []customer.Preference) string {
@@ -3277,6 +3361,9 @@ func delegatedAgentPrompt(exec execution.TurnExecution, view resolvedView, event
 	}
 	if latest := latestText(events); latest != "" {
 		parts = append(parts, "Customer request: "+latest)
+	}
+	if ctx := emailContextPrompt(events); ctx != "" {
+		parts = append(parts, "Trusted email context:\n"+ctx)
 	}
 	if len(view.MatchFinalizeStage.MatchedGuidelines) > 0 {
 		parts = append(parts, "Matched guideline IDs: "+strings.Join(idsFromGuidelines(view.MatchFinalizeStage.MatchedGuidelines), ", "))
@@ -3710,17 +3797,25 @@ func normalizeResponseMessages(messages []string) []string {
 }
 
 func latestText(events []session.Event) string {
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Source != "customer" {
-			continue
-		}
-		for _, part := range events[i].Content {
-			if part.Type == "text" && part.Text != "" {
-				return part.Text
-			}
+	event := latestCustomerMessageEvent(events)
+	if event == nil {
+		return ""
+	}
+	for _, part := range event.Content {
+		if part.Type == "text" && strings.TrimSpace(part.Text) != "" {
+			return strings.TrimSpace(part.Text)
 		}
 	}
-	return "hello"
+	return ""
+}
+
+func latestCustomerMessageEvent(events []session.Event) *session.Event {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Source == "customer" && (events[i].Kind == "" || events[i].Kind == "message") {
+			return &events[i]
+		}
+	}
+	return nil
 }
 
 func latestCustomerText(events []session.Event) string {

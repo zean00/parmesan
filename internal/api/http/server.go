@@ -1814,24 +1814,25 @@ func (s *Server) appendEvent(w http.ResponseWriter, r *http.Request) {
 func (s *Server) acpCreateMessage(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("id")
 	var req struct {
-		ID         string         `json:"id"`
-		Source     string         `json:"source"`
-		Text       string         `json:"text"`
-		Metadata   map[string]any `json:"metadata"`
-		Moderation string         `json:"moderation"`
+		ID         string                `json:"id"`
+		Source     string                `json:"source"`
+		Text       string                `json:"text"`
+		Content    []session.ContentPart `json:"content"`
+		Metadata   map[string]any        `json:"metadata"`
+		Moderation string                `json:"moderation"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(req.Text) == "" {
-		http.Error(w, "text is required", http.StatusBadRequest)
-		return
-	}
 	if strings.TrimSpace(req.Source) == "" {
 		req.Source = "customer"
 	}
-	content := []session.ContentPart{{Type: "text", Text: req.Text}}
+	content, err := normalizeACPMessageContent(req.Text, req.Content)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	content, metadata, moderationPayload, err := s.prepareModeratedInboundEvent(r.Context(), req.Source, acp.EventKindMessage, content, req.Metadata, req.Moderation)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -8683,6 +8684,39 @@ func extractTextParts(content []session.ContentPart) string {
 		parts = append(parts, strings.TrimSpace(part.Text))
 	}
 	return strings.Join(parts, "\n")
+}
+
+func normalizeACPMessageContent(text string, content []session.ContentPart) ([]session.ContentPart, error) {
+	out := make([]session.ContentPart, 0, len(content)+1)
+	if len(content) == 0 && strings.TrimSpace(text) != "" {
+		out = append(out, session.ContentPart{Type: "text", Text: strings.TrimSpace(text)})
+	}
+	for _, part := range content {
+		part.Type = strings.TrimSpace(part.Type)
+		part.Text = strings.TrimSpace(part.Text)
+		part.URL = strings.TrimSpace(part.URL)
+		if strings.EqualFold(part.Type, "text/plain") {
+			part.Type = "text"
+		}
+		if part.Type == "" {
+			if part.Text != "" {
+				part.Type = "text"
+			} else {
+				return nil, errors.New("content part type is required")
+			}
+		}
+		if part.Type == "text" && part.Text == "" {
+			continue
+		}
+		out = append(out, part)
+	}
+	if len(content) > 0 && strings.TrimSpace(text) != "" && strings.TrimSpace(extractTextParts(out)) == "" {
+		out = append([]session.ContentPart{{Type: "text", Text: strings.TrimSpace(text)}}, out...)
+	}
+	if len(out) == 0 || strings.TrimSpace(extractTextParts(out)) == "" {
+		return nil, errors.New("text is required")
+	}
+	return out, nil
 }
 
 func censorContentParts(content []session.ContentPart, replacement string) []session.ContentPart {

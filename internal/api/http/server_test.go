@@ -4029,6 +4029,90 @@ func TestACPMessageIngressCreatesExecutionAndTriggerEvent(t *testing.T) {
 	}
 }
 
+func TestACPMessageIngressPreservesEmailStructuredContent(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_email", Channel: "email", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/sessions/sess_email/messages", strings.NewReader(`{
+		"id":"evt_email",
+		"content":[
+			{"type":"text","text":"Can you confirm the proposal?"},
+			{"type":"structured_data","data":{"kind":"email_context","subject":"Re: Proposal","from":"Ada <ada@example.com>","thread_id":"thread-1","message_id":"msg-2","in_reply_to":"msg-1","references":["msg-1"]}},
+			{"type":"artifact_ref","data":{"artifact_id":"att_1","name":"proposal.pdf","mime_type":"application/pdf"}}
+		]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	waitFor(t, time.Second, func() bool {
+		events, err := repo.ListEvents(context.Background(), "sess_email")
+		return err == nil && len(events) == 1 && len(events[0].Content) == 3
+	})
+	events, err := repo.ListEvents(context.Background(), "sess_email")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := events[0].Content[1].Data
+	if data["kind"] != "email_context" || data["subject"] != "Re: Proposal" {
+		t.Fatalf("structured data = %#v, want email context", data)
+	}
+	if events[0].Content[2].Data["artifact_id"] != "att_1" {
+		t.Fatalf("artifact ref = %#v, want att_1", events[0].Content[2].Data)
+	}
+}
+
+func TestACPMessageIngressRejectsStructuredOnlyContent(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_email_structured_only", Channel: "email", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/sessions/sess_email_structured_only/messages", strings.NewReader(`{
+		"id":"evt_email_structured_only",
+		"content":[
+			{"type":"structured_data","data":{"kind":"email_context","subject":"Re: Proposal","from":"Ada <ada@example.com>"}},
+			{"type":"artifact_ref","data":{"artifact_id":"att_1","name":"proposal.pdf","mime_type":"application/pdf"}}
+		]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	events, err := repo.ListEvents(context.Background(), "sess_email_structured_only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("events = %#v, want no structured-only event persisted", events)
+	}
+}
+
 func TestACPMessageIngressMissingSessionReturnsNotFound(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)

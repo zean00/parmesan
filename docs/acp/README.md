@@ -27,7 +27,8 @@ Conversation-edge rules:
 - Agent-scoped session creation assigns a stable anonymous `customer_id` when `_meta` and Parmesan compatibility fields do not provide customer identity, preserving customer-scoped context without requiring a Parmesan-specific ACP field.
 - Session creation accepts `allow_greeting: true` to queue an agent greeting immediately after the session is created. Greeting works in `auto`, `manual`, and `unattended` sessions and is deduped per session.
 - Session creation accepts `allow_first_message_response: true` to let a `manual` session create one automated execution for its first customer message. Later customer messages in the same manual session are still persisted without automation until an operator explicitly processes them.
-- `POST /v1/acp/sessions/{id}/messages` is the primary turn-ingress endpoint and creates or coalesces a durable execution plus the trigger event.
+- `POST /v1/acp/sessions/{id}/messages` is the primary turn-ingress endpoint and creates or coalesces a durable execution plus the trigger event. It accepts either `text` or a `content` array of ACP content parts, but customer message ingress requires a non-empty text part.
+- Email gateway integrations should create sessions with `channel: "email"` and send Nexus-compatible email parts: a normal text part for the visible message, a `structured_data` part whose `data.kind` is `email_context` with fields such as `subject`, `from`, `from_name`, `message_id`, `thread_id`, `in_reply_to`, and `references`, plus `artifact_ref` parts for hydrated attachments. Parmesan preserves those parts and injects the email context as trusted channel context for that same customer turn during response composition.
 - Quick successive customer messages are coalesced for `ACP_RESPONSE_COALESCE_MS` milliseconds (default `1500`, set `0` to disable) while the execution is still safe to merge before response composition.
 - One execution can emit multiple ordered `ai_agent` message events when a strict template defines `messages: [...]` or generation returns a bounded JSON `messages` array; each event carries response-batch metadata while compatibility status events keep the first `event_id`.
 - If the session mode is `manual`, ACP message ingress persists and streams the customer message but does not create an automated execution, except for the opt-in first-message response described above.
@@ -94,7 +95,7 @@ Knowledge rules:
 - Folder sources require `KNOWLEDGE_SOURCE_ROOT` and cannot point outside that root.
 - Compiled wiki pages and chunks are stored as typed records; Markdown files are source input, not runtime truth.
 - Runtime retrievers inject response-scoped grounding from immutable knowledge snapshots and must not mutate policy or wiki state during ACP turn processing.
-- Non-text ACP content parts are treated as media assets; image/audio parts now produce derived signals like OCR text, summaries, labels, transcripts, and language hints.
+- Non-text media ACP content parts with URLs are treated as media assets; image/audio parts now produce derived signals like OCR text, summaries, labels, transcripts, and language hints. Structured email context and `artifact_ref` parts are preserved as message context and are not sent through media enrichment.
 - Retrieval prefers customer-scoped `customer_agent` knowledge when available, then falls back to shared agent or bundle knowledge.
 - Shared conversation learning creates draft knowledge proposals; low-risk customer facts update first-class customer preferences directly.
 - Inferred preference signals are reviewable and are not injected into runtime responses until confirmed active; explicit customer statements can supersede older active values.

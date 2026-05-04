@@ -63,6 +63,12 @@ Customer ingress is also usage-metered. Active `customer_turns` quota policies
 can reject the message with HTTP `429` before execution creation when
 `block` enforcement would be exceeded.
 
+Email ingress is expected to arrive through an ACP gateway such as Nexus. The
+engine keeps the normal customer text as the message body, preserves
+`structured_data` email context and `artifact_ref` attachment references, and
+adds that trusted email context to the response prompt separately from the
+customer's prose.
+
 That distinction matters operationally: manual mode changes execution behavior
 without losing the durable session history.
 

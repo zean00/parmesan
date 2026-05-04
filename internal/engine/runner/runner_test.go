@@ -1211,6 +1211,116 @@ func TestComposePromptIncludesSoulGuidance(t *testing.T) {
 	}
 }
 
+func TestComposePromptIncludesTrustedEmailContext(t *testing.T) {
+	events := []session.Event{{
+		Source: "customer",
+		Kind:   "message",
+		Content: []session.ContentPart{
+			{Type: "text", Text: "Can you confirm the proposal?"},
+			{Type: "structured_data", Data: map[string]any{
+				"kind":        "email_context",
+				"subject":     "Re: Proposal",
+				"from":        "Ada <ada@example.com>",
+				"thread_id":   "thread-1",
+				"message_id":  "msg-2",
+				"in_reply_to": "msg-1",
+				"references":  []any{"msg-1"},
+			}},
+			{Type: "artifact_ref", Data: map[string]any{
+				"artifact_id": "att_1",
+				"name":        "proposal.pdf",
+				"mime_type":   "application/pdf",
+			}},
+		},
+	}}
+	prompt := composePrompt(resolvedView{}, events, nil, responsedomain.Response{})
+	for _, want := range []string{
+		"Customer message: Can you confirm the proposal?",
+		"Trusted email context:",
+		"subject: Re: Proposal",
+		"from: Ada <ada@example.com>",
+		"thread_id: thread-1",
+		"references: msg-1",
+		"attachment: att_1 (proposal.pdf) application/pdf",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want %q", prompt, want)
+		}
+	}
+}
+
+func TestComposePromptDoesNotReuseStaleEmailContext(t *testing.T) {
+	events := []session.Event{
+		{
+			Source: "customer",
+			Kind:   "message",
+			Content: []session.ContentPart{
+				{Type: "text", Text: "Can you confirm the proposal?"},
+				{Type: "structured_data", Data: map[string]any{
+					"kind":      "email_context",
+					"subject":   "Re: Proposal",
+					"from":      "Ada <ada@example.com>",
+					"thread_id": "thread-1",
+				}},
+			},
+		},
+		{
+			Source:  "customer",
+			Kind:    "message",
+			Content: []session.ContentPart{{Type: "text", Text: "Thanks, one more question."}},
+		},
+	}
+	prompt := composePrompt(resolvedView{}, events, nil, responsedomain.Response{})
+	if !strings.Contains(prompt, "Customer message: Thanks, one more question.") {
+		t.Fatalf("prompt = %q, want latest customer text", prompt)
+	}
+	if strings.Contains(prompt, "Trusted email context:") || strings.Contains(prompt, "Re: Proposal") {
+		t.Fatalf("prompt = %q, want stale email context excluded", prompt)
+	}
+}
+
+func TestLatestTextReturnsEmptyForStructuredOnlyMessage(t *testing.T) {
+	events := []session.Event{{
+		Source: "customer",
+		Kind:   "message",
+		Content: []session.ContentPart{{
+			Type: "structured_data",
+			Data: map[string]any{"kind": "email_context", "subject": "No body"},
+		}},
+	}}
+	if got := latestText(events); got != "" {
+		t.Fatalf("latestText() = %q, want empty", got)
+	}
+	prompt := composePrompt(resolvedView{}, events, nil, responsedomain.Response{})
+	if strings.Contains(prompt, "Customer message: hello") || strings.Contains(prompt, "Customer message:") {
+		t.Fatalf("prompt = %q, want no fabricated customer message", prompt)
+	}
+}
+
+func TestIngestMediaAssetsSkipsEmailStructuredParts(t *testing.T) {
+	repo := memory.New()
+	r := New(repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), "test-runner")
+	events := []session.Event{{
+		ID:        "evt_email",
+		SessionID: "sess_email",
+		Content: []session.ContentPart{
+			{Type: "structured_data", Data: map[string]any{"kind": "email_context", "subject": "Re: Proposal"}},
+			{Type: "artifact_ref", Data: map[string]any{"artifact_id": "att_1", "name": "proposal.pdf"}},
+			{Type: "image", URL: "https://example.com/image.png", Meta: map[string]any{"mime_type": "image/png"}},
+		},
+	}}
+	if err := r.ingestMediaAssets(context.Background(), events); err != nil {
+		t.Fatalf("ingestMediaAssets() error = %v", err)
+	}
+	assets, err := repo.ListMediaAssets(context.Background(), "sess_email")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 1 || assets[0].PartIndex != 2 {
+		t.Fatalf("assets = %#v, want only image part indexed", assets)
+	}
+}
+
 func TestComposePromptScopesTriggerToCurrentResponse(t *testing.T) {
 	events := []session.Event{
 		{

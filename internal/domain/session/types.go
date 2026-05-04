@@ -20,6 +20,7 @@ type ContentPart struct {
 	Type string         `json:"type"`
 	Text string         `json:"text,omitempty"`
 	URL  string         `json:"url,omitempty"`
+	Data map[string]any `json:"data,omitempty"`
 	Meta map[string]any `json:"meta,omitempty"`
 }
 
