@@ -44,6 +44,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/rollout"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
+	usagedomain "github.com/sahal/parmesan/internal/domain/usage"
 	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 	knowledgecompiler "github.com/sahal/parmesan/internal/knowledge/compiler"
 	knowledgeenrichment "github.com/sahal/parmesan/internal/knowledge/enrichment"
@@ -60,6 +61,7 @@ import (
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/toolsecurity"
 	"github.com/sahal/parmesan/internal/toolsync"
+	usageledger "github.com/sahal/parmesan/internal/usage"
 )
 
 type Server struct {
@@ -80,6 +82,8 @@ type Server struct {
 	trustedOperatorRolesHeader string
 	toolProviderSecurity       config.ToolProviderSecurityConfig
 	argumentResolver           policyruntime.ToolArgumentResolver
+	usage                      *usageledger.Service
+	defaultOrgID               string
 }
 
 const adminStreamID = "__admin__"
@@ -277,6 +281,7 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 		syncer:                     syncer,
 		sessions:                   sessionsvc.New(repo, writes),
 		moderator:                  moderation.NewService(router, moderation.Settings{}),
+		usage:                      usageledger.New(repo, ""),
 		listener:                   sessionsvc.NewListener(repo),
 		operatorAPIKey:             strings.TrimSpace(os.Getenv("OPERATOR_API_KEY")),
 		trustedOperatorIDHeader:    strings.TrimSpace(os.Getenv("OPERATOR_TRUSTED_ID_HEADER")),
@@ -357,6 +362,13 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/operator/feedback/{id}/lineage", s.operatorGetFeedbackLineage)
 	mux.HandleFunc("GET /v1/operator/notifications", s.operatorListNotifications)
 	mux.HandleFunc("GET /v1/operator/notifications/stream", s.operatorStreamNotifications)
+	mux.HandleFunc("POST /v1/operator/usage/quota-policies", s.operatorCreateUsageQuotaPolicy)
+	mux.HandleFunc("GET /v1/operator/usage/quota-policies", s.operatorListUsageQuotaPolicies)
+	mux.HandleFunc("GET /v1/operator/usage/quota-policies/{id}", s.operatorGetUsageQuotaPolicy)
+	mux.HandleFunc("PUT /v1/operator/usage/quota-policies/{id}", s.operatorUpdateUsageQuotaPolicy)
+	mux.HandleFunc("DELETE /v1/operator/usage/quota-policies/{id}", s.operatorDisableUsageQuotaPolicy)
+	mux.HandleFunc("GET /v1/operator/usage/events", s.operatorListUsageEvents)
+	mux.HandleFunc("GET /v1/operator/usage/summary", s.operatorUsageSummary)
 	mux.HandleFunc("GET /v1/operator/retry-model-profiles", s.operatorListRetryModelProfiles)
 	mux.HandleFunc("GET /v1/operator/quality/regressions", s.operatorListRegressionFixtures)
 	mux.HandleFunc("POST /v1/operator/quality/regressions/{id}/state", s.operatorTransitionRegressionFixture)
@@ -501,6 +513,12 @@ func (s *Server) WithToolProviderSecurity(cfg config.ToolProviderSecurityConfig)
 			AllowLocalDev: cfg.AllowLocalDev,
 		})
 	}
+	return s
+}
+
+func (s *Server) WithDefaultOrgID(orgID string) *Server {
+	s.defaultOrgID = strings.TrimSpace(orgID)
+	s.usage = usageledger.New(s.store, s.defaultOrgID)
 	return s
 }
 
@@ -1827,6 +1845,22 @@ func (s *Server) acpCreateMessage(w http.ResponseWriter, r *http.Request) {
 	if !s.allowACPScopedSession(w, r, sess) {
 		return
 	}
+	if req.Source == "customer" && s.usage != nil {
+		if _, err := s.usage.Meter(r.Context(), usageledger.MeterRequest{
+			Context:  s.usageContextForSession(r.Context(), sess, "", "", ""),
+			Metric:   usagedomain.MetricCustomerTurns,
+			Quantity: 1,
+			Resource: "acp_message",
+			Status:   "accepted",
+		}); err != nil {
+			if quotaErr, ok := err.(*usageledger.QuotaError); ok {
+				writeQuotaError(w, quotaErr.Decision)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 	if sessionMode(sess) == "manual" {
 		metadata = cloneMap(metadata)
 		if s.manualFirstMessageResponseAllowed(r.Context(), sess, req.Source) {
@@ -2988,6 +3022,164 @@ func (s *Server) operatorGetFeedback(w http.ResponseWriter, r *http.Request) {
 		payload["recent_changes"] = history
 	}
 	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *Server) operatorCreateUsageQuotaPolicy(w http.ResponseWriter, r *http.Request) {
+	var item usagedomain.QuotaPolicy
+	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(item.ID) == "" {
+		item.ID = fmt.Sprintf("quota_%d", time.Now().UnixNano())
+	}
+	if err := normalizeUsageQuotaPolicy(&item); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	now := time.Now().UTC()
+	item.CreatedAt = now
+	item.UpdatedAt = now
+	if err := s.store.SaveUsageQuotaPolicy(r.Context(), item); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusCreated, item)
+}
+
+func (s *Server) operatorListUsageQuotaPolicies(w http.ResponseWriter, r *http.Request) {
+	limit, ok := positiveIntQuery(w, r, "limit")
+	if !ok {
+		return
+	}
+	items, err := s.store.ListUsageQuotaPolicies(r.Context(), usagedomain.PolicyQuery{
+		ScopeKind: strings.TrimSpace(r.URL.Query().Get("scope_kind")),
+		ScopeID:   strings.TrimSpace(r.URL.Query().Get("scope_id")),
+		Metric:    strings.TrimSpace(r.URL.Query().Get("metric")),
+		Status:    strings.TrimSpace(r.URL.Query().Get("status")),
+		Limit:     limit,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) operatorGetUsageQuotaPolicy(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetUsageQuotaPolicy(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) operatorUpdateUsageQuotaPolicy(w http.ResponseWriter, r *http.Request) {
+	current, err := s.store.GetUsageQuotaPolicy(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	var item usagedomain.QuotaPolicy
+	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	item.ID = current.ID
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = current.CreatedAt
+	}
+	item.UpdatedAt = time.Now().UTC()
+	if err := normalizeUsageQuotaPolicy(&item); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.store.SaveUsageQuotaPolicy(r.Context(), item); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) operatorDisableUsageQuotaPolicy(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetUsageQuotaPolicy(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	item.Status = usagedomain.PolicyDisabled
+	item.UpdatedAt = time.Now().UTC()
+	if err := s.store.SaveUsageQuotaPolicy(r.Context(), item); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) operatorListUsageEvents(w http.ResponseWriter, r *http.Request) {
+	limit, ok := positiveIntQuery(w, r, "limit")
+	if !ok {
+		return
+	}
+	since, err := optionalTimeQuery(r, "since")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	until, err := optionalTimeQuery(r, "until")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	items, err := s.store.ListUsageEvents(r.Context(), usagedomain.EventQuery{
+		ScopeKind:   strings.TrimSpace(r.URL.Query().Get("scope_kind")),
+		ScopeID:     strings.TrimSpace(r.URL.Query().Get("scope_id")),
+		Metric:      strings.TrimSpace(r.URL.Query().Get("metric")),
+		SessionID:   strings.TrimSpace(r.URL.Query().Get("session_id")),
+		ExecutionID: strings.TrimSpace(r.URL.Query().Get("execution_id")),
+		Provider:    strings.TrimSpace(r.URL.Query().Get("provider")),
+		Status:      strings.TrimSpace(r.URL.Query().Get("status")),
+		Since:       since,
+		Until:       until,
+		Limit:       limit,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) operatorUsageSummary(w http.ResponseWriter, r *http.Request) {
+	limit, ok := positiveIntQuery(w, r, "limit")
+	if !ok {
+		return
+	}
+	since, err := optionalTimeQuery(r, "since")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	until, err := optionalTimeQuery(r, "until")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	items, err := s.store.ListUsageBuckets(r.Context(), usagedomain.SummaryQuery{
+		ScopeKind: strings.TrimSpace(r.URL.Query().Get("scope_kind")),
+		ScopeID:   strings.TrimSpace(r.URL.Query().Get("scope_id")),
+		Metric:    strings.TrimSpace(r.URL.Query().Get("metric")),
+		Window:    strings.TrimSpace(r.URL.Query().Get("window")),
+		Since:     since,
+		Until:     until,
+		Limit:     limit,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) operatorGetFeedbackLineage(w http.ResponseWriter, r *http.Request) {
@@ -7555,6 +7747,12 @@ func operatorPermission(method, path string) string {
 	if strings.HasPrefix(path, "/v1/operator/operators") {
 		return "operator.manage"
 	}
+	if strings.HasPrefix(path, "/v1/operator/usage") {
+		if method == http.MethodGet {
+			return "operator.view"
+		}
+		return "operator.manage"
+	}
 	if strings.Contains(path, "/takeover") || strings.Contains(path, "/resume") || strings.Contains(path, "/messages") || strings.Contains(path, "/notes") || strings.Contains(path, "/process") || strings.Contains(path, "/approvals") || strings.Contains(path, "/feedback") {
 		if method == http.MethodGet {
 			return "operator.view"
@@ -7698,6 +7896,22 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeQuotaError(w http.ResponseWriter, decision usagedomain.Decision) {
+	writeJSON(w, http.StatusTooManyRequests, map[string]any{
+		"code":        "quota_exceeded",
+		"message":     "quota exceeded",
+		"scope_kind":  decision.ScopeKind,
+		"scope_id":    decision.ScopeID,
+		"metric":      decision.Metric,
+		"window":      decision.Window,
+		"limit":       decision.Limit,
+		"used":        decision.UsedBefore,
+		"requested":   decision.Requested,
+		"reset_at":    decision.ResetAt,
+		"enforcement": decision.Policy.Enforcement,
+	})
 }
 
 func newStep(execID, name string, recomputable bool) execution.ExecutionStep {
@@ -8823,6 +9037,27 @@ func boolMetadata(metadata map[string]any, key string) bool {
 	return boolValue(metadata[key])
 }
 
+func (s *Server) usageContextForSession(ctx context.Context, sess session.Session, executionID, responseID, traceID string) usageledger.Context {
+	orgID := firstNonEmpty(stringMetadata(sess.Metadata, "org_id"), stringMetadata(sess.Metadata, "organization_id"))
+	if orgID == "" && strings.TrimSpace(sess.AgentID) != "" {
+		if profile, err := s.store.GetAgentProfile(ctx, sess.AgentID); err == nil {
+			orgID = firstNonEmpty(stringMetadata(profile.Metadata, "org_id"), stringMetadata(profile.Metadata, "organization_id"))
+		}
+	}
+	if orgID == "" {
+		orgID = s.defaultOrgID
+	}
+	return usageledger.Context{
+		OrgID:       orgID,
+		AgentID:     sess.AgentID,
+		CustomerID:  sess.CustomerID,
+		SessionID:   sess.ID,
+		ExecutionID: executionID,
+		ResponseID:  responseID,
+		TraceID:     traceID,
+	}
+}
+
 func positiveIntQuery(w http.ResponseWriter, r *http.Request, key string) (int, bool) {
 	raw := strings.TrimSpace(r.URL.Query().Get(key))
 	if raw == "" {
@@ -8834,6 +9069,88 @@ func positiveIntQuery(w http.ResponseWriter, r *http.Request, key string) (int, 
 		return 0, false
 	}
 	return value, true
+}
+
+func optionalTimeQuery(r *http.Request, key string) (time.Time, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get(key))
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	ts, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid %s", key)
+	}
+	return ts, nil
+}
+
+func normalizeUsageQuotaPolicy(item *usagedomain.QuotaPolicy) error {
+	item.ScopeKind = strings.ToLower(strings.TrimSpace(item.ScopeKind))
+	item.ScopeID = strings.TrimSpace(item.ScopeID)
+	item.Metric = strings.ToLower(strings.TrimSpace(item.Metric))
+	item.Window = strings.ToLower(strings.TrimSpace(item.Window))
+	item.Enforcement = strings.ToLower(strings.TrimSpace(item.Enforcement))
+	item.Status = strings.ToLower(strings.TrimSpace(item.Status))
+	if item.Status == "" {
+		item.Status = usagedomain.PolicyActive
+	}
+	if item.Enforcement == "" {
+		item.Enforcement = usagedomain.EnforcementBlock
+	}
+	if item.Limit <= 0 {
+		return errors.New("limit must be positive")
+	}
+	if !validUsageScope(item.ScopeKind) {
+		return errors.New("invalid scope_kind")
+	}
+	if !validUsageMetric(item.Metric) {
+		return errors.New("invalid metric")
+	}
+	if !validUsageWindow(item.Window) {
+		return errors.New("invalid window")
+	}
+	if !validUsageEnforcement(item.Enforcement) {
+		return errors.New("invalid enforcement")
+	}
+	if item.Status != usagedomain.PolicyActive && item.Status != usagedomain.PolicyDisabled {
+		return errors.New("invalid status")
+	}
+	return nil
+}
+
+func validUsageScope(value string) bool {
+	switch value {
+	case usagedomain.ScopeCustomer, usagedomain.ScopeAgent, usagedomain.ScopeOrganization:
+		return true
+	default:
+		return false
+	}
+}
+
+func validUsageMetric(value string) bool {
+	switch value {
+	case usagedomain.MetricCustomerTurns, usagedomain.MetricModelRequests, usagedomain.MetricInputTokens, usagedomain.MetricOutputTokens, usagedomain.MetricTotalTokens, usagedomain.MetricEstimatedCostMicros, usagedomain.MetricToolCalls:
+		return true
+	default:
+		return false
+	}
+}
+
+func validUsageWindow(value string) bool {
+	switch value {
+	case usagedomain.WindowMinute, usagedomain.WindowHour, usagedomain.WindowDay, usagedomain.WindowMonth:
+		return true
+	default:
+		return false
+	}
+}
+
+func validUsageEnforcement(value string) bool {
+	switch value {
+	case usagedomain.EnforcementBlock, usagedomain.EnforcementWarn, usagedomain.EnforcementAllowOverage:
+		return true
+	default:
+		return false
+	}
 }
 
 func stringSliceMetadata(metadata map[string]any, key string) []string {

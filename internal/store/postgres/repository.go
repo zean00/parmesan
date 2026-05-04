@@ -33,6 +33,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/domain/toolrun"
+	usagedomain "github.com/sahal/parmesan/internal/domain/usage"
 )
 
 const (
@@ -3843,6 +3844,304 @@ func applyWatchMetadata(raw []byte, watch *session.Watch) {
 		return
 	}
 	watch.CapabilityID = strings.TrimSpace(stringValue(metadata[capabilityIDMetadataKey]))
+}
+
+func (c *Client) SaveUsageQuotaPolicy(ctx context.Context, policy usagedomain.QuotaPolicy) error {
+	now := time.Now().UTC()
+	if policy.CreatedAt.IsZero() {
+		policy.CreatedAt = now
+	}
+	if policy.UpdatedAt.IsZero() {
+		policy.UpdatedAt = now
+	}
+	if policy.Status == "" {
+		policy.Status = usagedomain.PolicyActive
+	}
+	if policy.Enforcement == "" {
+		policy.Enforcement = usagedomain.EnforcementBlock
+	}
+	_, err := c.sessionQuery().Exec(ctx, `
+		INSERT INTO usage_quota_policies (id, scope_kind, scope_id, metric, window, limit_value, enforcement, status, metadata_json, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		ON CONFLICT (id) DO UPDATE SET
+			scope_kind = EXCLUDED.scope_kind,
+			scope_id = EXCLUDED.scope_id,
+			metric = EXCLUDED.metric,
+			window = EXCLUDED.window,
+			limit_value = EXCLUDED.limit_value,
+			enforcement = EXCLUDED.enforcement,
+			status = EXCLUDED.status,
+			metadata_json = EXCLUDED.metadata_json,
+			updated_at = EXCLUDED.updated_at
+	`, policy.ID, policy.ScopeKind, nullString(policy.ScopeID), policy.Metric, policy.Window, policy.Limit, policy.Enforcement, policy.Status, metadataJSON(policy.Metadata, policy.ArtifactMeta), policy.CreatedAt, policy.UpdatedAt)
+	return err
+}
+
+func (c *Client) GetUsageQuotaPolicy(ctx context.Context, policyID string) (usagedomain.QuotaPolicy, error) {
+	items, err := c.ListUsageQuotaPolicies(ctx, usagedomain.PolicyQuery{ID: policyID, Limit: 1})
+	if err != nil {
+		return usagedomain.QuotaPolicy{}, err
+	}
+	if len(items) == 0 {
+		return usagedomain.QuotaPolicy{}, errors.New("usage quota policy not found")
+	}
+	return items[0], nil
+}
+
+func (c *Client) ListUsageQuotaPolicies(ctx context.Context, query usagedomain.PolicyQuery) ([]usagedomain.QuotaPolicy, error) {
+	limit := query.Limit
+	if limit <= 0 {
+		limit = 1000
+	}
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT id, scope_kind, COALESCE(scope_id,''), metric, window, limit_value, enforcement, status, metadata_json, created_at, updated_at
+		FROM usage_quota_policies
+		WHERE ($1 = '' OR id = $1)
+		  AND ($2 = '' OR scope_kind = $2)
+		  AND ($3 = '' OR scope_id IS NULL OR scope_id = $3)
+		  AND ($4 = '' OR metric = $4)
+		  AND ($5 = '' OR status = $5)
+		ORDER BY created_at DESC
+		LIMIT $6
+	`, query.ID, query.ScopeKind, query.ScopeID, query.Metric, query.Status, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []usagedomain.QuotaPolicy
+	for rows.Next() {
+		var item usagedomain.QuotaPolicy
+		var metadata []byte
+		if err := rows.Scan(&item.ID, &item.ScopeKind, &item.ScopeID, &item.Metric, &item.Window, &item.Limit, &item.Enforcement, &item.Status, &metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) AppendUsageEvent(ctx context.Context, event usagedomain.UsageEvent) error {
+	if event.RecordedAt.IsZero() {
+		event.RecordedAt = time.Now().UTC()
+	}
+	if event.OccurredAt.IsZero() {
+		event.OccurredAt = event.RecordedAt
+	}
+	_, err := c.sessionQuery().Exec(ctx, `
+		INSERT INTO usage_events (id, policy_id, decision, scope_kind, scope_id, metric, quantity, window, window_start, window_end, used_before, used_after, limit_value, resource, provider, model, tool_id, session_id, execution_id, response_id, trace_id, estimated, status, error, latency_ms, metadata_json, occurred_at, recorded_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9, TIMESTAMPTZ '0001-01-01 00:00:00+00'),NULLIF($10, TIMESTAMPTZ '0001-01-01 00:00:00+00'),$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+		ON CONFLICT (id) DO NOTHING
+	`, event.ID, nullString(event.PolicyID), nullString(event.Decision), event.ScopeKind, event.ScopeID, event.Metric, event.Quantity, nullString(event.Window), event.WindowStart, event.WindowEnd, event.UsedBefore, event.UsedAfter, event.Limit, nullString(event.Resource), nullString(event.Provider), nullString(event.Model), nullString(event.ToolID), nullString(event.SessionID), nullString(event.ExecutionID), nullString(event.ResponseID), nullString(event.TraceID), event.Estimated, nullString(event.Status), nullString(event.Error), event.LatencyMS, metadataJSON(event.Metadata, event.ArtifactMeta), event.OccurredAt, event.RecordedAt)
+	return err
+}
+
+func (c *Client) ListUsageEvents(ctx context.Context, query usagedomain.EventQuery) ([]usagedomain.UsageEvent, error) {
+	limit := query.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT id, COALESCE(policy_id,''), COALESCE(decision,''), scope_kind, scope_id, metric, quantity, COALESCE(window,''), COALESCE(window_start, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(window_end, TIMESTAMPTZ '0001-01-01 00:00:00+00'), used_before, used_after, limit_value, COALESCE(resource,''), COALESCE(provider,''), COALESCE(model,''), COALESCE(tool_id,''), COALESCE(session_id,''), COALESCE(execution_id,''), COALESCE(response_id,''), COALESCE(trace_id,''), estimated, COALESCE(status,''), COALESCE(error,''), latency_ms, metadata_json, occurred_at, recorded_at
+		FROM usage_events
+		WHERE ($1 = '' OR scope_kind = $1)
+		  AND ($2 = '' OR scope_id = $2)
+		  AND ($3 = '' OR metric = $3)
+		  AND ($4 = '' OR session_id = $4)
+		  AND ($5 = '' OR execution_id = $5)
+		  AND ($6 = '' OR provider = $6)
+		  AND ($7 = '' OR status = $7)
+		  AND ($8 = TIMESTAMPTZ '0001-01-01 00:00:00+00' OR occurred_at >= $8)
+		  AND ($9 = TIMESTAMPTZ '0001-01-01 00:00:00+00' OR occurred_at <= $9)
+		ORDER BY occurred_at DESC
+		LIMIT $10
+	`, query.ScopeKind, query.ScopeID, query.Metric, query.SessionID, query.ExecutionID, query.Provider, query.Status, query.Since, query.Until, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []usagedomain.UsageEvent
+	for rows.Next() {
+		var item usagedomain.UsageEvent
+		var metadata []byte
+		if err := rows.Scan(&item.ID, &item.PolicyID, &item.Decision, &item.ScopeKind, &item.ScopeID, &item.Metric, &item.Quantity, &item.Window, &item.WindowStart, &item.WindowEnd, &item.UsedBefore, &item.UsedAfter, &item.Limit, &item.Resource, &item.Provider, &item.Model, &item.ToolID, &item.SessionID, &item.ExecutionID, &item.ResponseID, &item.TraceID, &item.Estimated, &item.Status, &item.Error, &item.LatencyMS, &metadata, &item.OccurredAt, &item.RecordedAt); err != nil {
+			return nil, err
+		}
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) CheckAndReserveUsage(ctx context.Context, reservation usagedomain.Reservation) (usagedomain.Decision, error) {
+	decisions, err := c.CheckAndReserveUsageBatch(ctx, []usagedomain.Reservation{reservation})
+	if err != nil {
+		return usagedomain.Decision{}, err
+	}
+	if len(decisions) == 0 {
+		return usagedomain.Decision{}, errors.New("usage reservation not found")
+	}
+	return decisions[0], nil
+}
+
+func (c *Client) CheckAndReserveUsageBatch(ctx context.Context, reservations []usagedomain.Reservation) ([]usagedomain.Decision, error) {
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	type pending struct {
+		reservation usagedomain.Reservation
+		scopeID     string
+		start       time.Time
+		end         time.Time
+		decision    usagedomain.Decision
+	}
+	pendingItems := make([]pending, 0, len(reservations))
+	blocked := false
+	for _, reservation := range reservations {
+		start, end, err := usageWindowBounds(reservation.Policy.Window, reservation.Now)
+		if err != nil {
+			return nil, err
+		}
+		scopeID := strings.TrimSpace(reservation.ScopeID)
+		if scopeID == "" {
+			scopeID = strings.TrimSpace(reservation.Policy.ScopeID)
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO usage_buckets (policy_id, scope_kind, scope_id, metric, window, window_start, window_end, quantity, limit_value, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,0,$8,$9)
+			ON CONFLICT (policy_id, scope_id, window_start) DO NOTHING
+		`, reservation.Policy.ID, reservation.Policy.ScopeKind, scopeID, reservation.Policy.Metric, reservation.Policy.Window, start, end, reservation.Policy.Limit, reservation.Now)
+		if err != nil {
+			return nil, err
+		}
+		var before int64
+		if err := tx.QueryRow(ctx, `
+			SELECT quantity FROM usage_buckets
+			WHERE policy_id = $1 AND scope_id = $2 AND window_start = $3
+			FOR UPDATE
+		`, reservation.Policy.ID, scopeID, start).Scan(&before); err != nil {
+			return nil, err
+		}
+		after := before + reservation.Quantity
+		allowed := after <= reservation.Policy.Limit || reservation.Policy.Enforcement != usagedomain.EnforcementBlock
+		if !allowed {
+			blocked = true
+		}
+		pendingItems = append(pendingItems, pending{
+			reservation: reservation,
+			scopeID:     scopeID,
+			start:       start,
+			end:         end,
+			decision: usagedomain.Decision{
+				Policy:      reservation.Policy,
+				Decision:    usageDecisionFor(reservation.Policy.Enforcement, after, reservation.Policy.Limit),
+				Allowed:     allowed,
+				ScopeKind:   reservation.Policy.ScopeKind,
+				ScopeID:     scopeID,
+				Metric:      reservation.Policy.Metric,
+				Window:      reservation.Policy.Window,
+				Limit:       reservation.Policy.Limit,
+				UsedBefore:  before,
+				UsedAfter:   after,
+				Requested:   reservation.Quantity,
+				WindowStart: start,
+				WindowEnd:   end,
+				ResetAt:     end,
+			},
+		})
+	}
+	decisions := make([]usagedomain.Decision, 0, len(pendingItems))
+	for _, item := range pendingItems {
+		decisions = append(decisions, item.decision)
+	}
+	if blocked {
+		return decisions, nil
+	}
+	for _, item := range pendingItems {
+		if _, err := tx.Exec(ctx, `
+			UPDATE usage_buckets SET quantity = $1, limit_value = $2, updated_at = $3
+			WHERE policy_id = $4 AND scope_id = $5 AND window_start = $6
+		`, item.decision.UsedAfter, item.reservation.Policy.Limit, item.reservation.Now, item.reservation.Policy.ID, item.scopeID, item.start); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return decisions, nil
+}
+
+func (c *Client) ListUsageBuckets(ctx context.Context, query usagedomain.SummaryQuery) ([]usagedomain.Bucket, error) {
+	limit := query.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := c.sessionQuery().Query(ctx, `
+		SELECT policy_id, scope_kind, scope_id, metric, window, window_start, window_end, quantity, limit_value, updated_at
+		FROM usage_buckets
+		WHERE ($1 = '' OR scope_kind = $1)
+		  AND ($2 = '' OR scope_id = $2)
+		  AND ($3 = '' OR metric = $3)
+		  AND ($4 = '' OR window = $4)
+		  AND ($5 = TIMESTAMPTZ '0001-01-01 00:00:00+00' OR window_end >= $5)
+		  AND ($6 = TIMESTAMPTZ '0001-01-01 00:00:00+00' OR window_start <= $6)
+		ORDER BY window_start DESC
+		LIMIT $7
+	`, query.ScopeKind, query.ScopeID, query.Metric, query.Window, query.Since, query.Until, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []usagedomain.Bucket
+	for rows.Next() {
+		var item usagedomain.Bucket
+		if err := rows.Scan(&item.PolicyID, &item.ScopeKind, &item.ScopeID, &item.Metric, &item.Window, &item.WindowStart, &item.WindowEnd, &item.Quantity, &item.Limit, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func usageWindowBounds(window string, now time.Time) (time.Time, time.Time, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	now = now.UTC()
+	switch strings.ToLower(strings.TrimSpace(window)) {
+	case usagedomain.WindowMinute:
+		start := now.Truncate(time.Minute)
+		return start, start.Add(time.Minute), nil
+	case usagedomain.WindowHour:
+		start := now.Truncate(time.Hour)
+		return start, start.Add(time.Hour), nil
+	case usagedomain.WindowDay:
+		y, m, d := now.Date()
+		start := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+		return start, start.AddDate(0, 0, 1), nil
+	case usagedomain.WindowMonth:
+		y, m, _ := now.Date()
+		start := time.Date(y, m, 1, 0, 0, 0, 0, time.UTC)
+		return start, start.AddDate(0, 1, 0), nil
+	default:
+		return time.Time{}, time.Time{}, errors.New("invalid quota window")
+	}
+}
+
+func usageDecisionFor(enforcement string, usedAfter, limit int64) string {
+	if usedAfter <= limit {
+		return usagedomain.DecisionAllowed
+	}
+	switch enforcement {
+	case usagedomain.EnforcementWarn:
+		return usagedomain.DecisionWarned
+	case usagedomain.EnforcementAllowOverage:
+		return usagedomain.DecisionAllowed
+	default:
+		return usagedomain.DecisionBlocked
+	}
 }
 
 func stringValue(v any) string {

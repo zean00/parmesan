@@ -29,6 +29,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/domain/toolrun"
+	usagedomain "github.com/sahal/parmesan/internal/domain/usage"
 )
 
 type Store struct {
@@ -74,6 +75,9 @@ type Store struct {
 	knowledgeLintFindings    []knowledge.LintFinding
 	mediaAssets              []media.Asset
 	derivedSignals           []media.DerivedSignal
+	usagePolicies            []usagedomain.QuotaPolicy
+	usageEvents              []usagedomain.UsageEvent
+	usageBuckets             []usagedomain.Bucket
 }
 
 func New() *Store {
@@ -2359,4 +2363,302 @@ func (s *Store) ListDerivedSignals(_ context.Context, sessionID string) ([]media
 		}
 	}
 	return out, nil
+}
+
+func (s *Store) SaveUsageQuotaPolicy(_ context.Context, policy usagedomain.QuotaPolicy) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	if policy.CreatedAt.IsZero() {
+		policy.CreatedAt = now
+	}
+	if policy.UpdatedAt.IsZero() {
+		policy.UpdatedAt = now
+	}
+	if policy.Status == "" {
+		policy.Status = usagedomain.PolicyActive
+	}
+	if policy.Enforcement == "" {
+		policy.Enforcement = usagedomain.EnforcementBlock
+	}
+	for i, existing := range s.usagePolicies {
+		if existing.ID == policy.ID {
+			if policy.CreatedAt.IsZero() {
+				policy.CreatedAt = existing.CreatedAt
+			}
+			s.usagePolicies[i] = policy
+			return nil
+		}
+	}
+	s.usagePolicies = append(s.usagePolicies, policy)
+	return nil
+}
+
+func (s *Store) GetUsageQuotaPolicy(_ context.Context, policyID string) (usagedomain.QuotaPolicy, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.usagePolicies {
+		if item.ID == policyID {
+			return item, nil
+		}
+	}
+	return usagedomain.QuotaPolicy{}, errors.New("usage quota policy not found")
+}
+
+func (s *Store) ListUsageQuotaPolicies(_ context.Context, query usagedomain.PolicyQuery) ([]usagedomain.QuotaPolicy, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []usagedomain.QuotaPolicy
+	for i := len(s.usagePolicies) - 1; i >= 0; i-- {
+		item := s.usagePolicies[i]
+		if query.ID != "" && item.ID != query.ID {
+			continue
+		}
+		if query.ScopeKind != "" && item.ScopeKind != query.ScopeKind {
+			continue
+		}
+		if query.ScopeID != "" && item.ScopeID != "" && item.ScopeID != query.ScopeID {
+			continue
+		}
+		if query.Metric != "" && item.Metric != query.Metric {
+			continue
+		}
+		if query.Status != "" && item.Status != query.Status {
+			continue
+		}
+		out = append(out, item)
+		if query.Limit > 0 && len(out) >= query.Limit {
+			break
+		}
+	}
+	return append([]usagedomain.QuotaPolicy(nil), out...), nil
+}
+
+func (s *Store) AppendUsageEvent(_ context.Context, event usagedomain.UsageEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if event.RecordedAt.IsZero() {
+		event.RecordedAt = time.Now().UTC()
+	}
+	if event.OccurredAt.IsZero() {
+		event.OccurredAt = event.RecordedAt
+	}
+	s.usageEvents = append(s.usageEvents, event)
+	return nil
+}
+
+func (s *Store) ListUsageEvents(_ context.Context, query usagedomain.EventQuery) ([]usagedomain.UsageEvent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []usagedomain.UsageEvent
+	for i := len(s.usageEvents) - 1; i >= 0; i-- {
+		item := s.usageEvents[i]
+		if query.ScopeKind != "" && item.ScopeKind != query.ScopeKind {
+			continue
+		}
+		if query.ScopeID != "" && item.ScopeID != query.ScopeID {
+			continue
+		}
+		if query.Metric != "" && item.Metric != query.Metric {
+			continue
+		}
+		if query.SessionID != "" && item.SessionID != query.SessionID {
+			continue
+		}
+		if query.ExecutionID != "" && item.ExecutionID != query.ExecutionID {
+			continue
+		}
+		if query.Provider != "" && item.Provider != query.Provider {
+			continue
+		}
+		if query.Status != "" && item.Status != query.Status {
+			continue
+		}
+		if !query.Since.IsZero() && item.OccurredAt.Before(query.Since) {
+			continue
+		}
+		if !query.Until.IsZero() && item.OccurredAt.After(query.Until) {
+			continue
+		}
+		out = append(out, item)
+		if query.Limit > 0 && len(out) >= query.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) CheckAndReserveUsage(_ context.Context, reservation usagedomain.Reservation) (usagedomain.Decision, error) {
+	decisions, err := s.CheckAndReserveUsageBatch(context.Background(), []usagedomain.Reservation{reservation})
+	if err != nil {
+		return usagedomain.Decision{}, err
+	}
+	if len(decisions) == 0 {
+		return usagedomain.Decision{}, errors.New("usage reservation not found")
+	}
+	return decisions[0], nil
+}
+
+func (s *Store) CheckAndReserveUsageBatch(_ context.Context, reservations []usagedomain.Reservation) ([]usagedomain.Decision, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	type pending struct {
+		reservation usagedomain.Reservation
+		scopeID     string
+		start       time.Time
+		end         time.Time
+		bucketIndex int
+		decision    usagedomain.Decision
+	}
+	pendingItems := make([]pending, 0, len(reservations))
+	blocked := false
+	for _, reservation := range reservations {
+		start, end, err := usageWindowBounds(reservation.Policy.Window, reservation.Now)
+		if err != nil {
+			return nil, err
+		}
+		scopeID := strings.TrimSpace(reservation.ScopeID)
+		if scopeID == "" {
+			scopeID = strings.TrimSpace(reservation.Policy.ScopeID)
+		}
+		bucketIndex := -1
+		before := int64(0)
+		for i := range s.usageBuckets {
+			item := s.usageBuckets[i]
+			if item.PolicyID == reservation.Policy.ID && item.ScopeID == scopeID && item.WindowStart.Equal(start) {
+				bucketIndex = i
+				before = item.Quantity
+				break
+			}
+		}
+		after := before + reservation.Quantity
+		allowed := after <= reservation.Policy.Limit || reservation.Policy.Enforcement != usagedomain.EnforcementBlock
+		decision := usageDecisionFor(reservation.Policy.Enforcement, after, reservation.Policy.Limit)
+		if !allowed {
+			blocked = true
+		}
+		pendingItems = append(pendingItems, pending{
+			reservation: reservation,
+			scopeID:     scopeID,
+			start:       start,
+			end:         end,
+			bucketIndex: bucketIndex,
+			decision: usagedomain.Decision{
+				Policy:      reservation.Policy,
+				Decision:    decision,
+				Allowed:     allowed,
+				ScopeKind:   reservation.Policy.ScopeKind,
+				ScopeID:     scopeID,
+				Metric:      reservation.Policy.Metric,
+				Window:      reservation.Policy.Window,
+				Limit:       reservation.Policy.Limit,
+				UsedBefore:  before,
+				UsedAfter:   after,
+				Requested:   reservation.Quantity,
+				WindowStart: start,
+				WindowEnd:   end,
+				ResetAt:     end,
+			},
+		})
+	}
+	decisions := make([]usagedomain.Decision, 0, len(pendingItems))
+	for _, item := range pendingItems {
+		decisions = append(decisions, item.decision)
+	}
+	if blocked {
+		return decisions, nil
+	}
+	for _, item := range pendingItems {
+		after := item.decision.UsedAfter
+		if item.bucketIndex >= 0 {
+			s.usageBuckets[item.bucketIndex].Quantity = after
+			s.usageBuckets[item.bucketIndex].Limit = item.reservation.Policy.Limit
+			s.usageBuckets[item.bucketIndex].UpdatedAt = item.reservation.Now
+			continue
+		}
+		s.usageBuckets = append(s.usageBuckets, usagedomain.Bucket{
+			PolicyID:    item.reservation.Policy.ID,
+			ScopeKind:   item.reservation.Policy.ScopeKind,
+			ScopeID:     item.scopeID,
+			Metric:      item.reservation.Policy.Metric,
+			Window:      item.reservation.Policy.Window,
+			WindowStart: item.start,
+			WindowEnd:   item.end,
+			Quantity:    after,
+			Limit:       item.reservation.Policy.Limit,
+			UpdatedAt:   item.reservation.Now,
+		})
+	}
+	return decisions, nil
+}
+
+func (s *Store) ListUsageBuckets(_ context.Context, query usagedomain.SummaryQuery) ([]usagedomain.Bucket, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []usagedomain.Bucket
+	for i := len(s.usageBuckets) - 1; i >= 0; i-- {
+		item := s.usageBuckets[i]
+		if query.ScopeKind != "" && item.ScopeKind != query.ScopeKind {
+			continue
+		}
+		if query.ScopeID != "" && item.ScopeID != query.ScopeID {
+			continue
+		}
+		if query.Metric != "" && item.Metric != query.Metric {
+			continue
+		}
+		if query.Window != "" && item.Window != query.Window {
+			continue
+		}
+		if !query.Since.IsZero() && item.WindowEnd.Before(query.Since) {
+			continue
+		}
+		if !query.Until.IsZero() && item.WindowStart.After(query.Until) {
+			continue
+		}
+		out = append(out, item)
+		if query.Limit > 0 && len(out) >= query.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func usageWindowBounds(window string, now time.Time) (time.Time, time.Time, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	now = now.UTC()
+	switch strings.ToLower(strings.TrimSpace(window)) {
+	case usagedomain.WindowMinute:
+		start := now.Truncate(time.Minute)
+		return start, start.Add(time.Minute), nil
+	case usagedomain.WindowHour:
+		start := now.Truncate(time.Hour)
+		return start, start.Add(time.Hour), nil
+	case usagedomain.WindowDay:
+		y, m, d := now.Date()
+		start := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+		return start, start.AddDate(0, 0, 1), nil
+	case usagedomain.WindowMonth:
+		y, m, _ := now.Date()
+		start := time.Date(y, m, 1, 0, 0, 0, 0, time.UTC)
+		return start, start.AddDate(0, 1, 0), nil
+	default:
+		return time.Time{}, time.Time{}, errors.New("invalid quota window")
+	}
+}
+
+func usageDecisionFor(enforcement string, usedAfter, limit int64) string {
+	if usedAfter <= limit {
+		return usagedomain.DecisionAllowed
+	}
+	switch enforcement {
+	case usagedomain.EnforcementWarn:
+		return usagedomain.DecisionWarned
+	case usagedomain.EnforcementAllowOverage:
+		return usagedomain.DecisionAllowed
+	default:
+		return usagedomain.DecisionBlocked
+	}
 }

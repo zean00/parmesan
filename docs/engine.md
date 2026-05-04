@@ -59,6 +59,10 @@ If the session is in unattended mode, automated execution still starts. The
 only behavior change is tool approval handling: required approvals can be
 auto-approved for tool policies that explicitly allow unattended operation.
 
+Customer ingress is also usage-metered. Active `customer_turns` quota policies
+can reject the message with HTTP `429` before execution creation when
+`block` enforcement would be exceeded.
+
 That distinction matters operationally: manual mode changes execution behavior
 without losing the durable session history.
 
@@ -117,6 +121,12 @@ Capability exposure is controlled by policy. Discovery is not exposure.
 That means global catalogs can be large while each agent still operates inside
 an explicit behavioral boundary.
 
+Tool calls are quota-metered before invocation. If a blocking `tool_calls`
+policy is exceeded, the tool run is persisted as failed and the external tool
+is not called. Successful and failed tool outcomes are still appended to the
+usage ledger as zero-quantity status records so operators can inspect outcomes
+without double-counting calls.
+
 ### 6. Response Composition
 
 Responses may be:
@@ -128,6 +138,10 @@ Responses may be:
 
 Templates, tool output, and generation are all part of the same response path,
 but policy determines which one wins.
+
+Model calls are quota-metered before the provider request. Provider usage is
+then recorded into the ledger for model requests, input tokens, output tokens,
+total tokens, and estimated cost when available.
 
 For tool-backed direct responses, the current order is:
 
@@ -145,6 +159,7 @@ The engine persists:
 - response records
 - response trace spans
 - tool runs
+- usage ledger events and quota buckets
 - delivery attempts
 
 This is what powers replay, debugging, and operator trace inspection.

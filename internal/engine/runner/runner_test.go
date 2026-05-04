@@ -63,6 +63,34 @@ func (p runnerStubProvider) Generate(_ context.Context, _ model.Request) (model.
 	return model.Response{Provider: p.name, Text: p.text}, nil
 }
 
+func TestUsageContextHonorsOrganizationIDMetadata(t *testing.T) {
+	repo := memory.New()
+	r := New(repo, asyncwrite.New(repo, 8), sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), "test_owner")
+	usageCtx := r.usageContext(context.Background(), session.Session{
+		ID:         "sess_org_alias",
+		AgentID:    "agent_1",
+		CustomerID: "cust_1",
+		Metadata:   map[string]any{"organization_id": "org_from_session"},
+	}, execution.TurnExecution{ID: "exec_1", SessionID: "sess_org_alias", TraceID: "trace_1"}, responsedomain.Response{ID: "resp_1"})
+	if usageCtx.OrgID != "org_from_session" {
+		t.Fatalf("OrgID = %q, want session organization_id", usageCtx.OrgID)
+	}
+	if err := repo.SaveAgentProfile(context.Background(), agent.Profile{
+		ID:       "agent_2",
+		Metadata: map[string]any{"organization_id": "org_from_agent"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	usageCtx = r.usageContext(context.Background(), session.Session{
+		ID:         "sess_agent_alias",
+		AgentID:    "agent_2",
+		CustomerID: "cust_1",
+	}, execution.TurnExecution{ID: "exec_2", SessionID: "sess_agent_alias", TraceID: "trace_2"}, responsedomain.Response{ID: "resp_2"})
+	if usageCtx.OrgID != "org_from_agent" {
+		t.Fatalf("OrgID = %q, want agent organization_id", usageCtx.OrgID)
+	}
+}
+
 func (r *blockingExecutionRepo) GetExecution(ctx context.Context, executionID string) (execution.TurnExecution, []execution.ExecutionStep, error) {
 	r.getCalls.Add(1)
 	current := r.current.Add(1)

@@ -32,6 +32,7 @@ Conversation-edge rules:
 - One execution can emit multiple ordered `ai_agent` message events when a strict template defines `messages: [...]` or generation returns a bounded JSON `messages` array; each event carries response-batch metadata while compatibility status events keep the first `event_id`.
 - If the session mode is `manual`, ACP message ingress persists and streams the customer message but does not create an automated execution, except for the opt-in first-message response described above.
 - If the session mode is `unattended`, automated execution proceeds, but approval-required tools are auto-approved only when their policy has opted into unattended approval; other required tools follow the bundle's unattended ineligible-tool behavior. The same opt-in does not bypass approval in `auto` or `manual` mode.
+- ACP customer message ingress is quota-aware. If an active `customer_turns` quota with `block` enforcement would be exceeded, the message endpoint returns `429` with `code: "quota_exceeded"` and includes the blocked scope, metric, window, limit, requested quantity, and reset time.
 - approval reads and responses should use the ACP session-scoped approval endpoints instead of the legacy `/v1/web/...` gateway surface.
 - Operator supervision uses `/v1/operator/...`; operator notes are hidden from ACP list/stream responses.
 - Operator session listing supports customer, agent, mode, label, assignment, pending approval, failed media, unresolved lint, activity-window, cursor, and limit filters.
@@ -75,6 +76,13 @@ Knowledge workspace routes:
 - `GET /v1/operator/media/assets/{id}`
 - `POST /v1/operator/media/assets/{id}/reprocess`
 - `POST /v1/operator/media/assets/reprocess`
+- `POST /v1/operator/usage/quota-policies`
+- `GET /v1/operator/usage/quota-policies`
+- `GET /v1/operator/usage/quota-policies/{id}`
+- `PUT /v1/operator/usage/quota-policies/{id}`
+- `DELETE /v1/operator/usage/quota-policies/{id}`
+- `GET /v1/operator/usage/events`
+- `GET /v1/operator/usage/summary`
 - Media asset responses expose retry state directly: `retry_count`, `next_retry_at`, `last_retry_at`, `enrichment_status`, and `error`.
 - `GET /v1/operator/media/signals`
 

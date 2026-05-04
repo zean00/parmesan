@@ -34,6 +34,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/domain/toolrun"
+	usagedomain "github.com/sahal/parmesan/internal/domain/usage"
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/quality"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
@@ -88,6 +89,34 @@ func TestEnqueueSessionTurnCoalescesQuickCustomerMessages(t *testing.T) {
 	}
 	if len(events) != 2 || events[0].ID != "evt_first" || events[1].ID != "evt_second" {
 		t.Fatalf("events = %#v, want both trigger events persisted immediately", events)
+	}
+}
+
+func TestUsageContextForSessionHonorsOrganizationIDMetadata(t *testing.T) {
+	repo := memory.New()
+	srv := New(":0", repo, asyncwrite.New(repo, 8), sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil).WithDefaultOrgID("default_org")
+	usageCtx := srv.usageContextForSession(context.Background(), session.Session{
+		ID:         "sess_org_alias",
+		AgentID:    "agent_1",
+		CustomerID: "cust_1",
+		Metadata:   map[string]any{"organization_id": "org_from_session"},
+	}, "exec_1", "resp_1", "trace_1")
+	if usageCtx.OrgID != "org_from_session" {
+		t.Fatalf("OrgID = %q, want session organization_id", usageCtx.OrgID)
+	}
+	if err := repo.SaveAgentProfile(context.Background(), agent.Profile{
+		ID:       "agent_2",
+		Metadata: map[string]any{"organization_id": "org_from_agent"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	usageCtx = srv.usageContextForSession(context.Background(), session.Session{
+		ID:         "sess_agent_alias",
+		AgentID:    "agent_2",
+		CustomerID: "cust_1",
+	}, "exec_1", "resp_1", "trace_1")
+	if usageCtx.OrgID != "org_from_agent" {
+		t.Fatalf("OrgID = %q, want agent organization_id", usageCtx.OrgID)
 	}
 }
 
@@ -4189,6 +4218,82 @@ func TestACPMessageIngressManualFirstMessageResponseCreatesOnlyOneExecution(t *t
 	}
 	if events[1].Metadata["automation_skipped"] != true {
 		t.Fatalf("second event metadata = %#v, want manual skip", events[1].Metadata)
+	}
+}
+
+func TestACPMessageIngressReturnsQuotaExceeded(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	now := time.Now().UTC()
+	if err := repo.SaveUsageQuotaPolicy(context.Background(), usagedomain.QuotaPolicy{
+		ID:          "quota_turns",
+		ScopeKind:   usagedomain.ScopeCustomer,
+		ScopeID:     "cust_1",
+		Metric:      usagedomain.MetricCustomerTurns,
+		Window:      usagedomain.WindowDay,
+		Limit:       0 + 1,
+		Enforcement: usagedomain.EnforcementBlock,
+		Status:      usagedomain.PolicyActive,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateSession(context.Background(), session.Session{ID: "sess_quota", Channel: "acp", CustomerID: "cust_1", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	for i, want := range []int{http.StatusCreated, http.StatusTooManyRequests} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/acp/sessions/sess_quota/messages", strings.NewReader(fmt.Sprintf(`{"id":"evt_%d","text":"hello"}`, i)))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.httpServer.Handler.ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Fatalf("request %d status = %d, want %d body=%s", i, rec.Code, want, rec.Body.String())
+		}
+		if want == http.StatusTooManyRequests && !strings.Contains(rec.Body.String(), `"code":"quota_exceeded"`) {
+			t.Fatalf("quota body = %s, want quota_exceeded", rec.Body.String())
+		}
+	}
+}
+
+func TestOperatorUsageQuotaPolicyAndSummaryEndpoints(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/usage/quota-policies", strings.NewReader(`{
+		"id":"quota_1",
+		"scope_kind":"agent",
+		"scope_id":"agent_1",
+		"metric":"tool_calls",
+		"window":"hour",
+		"limit":5,
+		"enforcement":"warn"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := repo.CheckAndReserveUsage(context.Background(), usagedomain.Reservation{
+		Policy:  usagedomain.QuotaPolicy{ID: "quota_1", ScopeKind: usagedomain.ScopeAgent, ScopeID: "agent_1", Metric: usagedomain.MetricToolCalls, Window: usagedomain.WindowHour, Limit: 5, Enforcement: usagedomain.EnforcementWarn},
+		ScopeID: "agent_1", Quantity: 2, Now: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/usage/quota-policies?scope_kind=agent", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"quota_1"`) {
+		t.Fatalf("list status/body = %d %s", rec.Code, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/v1/operator/usage/summary?scope_kind=agent&scope_id=agent_1&metric=tool_calls", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"quantity":2`) {
+		t.Fatalf("summary status/body = %d %s", rec.Code, rec.Body.String())
 	}
 }
 

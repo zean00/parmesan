@@ -157,6 +157,30 @@ func TestGenerateUsesModelOverride(t *testing.T) {
 	}
 }
 
+func TestGenerateDecodesOpenAIUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model": "gpt-test",
+			"usage": map[string]any{
+				"prompt_tokens":     11,
+				"completion_tokens": 7,
+				"total_tokens":      18,
+			},
+			"choices": []map[string]any{{"message": map[string]any{"content": "ok"}}},
+		})
+	}))
+	defer server.Close()
+
+	provider := NewHTTPProvider("openai", CapabilityReasoning, server.URL, "sk-openai")
+	resp, err := provider.Generate(context.Background(), Request{Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Model != "gpt-test" || resp.Usage.InputTokens != 11 || resp.Usage.OutputTokens != 7 || resp.Usage.TotalTokens != 18 {
+		t.Fatalf("response = %#v, want decoded usage", resp)
+	}
+}
+
 type stubProvider struct {
 	name       string
 	capability Capability

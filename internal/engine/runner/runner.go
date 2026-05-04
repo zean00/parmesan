@@ -29,6 +29,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/domain/toolrun"
+	usagedomain "github.com/sahal/parmesan/internal/domain/usage"
 	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 	knowledgecompiler "github.com/sahal/parmesan/internal/knowledge/compiler"
 	knowledgeenrichment "github.com/sahal/parmesan/internal/knowledge/enrichment"
@@ -43,6 +44,7 @@ import (
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/toolruntime"
 	"github.com/sahal/parmesan/internal/toolsecurity"
+	usageledger "github.com/sahal/parmesan/internal/usage"
 )
 
 type Runner struct {
@@ -65,6 +67,8 @@ type Runner struct {
 	workers          int
 	queueSize        int
 	argumentResolver policyruntime.ToolArgumentResolver
+	usage            *usageledger.Service
+	defaultOrgID     string
 }
 
 var errApprovalRequired = errors.New("approval required")
@@ -85,6 +89,7 @@ func New(repo store.Repository, writes *asyncwrite.Queue, broker *sse.Broker, ro
 		inFlight:   map[string]struct{}{},
 		workers:    1,
 		queueSize:  16,
+		usage:      usageledger.New(repo, ""),
 	}
 }
 
@@ -113,6 +118,12 @@ func (r *Runner) WithExecutionConcurrency(workers int) *Runner {
 
 func (r *Runner) WithToolArgumentResolver(resolver policyruntime.ToolArgumentResolver) *Runner {
 	r.argumentResolver = resolver
+	return r
+}
+
+func (r *Runner) WithDefaultOrgID(orgID string) *Runner {
+	r.defaultOrgID = strings.TrimSpace(orgID)
+	r.usage = usageledger.New(r.repo, r.defaultOrgID)
 	return r
 }
 
@@ -707,7 +718,7 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 					Status:      "started",
 					StartedAt:   time.Now().UTC(),
 				})
-				resp, err := r.router.Generate(ctx, model.CapabilityReasoning, model.RequestWithContextOverride(ctx, model.CapabilityReasoning, model.Request{Prompt: prompt}))
+				resp, err := r.generateMetered(ctx, *exec, responseRecord, model.CapabilityReasoning, model.RequestWithContextOverride(ctx, model.CapabilityReasoning, model.Request{Prompt: prompt}), "compose_response")
 				if err != nil {
 					if fallback := responseCapabilityFallback(view, responseCapability, responseFacts); len(fallback) > 0 {
 						respMessages = fallback
@@ -2398,6 +2409,23 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 	if err := r.repo.SaveToolRun(ctx, run); err != nil {
 		return nil, err
 	}
+	if r.usage != nil {
+		sess, _ := r.repo.GetSession(ctx, exec.SessionID)
+		if _, err := r.usage.Meter(ctx, usageledger.MeterRequest{
+			Context:  r.usageContext(ctx, sess, exec, responsedomain.Response{ID: responseID, TraceID: exec.TraceID}),
+			Metric:   usagedomain.MetricToolCalls,
+			Quantity: 1,
+			Resource: "tool_call",
+			Provider: entry.ProviderID,
+			ToolID:   toolID,
+			Status:   "started",
+		}); err != nil {
+			run.Status = "failed"
+			run.OutputJSON = mustJSON(map[string]any{"error": err.Error(), "error_class": "quota_exceeded"})
+			_ = r.repo.SaveToolRun(ctx, run)
+			return nil, err
+		}
+	}
 	_, _ = r.sessions.CreateToolEvent(ctx, exec.SessionID, "runtime", "tool.started", exec.ID, exec.TraceID, map[string]any{
 		"tool_id":     toolID,
 		"provider_id": entry.ProviderID,
@@ -2421,6 +2449,10 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 		run.Status = "failed"
 		run.OutputJSON = mustJSON(toolErrorPayload(err))
 		_ = r.repo.SaveToolRun(ctx, run)
+		if r.usage != nil {
+			sess, _ := r.repo.GetSession(ctx, exec.SessionID)
+			r.usage.Record(ctx, usageledger.MeterRequest{Context: r.usageContext(ctx, sess, exec, responsedomain.Response{ID: responseID, TraceID: exec.TraceID}), Metric: usagedomain.MetricToolCalls, Quantity: 0, Resource: "tool_call", Provider: entry.ProviderID, ToolID: toolID, Status: "failed", Error: err.Error(), LatencyMS: time.Since(toolRunStarted).Milliseconds()})
+		}
 		r.appendTrace(ctx, audit.Record{
 			ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
 			Kind:        "tool.run.failed",
@@ -2457,6 +2489,10 @@ func (r *Runner) runSingleTool(ctx context.Context, exec execution.TurnExecution
 	run.OutputJSON = mustJSON(output)
 	if err := r.repo.SaveToolRun(ctx, run); err != nil {
 		return nil, err
+	}
+	if r.usage != nil {
+		sess, _ := r.repo.GetSession(ctx, exec.SessionID)
+		r.usage.Record(ctx, usageledger.MeterRequest{Context: r.usageContext(ctx, sess, exec, responsedomain.Response{ID: responseID, TraceID: exec.TraceID}), Metric: usagedomain.MetricToolCalls, Quantity: 0, Resource: "tool_call", Provider: entry.ProviderID, ToolID: toolID, Status: "succeeded", LatencyMS: time.Since(toolRunStarted).Milliseconds()})
 	}
 	r.appendTrace(ctx, audit.Record{
 		ID:          fmt.Sprintf("trace_%d", time.Now().UnixNano()),
@@ -3556,7 +3592,7 @@ func (r *Runner) renderResponseCapability(ctx context.Context, exec execution.Tu
 			"response_capability_id": capability.ID,
 		},
 	})
-	resp, err := r.router.Generate(ctx, model.CapabilityReasoning, model.RequestWithContextOverride(ctx, model.CapabilityReasoning, model.Request{Prompt: prompt}))
+	resp, err := r.generateMetered(ctx, exec, *responseRecord, model.CapabilityReasoning, model.RequestWithContextOverride(ctx, model.CapabilityReasoning, model.Request{Prompt: prompt}), "response_capability")
 	if err != nil {
 		if fallback := responseCapabilityFallback(view, &capability, facts); len(fallback) > 0 {
 			return fallback, nil
@@ -3571,6 +3607,81 @@ func (r *Runner) renderResponseCapability(ctx context.Context, exec execution.Tu
 		}
 	}
 	return renderResponseCapabilityFallback(view, capability, facts), nil
+}
+
+func (r *Runner) generateMetered(ctx context.Context, exec execution.TurnExecution, record responsedomain.Response, cap model.Capability, req model.Request, resource string) (model.Response, error) {
+	sess, _ := r.repo.GetSession(ctx, exec.SessionID)
+	usageCtx := r.usageContext(ctx, sess, exec, record)
+	if r.usage != nil {
+		if _, err := r.usage.Meter(ctx, usageledger.MeterRequest{
+			Context:  usageCtx,
+			Metric:   usagedomain.MetricModelRequests,
+			Quantity: 1,
+			Resource: resource,
+			Model:    req.ModelOverride,
+			Status:   "started",
+		}); err != nil {
+			return model.Response{}, err
+		}
+	}
+	started := time.Now()
+	resp, err := r.router.Generate(ctx, cap, req)
+	latencyMS := time.Since(started).Milliseconds()
+	status := "succeeded"
+	errText := ""
+	if err != nil {
+		status = "failed"
+		errText = err.Error()
+	}
+	if r.usage != nil {
+		r.usage.Record(ctx, usageledger.MeterRequest{Context: usageCtx, Metric: usagedomain.MetricModelRequests, Quantity: 0, Resource: resource, Provider: resp.Provider, Model: resp.Model, Status: status, Error: errText, LatencyMS: latencyMS, Estimated: resp.Usage.Estimated})
+		if resp.Usage.InputTokens > 0 {
+			r.usage.Record(ctx, usageledger.MeterRequest{Context: usageCtx, Metric: usagedomain.MetricInputTokens, Quantity: resp.Usage.InputTokens, Resource: resource, Provider: resp.Provider, Model: resp.Model, Status: status, Error: errText, LatencyMS: latencyMS, Estimated: resp.Usage.Estimated})
+		}
+		if resp.Usage.OutputTokens > 0 {
+			r.usage.Record(ctx, usageledger.MeterRequest{Context: usageCtx, Metric: usagedomain.MetricOutputTokens, Quantity: resp.Usage.OutputTokens, Resource: resource, Provider: resp.Provider, Model: resp.Model, Status: status, Error: errText, LatencyMS: latencyMS, Estimated: resp.Usage.Estimated})
+		}
+		total := resp.Usage.TotalTokens
+		if total == 0 && (resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0) {
+			total = resp.Usage.InputTokens + resp.Usage.OutputTokens
+		}
+		if total > 0 {
+			r.usage.Record(ctx, usageledger.MeterRequest{Context: usageCtx, Metric: usagedomain.MetricTotalTokens, Quantity: total, Resource: resource, Provider: resp.Provider, Model: resp.Model, Status: status, Error: errText, LatencyMS: latencyMS, Estimated: resp.Usage.Estimated})
+		}
+		if resp.Usage.EstimatedCostMicros > 0 {
+			r.usage.Record(ctx, usageledger.MeterRequest{Context: usageCtx, Metric: usagedomain.MetricEstimatedCostMicros, Quantity: resp.Usage.EstimatedCostMicros, Resource: resource, Provider: resp.Provider, Model: resp.Model, Status: status, Error: errText, LatencyMS: latencyMS, Estimated: resp.Usage.Estimated})
+		}
+	}
+	return resp, err
+}
+
+func (r *Runner) usageContext(ctx context.Context, sess session.Session, exec execution.TurnExecution, record responsedomain.Response) usageledger.Context {
+	orgID := firstNonEmptyString(stringFromMap(sess.Metadata, "org_id"), stringFromMap(sess.Metadata, "organization_id"))
+	if orgID == "" {
+		if profile, err := r.repo.GetAgentProfile(ctx, sess.AgentID); err == nil {
+			orgID = firstNonEmptyString(stringFromMap(profile.Metadata, "org_id"), stringFromMap(profile.Metadata, "organization_id"))
+		}
+	}
+	return usageledger.Context{
+		OrgID:       orgID,
+		AgentID:     sess.AgentID,
+		CustomerID:  sess.CustomerID,
+		SessionID:   exec.SessionID,
+		ExecutionID: exec.ID,
+		ResponseID:  record.ID,
+		TraceID:     exec.TraceID,
+	}
+}
+
+func stringFromMap(values map[string]any, key string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	value := strings.TrimSpace(fmt.Sprint(values[key]))
+	if value == "<nil>" {
+		return ""
+	}
+	return value
 }
 
 func responseCapabilityFallback(view resolvedView, capability *policy.ResponseCapability, facts map[string]any) []string {

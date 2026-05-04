@@ -195,7 +195,18 @@ local development against localhost MCP or OpenAPI servers, set
 - notification policy for operator-visible moderation alerts
 
 `observability`
-- metrics and OTLP settings
+- metrics, OTLP settings, and the default organization id used by usage
+  metering
+
+Observability fields:
+
+- `metrics_address`: bind address for the metrics endpoint.
+- `org_id`: default organization scope for usage metering when neither the
+  session nor agent profile provides `org_id` or `organization_id`.
+
+The usage subsystem also checks `PARMESAN_ORG_ID`,
+`PARMESAN_OBSERVABILITY_ORG_ID`, and `DEFAULT_ORG_ID` as environment fallbacks
+when `observability.org_id` is empty.
 
 `runtime`
 - execution concurrency, async write workers, async write queue, request timeout,

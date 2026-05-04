@@ -73,6 +73,7 @@ func RunAPI(ctx context.Context) error {
 		WithCustomerContextEnricher(customercontext.New(cfg.CustomerContext)).
 		WithModerationConfig(cfg.Moderation).
 		WithRetryModelProfiles(cfg.RetryModelProfiles).
+		WithDefaultOrgID(cfg.Observability.OrgID).
 		WithToolArgumentResolver(orbyteintegration.NewToolArgumentResolver()).
 		WithToolProviderSecurity(cfg.ToolProviderSecurity)
 	return server.Run(ctx)
@@ -140,6 +141,7 @@ func RunWorker(ctx context.Context) error {
 	}
 	runner.New(repo, writes, broker, router, "worker-"+hostname()).
 		WithExecutionConcurrency(cfg.ExecutionConcurrency).
+		WithDefaultOrgID(cfg.Observability.OrgID).
 		WithToolArgumentResolver(orbyteintegration.NewToolArgumentResolver()).
 		WithProviderURLPolicy(providerPolicy).
 		WithAgentPeers(peerManager).

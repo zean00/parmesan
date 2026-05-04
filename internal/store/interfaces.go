@@ -24,6 +24,7 @@ import (
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/domain/toolrun"
+	"github.com/sahal/parmesan/internal/domain/usage"
 )
 
 type Repository interface {
@@ -159,4 +160,12 @@ type Repository interface {
 	ListMediaAssets(ctx context.Context, sessionID string) ([]media.Asset, error)
 	SaveDerivedSignal(ctx context.Context, signal media.DerivedSignal) error
 	ListDerivedSignals(ctx context.Context, sessionID string) ([]media.DerivedSignal, error)
+	SaveUsageQuotaPolicy(ctx context.Context, policy usage.QuotaPolicy) error
+	GetUsageQuotaPolicy(ctx context.Context, policyID string) (usage.QuotaPolicy, error)
+	ListUsageQuotaPolicies(ctx context.Context, query usage.PolicyQuery) ([]usage.QuotaPolicy, error)
+	AppendUsageEvent(ctx context.Context, event usage.UsageEvent) error
+	ListUsageEvents(ctx context.Context, query usage.EventQuery) ([]usage.UsageEvent, error)
+	CheckAndReserveUsage(ctx context.Context, reservation usage.Reservation) (usage.Decision, error)
+	CheckAndReserveUsageBatch(ctx context.Context, reservations []usage.Reservation) ([]usage.Decision, error)
+	ListUsageBuckets(ctx context.Context, query usage.SummaryQuery) ([]usage.Bucket, error)
 }

@@ -66,6 +66,16 @@ func RequestWithContextOverride(ctx context.Context, cap Capability, req Request
 type Response struct {
 	Provider string `json:"provider"`
 	Text     string `json:"text"`
+	Model    string `json:"model,omitempty"`
+	Usage    Usage  `json:"usage,omitempty"`
+}
+
+type Usage struct {
+	InputTokens         int64 `json:"input_tokens,omitempty"`
+	OutputTokens        int64 `json:"output_tokens,omitempty"`
+	TotalTokens         int64 `json:"total_tokens,omitempty"`
+	EstimatedCostMicros int64 `json:"estimated_cost_micros,omitempty"`
+	Estimated           bool  `json:"estimated,omitempty"`
 }
 
 type EmbeddingResponse struct {
@@ -353,6 +363,13 @@ func (p *HTTPProvider) Generate(ctx context.Context, req Request) (Response, err
 		return Response{
 			Provider: p.name,
 			Text:     "provider stub: " + req.Prompt,
+			Model:    defaultModelForProvider(p.name, p.capability),
+			Usage: Usage{
+				InputTokens:  int64(len(strings.Fields(req.Prompt))),
+				OutputTokens: int64(len(strings.Fields("provider stub: " + req.Prompt))),
+				TotalTokens:  int64(len(strings.Fields(req.Prompt)) + len(strings.Fields("provider stub: "+req.Prompt))),
+				Estimated:    true,
+			},
 		}, nil
 	}
 
@@ -396,6 +413,12 @@ func (p *HTTPProvider) Generate(ctx context.Context, req Request) (Response, err
 	}
 
 	var decoded struct {
+		Model string `json:"model"`
+		Usage struct {
+			PromptTokens     int64 `json:"prompt_tokens"`
+			CompletionTokens int64 `json:"completion_tokens"`
+			TotalTokens      int64 `json:"total_tokens"`
+		} `json:"usage"`
 		Choices []struct {
 			Message struct {
 				Content string `json:"content"`
@@ -411,6 +434,12 @@ func (p *HTTPProvider) Generate(ctx context.Context, req Request) (Response, err
 	return Response{
 		Provider: p.name,
 		Text:     decoded.Choices[0].Message.Content,
+		Model:    firstNonEmptyString(decoded.Model, modelName),
+		Usage: Usage{
+			InputTokens:  decoded.Usage.PromptTokens,
+			OutputTokens: decoded.Usage.CompletionTokens,
+			TotalTokens:  decoded.Usage.TotalTokens,
+		},
 	}, nil
 }
 
@@ -487,6 +516,15 @@ func defaultModelForProvider(name string, capability Capability) string {
 		}
 		return "gpt-4.1-mini"
 	}
+}
+
+func firstNonEmptyString(items ...string) string {
+	for _, item := range items {
+		if strings.TrimSpace(item) != "" {
+			return strings.TrimSpace(item)
+		}
+	}
+	return ""
 }
 
 func deterministicEmbeddings(texts []string) [][]float32 {
