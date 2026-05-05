@@ -41,6 +41,83 @@ journeys:
 	}
 }
 
+func TestParseBundleUsesGenericDomainProfileByDefault(t *testing.T) {
+	raw := []byte(`
+id: bundle-1
+version: v1
+`)
+
+	bundle, err := ParseBundle(raw)
+	if err != nil {
+		t.Fatalf("ParseBundle() error = %v", err)
+	}
+	if bundle.DomainProfile != "generic" {
+		t.Fatalf("domain profile = %q, want generic", bundle.DomainProfile)
+	}
+	if len(bundle.WatchCapabilities) != 0 {
+		t.Fatalf("watch capabilities = %#v, want no implicit domain watches", bundle.WatchCapabilities)
+	}
+	for _, signal := range bundle.Semantics.Signals {
+		if signal.ID == "return_status" || signal.ID == "order_status" || signal.ID == "delivery" {
+			t.Fatalf("generic semantics includes support-commerce signal %#v", signal)
+		}
+	}
+	for _, indicator := range bundle.QualityProfile.HighRiskIndicators {
+		if indicator == "refund" || indicator == "replacement" || indicator == "instant replacement" {
+			t.Fatalf("generic quality indicators include support-commerce term %q", indicator)
+		}
+	}
+}
+
+func TestParseBundleSupportCommerceDomainProfileKeepsSupportDefaults(t *testing.T) {
+	raw := []byte(`
+id: bundle-1
+version: v1
+domain_profile: support_commerce
+`)
+
+	bundle, err := ParseBundle(raw)
+	if err != nil {
+		t.Fatalf("ParseBundle() error = %v", err)
+	}
+	if bundle.DomainProfile != "support_commerce" {
+		t.Fatalf("domain profile = %q, want support_commerce", bundle.DomainProfile)
+	}
+	if len(bundle.WatchCapabilities) == 0 {
+		t.Fatal("watch capabilities len = 0, want support-commerce defaults")
+	}
+	foundReturnStatus := false
+	for _, signal := range bundle.Semantics.Signals {
+		if signal.ID == "return_status" {
+			foundReturnStatus = true
+		}
+	}
+	if !foundReturnStatus {
+		t.Fatalf("semantics = %#v, want return_status signal", bundle.Semantics.Signals)
+	}
+	foundRefund := false
+	for _, indicator := range bundle.QualityProfile.HighRiskIndicators {
+		if indicator == "refund" {
+			foundRefund = true
+		}
+	}
+	if !foundRefund {
+		t.Fatalf("quality indicators = %#v, want refund indicator", bundle.QualityProfile.HighRiskIndicators)
+	}
+}
+
+func TestParseBundleRejectsUnknownDomainProfile(t *testing.T) {
+	raw := []byte(`
+id: bundle-1
+version: v1
+domain_profile: retail_only
+`)
+
+	if _, err := ParseBundle(raw); err == nil {
+		t.Fatal("ParseBundle() error = nil, want unsupported domain profile error")
+	}
+}
+
 func TestParseBundleUnattendedToolPolicy(t *testing.T) {
 	raw := []byte(`
 id: bundle-1

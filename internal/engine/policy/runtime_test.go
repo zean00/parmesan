@@ -379,8 +379,9 @@ func TestResolveEmitsUpdateIntentArtifacts(t *testing.T) {
 			Content:   []session.ContentPart{{Type: "text", Text: "Please schedule an appointment tomorrow at 6pm and remind me about it."}},
 		}},
 		[]policy.Bundle{{
-			ID:      "bundle_1",
-			Version: "v1",
+			ID:            "bundle_1",
+			Version:       "v1",
+			DomainProfile: "support_commerce",
 			Guidelines: []policy.Guideline{
 				{ID: "schedule_visit", When: "appointment", Then: "schedule the appointment"},
 				{ID: "send_reminder", When: "remind me", Then: "set a reminder"},
@@ -3254,8 +3255,9 @@ func TestResolveMarksToolAsNotRunnableWhenRequiredArgsMissing(t *testing.T) {
 			Content:   []session.ContentPart{{Type: "text", Text: "check my return"}},
 		}},
 		[]policy.Bundle{{
-			ID:      "bundle_1",
-			Version: "v1",
+			ID:            "bundle_1",
+			Version:       "v1",
+			DomainProfile: "support_commerce",
 			Guidelines: []policy.Guideline{{
 				ID:   "lookup",
 				When: "check return",
@@ -3303,8 +3305,9 @@ func TestResolveDerivesHiddenToolArgumentWithoutBlocking(t *testing.T) {
 			Content:   []session.ContentPart{{Type: "text", Text: "check my return"}},
 		}},
 		[]policy.Bundle{{
-			ID:      "bundle_1",
-			Version: "v1",
+			ID:            "bundle_1",
+			Version:       "v1",
+			DomainProfile: "support_commerce",
 			Guidelines: []policy.Guideline{{
 				ID:   "lookup",
 				When: "check return",
@@ -3348,8 +3351,9 @@ func TestResolveAppliesToolDefaultArguments(t *testing.T) {
 			Content:   []session.ContentPart{{Type: "text", Text: "check my return"}},
 		}},
 		[]policy.Bundle{{
-			ID:      "bundle_1",
-			Version: "v1",
+			ID:            "bundle_1",
+			Version:       "v1",
+			DomainProfile: "support_commerce",
 			Guidelines: []policy.Guideline{{
 				ID:   "lookup",
 				When: "check return",
@@ -3387,8 +3391,9 @@ func TestResolveBlocksWhenHiddenRequiredArgumentCannotBeDerived(t *testing.T) {
 			Content:   []session.ContentPart{{Type: "text", Text: "check my return"}},
 		}},
 		[]policy.Bundle{{
-			ID:      "bundle_1",
-			Version: "v1",
+			ID:            "bundle_1",
+			Version:       "v1",
+			DomainProfile: "support_commerce",
 			Guidelines: []policy.Guideline{{
 				ID:   "lookup",
 				When: "check return",
@@ -3455,8 +3460,9 @@ func TestResolveReportsInvalidToolArgumentWithChoicesAndSignificance(t *testing.
 			Content:   []session.ContentPart{{Type: "text", Text: "check my return"}},
 		}},
 		[]policy.Bundle{{
-			ID:      "bundle_1",
-			Version: "v1",
+			ID:            "bundle_1",
+			Version:       "v1",
+			DomainProfile: "support_commerce",
 			Guidelines: []policy.Guideline{{
 				ID:   "lookup",
 				When: "check return",
@@ -4009,6 +4015,7 @@ func TestVerifyDraftReplacesOutOfScopeAnswer(t *testing.T) {
 
 func TestVerifyDraftReplacesPrematureHighRiskCommitment(t *testing.T) {
 	view := EngineResult{
+		QualityProfile: defaultQualityProfile(policy.QualityProfile{}, "support_commerce"),
 		ActiveJourneyState: &policy.JourneyNode{
 			ID:          "verify_state",
 			Instruction: "Please share the order number before I review refund or replacement options.",
@@ -4028,6 +4035,7 @@ func TestVerifyDraftReplacesPrematureHighRiskCommitment(t *testing.T) {
 
 func TestVerifyDraftReplacesPrematureResolutionChoice(t *testing.T) {
 	view := EngineResult{
+		QualityProfile: defaultQualityProfile(policy.QualityProfile{}, "support_commerce"),
 		ActiveJourneyState: &policy.JourneyNode{
 			ID:          "verify_state",
 			Instruction: "Please share the order number before I review refund or replacement options.",

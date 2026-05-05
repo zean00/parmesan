@@ -1,5 +1,6 @@
 id: bundle_orbyte_nexus_knowledge_validation
 version: v1
+domain_profile: support_commerce
 composition_mode: guided
 no_match: I can answer questions that are covered by the validated knowledge corpus for this demo. If the current knowledge does not cover it, I will say so.
 domain_boundary:

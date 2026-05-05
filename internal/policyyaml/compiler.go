@@ -45,6 +45,9 @@ func ValidateBundle(bundle policy.Bundle) error {
 	if err := validateUnattended(bundle.Unattended); err != nil {
 		return err
 	}
+	if err := validateDomainProfile(bundle.DomainProfile); err != nil {
+		return err
+	}
 	if err := validateSemantics(bundle.Semantics); err != nil {
 		return err
 	}
@@ -249,6 +252,15 @@ func validateUnattended(item policy.UnattendedPolicy) error {
 	}
 }
 
+func validateDomainProfile(profile string) error {
+	switch normalizedDomainProfile(profile) {
+	case "generic", "support_commerce":
+		return nil
+	default:
+		return fmt.Errorf("domain_profile has unsupported value %q", strings.TrimSpace(profile))
+	}
+}
+
 func validateToolPolicyUnattended(item policy.ToolPolicy) error {
 	mode := strings.ToLower(strings.TrimSpace(item.Unattended))
 	switch mode {
@@ -260,17 +272,18 @@ func validateToolPolicyUnattended(item policy.ToolPolicy) error {
 }
 
 func applyBundleDefaults(bundle policy.Bundle) policy.Bundle {
+	bundle.DomainProfile = normalizedDomainProfile(bundle.DomainProfile)
 	if len(bundle.Semantics.Signals) == 0 && len(bundle.Semantics.Categories) == 0 && len(bundle.Semantics.Slots) == 0 {
-		bundle.Semantics = defaultSemanticsPolicy()
+		bundle.Semantics = defaultSemanticsPolicy(bundle.DomainProfile)
 	}
-	if len(bundle.WatchCapabilities) == 0 {
-		bundle.WatchCapabilities = defaultWatchCapabilities()
+	if len(bundle.WatchCapabilities) == 0 && bundle.DomainProfile == "support_commerce" {
+		bundle.WatchCapabilities = supportCommerceWatchCapabilities()
 	}
 	if strings.TrimSpace(bundle.QualityProfile.ID) == "" {
-		bundle.QualityProfile = defaultQualityProfile(bundle.QualityProfile)
+		bundle.QualityProfile = defaultQualityProfile(bundle.QualityProfile, bundle.DomainProfile)
 	}
 	if strings.TrimSpace(bundle.LifecyclePolicy.ID) == "" {
-		bundle.LifecyclePolicy = defaultLifecyclePolicy(bundle.LifecyclePolicy)
+		bundle.LifecyclePolicy = defaultLifecyclePolicy(bundle.LifecyclePolicy, bundle.DomainProfile)
 	}
 	return bundle
 }
@@ -912,13 +925,25 @@ func validateLifecyclePolicy(policyDef policy.LifecyclePolicy) error {
 	return validateNonEmptyUnique("lifecycle_policy.appointment_reminder_signals", policyDef.AppointmentReminderSignals)
 }
 
-func defaultSemanticsPolicy() policy.SemanticsPolicy {
+func normalizedDomainProfile(profile string) string {
+	profile = strings.ToLower(strings.TrimSpace(profile))
+	if profile == "" {
+		return "generic"
+	}
+	return strings.ReplaceAll(profile, "-", "_")
+}
+
+func defaultSemanticsPolicy(domainProfile string) policy.SemanticsPolicy {
+	if normalizedDomainProfile(domainProfile) == "support_commerce" {
+		return supportCommerceSemanticsPolicy()
+	}
+	return genericSemanticsPolicy()
+}
+
+func genericSemanticsPolicy() policy.SemanticsPolicy {
 	return policy.SemanticsPolicy{
 		Signals: []policy.SemanticSignal{
-			{ID: "return_status", Phrases: []string{"return status", "tracking"}, Tokens: []string{"refund", "return", "damaged", "cancel", "order"}},
-			{ID: "order_status", Phrases: []string{"order status", "status is"}},
 			{ID: "scheduling", Tokens: []string{"schedule", "appointment", "booking", "book", "reschedule"}},
-			{ID: "delivery", Phrases: []string{"delivery", "shipping"}, Tokens: []string{"delivery", "shipping", "tracking"}},
 			{ID: "confirmation", Tokens: []string{"confirm", "confirmation", "notify", "email"}},
 		},
 		Categories: []policy.SemanticCategory{
@@ -926,14 +951,25 @@ func defaultSemanticsPolicy() policy.SemanticsPolicy {
 			{ID: "confirmation", Signals: []string{"confirmation"}},
 		},
 		Slots: []policy.SemanticSlot{
-			{Field: "destination", Kind: "destination", Markers: []string{"to"}, StopTokens: []string{"today", "tomorrow", "next", "return", "for"}},
-			{Field: "product_name", Kind: "product_like", Markers: []string{"for a", "for an", "for the", "for"}, StopTokens: []string{"today", "tomorrow", "next", "with", "from", "to"}},
+			{Field: "destination", Kind: "destination", Markers: []string{"to"}, StopTokens: []string{"today", "tomorrow", "next", "for"}},
 		},
-		RelativeDates: []string{"today", "tomorrow", "next week", "next month", "return in"},
+		RelativeDates: []string{"today", "tomorrow", "next week", "next month"},
 	}
 }
 
-func defaultWatchCapabilities() []policy.WatchCapability {
+func supportCommerceSemanticsPolicy() policy.SemanticsPolicy {
+	sem := genericSemanticsPolicy()
+	sem.Signals = append([]policy.SemanticSignal{
+		{ID: "return_status", Phrases: []string{"return status", "tracking"}, Tokens: []string{"refund", "return", "damaged", "cancel", "order"}},
+		{ID: "order_status", Phrases: []string{"order status", "status is"}},
+		{ID: "delivery", Phrases: []string{"delivery", "shipping"}, Tokens: []string{"delivery", "shipping", "tracking"}},
+	}, sem.Signals...)
+	sem.Slots = append(sem.Slots, policy.SemanticSlot{Field: "product_name", Kind: "product_like", Markers: []string{"for a", "for an", "for the", "for"}, StopTokens: []string{"today", "tomorrow", "next", "with", "from", "to"}})
+	sem.RelativeDates = append(sem.RelativeDates, "return in")
+	return sem
+}
+
+func supportCommerceWatchCapabilities() []policy.WatchCapability {
 	return []policy.WatchCapability{
 		{
 			ID:                     "delivery_status_watch",
@@ -965,7 +1001,14 @@ func defaultWatchCapabilities() []policy.WatchCapability {
 	}
 }
 
-func defaultQualityProfile(existing policy.QualityProfile) policy.QualityProfile {
+func defaultQualityProfile(existing policy.QualityProfile, domainProfile string) policy.QualityProfile {
+	if normalizedDomainProfile(domainProfile) == "support_commerce" {
+		return supportCommerceQualityProfile(existing)
+	}
+	return genericQualityProfile(existing)
+}
+
+func genericQualityProfile(existing policy.QualityProfile) policy.QualityProfile {
 	if strings.TrimSpace(existing.ID) == "" {
 		existing.ID = "default_quality_profile"
 	}
@@ -980,12 +1023,8 @@ func defaultQualityProfile(existing policy.QualityProfile) policy.QualityProfile
 	}
 	if len(existing.HighRiskIndicators) == 0 {
 		existing.HighRiskIndicators = []string{
-			"within 30 days",
-			"instant replacement",
 			"guarantee",
 			"guaranteed",
-			"refund",
-			"replacement",
 			"approved",
 			"eligible",
 			"qualify",
@@ -994,8 +1033,6 @@ func defaultQualityProfile(existing policy.QualityProfile) policy.QualityProfile
 	}
 	if len(existing.ClaimProfiles) == 0 {
 		existing.ClaimProfiles = []policy.QualityClaimProfile{
-			{ID: "refund_commitment", MatchTerms: []string{"refund", "reimbursement", "credit"}, Risk: "high", RequiredEvidence: []string{"policy_or_knowledge", "approval"}, RequiredVerification: []string{"review", "verification"}, AllowedCommitments: []string{"verification_first"}, VerificationQualifiers: []string{"after verification", "after review", "pending review", "requires review"}, ContradictionMarkers: []string{"not eligible", "requires review", "after review", "before review"}},
-			{ID: "replacement_commitment", MatchTerms: []string{"replacement", "replace", "exchange", "swap"}, Risk: "high", RequiredEvidence: []string{"policy_or_knowledge", "approval"}, RequiredVerification: []string{"review", "verification"}, AllowedCommitments: []string{"verification_first"}, VerificationQualifiers: []string{"after verification", "after review", "pending review", "requires review"}, ContradictionMarkers: []string{"not eligible", "requires review", "after review", "before review"}},
 			{ID: "approval_commitment", MatchTerms: []string{"approved", "approval", "authorized", "authorization"}, Risk: "high", RequiredEvidence: []string{"approval", "matched_guideline"}, RequiredVerification: []string{"approval", "review"}, AllowedCommitments: []string{"approval_required"}, VerificationQualifiers: []string{"after approval", "pending approval", "requires approval"}, ContradictionMarkers: []string{"requires approval", "pending approval", "not approved"}},
 			{ID: "escalation_commitment", MatchTerms: []string{"escalat", "handoff", "human operator", "operator review"}, Risk: "medium", RequiredEvidence: []string{"escalation", "matched_guideline"}, RequiredVerification: []string{"handoff"}, AllowedCommitments: []string{"safe_escalation"}, VerificationQualifiers: []string{"for review", "to a human", "to an operator"}, ContradictionMarkers: []string{"cannot escalate", "no escalation"}},
 			{ID: "eligibility", MatchTerms: []string{"eligible", "eligibility", "qualify", "qualifies"}, Risk: "high", RequiredEvidence: []string{"eligibility", "policy_or_knowledge"}, RequiredVerification: []string{"review", "verification"}, AllowedCommitments: []string{"verification_first"}, VerificationQualifiers: []string{"after verification", "after review", "pending review"}, ContradictionMarkers: []string{"not eligible", "requires review", "after review"}},
@@ -1005,8 +1042,6 @@ func defaultQualityProfile(existing policy.QualityProfile) policy.QualityProfile
 	}
 	if existing.SemanticConcepts == nil {
 		existing.SemanticConcepts = map[string][]string{
-			"refund":       {"refund", "refunds", "refunded", "reimbursement", "reimburse", "reimbursed", "credit", "credited"},
-			"replacement":  {"replacement", "replacements", "replace", "replaced", "exchange", "exchanges", "swap", "swapped"},
 			"eligibility":  {"eligible", "eligibility", "qualify", "qualifies", "qualified", "qualifying"},
 			"approval":     {"approval", "approve", "approved", "authorization", "authorize", "authorized"},
 			"verification": {"review", "reviewed", "verification", "verify", "verified", "confirm", "confirmed", "validation", "validate", "validated"},
@@ -1024,10 +1059,6 @@ func defaultQualityProfile(existing policy.QualityProfile) policy.QualityProfile
 	}
 	if existing.BlueprintRules == nil {
 		existing.BlueprintRules = map[string][]string{
-			"refund_replacement": {
-				"Start by stating what still must be verified before any refund or replacement decision.",
-				"Do not imply approval before the required review or verification step is complete.",
-			},
 			"approval": {
 				"State the review or approval requirement before suggesting the outcome is complete.",
 			},
@@ -1042,7 +1073,34 @@ func defaultQualityProfile(existing policy.QualityProfile) policy.QualityProfile
 	return existing
 }
 
-func defaultLifecyclePolicy(existing policy.LifecyclePolicy) policy.LifecyclePolicy {
+func supportCommerceQualityProfile(existing policy.QualityProfile) policy.QualityProfile {
+	existing = genericQualityProfile(existing)
+	existing.HighRiskIndicators = appendUniqueStrings(existing.HighRiskIndicators,
+		"within 30 days",
+		"instant replacement",
+		"refund",
+		"replacement",
+	)
+	existing.ClaimProfiles = append([]policy.QualityClaimProfile{
+		{ID: "refund_commitment", MatchTerms: []string{"refund", "reimbursement", "credit"}, Risk: "high", RequiredEvidence: []string{"policy_or_knowledge", "approval"}, RequiredVerification: []string{"review", "verification"}, AllowedCommitments: []string{"verification_first"}, VerificationQualifiers: []string{"after verification", "after review", "pending review", "requires review"}, ContradictionMarkers: []string{"not eligible", "requires review", "after review", "before review"}},
+		{ID: "replacement_commitment", MatchTerms: []string{"replacement", "replace", "exchange", "swap"}, Risk: "high", RequiredEvidence: []string{"policy_or_knowledge", "approval"}, RequiredVerification: []string{"review", "verification"}, AllowedCommitments: []string{"verification_first"}, VerificationQualifiers: []string{"after verification", "after review", "pending review", "requires review"}, ContradictionMarkers: []string{"not eligible", "requires review", "after review", "before review"}},
+	}, existing.ClaimProfiles...)
+	if existing.SemanticConcepts == nil {
+		existing.SemanticConcepts = map[string][]string{}
+	}
+	existing.SemanticConcepts["refund"] = []string{"refund", "refunds", "refunded", "reimbursement", "reimburse", "reimbursed", "credit", "credited"}
+	existing.SemanticConcepts["replacement"] = []string{"replacement", "replacements", "replace", "replaced", "exchange", "exchanges", "swap", "swapped"}
+	if existing.BlueprintRules == nil {
+		existing.BlueprintRules = map[string][]string{}
+	}
+	existing.BlueprintRules["refund_replacement"] = []string{
+		"Start by stating what still must be verified before any refund or replacement decision.",
+		"Do not imply approval before the required review or verification step is complete.",
+	}
+	return existing
+}
+
+func defaultLifecyclePolicy(existing policy.LifecyclePolicy, domainProfile string) policy.LifecyclePolicy {
 	if strings.TrimSpace(existing.ID) == "" {
 		existing.ID = "default_lifecycle_policy"
 	}
@@ -1062,12 +1120,30 @@ func defaultLifecyclePolicy(existing policy.LifecyclePolicy) policy.LifecyclePol
 		existing.ResolutionSignals = []string{"thanks", "thank you", "that helps", "all good", "solved", "ok got it"}
 	}
 	if len(existing.DeliveryUpdateSignals) == 0 {
-		existing.DeliveryUpdateSignals = []string{"update me", "keep me updated", "notify me", "let me know", "delivery", "shipping", "order status", "package"}
+		existing.DeliveryUpdateSignals = []string{"update me", "keep me updated", "notify me", "let me know"}
+		if normalizedDomainProfile(domainProfile) == "support_commerce" {
+			existing.DeliveryUpdateSignals = append(existing.DeliveryUpdateSignals, "delivery", "shipping", "order status", "package")
+		}
 	}
 	if len(existing.AppointmentReminderSignals) == 0 {
 		existing.AppointmentReminderSignals = []string{"remind me", "appointment reminder", "reminder for my appointment", "notify me about my appointment"}
 	}
 	return existing
+}
+
+func appendUniqueStrings(base []string, extra ...string) []string {
+	seen := map[string]struct{}{}
+	for _, item := range base {
+		seen[item] = struct{}{}
+	}
+	for _, item := range extra {
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		base = append(base, item)
+		seen[item] = struct{}{}
+	}
+	return base
 }
 
 func validateNonEmptyUnique(field string, values []string) error {

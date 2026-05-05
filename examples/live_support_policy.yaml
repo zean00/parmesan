@@ -1,6 +1,7 @@
 id: bundle_live_support_v2
 version: v2
 composition_mode: strict
+domain_profile: support_commerce
 no_match: I can help with customer support questions about orders, shipping, returns, refunds, and account help. Please tell me the support issue.
 domain_boundary:
   mode: soft_redirect

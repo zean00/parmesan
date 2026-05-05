@@ -1,6 +1,7 @@
 id: ecommerce-returns
 version: v1
 composition_mode: strict
+domain_profile: support_commerce
 unattended:
   ineligible_required_tools: hide
 no_match: I need to hand this to a specialist because I do not have an approved response for this case yet.

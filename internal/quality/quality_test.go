@@ -8,8 +8,8 @@ import (
 	"github.com/sahal/parmesan/internal/domain/customer"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/policy"
-	knowledgeretriever "github.com/sahal/parmesan/internal/knowledge/retriever"
 	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
+	knowledgeretriever "github.com/sahal/parmesan/internal/knowledge/retriever"
 )
 
 func TestGradeFailsOutOfScopeAnswer(t *testing.T) {
@@ -229,6 +229,7 @@ func TestGradeSupportsSpecificKnowledgeClaimFromRetrievedEvidence(t *testing.T) 
 
 func TestBuildResponsePlanIncludesHighRiskBlueprint(t *testing.T) {
 	view := policyruntime.EngineResult{
+		QualityProfile: supportQualityProfileForTest(),
 		ActiveJourneyState: &policy.JourneyNode{
 			ID:          "verify_state",
 			Instruction: "Please share the order number before I review refund or replacement options.",
@@ -397,7 +398,8 @@ func TestMatchClaimsDetectsContradictedEvidence(t *testing.T) {
 		}}},
 	}
 
-	claims := ExtractClaims("You qualify for an instant replacement right away.", policy.QualityProfile{})
+	profile := supportQualityProfileForTest()
+	claims := ExtractClaims("You qualify for an instant replacement right away.", profile)
 	matches := MatchClaims(view, claims)
 	if len(matches) == 0 || matches[0].FailureReason != "contradicted_by_evidence" {
 		t.Fatalf("matches = %#v, want contradicted_by_evidence", matches)
@@ -414,13 +416,38 @@ func TestMatchClaimsUsesSemanticEvidenceConcepts(t *testing.T) {
 		}}},
 	}
 
-	claims := ExtractClaims("Refund and replacement eligibility can be reviewed after verification.", policy.QualityProfile{})
+	profile := supportQualityProfileForTest()
+	claims := ExtractClaims("Refund and replacement eligibility can be reviewed after verification.", profile)
 	matches := MatchClaims(view, claims)
 	if len(matches) == 0 || !matches[0].Supported {
 		t.Fatalf("matches = %#v, want semantic support", matches)
 	}
 	if matches[0].MatchedSourceType != "retrieved_knowledge" {
 		t.Fatalf("matches = %#v, want retrieved knowledge source", matches)
+	}
+}
+
+func supportQualityProfileForTest() policy.QualityProfile {
+	return policy.QualityProfile{
+		HighRiskIndicators: []string{"refund", "replacement", "instant replacement", "eligible", "qualify"},
+		ClaimProfiles: []policy.QualityClaimProfile{
+			{ID: "refund_commitment", MatchTerms: []string{"refund", "reimbursement", "credit"}, Risk: "high"},
+			{ID: "replacement_commitment", MatchTerms: []string{"replacement", "replace", "exchange", "swap"}, Risk: "high"},
+			{ID: "eligibility", MatchTerms: []string{"eligible", "eligibility", "qualify", "qualifies"}, Risk: "high"},
+		},
+		SemanticConcepts: map[string][]string{
+			"refund":      {"refund", "reimbursement", "credit"},
+			"replacement": {"replacement", "replace", "exchange", "swap"},
+			"eligibility": {"eligible", "eligibility", "qualify", "qualifies"},
+		},
+		BlueprintRules: map[string][]string{
+			"refund_replacement": {
+				"Start by stating what still must be verified before any refund or replacement decision.",
+				"Do not promise eligibility, approval, or timing before verification is complete.",
+				"End with the next review step or the information the customer must provide.",
+				"When you rely on retrieved knowledge, cite the supporting source identifier or URI.",
+			},
+		},
 	}
 }
 

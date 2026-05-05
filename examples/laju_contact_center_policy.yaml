@@ -1,6 +1,7 @@
 id: bundle_laju_contact_center_v1
 version: v1
 composition_mode: strict
+domain_profile: support_commerce
 unattended:
   ineligible_required_tools: hide
 no_match: I can help route this to support. Please describe the issue and include the affected service, account, or device.

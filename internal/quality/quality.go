@@ -10,9 +10,9 @@ import (
 	"github.com/sahal/parmesan/internal/domain/customer"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
 	"github.com/sahal/parmesan/internal/domain/policy"
+	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 	knowledgeretriever "github.com/sahal/parmesan/internal/knowledge/retriever"
 	"github.com/sahal/parmesan/internal/model"
-	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 )
 
 type Finding struct {
@@ -387,7 +387,7 @@ func retrievalFindings(view policyruntime.EngineResult, response string, matches
 	}
 	if len(view.RetrieverStage.Results) == 0 && strings.Contains(lower, "according to") {
 		severity := "medium"
-		if containsAny(lower, []string{"refund", "replacement", "qualify", "eligible", "approved"}) {
+		if containsAny(lower, qualityRiskTerms(view.QualityProfile)) {
 			severity = "hard"
 		}
 		findings = append(findings, Finding{Kind: "missing_required_retrieval", Severity: severity, Message: "Response uses retrieval framing without any retrieved knowledge."})
@@ -446,7 +446,7 @@ func refusalFindings(view policyruntime.EngineResult, response string) []Finding
 
 func hallucinationFindings(view policyruntime.EngineResult, response string) []Finding {
 	lower := strings.ToLower(response)
-	if strings.Contains(lower, "guarantee") && strings.Contains(lower, "refund") && !containsText(view, "guarantee") {
+	if strings.Contains(lower, "guarantee") && !containsText(view, "guarantee") {
 		return []Finding{{Kind: "unsupported_guarantee", Severity: "high", Message: "Response appears to make an unsupported guarantee."}}
 	}
 	return nil
@@ -458,7 +458,7 @@ func prematureCommitmentFindings(view policyruntime.EngineResult, response strin
 		return nil
 	}
 	lower := strings.ToLower(response)
-	if !containsAny(lower, []string{"refund", "replacement", "eligible", "approval", "approved", "qualify"}) {
+	if !containsAny(lower, qualityRiskTerms(view.QualityProfile)) {
 		return nil
 	}
 	if verificationFirstOptionsResponse(lower) {
@@ -545,6 +545,34 @@ func containsAny(haystack string, needles []string) bool {
 		}
 	}
 	return false
+}
+
+func qualityRiskTerms(profile policy.QualityProfile) []string {
+	terms := highRiskClaimIndicators(profile)
+	for _, claim := range profile.ClaimProfiles {
+		terms = append(terms, claim.MatchTerms...)
+	}
+	for _, aliases := range profile.SemanticConcepts {
+		terms = append(terms, aliases...)
+	}
+	return uniqueStrings(terms)
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func updateSoftDimension(card *Scorecard, name string, score float64, warnings []string) {
@@ -693,12 +721,8 @@ func highRiskClaimIndicators(profile policy.QualityProfile) []string {
 		return append([]string(nil), profile.HighRiskIndicators...)
 	}
 	return []string{
-		"within 30 days",
-		"instant replacement",
 		"guarantee",
 		"guaranteed",
-		"refund",
-		"replacement",
 		"approved",
 		"eligible",
 		"qualify",
@@ -1571,11 +1595,47 @@ func highRiskIntent(view policyruntime.EngineResult) string {
 		return "approval"
 	case strings.Contains(text, "escalat") || strings.Contains(text, "handoff") || strings.Contains(text, "operator"):
 		return "escalation"
-	case strings.Contains(text, "refund") || strings.Contains(text, "replacement") || strings.Contains(text, "exchange") || strings.Contains(text, "return"):
+	case profileHasAnyQualityTerm(view.QualityProfile, "refund", "replacement", "exchange", "return") &&
+		(strings.Contains(text, "refund") || strings.Contains(text, "replacement") || strings.Contains(text, "exchange") || strings.Contains(text, "return")):
 		return "refund_replacement"
 	default:
 		return ""
 	}
+}
+
+func profileHasAnyQualityTerm(profile policy.QualityProfile, terms ...string) bool {
+	for _, term := range terms {
+		term = strings.ToLower(strings.TrimSpace(term))
+		if term == "" {
+			continue
+		}
+		for _, indicator := range profile.HighRiskIndicators {
+			if strings.Contains(strings.ToLower(indicator), term) {
+				return true
+			}
+		}
+		for _, claim := range profile.ClaimProfiles {
+			if strings.Contains(strings.ToLower(claim.ID), term) {
+				return true
+			}
+			for _, matchTerm := range claim.MatchTerms {
+				if strings.Contains(strings.ToLower(matchTerm), term) {
+					return true
+				}
+			}
+		}
+		for concept, aliases := range profile.SemanticConcepts {
+			if strings.Contains(strings.ToLower(concept), term) {
+				return true
+			}
+			for _, alias := range aliases {
+				if strings.Contains(strings.ToLower(alias), term) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func highRiskSignals(view policyruntime.EngineResult) []string {

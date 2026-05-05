@@ -39,6 +39,7 @@ where a visual reference is more useful than another block of prose.
 | inspect component boundaries and flow | [Architecture](./architecture.md) |
 | understand turn execution | [Engine](./engine.md) |
 | author or review policy bundles | [Policies](./policies.md) |
+| choose generic vs support-commerce policy defaults | [Policies: Domain Profiles](./policies.md#domain-profiles) |
 | understand delegated result verification and watch creation | [Delegation Contracts](./delegation-contracts.md) |
 | understand feedback, maintainer jobs, and learning | [Feedback Loop / Learning](./feedback-learning.md) |
 | operate sessions and use the dashboard | [Operations / Dashboard](./operations-dashboard.md) |

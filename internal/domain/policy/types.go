@@ -22,6 +22,7 @@ type Bundle struct {
 	ArtifactMeta               artifactmeta.Meta           `json:"artifact_meta,omitempty" yaml:"-"`
 	Version                    string                      `json:"version" yaml:"version"`
 	CompositionMode            string                      `json:"composition_mode,omitempty" yaml:"composition_mode,omitempty"`
+	DomainProfile              string                      `json:"domain_profile,omitempty" yaml:"domain_profile,omitempty"`
 	PerceivedPerformance       PerceivedPerformancePolicy  `json:"perceived_performance,omitempty" yaml:"perceived_performance,omitempty"`
 	Unattended                 UnattendedPolicy            `json:"unattended,omitempty" yaml:"unattended,omitempty"`
 	Semantics                  SemanticsPolicy             `json:"semantics,omitempty" yaml:"semantics,omitempty"`

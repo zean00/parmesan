@@ -58,6 +58,7 @@ platform with:
 | boot the stack | [docs/getting-started.md](/home/sahal/workspace/agents/parmesan/docs/getting-started.md) |
 | configure providers, MCP, ACP peers, or enrichment | [docs/configuration.md](/home/sahal/workspace/agents/parmesan/docs/configuration.md) |
 | understand execution and policy behavior | [docs/engine.md](/home/sahal/workspace/agents/parmesan/docs/engine.md) and [docs/policies.md](/home/sahal/workspace/agents/parmesan/docs/policies.md) |
+| choose generic vs support-commerce policy defaults | [docs/policies.md#domain-profiles](/home/sahal/workspace/agents/parmesan/docs/policies.md#domain-profiles) |
 | operate sessions and traces | [docs/operations-dashboard.md](/home/sahal/workspace/agents/parmesan/docs/operations-dashboard.md) |
 | understand learning and feedback | [docs/feedback-learning.md](/home/sahal/workspace/agents/parmesan/docs/feedback-learning.md) |
 

@@ -528,10 +528,10 @@ func (genericStrategy) CreateMatchingBatches(_ matchingSnapshot, items []policy.
 			return GuidelineMatchStageResult{Matches: matches, Guidelines: guidelines, Low: true}, nil
 		}),
 		makeBatch("customer_dependency", "generic", promptVersion("customer_dependency"), func(_ context.Context, snapshot matchingSnapshot) (StageResult, error) {
-			return buildCustomerDependencyStageResult(snapshot.context, snapshot.matchFinalizeStage.MatchedGuidelines), nil
+			return buildCustomerDependencyStageResult(snapshot.bundle, snapshot.context, snapshot.matchFinalizeStage.MatchedGuidelines), nil
 		}),
 		makeBatch("previously_applied", "generic", promptVersion("previously_applied"), func(_ context.Context, snapshot matchingSnapshot) (StageResult, error) {
-			return buildPreviouslyAppliedStageResult(snapshot.context, snapshot.matchFinalizeStage.MatchedGuidelines, snapshot.matchFinalizeStage.GuidelineMatches), nil
+			return buildPreviouslyAppliedStageResult(snapshot.bundle, snapshot.context, snapshot.matchFinalizeStage.MatchedGuidelines, snapshot.matchFinalizeStage.GuidelineMatches), nil
 		}),
 		makeBatch("relationship_resolution", "generic", promptVersion("relationship_resolution"), func(_ context.Context, snapshot matchingSnapshot) (StageResult, error) {
 			return buildRelationshipResolutionStageResult(snapshot.bundle, snapshot.context, snapshot.observationStage.Observations, snapshot.matchFinalizeStage.GuidelineMatches, snapshot.matchFinalizeStage.MatchedGuidelines, snapshot.activeJourney, snapshot.activeJourneyState), nil

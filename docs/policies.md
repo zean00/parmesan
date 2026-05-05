@@ -37,6 +37,7 @@ usable until policy exposes them.
 
 | Section | Purpose |
 | --- | --- |
+| `domain_profile` | optional named defaults for domain-specific semantics, watches, quality, and lifecycle behavior |
 | `soul` | voice, role, identity, style guardrails |
 | `domain_boundary` | what the agent should stay inside or redirect away from |
 | `guidelines` | conditional behavior rules |
@@ -63,6 +64,7 @@ Key example:
 id: bundle_live_support_v2
 version: v2
 composition_mode: strict
+domain_profile: support_commerce
 unattended:
   ineligible_required_tools: hide
 no_match: I can help with customer support questions about orders, shipping, returns, refunds, and account help. Please tell me the support issue.
@@ -84,6 +86,24 @@ templates:
     when: customer asks for customer support help
     text: Hi, I can help with that. Please tell me the issue and any relevant order or account detail.
 ```
+
+## Domain Profiles
+
+`domain_profile` controls which implicit defaults are added when a bundle does
+not provide its own `semantics`, `watch_capabilities`, `quality_profile`, or
+`lifecycle_policy`.
+
+Supported values:
+
+| Value | Behavior |
+| --- | --- |
+| `generic` | default. Adds only domain-neutral scheduling, confirmation, lifecycle, and quality defaults. It does not add order, refund, delivery, shipment, or replacement assumptions. |
+| `support_commerce` | opt-in compatibility profile for customer support and ecommerce bundles. Adds order/return/delivery semantics, delivery and appointment watches, and refund/replacement quality rules. |
+
+Omit `domain_profile` for a domain-neutral agent. Set
+`domain_profile: support_commerce` only for bundles that intentionally operate
+in customer support, ecommerce, complaint intake, delivery, or similar support
+workflows.
 
 ## Unattended Tool Approvals
 

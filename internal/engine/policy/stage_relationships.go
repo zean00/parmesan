@@ -5,13 +5,14 @@ import (
 	"strings"
 
 	"github.com/sahal/parmesan/internal/domain/policy"
-	"github.com/sahal/parmesan/internal/model"
 	semantics "github.com/sahal/parmesan/internal/engine/semantics"
+	"github.com/sahal/parmesan/internal/model"
 )
 
-func buildCustomerDependencyStageResult(ctx MatchingContext, items []policy.Guideline) CustomerDependencyStageResult {
-	decisions, guidelines := runCustomerDependentARQ(ctx, items)
+func buildCustomerDependencyStageResult(bundle policy.Bundle, ctx MatchingContext, items []policy.Guideline) CustomerDependencyStageResult {
+	decisions, guidelines := runCustomerDependentARQ(bundle, ctx, items)
 	evidence := map[string]semantics.CustomerDependencyEvidence{}
+	dependencyTerms := customerDependencyTerms(bundle)
 	for _, item := range items {
 		if strings.Contains(strings.ToLower(item.Scope), "journey") {
 			evidence[item.ID] = semantics.CustomerDependencyEvidence{
@@ -24,7 +25,7 @@ func buildCustomerDependencyStageResult(ctx MatchingContext, items []policy.Guid
 			item,
 			ctx.LatestCustomerText,
 			customerSatisfiedGuideline(ctx.LatestCustomerText, item),
-			len(matchedSemanticTerms(ctx.LatestCustomerText, []string{"because", "reason", "damaged", "refund", "cancel", "return", "order", "item", "details", "status"})) > 0,
+			len(matchedSemanticTerms(ctx.LatestCustomerText, dependencyTerms)) > 0,
 		)
 	}
 	return CustomerDependencyStageResult{
@@ -34,8 +35,8 @@ func buildCustomerDependencyStageResult(ctx MatchingContext, items []policy.Guid
 	}
 }
 
-func buildPreviouslyAppliedStageResult(ctx MatchingContext, items []policy.Guideline, matches []Match) PreviouslyAppliedStageResult {
-	decisions, guidelines := runPreviouslyAppliedARQ(ctx, items, matches)
+func buildPreviouslyAppliedStageResult(bundle policy.Bundle, ctx MatchingContext, items []policy.Guideline, matches []Match) PreviouslyAppliedStageResult {
+	decisions, guidelines := runPreviouslyAppliedARQ(bundle, ctx, items, matches)
 	return PreviouslyAppliedStageResult{Decisions: decisions, Guidelines: guidelines}
 }
 

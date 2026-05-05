@@ -317,6 +317,13 @@ as:
 
 Those choices now live in policy config instead of Go code.
 
+Domain-specific defaults follow the same rule. A bundle with no
+`domain_profile` uses the `generic` profile, which avoids implicit customer
+support or ecommerce assumptions. Support/order/refund/delivery defaults are
+only added by the explicit `support_commerce` profile or by policy sections
+that define equivalent semantics, watches, quality rules, and lifecycle
+signals directly.
+
 ### Fact Extraction
 
 Fact extraction is intentionally simple in v1:

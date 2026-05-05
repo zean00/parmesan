@@ -996,8 +996,9 @@ func TestProcessExecutionCreatesRuntimeAppointmentReminderWatch(t *testing.T) {
 		{ID: "commerce_schedule_appointment", ProviderID: "commerce", Name: "schedule_appointment", RuntimeProtocol: "mcp", Schema: `{"type":"object","properties":{"date":{"type":"string"}}}`, ImportedAt: now},
 	})
 	_ = repo.SaveBundle(ctx, policy.Bundle{
-		ID:      "bundle_watch",
-		Version: "v1",
+		ID:            "bundle_watch",
+		Version:       "v1",
+		DomainProfile: "support_commerce",
 		Templates: []policy.Template{{
 			ID:   "watch_reply",
 			Mode: "strict",
@@ -1162,6 +1163,19 @@ func TestComposePromptIncludesSoulGuidance(t *testing.T) {
 		},
 		ResponseAnalysisStage: policyruntime.ResponseAnalysisStageResult{
 			Evaluation: policyruntime.ResponseAnalysisEvaluation{StyleProfileID: "default_style"},
+		},
+		QualityProfile: policy.QualityProfile{
+			ClaimProfiles: []policy.QualityClaimProfile{
+				{ID: "refund_commitment", MatchTerms: []string{"refund"}, Risk: "high"},
+				{ID: "replacement_commitment", MatchTerms: []string{"replacement"}, Risk: "high"},
+			},
+			BlueprintRules: map[string][]string{
+				"refund_replacement": {
+					"Start by stating what still must be verified before any refund or replacement decision.",
+					"Do not promise eligibility, approval, or timing before verification is complete.",
+					"End with the next review step or the information the customer must provide.",
+				},
+			},
 		},
 		CustomerPreferences: []customer.Preference{{
 			Key:   "preferred_name",

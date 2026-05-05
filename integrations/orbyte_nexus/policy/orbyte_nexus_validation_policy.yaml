@@ -1,5 +1,6 @@
 id: bundle_orbyte_nexus_validation
 version: v1
+domain_profile: support_commerce
 composition_mode: guided
 no_match: I can help with product questions, complaint intake, and follow-up updates for this validation flow. Please tell me whether you want product information or help with a complaint.
 domain_boundary:
