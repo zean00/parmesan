@@ -82,6 +82,7 @@ type Server struct {
 	trustedOperatorRolesHeader string
 	toolProviderSecurity       config.ToolProviderSecurityConfig
 	argumentResolver           policyruntime.ToolArgumentResolver
+	toolNameAliases            map[string]string
 	usage                      *usageledger.Service
 	defaultOrgID               string
 }
@@ -524,6 +525,11 @@ func (s *Server) WithDefaultOrgID(orgID string) *Server {
 
 func (s *Server) WithToolArgumentResolver(resolver policyruntime.ToolArgumentResolver) *Server {
 	s.argumentResolver = resolver
+	return s
+}
+
+func (s *Server) WithToolNameAliases(aliases map[string]string) *Server {
+	s.toolNameAliases = cloneStringMap(aliases)
 	return s
 }
 
@@ -6719,8 +6725,13 @@ func (s *Server) registerProvider(w http.ResponseWriter, r *http.Request) {
 	if req.ID == "" {
 		req.ID = fmt.Sprintf("provider_%d", time.Now().UnixNano())
 	}
-	if err := s.validateProviderURI(req.URI); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if req.Kind != tool.ProviderNative {
+		if err := s.validateProviderURI(req.URI); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else if strings.TrimSpace(req.URI) != "" {
+		http.Error(w, "native providers cannot define a remote uri", http.StatusBadRequest)
 		return
 	}
 	binding := tool.ProviderBinding{
@@ -6882,10 +6893,18 @@ func (s *Server) listCatalog(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, catalogEntriesResponse(entries))
+	writeJSON(w, http.StatusOK, s.catalogEntriesResponse(entries))
 }
 
 func catalogEntriesResponse(entries []tool.CatalogEntry) []map[string]any {
+	return catalogEntriesResponseWithAliases(entries, nil)
+}
+
+func (s *Server) catalogEntriesResponse(entries []tool.CatalogEntry) []map[string]any {
+	return catalogEntriesResponseWithAliases(entries, policyruntime.BuildToolModelNameMap(entries, s.toolNameAliases))
+}
+
+func catalogEntriesResponseWithAliases(entries []tool.CatalogEntry, modelNames map[string]string) []map[string]any {
 	out := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
 		item := map[string]any{
@@ -6897,6 +6916,9 @@ func catalogEntriesResponse(entries []tool.CatalogEntry) []map[string]any {
 			"runtime_protocol": entry.RuntimeProtocol,
 			"metadata_json":    entry.MetadataJSON,
 			"imported_at":      entry.ImportedAt,
+		}
+		if modelName := strings.TrimSpace(modelNames[policyruntime.QualifiedToolID(entry)]); modelName != "" {
+			item["model_tool_name"] = modelName
 		}
 		metadata := parseCatalogMetadata(entry.MetadataJSON)
 		if len(metadata) > 0 {
@@ -9811,7 +9833,10 @@ func (s *Server) resolveExecutionView(ctx context.Context, exec execution.TurnEx
 		return resolvedPolicyResponse{}, err
 	}
 	catalog = filterCatalogForPolicy(catalog, selected)
-	view, err := policyruntime.ResolveWithRouter(ctx, s.router, events, selected, journeyInstances, catalog)
+	view, err := policyruntime.ResolveWithOptions(ctx, events, selected, journeyInstances, catalog, policyruntime.ResolveOptions{
+		Router:          s.router,
+		ToolNameAliases: s.toolNameAliases,
+	})
 	if err != nil {
 		return resolvedPolicyResponse{}, err
 	}
@@ -9875,6 +9900,7 @@ func (s *Server) executionQualityPayload(ctx context.Context, exec execution.Tur
 		KnowledgeSnapshot: knowledgeSnapshot,
 		KnowledgeChunks:   knowledgeChunks,
 		DerivedSignals:    s.qualityDerivedSignals(ctx, exec.SessionID),
+		ToolNameAliases:   s.toolNameAliases,
 	})
 	if err != nil {
 		return nil, err

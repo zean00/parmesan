@@ -181,6 +181,7 @@ type Config struct {
 	CustomerContext      CustomerContextConfig
 	Moderation           ModerationConfig
 	RetryModelProfiles   []RetryModelProfileConfig
+	ToolNameAliases      map[string]string
 	ExecutionConcurrency int
 	AsyncWriteWorkers    int
 	AsyncWriteQueueSize  int
@@ -247,6 +248,7 @@ func Load(service string) Config {
 			},
 		},
 		RetryModelProfiles:   fileCfg.Runtime.RetryModelProfiles,
+		ToolNameAliases:      cloneStringMap(fileCfg.Runtime.ToolNameAliases),
 		ExecutionConcurrency: intEnv("EXECUTION_CONCURRENCY", defaultInt(fileCfg.Runtime.ExecutionConcurrency, 2)),
 		AsyncWriteWorkers:    intEnv("ASYNC_WRITE_WORKERS", defaultInt(fileCfg.Runtime.AsyncWriteWorkers, 2)),
 		AsyncWriteQueueSize:  intEnv("ASYNC_WRITE_QUEUE_SIZE", 256),
@@ -314,6 +316,7 @@ type fileConfig struct {
 		AsyncWriteQueueSize  int                       `yaml:"async_write_queue_size"`
 		RequestTimeoutSecs   int                       `yaml:"request_timeout_seconds"`
 		RetryModelProfiles   []RetryModelProfileConfig `yaml:"retry_model_profiles"`
+		ToolNameAliases      map[string]string         `yaml:"tool_name_aliases"`
 	} `yaml:"runtime"`
 }
 
@@ -333,6 +336,17 @@ func loadFileConfig() fileConfig {
 		fmt.Fprintf(os.Stderr, "warning: parse PARMESAN_CONFIG %q: %v\n", path, err)
 	}
 	return cfg
+}
+
+func cloneStringMap(input map[string]string) map[string]string {
+	if len(input) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(input))
+	for key, value := range input {
+		out[key] = value
+	}
+	return out
 }
 
 func applyFileEnv(cfg fileConfig) {

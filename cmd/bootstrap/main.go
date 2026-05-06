@@ -14,6 +14,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/sahal/parmesan/internal/builtintools"
 	"github.com/sahal/parmesan/internal/config"
 	"github.com/sahal/parmesan/internal/domain/agent"
 	"github.com/sahal/parmesan/internal/domain/knowledge"
@@ -85,6 +86,10 @@ func main() {
 
 func bootstrapProviders(ctx context.Context, repo *postgres.Client, cfg config.Config) error {
 	now := time.Now().UTC()
+	if err := builtintools.Ensure(ctx, repo); err != nil {
+		return err
+	}
+	fmt.Printf("registered provider %s (%s)\n", builtintools.ProviderID, tool.ProviderNative)
 	for _, provider := range cfg.MCP.Providers {
 		if strings.TrimSpace(provider.ID) == "" {
 			return errors.New("mcp provider id is required")

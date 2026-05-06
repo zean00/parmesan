@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sahal/parmesan/internal/builtintools"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/toolsecurity"
 )
@@ -59,6 +60,9 @@ func (i *Invoker) Invoke(ctx context.Context, binding tool.ProviderBinding, auth
 }
 
 func (i *Invoker) InvokeWithOptions(ctx context.Context, binding tool.ProviderBinding, auth tool.AuthBinding, entry tool.CatalogEntry, input map[string]any, opts InvokeOptions) (map[string]any, error) {
+	if binding.Kind == tool.ProviderNative || entry.RuntimeProtocol == "native" {
+		return builtintools.Invoke(entry, input, time.Now().UTC())
+	}
 	if err := i.policy.Validate(binding.URI); err != nil {
 		return nil, classifyInvokeFailure(err, 0)
 	}

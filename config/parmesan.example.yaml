@@ -86,6 +86,8 @@ runtime:
   async_write_workers: 3
   async_write_queue_size: 256
   request_timeout_seconds: 15
+  tool_name_aliases:
+    builtin.get_current_time: get_current_time
   retry_model_profiles:
     - id: structured_safe
       name: Structured-safe fallback

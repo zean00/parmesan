@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sahal/parmesan/internal/builtintools"
 	"github.com/sahal/parmesan/internal/config"
 	"github.com/sahal/parmesan/internal/domain/journey"
 	"github.com/sahal/parmesan/internal/domain/policy"
@@ -136,6 +137,37 @@ func TestResolveBuildsARQDrivenView(t *testing.T) {
 	}
 	if view.ToolDecisionStage.Evaluation.PlannedSelectedTool == "" {
 		t.Fatalf("tool decision evaluation = %#v, want persisted tool decision artifact on the resolved view", view.ToolDecisionStage.Evaluation)
+	}
+}
+
+func TestResolveAutoExposesBuiltInTimeTool(t *testing.T) {
+	view, err := Resolve(
+		[]session.Event{{
+			ID:        "evt_1",
+			SessionID: "sess_1",
+			Source:    "customer",
+			Kind:      "message",
+			CreatedAt: time.Now().UTC(),
+			Content:   []session.ContentPart{{Type: "text", Text: "What time is it in Jakarta?"}},
+		}},
+		[]policy.Bundle{{ID: "bundle_1", Version: "v1"}},
+		nil,
+		builtintools.CatalogEntries(time.Now().UTC()),
+	)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if !slices.Contains(view.ToolExposureStage.ExposedTools, builtintools.CurrentTimeName) {
+		t.Fatalf("exposed tools = %#v, want built-in time tool", view.ToolExposureStage.ExposedTools)
+	}
+	if view.ToolDecisionStage.Decision.SelectedTool != "builtin.get_current_time" {
+		t.Fatalf("tool decision = %#v, want built-in current time selected", view.ToolDecisionStage.Decision)
+	}
+	if view.ToolDecisionStage.Decision.Arguments["location"] != "Jakarta" {
+		t.Fatalf("tool arguments = %#v, want inferred Jakarta location", view.ToolDecisionStage.Decision.Arguments)
+	}
+	if view.ToolExposureStage.ToolApprovals["builtin.get_current_time"] != "auto" {
+		t.Fatalf("tool approvals = %#v, want auto approval marker", view.ToolExposureStage.ToolApprovals)
 	}
 }
 
@@ -3241,6 +3273,71 @@ func TestResolveWithRouterUsesStructuredToolDecision(t *testing.T) {
 	}
 	if toolDecision.Arguments["reason"] != "status" {
 		t.Fatalf("tool args = %#v, want structured tool arguments", toolDecision.Arguments)
+	}
+}
+
+func TestResolveWithRouterNormalizesConfiguredModelToolAlias(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		switch calls {
+		case 1:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"checks\":[{\"id\":\"lookup\",\"applies\":true,\"rationale\":\"structured yes\"}]}"}}]}`))
+		case 2:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"selected_tool\":\"lookup_return\",\"approval_required\":false,\"arguments\":{\"reason\":\"status\"},\"rationale\":\"alias is the best fit\"}"}}]}`))
+		default:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"checks\":[]}"}}]}`))
+		}
+	}))
+	defer server.Close()
+
+	router := model.NewRouter(config.ProviderConfig{
+		DefaultStructured: "openrouter",
+		OpenRouterBase:    server.URL,
+		OpenRouterAPIKey:  "test-key",
+	})
+
+	view, err := ResolveWithOptions(
+		context.Background(),
+		[]session.Event{{
+			ID:        "evt_1",
+			SessionID: "sess_1",
+			Source:    "customer",
+			Kind:      "message",
+			CreatedAt: time.Now().UTC(),
+			Content:   []session.ContentPart{{Type: "text", Text: "what is my return status?"}},
+		}},
+		[]policy.Bundle{{
+			ID:      "bundle_1",
+			Version: "v1",
+			Guidelines: []policy.Guideline{{
+				ID:   "lookup",
+				When: "return status",
+				Then: "Check the return status first",
+			}},
+			GuidelineToolAssociations: []policy.GuidelineToolAssociation{
+				{GuidelineID: "lookup", ToolID: "commerce.get_return_status"},
+			},
+		}},
+		nil,
+		[]tool.CatalogEntry{{ID: "commerce_get_return_status", ProviderID: "commerce", Name: "get_return_status"}},
+		ResolveOptions{
+			Router: router,
+			ToolNameAliases: map[string]string{
+				"commerce.get_return_status": "lookup_return",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("ResolveWithOptions() error = %v", err)
+	}
+	toolDecision := view.ToolDecisionStage.Decision
+	if toolDecision.SelectedTool != "commerce.get_return_status" {
+		t.Fatalf("selected tool = %q, want canonical commerce.get_return_status", toolDecision.SelectedTool)
+	}
+	if len(view.ToolPlanStage.Plan.Candidates) != 1 || view.ToolPlanStage.Plan.Candidates[0].ModelToolName != "lookup_return" {
+		t.Fatalf("candidates = %#v, want model alias lookup_return", view.ToolPlanStage.Plan.Candidates)
 	}
 }
 

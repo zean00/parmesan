@@ -221,6 +221,9 @@ Runtime fields:
   API, gateway, and worker processes.
 - `async_write_queue_size`: buffered async-write queue depth.
 - `request_timeout_seconds`: outbound request timeout used by runtime HTTP calls.
+- `tool_name_aliases`: optional model-facing tool names keyed by canonical
+  tool reference. Use this when a model is unreliable with tool names that
+  contain characters such as `.` or `:`.
 
 Defaults:
 
@@ -228,6 +231,8 @@ Defaults:
 - `async_write_workers`: `2`
 - `async_write_queue_size`: `256`
 - `request_timeout_seconds`: `15`
+- `tool_name_aliases`: empty. Parmesan still derives safe fallback names by
+  replacing unsupported characters with `_`.
 
 Sizing guidance:
 
@@ -308,6 +313,9 @@ configured list; they do not type arbitrary provider or model ids.
 runtime:
   execution_concurrency: 6
   async_write_workers: 3
+  tool_name_aliases:
+    builtin.get_current_time: get_current_time
+    commerce.get_order: commerce_get_order
   retry_model_profiles:
     - id: structured_safe
       name: Structured-safe fallback
@@ -578,6 +586,35 @@ That split is deliberate:
 
 - config says what exists
 - policy says what the agent may use
+
+### Built-In Utility Tools
+
+Parmesan also registers a small native provider named `builtin`. Native tools do
+not use a remote URI and do not call an MCP or OpenAPI service. The built-in
+catalog is only generated for the `builtin` provider; other native provider
+registrations are accepted as local placeholders and do not receive the built-in
+tool catalog during provider sync.
+
+The first built-in utility is:
+
+- `builtin.get_current_time`
+
+It accepts optional `timezone`, `location`, and `locale` arguments. `timezone`
+should be an IANA timezone such as `Asia/Jakarta` or `America/New_York`; UTC
+offsets such as `UTC+07:00` are also accepted. `location` uses a small embedded
+alias table for common cities and regions. Unknown locations return a tool
+error asking the model to provide an explicit timezone.
+
+Built-in time is read-only, non-consequential, and auto-exposed by default so
+customer-facing agents can answer timezone and local-date questions without
+policy authors adding a business-specific tool policy. Capability isolation can
+still remove it by restricting allowed tool ids.
+
+The canonical tool id remains `builtin.get_current_time` in policy, approval,
+usage, audit, and tool-run records. If a model has trouble returning names with
+`.` characters, configure `runtime.tool_name_aliases` to expose a model-facing
+name such as `get_current_time`; Parmesan maps it back to the canonical id
+before invocation.
 
 ### Delegated ACP Peer Agents
 

@@ -209,6 +209,21 @@ available to the runtime.
 
 Policy must expose it first.
 
+The exception is the safe built-in utility provider. `builtin.get_current_time`
+is read-only, non-consequential, and auto-exposed by default so agents can
+answer current-time, local-date, weekday, UTC-offset, and timezone-aware
+scheduling questions. Use `capability_isolation.allowed_tool_ids` when an agent
+must not see even built-in utilities.
+
+Only the native provider with id `builtin` receives Parmesan's built-in utility
+catalog. Other native provider registrations do not inherit built-in tools.
+
+Policies always refer to canonical tool ids such as `provider.tool` or the
+supported catalog/name aliases. Runtime model-name aliases configured under
+`runtime.tool_name_aliases` are only for LLM prompt compatibility; they do not
+change policy matching, approval boundaries, usage ledger records, or tool-run
+identity.
+
 This is a deliberate safety boundary:
 
 - discovery populates the catalog

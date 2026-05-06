@@ -10,6 +10,7 @@ import (
 	"github.com/sahal/parmesan/internal/acppeer"
 	httpapi "github.com/sahal/parmesan/internal/api/http"
 	"github.com/sahal/parmesan/internal/api/sse"
+	"github.com/sahal/parmesan/internal/builtintools"
 	"github.com/sahal/parmesan/internal/config"
 	"github.com/sahal/parmesan/internal/customercontext"
 	"github.com/sahal/parmesan/internal/engine/runner"
@@ -68,6 +69,9 @@ func RunAPI(ctx context.Context) error {
 	}
 	writes.Start(ctx, cfg.AsyncWriteWorkers)
 	defer writes.Stop()
+	if err := builtintools.Ensure(ctx, repo); err != nil {
+		return err
+	}
 
 	server := httpapi.New(cfg.HTTP.Address, repo, writes, broker, router, syncer).
 		WithCustomerContextEnricher(customercontext.New(cfg.CustomerContext)).
@@ -75,6 +79,7 @@ func RunAPI(ctx context.Context) error {
 		WithRetryModelProfiles(cfg.RetryModelProfiles).
 		WithDefaultOrgID(cfg.Observability.OrgID).
 		WithToolArgumentResolver(orbyteintegration.NewToolArgumentResolver()).
+		WithToolNameAliases(cfg.ToolNameAliases).
 		WithToolProviderSecurity(cfg.ToolProviderSecurity)
 	return server.Run(ctx)
 }
@@ -133,6 +138,9 @@ func RunWorker(ctx context.Context) error {
 	slog.Info("worker postgres connected", "service", cfg.ServiceName)
 	writes.Start(ctx, cfg.AsyncWriteWorkers)
 	defer writes.Stop()
+	if err := builtintools.Ensure(ctx, repo); err != nil {
+		return err
+	}
 	peerManager := acppeer.NewManager(cfg.AgentServers)
 	providerPolicy := toolsecurity.ProviderURLPolicy{
 		AllowedHosts:   cfg.ToolProviderSecurity.AllowedHosts,
@@ -143,6 +151,7 @@ func RunWorker(ctx context.Context) error {
 		WithExecutionConcurrency(cfg.ExecutionConcurrency).
 		WithDefaultOrgID(cfg.Observability.OrgID).
 		WithToolArgumentResolver(orbyteintegration.NewToolArgumentResolver()).
+		WithToolNameAliases(cfg.ToolNameAliases).
 		WithProviderURLPolicy(providerPolicy).
 		WithAgentPeers(peerManager).
 		Start(ctx)

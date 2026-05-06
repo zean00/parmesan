@@ -36,6 +36,30 @@ func TestLoadDefaultsACPResponseCoalesceWhenUnset(t *testing.T) {
 	}
 }
 
+func TestLoadToolNameAliasesFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "parmesan.yaml")
+	raw := []byte(`
+runtime:
+  tool_name_aliases:
+    builtin.get_current_time: get_current_time
+    commerce.get_order: commerce_get_order
+`)
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	t.Setenv("PARMESAN_CONFIG", path)
+
+	cfg := Load("worker")
+	if cfg.ToolNameAliases["builtin.get_current_time"] != "get_current_time" {
+		t.Fatalf("tool aliases = %#v, want builtin alias", cfg.ToolNameAliases)
+	}
+	if cfg.ToolNameAliases["commerce.get_order"] != "commerce_get_order" {
+		t.Fatalf("tool aliases = %#v, want commerce alias", cfg.ToolNameAliases)
+	}
+}
+
 func TestLoadAgentServersFromFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "parmesan.yaml")

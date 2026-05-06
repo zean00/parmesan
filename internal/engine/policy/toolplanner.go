@@ -10,11 +10,11 @@ import (
 
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/tool"
-	"github.com/sahal/parmesan/internal/model"
 	semantics "github.com/sahal/parmesan/internal/engine/semantics"
+	"github.com/sahal/parmesan/internal/model"
 )
 
-func buildToolPlan(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, journeyDecision JourneyDecision, guidelines []policy.Guideline, exposedTools []string, approvals map[string]string, relationships []policy.Relationship, catalog []tool.CatalogEntry, argumentResolver ToolArgumentResolver) (ToolCallPlan, ToolDecision) {
+func buildToolPlan(ctx context.Context, router *model.Router, matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, journeyDecision JourneyDecision, guidelines []policy.Guideline, exposedTools []string, approvals map[string]string, relationships []policy.Relationship, catalog []tool.CatalogEntry, toolModelNames map[string]string, argumentResolver ToolArgumentResolver) (ToolCallPlan, ToolDecision) {
 	decision := ToolDecision{
 		Arguments: map[string]any{
 			"session_id":           matchCtx.SessionID,
@@ -31,7 +31,7 @@ func buildToolPlan(ctx context.Context, router *model.Router, matchCtx MatchingC
 		decision.Arguments["journey_state"] = activeState.ID
 	}
 
-	candidates, groups, resolutionIssues := buildToolCandidates(matchCtx, activeJourney, activeState, journeyDecision, guidelines, exposedTools, relationships, catalog, decision.Arguments, argumentResolver)
+	candidates, groups, resolutionIssues := buildToolCandidates(matchCtx, activeJourney, activeState, journeyDecision, guidelines, exposedTools, relationships, catalog, toolModelNames, decision.Arguments, argumentResolver)
 	selectionCache := newToolSelectionEvalCache(candidates)
 	plan := ToolCallPlan{
 		Candidates:        candidates,
@@ -59,7 +59,7 @@ func buildToolPlan(ctx context.Context, router *model.Router, matchCtx MatchingC
 			Arguments        map[string]any `json:"arguments"`
 			Rationale        string         `json:"rationale"`
 		}
-		prompt := buildToolDecisionPrompt(matchCtx, guidelines, activeJourney, activeState, candidateToolIDs(candidates))
+		prompt := buildToolDecisionPrompt(matchCtx, guidelines, activeJourney, activeState, candidates)
 		if generateStructuredWithRetry(ctx, router, prompt, &structured) {
 			if selected := strings.TrimSpace(structured.SelectedTool); selected != "" {
 				if selected = firstMatchingCandidateToolID(candidates, selected); selected != "" {
@@ -322,7 +322,7 @@ func preferredCandidateForDecision(candidates []ToolCandidate) (ToolCandidate, b
 	return candidates[0], true
 }
 
-func buildToolCandidates(matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, journeyDecision JourneyDecision, guidelines []policy.Guideline, exposedTools []string, relationships []policy.Relationship, catalog []tool.CatalogEntry, baseArgs map[string]any, argumentResolver ToolArgumentResolver) ([]ToolCandidate, [][]string, []string) {
+func buildToolCandidates(matchCtx MatchingContext, activeJourney *policy.Journey, activeState *policy.JourneyNode, journeyDecision JourneyDecision, guidelines []policy.Guideline, exposedTools []string, relationships []policy.Relationship, catalog []tool.CatalogEntry, toolModelNames map[string]string, baseArgs map[string]any, argumentResolver ToolArgumentResolver) ([]ToolCandidate, [][]string, []string) {
 	var candidates []ToolCandidate
 	var resolutionIssues []string
 	results, _ := processBatchesInParallel(context.Background(), exposedTools, func(_ context.Context, name string) (ToolCandidate, bool) {
@@ -334,6 +334,10 @@ func buildToolCandidates(matchCtx MatchingContext, activeJourney *policy.Journey
 			return ToolCandidate{}, true
 		}
 		identity := ToolIdentityForEntry(entry)
+		identity.ModelToolName = toolModelNames[identity.ToolID]
+		if strings.TrimSpace(identity.ModelToolName) == "" {
+			identity.ModelToolName = sanitizeModelToolName(identity.ToolID)
+		}
 		args := mergeArguments(nil, baseArgs)
 		specs := extractToolRequirements(entry)
 		args = mergeArguments(args, inferToolArgumentsFromContext(matchCtx, identity, specs, argumentResolver))
@@ -367,6 +371,7 @@ func buildToolCandidates(matchCtx MatchingContext, activeJourney *policy.Journey
 		})
 		candidate := ToolCandidate{
 			ToolID:               identity.ToolID,
+			ModelToolName:        identity.ModelToolName,
 			ProviderID:           identity.ProviderID,
 			ToolName:             identity.ToolName,
 			CatalogEntryID:       identity.CatalogEntryID,
@@ -649,7 +654,9 @@ func selectToolCandidate(ctx context.Context, router *model.Router, matchCtx Mat
 		}
 		prompt := buildToolCandidatePrompt(matchCtx, activeJourney, activeState, guidelines, pool)
 		if generateStructuredWithRetry(ctx, router, prompt, &structured) && strings.TrimSpace(structured.SelectedTool) != "" {
-			return strings.TrimSpace(structured.SelectedTool), strings.TrimSpace(structured.Rationale)
+			if selected := firstMatchingCandidateToolID(pool, structured.SelectedTool); selected != "" {
+				return selected, strings.TrimSpace(structured.Rationale)
+			}
 		}
 	}
 	return pool[0].ToolID, firstNonEmpty(pool[0].Rationale, "best grounded tool candidate")
@@ -745,9 +752,9 @@ func buildToolCandidatePrompt(matchCtx MatchingContext, activeJourney *policy.Jo
 	}
 	sb.WriteString("Candidates:\n")
 	for _, candidate := range candidates {
-		sb.WriteString(fmt.Sprintf("- %s grounded=%t consequential=%t missing=%d invalid=%d rationale=%s\n", candidate.ToolID, candidate.Grounded, candidate.Consequential, len(candidate.MissingIssues), len(candidate.InvalidIssues), candidate.Rationale))
+		sb.WriteString(fmt.Sprintf("- %s grounded=%t consequential=%t missing=%d invalid=%d rationale=%s\n", modelToolNameForCandidate(candidate), candidate.Grounded, candidate.Consequential, len(candidate.MissingIssues), len(candidate.InvalidIssues), candidate.Rationale))
 	}
-	sb.WriteString(`Return JSON: {"selected_tool":"tool_name","rationale":"why"}`)
+	sb.WriteString(`Return JSON using one of the listed tool names: {"selected_tool":"tool_name","rationale":"why"}`)
 	return sb.String()
 }
 
@@ -823,23 +830,39 @@ func firstMatchingCandidateToolID(candidates []ToolCandidate, toolRef string) st
 	if toolRef == "" {
 		return ""
 	}
-	var matches []ToolCandidate
+	var direct []ToolCandidate
+	var byName []ToolCandidate
 	for _, candidate := range candidates {
 		switch {
 		case strings.TrimSpace(candidate.ToolID) == toolRef:
-			matches = append(matches, candidate)
-		case strings.TrimSpace(candidate.ToolName) == toolRef:
-			matches = append(matches, candidate)
+			direct = append(direct, candidate)
+		case strings.TrimSpace(candidate.ModelToolName) == toolRef:
+			direct = append(direct, candidate)
 		case strings.TrimSpace(candidate.CatalogEntryID) == toolRef:
-			matches = append(matches, candidate)
+			direct = append(direct, candidate)
 		case strings.TrimSpace(candidate.ProviderID+":"+candidate.ToolName) == toolRef:
-			matches = append(matches, candidate)
+			direct = append(direct, candidate)
+		case strings.TrimSpace(candidate.ToolName) == toolRef:
+			byName = append(byName, candidate)
 		}
 	}
-	if len(matches) == 1 {
-		return matches[0].ToolID
+	if len(direct) == 1 {
+		return direct[0].ToolID
+	}
+	if len(direct) > 1 {
+		return ""
+	}
+	if len(byName) == 1 {
+		return byName[0].ToolID
 	}
 	return ""
+}
+
+func modelToolNameForCandidate(candidate ToolCandidate) string {
+	if name := strings.TrimSpace(candidate.ModelToolName); name != "" {
+		return name
+	}
+	return candidate.ToolID
 }
 
 func toolCandidatePreparationRationale(activeState *policy.JourneyNode, guidelines []policy.Guideline, entry tool.CatalogEntry, references []string) string {
@@ -938,6 +961,21 @@ func inferToolArgumentsFromText(text string, toolName string, specs map[string]t
 }
 
 func inferArgumentFromToolContext(toolName string, field string, text string, lower string) (any, bool) {
+	if strings.EqualFold(strings.TrimSpace(toolName), "get_current_time") {
+		switch field {
+		case "timezone":
+			if value := extractBetween(text, "timezone ", "?", ".", ",", ";"); value != "" {
+				return value, true
+			}
+		case "location":
+			if value := extractBetween(text, " in ", "?", ".", ",", ";"); value != "" {
+				return value, true
+			}
+			if value := extractBetween(text, " for ", "?", ".", ",", ";"); value != "" {
+				return value, true
+			}
+		}
+	}
 	switch field {
 	case "party_id":
 		if value := extractBetween(text, "party id ", ")", ".", ","); value != "" {

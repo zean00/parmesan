@@ -64,3 +64,35 @@ func TestSyncProviderRejectsDisallowedProviderURL(t *testing.T) {
 		t.Fatal("SyncProvider() error = nil, want provider policy rejection")
 	}
 }
+
+func TestSyncNativeProviderReturnsBuiltInCatalog(t *testing.T) {
+	entries, err := New().WithProviderURLPolicy(toolsecurity.ProviderURLPolicy{
+		AllowedHosts: []string{"tools.example.com"},
+	}).SyncProvider(context.Background(), tool.ProviderBinding{
+		ID:   "builtin",
+		Kind: tool.ProviderNative,
+		Name: "Built-in utilities",
+	})
+	if err != nil {
+		t.Fatalf("SyncProvider() error = %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name != "get_current_time" || entries[0].RuntimeProtocol != "native" {
+		t.Fatalf("entries = %#v, want built-in current time tool", entries)
+	}
+}
+
+func TestSyncNonBuiltinNativeProviderReturnsNoCatalog(t *testing.T) {
+	entries, err := New().WithProviderURLPolicy(toolsecurity.ProviderURLPolicy{
+		AllowedHosts: []string{"tools.example.com"},
+	}).SyncProvider(context.Background(), tool.ProviderBinding{
+		ID:   "native_1",
+		Kind: tool.ProviderNative,
+		Name: "native",
+	})
+	if err != nil {
+		t.Fatalf("SyncProvider() error = %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("entries = %#v, want no catalog entries for non-builtin native provider", entries)
+	}
+}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/getkin/kin-openapi/openapi3"
 
+	"github.com/sahal/parmesan/internal/builtintools"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/toolsecurity"
 )
@@ -31,6 +32,12 @@ func (s *Syncer) WithProviderURLPolicy(policy toolsecurity.ProviderURLPolicy) *S
 }
 
 func (s *Syncer) SyncProvider(ctx context.Context, binding tool.ProviderBinding) ([]tool.CatalogEntry, error) {
+	if binding.Kind == tool.ProviderNative {
+		if strings.TrimSpace(binding.ID) != builtintools.ProviderID {
+			return nil, nil
+		}
+		return builtintools.CatalogEntries(time.Now().UTC()), nil
+	}
 	if err := s.policy.Validate(binding.URI); err != nil {
 		return nil, err
 	}

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/sahal/parmesan/internal/builtintools"
 	"github.com/sahal/parmesan/internal/domain/tool"
 	"github.com/sahal/parmesan/internal/toolsecurity"
 )
@@ -111,5 +112,23 @@ func TestInvokeRejectsDisallowedProviderURL(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("Invoke() error = nil, want provider policy rejection")
+	}
+}
+
+func TestInvokeNativeBuiltInBypassesRemoteURLPolicy(t *testing.T) {
+	invoker := New().WithProviderURLPolicy(toolsecurity.ProviderURLPolicy{
+		AllowedHosts: []string{"tools.example.com"},
+	})
+	out, err := invoker.Invoke(context.Background(),
+		tool.ProviderBinding{ID: builtintools.ProviderID, Kind: tool.ProviderNative},
+		tool.AuthBinding{},
+		tool.CatalogEntry{ID: builtintools.CurrentTimeToolID, ProviderID: builtintools.ProviderID, Name: builtintools.CurrentTimeName, RuntimeProtocol: "native"},
+		map[string]any{"timezone": "UTC+07:00"},
+	)
+	if err != nil {
+		t.Fatalf("Invoke() error = %v", err)
+	}
+	if out["utc_offset"] != "+07:00" {
+		t.Fatalf("output = %#v, want +07:00 offset", out)
 	}
 }

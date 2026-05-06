@@ -67,6 +67,7 @@ type Runner struct {
 	workers          int
 	queueSize        int
 	argumentResolver policyruntime.ToolArgumentResolver
+	toolNameAliases  map[string]string
 	usage            *usageledger.Service
 	defaultOrgID     string
 }
@@ -118,6 +119,11 @@ func (r *Runner) WithExecutionConcurrency(workers int) *Runner {
 
 func (r *Runner) WithToolArgumentResolver(resolver policyruntime.ToolArgumentResolver) *Runner {
 	r.argumentResolver = resolver
+	return r
+}
+
+func (r *Runner) WithToolNameAliases(aliases map[string]string) *Runner {
+	r.toolNameAliases = cloneStringMap(aliases)
 	return r
 }
 
@@ -966,6 +972,7 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 		KnowledgeChunks:   knowledgeChunks,
 		DerivedSignals:    derivedSignals,
 		SessionMode:       sess.Mode,
+		ToolNameAliases:   r.toolNameAliases,
 	})
 	if err != nil {
 		return resolvedView{}, nil, err

@@ -5,12 +5,12 @@ import (
 
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/tool"
-	"github.com/sahal/parmesan/internal/model"
 	semantics "github.com/sahal/parmesan/internal/engine/semantics"
+	"github.com/sahal/parmesan/internal/model"
 )
 
-func buildToolStageResults(ctx context.Context, router *model.Router, matchCtx MatchingContext, state *matchingState, relationships []policy.Relationship, catalog []tool.CatalogEntry, argumentResolver ToolArgumentResolver) (ToolPlanStageResult, ToolDecisionStageResult) {
-	plan, decision := buildToolPlan(ctx, router, matchCtx, state.activeJourney, state.activeJourneyState, state.journeyProgressStage.Decision, state.matchFinalizeStage.MatchedGuidelines, state.toolExposureStage.ExposedTools, state.toolExposureStage.ToolApprovals, relationships, catalog, argumentResolver)
+func buildToolStageResults(ctx context.Context, router *model.Router, matchCtx MatchingContext, state *matchingState, relationships []policy.Relationship, catalog []tool.CatalogEntry, toolModelNames map[string]string, argumentResolver ToolArgumentResolver) (ToolPlanStageResult, ToolDecisionStageResult) {
+	plan, decision := buildToolPlan(ctx, router, matchCtx, state.activeJourney, state.activeJourneyState, state.journeyProgressStage.Decision, state.matchFinalizeStage.MatchedGuidelines, state.toolExposureStage.ExposedTools, state.toolExposureStage.ToolApprovals, relationships, catalog, toolModelNames, argumentResolver)
 	grounding := map[string]semantics.ToolGroundingEvidence{}
 	selection := map[string]semantics.ToolSelectionEvidence{}
 	if len(plan.Candidates) > 0 {

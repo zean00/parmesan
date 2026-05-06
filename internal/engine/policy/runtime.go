@@ -76,7 +76,8 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	ToolExposureStageResult{ExposedTools: exposedTools, ToolApprovals: toolApprovals, UnattendedApprovals: unattendedApprovals, UnattendedIneligibleRequired: unattendedIneligible, UnattendedIneligibleToolBehavior: unattendedBehavior}.Apply(state)
 	exposedAgents, exposedBindings := resolveAgentExposure(bundle.GuidelineAgentAssociations, state.matchFinalizeStage.MatchedGuidelines, state.activeJourneyState, bundle.CapabilityIsolation)
 	AgentExposureStageResult{ExposedAgents: exposedAgents, ExposedBindings: exposedBindings}.Apply(state)
-	toolPlanResult, toolDecisionResult := buildToolStageResults(ctx, options.Router, state.context, state, bundle.Relationships, catalog, options.ArgumentResolver)
+	toolModelNames := BuildToolModelNameMap(catalog, options.ToolNameAliases)
+	toolPlanResult, toolDecisionResult := buildToolStageResults(ctx, options.Router, state.context, state, bundle.Relationships, catalog, toolModelNames, options.ArgumentResolver)
 	toolPlanResult.Apply(state)
 	toolDecisionResult.Apply(state)
 	agentDecisionResult := buildAgentStageResults(ctx, options.Router, state.context, state)
@@ -2527,6 +2528,11 @@ func resolveToolExposure(associations []policy.GuidelineToolAssociation, observa
 			addApprovalAliases(entry, approvals[entry.ProviderID+"."+entry.Name])
 			continue
 		}
+		if toolBuiltinAutoExposed(entry) {
+			out = append(out, entry.Name)
+			addApprovalAliases(entry, "auto")
+			continue
+		}
 		if _, ok := serverAllowed[entry.ProviderID]; ok {
 			if unattendedMode {
 				addUnattendedAliases(unattendedApprovals, entry, toolUnattendedValue(entry, unattendedEligibility))
@@ -2542,6 +2548,11 @@ func resolveToolExposure(associations []policy.GuidelineToolAssociation, observa
 	}
 	sort.Strings(out)
 	return dedupe(out), approvals, unattendedApprovals, unattendedIneligible, unattendedBehavior
+}
+
+func toolBuiltinAutoExposed(entry tool.CatalogEntry) bool {
+	meta := decodeToolMetadata(entry)
+	return strings.EqualFold(entry.ProviderID, "builtin") && truthyValue(meta["builtin"]) && truthyValue(meta["auto_expose"])
 }
 
 func unattendedIneligibleRequiredToolBehavior(unattended policy.UnattendedPolicy) string {
@@ -3516,11 +3527,11 @@ func buildJourneyBacktrackPrompt(ctx MatchingContext, activeJourney *policy.Jour
 	return strings.Join(lines, "\n")
 }
 
-func buildToolDecisionPrompt(ctx MatchingContext, guidelines []policy.Guideline, activeJourney *policy.Journey, activeState *policy.JourneyNode, tools []string) string {
+func buildToolDecisionPrompt(ctx MatchingContext, guidelines []policy.Guideline, activeJourney *policy.Journey, activeState *policy.JourneyNode, candidates []ToolCandidate) string {
 	lines := []string{
 		"Return only JSON.",
 		`Schema: {"selected_tool":"string","approval_required":false,"arguments":{"key":"value"},"rationale":"string"}`,
-		"Choose the single best tool to run for the current turn.",
+		"Choose the single best tool to run for the current turn. Return selected_tool as one of the listed tool names.",
 		"Latest customer message: " + ctx.LatestCustomerText,
 		"Conversation context: " + firstNonEmpty(ctx.ConversationText, ctx.LatestCustomerText),
 	}
@@ -3537,8 +3548,8 @@ func buildToolDecisionPrompt(ctx MatchingContext, guidelines []policy.Guideline,
 		}
 	}
 	lines = append(lines, "Candidate tools:")
-	for _, item := range tools {
-		lines = append(lines, "- "+item)
+	for _, item := range candidates {
+		lines = append(lines, "- "+modelToolNameForCandidate(item))
 	}
 	lines = append(lines,
 		"Example: prefer a tool explicitly referenced by the active journey state over a generic exposed tool.",

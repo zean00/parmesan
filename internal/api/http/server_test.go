@@ -3168,6 +3168,21 @@ func TestRegisterProviderRejectsDisallowedURI(t *testing.T) {
 	}
 }
 
+func TestRegisterNativeProviderAllowsEmptyURI(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil).
+		WithToolProviderSecurity(config.ToolProviderSecurityConfig{AllowedHosts: []string{"tools.example.com"}})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/tools/providers/register", strings.NewReader(`{"id":"native_1","kind":"native","name":"native"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("register provider status = %d, want %d body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+}
+
 func TestACPSessionEndpointsRoundTrip(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)

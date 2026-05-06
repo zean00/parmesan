@@ -267,6 +267,7 @@ type ToolPlanEvaluation struct {
 
 type ToolIdentity struct {
 	ToolID         string `json:"tool_id"`
+	ModelToolName  string `json:"model_tool_name,omitempty"`
 	ProviderID     string `json:"provider_id,omitempty"`
 	ToolName       string `json:"tool_name,omitempty"`
 	CatalogEntryID string `json:"catalog_entry_id,omitempty"`
@@ -274,6 +275,7 @@ type ToolIdentity struct {
 
 type ToolCandidate struct {
 	ToolID               string                `json:"tool_id"`
+	ModelToolName        string                `json:"model_tool_name,omitempty"`
 	ProviderID           string                `json:"provider_id,omitempty"`
 	ToolName             string                `json:"tool_name,omitempty"`
 	CatalogEntryID       string                `json:"catalog_entry_id,omitempty"`
@@ -492,4 +494,5 @@ type ResolveOptions struct {
 	DerivedSignals    []string
 	ArgumentResolver  ToolArgumentResolver
 	SessionMode       string
+	ToolNameAliases   map[string]string
 }
