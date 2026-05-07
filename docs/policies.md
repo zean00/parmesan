@@ -164,6 +164,9 @@ Put differently:
 `domain_boundary`
 - defines the allowed topic boundary and redirect behavior
 
+`context_history`
+- controls which prior turns are included in runtime reasoning context
+
 `soul`
 - response identity and style constraints
 
@@ -194,6 +197,8 @@ Put differently:
 In the current `live_support` sample:
 
 - `domain_boundary.allowed_topics` constrains the agent to support topics
+- `context_history` defaults keep prior out-of-scope and moderated text out of
+  future matching context
 - `soul` keeps the tone concise and professional
 - `guidelines` enforce truthfulness and scope redirect behavior
 - `templates` provide deterministic clarification messages for tracking,
@@ -201,6 +206,31 @@ In the current `live_support` sample:
 
 That bundle is intentionally simple. It is a good starting point because it
 shows the control model without burying it under a large workflow graph.
+
+## Context History
+
+Parmesan stores the full transcript, but policy matching and response
+composition use a selected runtime context. This prevents old out-of-scope
+questions, boundary replies, and moderated customer text from polluting future
+guideline matching, retrieval, tool planning, or response quality checks.
+
+Defaults are enabled and deterministic:
+
+```yaml
+context_history:
+  enabled: true
+  max_turns: 12
+  out_of_scope: exclude_turn
+  moderated: metadata_only
+  keep_latest_customer_turn: true
+```
+
+`metadata_only` keeps moderation metadata and derived safety signals while
+removing all moderated content from the runtime prompt, including text,
+structured email context, and artifact references. Tool context follows the
+same selected-history window, so old tool summaries are removed when the turn
+that produced them is trimmed. The operator transcript, audit trail, approvals,
+tool runs, and stored event history remain unchanged.
 
 ## Capability Exposure
 

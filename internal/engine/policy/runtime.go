@@ -32,8 +32,9 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	}
 	bundle := applyRuntimeBundleDefaults(bundles[0])
 	bundle.Retrievers = bundle.CapabilityIsolation.FilterRetrieverBindings(bundle.Retrievers)
-	matchCtx := buildMatchingContext(events)
-	matchCtx.DerivedSignals = append([]string(nil), options.DerivedSignals...)
+	selectedEvents, historySelection := SelectHistoryEvents(events, bundle, options.ExecutionID)
+	matchCtx := buildMatchingContext(selectedEvents)
+	matchCtx.DerivedSignals = append(matchCtx.DerivedSignals, options.DerivedSignals...)
 	matchCtx.DerivedSignals = append(matchCtx.DerivedSignals, semantics.SignalsForPolicy(bundle.Semantics, matchCtx.LatestCustomerText)...)
 	if len(matchCtx.DerivedSignals) > 0 {
 		matchCtx.DerivedSignals = signalKeys(signalSet(matchCtx.DerivedSignals))
@@ -47,6 +48,7 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	if err != nil {
 		return EngineResult{}, err
 	}
+	state.historySelectionStage = historySelection
 	state.scopeBoundaryStage = scopeBoundary
 	// Journey-node projected guidelines only become active once the active state is known.
 	if state.activeJourney != nil && state.activeJourneyState != nil {
@@ -61,7 +63,9 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 		if mode == "" {
 			mode = inferCompositionMode(state.responseAnalysisStage.CandidateTemplates)
 		}
-		return resolvedViewFromState(bundle, state, mode, arqsFromState(state), nil), nil
+		view := resolvedViewFromState(bundle, state, mode, arqsFromState(state), nil)
+		view.HistorySelectionStage = historySelection
+		return view, nil
 	}
 	agentRetrieverTasks := startAgentRetrieverTasks(ctx, options, bundle.Retrievers, matchCtx)
 	if len(bundle.Retrievers) > 0 {
@@ -135,7 +139,9 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	state.promptSetVersions["tool_plan"] = promptVersion("tool_plan")
 	state.promptSetVersions["tool_decision"] = promptVersion("tool_decision")
 
-	return resolvedViewFromState(bundle, state, mode, arqs, updateIntents), nil
+	view := resolvedViewFromState(bundle, state, mode, arqs, updateIntents)
+	view.HistorySelectionStage = historySelection
+	return view, nil
 }
 
 func signalKeys(values map[string]struct{}) []string {
@@ -436,6 +442,7 @@ func resolvedViewFromState(bundle policy.Bundle, state *matchingState, mode stri
 		RelationshipResolutionStage: state.relationshipResolutionStage,
 		DisambiguationStage:         state.disambiguationStage,
 		ScopeBoundaryStage:          state.scopeBoundaryStage,
+		HistorySelectionStage:       state.historySelectionStage,
 		RetrieverStage:              state.retrieverStage,
 		ResponseAnalysisStage:       state.responseAnalysisStage,
 		ToolExposureStage:           state.toolExposureStage,

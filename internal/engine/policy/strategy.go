@@ -112,6 +112,7 @@ type matchingState struct {
 	relationshipResolutionStage RelationshipResolutionStageResult
 	disambiguationStage         DisambiguationStageResult
 	scopeBoundaryStage          ScopeBoundaryStageResult
+	historySelectionStage       HistorySelectionStageResult
 	retrieverStage              RetrieverStageResult
 	responseAnalysisStage       ResponseAnalysisStageResult
 	toolExposureStage           ToolExposureStageResult
@@ -145,6 +146,7 @@ type matchingSnapshot struct {
 	relationshipResolutionStage RelationshipResolutionStageResult
 	disambiguationStage         DisambiguationStageResult
 	scopeBoundaryStage          ScopeBoundaryStageResult
+	historySelectionStage       HistorySelectionStageResult
 	retrieverStage              RetrieverStageResult
 	responseAnalysisStage       ResponseAnalysisStageResult
 	toolExposureStage           ToolExposureStageResult
@@ -182,6 +184,7 @@ func snapshotFromState(state *matchingState) matchingSnapshot {
 		relationshipResolutionStage: state.relationshipResolutionStage,
 		disambiguationStage:         state.disambiguationStage,
 		scopeBoundaryStage:          state.scopeBoundaryStage,
+		historySelectionStage:       state.historySelectionStage,
 		retrieverStage:              state.retrieverStage,
 		responseAnalysisStage:       state.responseAnalysisStage,
 		toolExposureStage:           state.toolExposureStage,

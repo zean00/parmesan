@@ -630,9 +630,14 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			"retriever_result_hashes": retrieverResultHashes(view),
 		})
 		if _, err := r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "policy.resolved", "completed", exec.ID, exec.TraceID, map[string]any{
-			"bundle_id":          exec.PolicyBundleID,
-			"composition_mode":   view.CompositionMode,
-			"matched_guidelines": idsFromGuidelines(view.MatchFinalizeStage.MatchedGuidelines),
+			"bundle_id":               exec.PolicyBundleID,
+			"composition_mode":        view.CompositionMode,
+			"matched_guidelines":      idsFromGuidelines(view.MatchFinalizeStage.MatchedGuidelines),
+			"history_included":        view.HistorySelectionStage.Included,
+			"history_excluded":        view.HistorySelectionStage.Excluded,
+			"history_metadata_only":   view.HistorySelectionStage.MetadataOnly,
+			"history_original_events": view.HistorySelectionStage.OriginalEvents,
+			"history_selected_events": view.HistorySelectionStage.SelectedEvents,
 		}, nil, false); err != nil {
 			return err
 		}
@@ -973,6 +978,7 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 		DerivedSignals:    derivedSignals,
 		SessionMode:       sess.Mode,
 		ToolNameAliases:   r.toolNameAliases,
+		ExecutionID:       exec.ID,
 	})
 	if err != nil {
 		return resolvedView{}, nil, err
@@ -1010,7 +1016,8 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 			return resolvedView{}, nil, err
 		}
 	}
-	return view, events, nil
+	selectedEvents, _ := policyruntime.SelectHistoryEvents(events, selectedBundles[0], exec.ID)
+	return view, selectedEvents, nil
 }
 
 func (r *Runner) prepareResponse(ctx context.Context, exec execution.TurnExecution, record responsedomain.Response) (resolvedView, []session.Event, map[string]any, responsedomain.Response, error) {

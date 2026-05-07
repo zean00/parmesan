@@ -460,6 +460,7 @@ A minimal useful bundle usually contains:
 - `composition_mode`
 - `no_match`
 - `domain_boundary`
+- `context_history`
 - `soul`
 - `guidelines`
 - `templates`
@@ -467,6 +468,26 @@ A minimal useful bundle usually contains:
 Use policy bundles for behavior, not infrastructure. If you are trying to set a
 model provider, MCP registration, or ACP peer process command here, it belongs
 in the global config instead.
+
+`context_history` is enabled by default and controls the transcript slice used
+for runtime reasoning:
+
+```yaml
+context_history:
+  enabled: true
+  max_turns: 12
+  out_of_scope: exclude_turn
+  moderated: metadata_only
+  keep_latest_customer_turn: true
+```
+
+It does not delete events. Operator-visible transcripts, audits, approvals, and
+tool runs still use the stored full history. When `moderated` is
+`metadata_only`, the runtime keeps moderation metadata and derived safety
+signals but drops all promptable content parts from that event, including text,
+structured email context, and artifact references. Tool summaries are retained
+only while their related conversation turn remains in the selected runtime
+history.
 
 See:
 

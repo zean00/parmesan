@@ -393,6 +393,24 @@ type ScopeBoundaryStageResult struct {
 	Reply          string   `json:"reply,omitempty"`
 }
 
+type HistorySelectionStageResult struct {
+	Enabled        bool                       `json:"enabled"`
+	Included       int                        `json:"included"`
+	Excluded       int                        `json:"excluded"`
+	MetadataOnly   int                        `json:"metadata_only"`
+	OriginalEvents int                        `json:"original_events"`
+	SelectedEvents int                        `json:"selected_events"`
+	Decisions      []HistorySelectionDecision `json:"decisions,omitempty"`
+}
+
+type HistorySelectionDecision struct {
+	EventID string   `json:"event_id,omitempty"`
+	Source  string   `json:"source,omitempty"`
+	Kind    string   `json:"kind,omitempty"`
+	Action  string   `json:"action"`
+	Reasons []string `json:"reasons,omitempty"`
+}
+
 type ARQResult struct {
 	Name    string         `json:"name"`
 	Version string         `json:"version"`
@@ -442,6 +460,7 @@ type EngineResult struct {
 	RelationshipResolutionStage     RelationshipResolutionStageResult
 	DisambiguationStage             DisambiguationStageResult
 	ScopeBoundaryStage              ScopeBoundaryStageResult
+	HistorySelectionStage           HistorySelectionStageResult
 	RetrieverStage                  RetrieverStageResult
 	ResponseAnalysisStage           ResponseAnalysisStageResult
 	ToolExposureStage               ToolExposureStageResult
@@ -495,4 +514,5 @@ type ResolveOptions struct {
 	ArgumentResolver  ToolArgumentResolver
 	SessionMode       string
 	ToolNameAliases   map[string]string
+	ExecutionID       string
 }

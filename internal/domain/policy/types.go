@@ -24,6 +24,7 @@ type Bundle struct {
 	CompositionMode            string                      `json:"composition_mode,omitempty" yaml:"composition_mode,omitempty"`
 	DomainProfile              string                      `json:"domain_profile,omitempty" yaml:"domain_profile,omitempty"`
 	PerceivedPerformance       PerceivedPerformancePolicy  `json:"perceived_performance,omitempty" yaml:"perceived_performance,omitempty"`
+	ContextHistory             ContextHistoryPolicy        `json:"context_history,omitempty" yaml:"context_history,omitempty"`
 	Unattended                 UnattendedPolicy            `json:"unattended,omitempty" yaml:"unattended,omitempty"`
 	Semantics                  SemanticsPolicy             `json:"semantics,omitempty" yaml:"semantics,omitempty"`
 	WatchCapabilities          []WatchCapability           `json:"watch_capabilities,omitempty" yaml:"watch_capabilities,omitempty"`
@@ -70,6 +71,14 @@ type PerceivedPerformancePolicy struct {
 
 type UnattendedPolicy struct {
 	IneligibleRequiredTools string `json:"ineligible_required_tools,omitempty" yaml:"ineligible_required_tools,omitempty"`
+}
+
+type ContextHistoryPolicy struct {
+	Enabled                *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	MaxTurns               int    `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
+	OutOfScope             string `json:"out_of_scope,omitempty" yaml:"out_of_scope,omitempty"`
+	Moderated              string `json:"moderated,omitempty" yaml:"moderated,omitempty"`
+	KeepLatestCustomerTurn *bool  `json:"keep_latest_customer_turn,omitempty" yaml:"keep_latest_customer_turn,omitempty"`
 }
 
 type SemanticsPolicy struct {

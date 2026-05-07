@@ -9780,39 +9780,40 @@ func (s *Server) mediaAuditTimelinePayload(ctx context.Context, record audit.Rec
 }
 
 type resolvedPolicyResponse struct {
-	BundleID             string                            `json:"bundle_id,omitempty"`
-	PolicySnapshotID     string                            `json:"policy_snapshot_id,omitempty"`
-	ProposalID           string                            `json:"proposal_id,omitempty"`
-	RolloutID            string                            `json:"rollout_id,omitempty"`
-	SelectionReason      string                            `json:"selection_reason,omitempty"`
-	CompositionMode      string                            `json:"composition_mode,omitempty"`
-	NoMatch              string                            `json:"no_match,omitempty"`
-	MatchedObservations  []string                          `json:"matched_observations,omitempty"`
-	MatchedGuidelines    []string                          `json:"matched_guidelines,omitempty"`
-	SuppressedGuidelines []string                          `json:"suppressed_guidelines,omitempty"`
-	ReapplyGuidelines    []string                          `json:"reapply_guidelines,omitempty"`
-	CustomerBlocked      []string                          `json:"customer_blocked,omitempty"`
-	ActiveJourney        string                            `json:"active_journey,omitempty"`
-	ActiveJourneyState   string                            `json:"active_journey_state,omitempty"`
-	JourneyDecision      string                            `json:"journey_decision,omitempty"`
-	SelectedTool         string                            `json:"selected_tool,omitempty"`
-	ToolCanRun           bool                              `json:"tool_can_run,omitempty"`
-	ToolMissingArgs      []string                          `json:"tool_missing_args,omitempty"`
-	ToolInvalidArgs      []string                          `json:"tool_invalid_args,omitempty"`
-	ToolMissingIssues    []policyruntime.ToolArgumentIssue `json:"tool_missing_issues,omitempty"`
-	ToolInvalidIssues    []policyruntime.ToolArgumentIssue `json:"tool_invalid_issues,omitempty"`
-	ResponseRevision     bool                              `json:"response_revision,omitempty"`
-	ResponseStrict       bool                              `json:"response_strict,omitempty"`
-	ExposedTools         []string                          `json:"exposed_tools,omitempty"`
-	CandidateTemplates   []string                          `json:"candidate_templates,omitempty"`
-	DisambiguationPrompt string                            `json:"disambiguation_prompt,omitempty"`
-	ScopeClassification  string                            `json:"scope_classification,omitempty"`
-	ScopeAction          string                            `json:"scope_action,omitempty"`
-	ScopeReasons         []string                          `json:"scope_reasons,omitempty"`
-	BatchResults         []policyruntime.BatchResult       `json:"batch_results,omitempty"`
-	PromptSetVersions    map[string]string                 `json:"prompt_set_versions,omitempty"`
-	ARQResults           []string                          `json:"arq_results,omitempty"`
-	CapabilityIsolation  map[string]any                    `json:"capability_isolation,omitempty"`
+	BundleID             string                                    `json:"bundle_id,omitempty"`
+	PolicySnapshotID     string                                    `json:"policy_snapshot_id,omitempty"`
+	ProposalID           string                                    `json:"proposal_id,omitempty"`
+	RolloutID            string                                    `json:"rollout_id,omitempty"`
+	SelectionReason      string                                    `json:"selection_reason,omitempty"`
+	CompositionMode      string                                    `json:"composition_mode,omitempty"`
+	NoMatch              string                                    `json:"no_match,omitempty"`
+	MatchedObservations  []string                                  `json:"matched_observations,omitempty"`
+	MatchedGuidelines    []string                                  `json:"matched_guidelines,omitempty"`
+	SuppressedGuidelines []string                                  `json:"suppressed_guidelines,omitempty"`
+	ReapplyGuidelines    []string                                  `json:"reapply_guidelines,omitempty"`
+	CustomerBlocked      []string                                  `json:"customer_blocked,omitempty"`
+	ActiveJourney        string                                    `json:"active_journey,omitempty"`
+	ActiveJourneyState   string                                    `json:"active_journey_state,omitempty"`
+	JourneyDecision      string                                    `json:"journey_decision,omitempty"`
+	SelectedTool         string                                    `json:"selected_tool,omitempty"`
+	ToolCanRun           bool                                      `json:"tool_can_run,omitempty"`
+	ToolMissingArgs      []string                                  `json:"tool_missing_args,omitempty"`
+	ToolInvalidArgs      []string                                  `json:"tool_invalid_args,omitempty"`
+	ToolMissingIssues    []policyruntime.ToolArgumentIssue         `json:"tool_missing_issues,omitempty"`
+	ToolInvalidIssues    []policyruntime.ToolArgumentIssue         `json:"tool_invalid_issues,omitempty"`
+	ResponseRevision     bool                                      `json:"response_revision,omitempty"`
+	ResponseStrict       bool                                      `json:"response_strict,omitempty"`
+	ExposedTools         []string                                  `json:"exposed_tools,omitempty"`
+	CandidateTemplates   []string                                  `json:"candidate_templates,omitempty"`
+	DisambiguationPrompt string                                    `json:"disambiguation_prompt,omitempty"`
+	ScopeClassification  string                                    `json:"scope_classification,omitempty"`
+	ScopeAction          string                                    `json:"scope_action,omitempty"`
+	ScopeReasons         []string                                  `json:"scope_reasons,omitempty"`
+	HistorySelection     policyruntime.HistorySelectionStageResult `json:"history_selection,omitempty"`
+	BatchResults         []policyruntime.BatchResult               `json:"batch_results,omitempty"`
+	PromptSetVersions    map[string]string                         `json:"prompt_set_versions,omitempty"`
+	ARQResults           []string                                  `json:"arq_results,omitempty"`
+	CapabilityIsolation  map[string]any                            `json:"capability_isolation,omitempty"`
 }
 
 func (s *Server) resolveExecutionView(ctx context.Context, exec execution.TurnExecution, bundleID string) (resolvedPolicyResponse, error) {
@@ -9836,6 +9837,7 @@ func (s *Server) resolveExecutionView(ctx context.Context, exec execution.TurnEx
 	view, err := policyruntime.ResolveWithOptions(ctx, events, selected, journeyInstances, catalog, policyruntime.ResolveOptions{
 		Router:          s.router,
 		ToolNameAliases: s.toolNameAliases,
+		ExecutionID:     exec.ID,
 	})
 	if err != nil {
 		return resolvedPolicyResponse{}, err
@@ -9901,6 +9903,7 @@ func (s *Server) executionQualityPayload(ctx context.Context, exec execution.Tur
 		KnowledgeChunks:   knowledgeChunks,
 		DerivedSignals:    s.qualityDerivedSignals(ctx, exec.SessionID),
 		ToolNameAliases:   s.toolNameAliases,
+		ExecutionID:       exec.ID,
 	})
 	if err != nil {
 		return nil, err
@@ -10209,6 +10212,7 @@ func toResolvedPolicyResponse(exec execution.TurnExecution, view policyruntime.E
 		ScopeClassification:  view.ScopeBoundaryStage.Classification,
 		ScopeAction:          view.ScopeBoundaryStage.Action,
 		ScopeReasons:         append([]string(nil), view.ScopeBoundaryStage.Reasons...),
+		HistorySelection:     view.HistorySelectionStage,
 		BatchResults:         append([]policyruntime.BatchResult(nil), view.BatchResults...),
 		PromptSetVersions:    cloneStringMap(view.PromptSetVersions),
 		ARQResults:           arqNames(view.ARQResults),

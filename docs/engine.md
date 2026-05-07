@@ -388,6 +388,14 @@ They do not affect:
 - moderation
 - delegation verification
 
+Before policy matching, Parmesan runs a deterministic context-history selector.
+The full transcript remains stored, but runtime matching context excludes prior
+out-of-scope turns, converts moderated customer events to metadata-only safety
+signals, and applies the configured recency window. Metadata-only events do not
+carry text, structured context, or artifact references into the prompt. Tool
+summaries are also scoped to the selected turns so stale tool output is not kept
+after the related turn is trimmed.
+
 The normal `composePrompt()` path now layers:
 
 1. quality and policy guidance
