@@ -1248,6 +1248,55 @@ func TestComposePromptInjectsCurrentTimeWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestComposePromptIncludesActiveTurnNexusLocationContext(t *testing.T) {
+	prompt := composePrompt(resolvedView{}, []session.Event{{
+		Source:  "customer",
+		Kind:    "message",
+		Content: []session.ContentPart{{Type: "text", Text: "I am here"}},
+	}, {
+		Source: "customer",
+		Kind:   "message",
+		Content: []session.ContentPart{
+			{Type: "text", Text: "Use this location"},
+			{
+				Type:        session.NexusLocationContentType,
+				ContentType: session.NexusLocationContentType,
+				Content:     `{"latitude":-6.2,"longitude":106.816666,"name":"Jakarta","address":"Central Jakarta"}`,
+			},
+		},
+	}}, nil, responsedomain.Response{})
+
+	if !strings.Contains(prompt, "Trusted location context:") ||
+		!strings.Contains(prompt, "Jakarta: -6.200000, 106.816666") ||
+		!strings.Contains(prompt, "https://maps.google.com/?q=-6.200000,106.816666") {
+		t.Fatalf("prompt = %q, want trusted location context", prompt)
+	}
+}
+
+func TestComposePromptDoesNotReuseStaleLocationContext(t *testing.T) {
+	prompt := composePrompt(resolvedView{}, []session.Event{{
+		Source: "customer",
+		Kind:   "message",
+		Content: []session.ContentPart{
+			{Type: "text", Text: "Use this location"},
+			{Type: "structured_data", Data: map[string]any{
+				"kind":      "location",
+				"latitude":  -6.2,
+				"longitude": 106.816666,
+				"name":      "Jakarta",
+			}},
+		},
+	}, {
+		Source:  "customer",
+		Kind:    "message",
+		Content: []session.ContentPart{{Type: "text", Text: "Now answer without location"}},
+	}}, nil, responsedomain.Response{})
+
+	if strings.Contains(prompt, "Trusted location context:") || strings.Contains(prompt, "Jakarta") {
+		t.Fatalf("prompt = %q, want no stale location context", prompt)
+	}
+}
+
 func TestCurrentTimePromptUsesTrustedCustomerTimezone(t *testing.T) {
 	enabled := true
 	now := time.Date(2026, 5, 8, 3, 4, 5, 0, time.UTC)

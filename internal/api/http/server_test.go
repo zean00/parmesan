@@ -4169,6 +4169,91 @@ func TestACPMessageIngressRejectsStructuredOnlyContent(t *testing.T) {
 	}
 }
 
+func TestACPMessageIngressAcceptsNexusLocationOnlyContent(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_location", Channel: "whatsapp", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/sessions/sess_location/messages", strings.NewReader(`{
+		"id":"evt_location",
+		"content":[
+			{"content_type":"application/vnd.nexus.location+json","content":"{\"latitude\":-6.2,\"longitude\":106.816666,\"name\":\"Jakarta\",\"address\":\"Central Jakarta\"}"}
+		]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	waitFor(t, time.Second, func() bool {
+		events, err := repo.ListEvents(context.Background(), "sess_location")
+		return err == nil && len(events) == 1 && len(events[0].Content) == 2
+	})
+	events, err := repo.ListEvents(context.Background(), "sess_location")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := events[0].Content[0].Text; !strings.Contains(got, "Jakarta") || !strings.Contains(got, "https://maps.google.com/?q=-6.200000,106.816666") {
+		t.Fatalf("fallback text = %q, want rendered Nexus location", got)
+	}
+	if events[0].Content[1].ContentType != session.NexusLocationContentType {
+		t.Fatalf("content type = %q, want Nexus location MIME", events[0].Content[1].ContentType)
+	}
+}
+
+func TestACPMessageIngressAcceptsNexusLocationObjectContent(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_location_object", Channel: "telegram", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/sessions/sess_location_object/messages", strings.NewReader(`{
+		"id":"evt_location_object",
+		"content":[
+			{"content_type":"application/vnd.nexus.location+json","content":{"latitude":-6.2,"longitude":106.816666,"name":"Jakarta"}}
+		]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	waitFor(t, time.Second, func() bool {
+		events, err := repo.ListEvents(context.Background(), "sess_location_object")
+		return err == nil && len(events) == 1 && len(events[0].Content) == 2
+	})
+	events, err := repo.ListEvents(context.Background(), "sess_location_object")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := events[0].Content[0].Text; !strings.Contains(got, "Jakarta") || !strings.Contains(got, "https://maps.google.com/?q=-6.200000,106.816666") {
+		t.Fatalf("fallback text = %q, want rendered Nexus location", got)
+	}
+}
+
 func TestACPMessageIngressMissingSessionReturnsNotFound(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)

@@ -1,6 +1,8 @@
 package session
 
 import (
+	"bytes"
+	"encoding/json"
 	"time"
 
 	"github.com/sahal/parmesan/internal/domain/artifactmeta"
@@ -17,11 +19,37 @@ const (
 )
 
 type ContentPart struct {
-	Type string         `json:"type"`
-	Text string         `json:"text,omitempty"`
-	URL  string         `json:"url,omitempty"`
-	Data map[string]any `json:"data,omitempty"`
-	Meta map[string]any `json:"meta,omitempty"`
+	Type        string         `json:"type"`
+	ContentType string         `json:"content_type,omitempty"`
+	MimeType    string         `json:"mime_type,omitempty"`
+	Content     string         `json:"content,omitempty"`
+	Text        string         `json:"text,omitempty"`
+	URL         string         `json:"url,omitempty"`
+	Data        map[string]any `json:"data,omitempty"`
+	Meta        map[string]any `json:"meta,omitempty"`
+}
+
+func (p *ContentPart) UnmarshalJSON(data []byte) error {
+	type contentPartAlias ContentPart
+	var raw struct {
+		contentPartAlias
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = ContentPart(raw.contentPartAlias)
+	content := bytes.TrimSpace(raw.Content)
+	if len(content) == 0 || bytes.Equal(content, []byte("null")) {
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(content, &text); err == nil {
+		p.Content = text
+		return nil
+	}
+	p.Content = string(content)
+	return nil
 }
 
 type Event struct {

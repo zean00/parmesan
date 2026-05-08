@@ -410,6 +410,14 @@ policy bundle and is disabled by default. When enabled, it uses UTC unless a
 trusted prompt-safe customer timezone is available. Trusted timezone values can
 be IANA names or fixed UTC offsets such as `UTC+07:00`.
 
+For channel context, `composePrompt()` also recognizes active-turn trusted
+email metadata and Nexus-compatible location parts. Location parts use
+`application/vnd.nexus.location+json` with `content` as either a JSON object or
+an escaped JSON string containing `latitude`, `longitude`, and optional
+`name`/`address`, or equivalent `structured_data` with `kind: "location"`.
+Only the latest customer message can contribute trusted location context, so a
+later chat/SMS follow-up does not inherit old coordinates.
+
 The response-capability render path uses the same style profile after SOUL and
 before normalized facts, capability instructions, and grounded examples.
 

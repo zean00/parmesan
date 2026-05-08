@@ -8855,8 +8855,17 @@ func normalizeACPMessageContent(text string, content []session.ContentPart) ([]s
 	}
 	for _, part := range content {
 		part.Type = strings.TrimSpace(part.Type)
+		part.ContentType = strings.TrimSpace(part.ContentType)
+		part.MimeType = strings.TrimSpace(part.MimeType)
+		part.Content = strings.TrimSpace(part.Content)
 		part.Text = strings.TrimSpace(part.Text)
 		part.URL = strings.TrimSpace(part.URL)
+		if part.Type == "" && part.ContentType != "" {
+			part.Type = part.ContentType
+		}
+		if part.Type == "" && part.MimeType != "" {
+			part.Type = part.MimeType
+		}
 		if strings.EqualFold(part.Type, "text/plain") {
 			part.Type = "text"
 		}
@@ -8871,6 +8880,14 @@ func normalizeACPMessageContent(text string, content []session.ContentPart) ([]s
 			continue
 		}
 		out = append(out, part)
+	}
+	if len(content) > 0 && strings.TrimSpace(extractTextParts(out)) == "" {
+		for _, part := range out {
+			if location, ok := session.LocationFromContentPart(part); ok {
+				out = append([]session.ContentPart{{Type: "text", Text: session.LocationText(location)}}, out...)
+				break
+			}
+		}
 	}
 	if len(content) > 0 && strings.TrimSpace(text) != "" && strings.TrimSpace(extractTextParts(out)) == "" {
 		out = append([]session.ContentPart{{Type: "text", Text: strings.TrimSpace(text)}}, out...)

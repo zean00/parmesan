@@ -1668,6 +1668,9 @@ func (r *Runner) ingestMediaAssets(ctx context.Context, events []session.Event) 
 }
 
 func isMediaContentPart(part session.ContentPart) bool {
+	if session.IsLocationContentPart(part) {
+		return false
+	}
 	switch strings.ToLower(strings.TrimSpace(part.Type)) {
 	case "", "text", "text/plain", "text/html", "structured_data", "artifact_ref":
 		return false
@@ -2951,6 +2954,9 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 	if ctx := emailContextPrompt(events); ctx != "" {
 		parts = append(parts, "Trusted email context:\n"+ctx)
 	}
+	if ctx := locationContextPrompt(events); ctx != "" {
+		parts = append(parts, "Trusted location context:\n"+ctx)
+	}
 	responsePlan := quality.BuildResponsePlan(view)
 	if plan := quality.FormatResponsePlan(responsePlan); plan != "" {
 		parts = append(parts, "Response quality plan: "+plan)
@@ -3115,6 +3121,30 @@ func emailContextLines(event session.Event) []string {
 			}
 			lines = append(lines, artifact)
 		}
+	}
+	return lines
+}
+
+func locationContextPrompt(events []session.Event) string {
+	event := latestCustomerMessageEvent(events)
+	if event == nil {
+		return ""
+	}
+	lines := locationContextLines(*event)
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
+}
+
+func locationContextLines(event session.Event) []string {
+	var lines []string
+	for _, part := range event.Content {
+		location, ok := session.LocationFromContentPart(part)
+		if !ok {
+			continue
+		}
+		lines = append(lines, session.LocationText(location))
 	}
 	return lines
 }
