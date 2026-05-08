@@ -1887,6 +1887,47 @@ func TestCustomerPreferenceLifecycleConfirmRejectExpire(t *testing.T) {
 	}
 }
 
+func TestCustomerMemoryListAndLifecycle(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	item := customer.MemoryItem{
+		ID: "mem_1", AgentID: "agent_1", CustomerID: "cust_1", Category: customer.MemoryCategoryFact, Key: "location", Value: "Jakarta",
+		Source: "conversation_explicit", Confidence: 1, Status: customer.MemoryStatusPending, Sensitivity: customer.MemorySensitivityLow, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := repo.SaveCustomerMemoryItem(context.Background(), item, customer.MemoryEvent{
+		ID: "mevt_1", MemoryID: "mem_1", AgentID: "agent_1", CustomerID: "cust_1", Category: customer.MemoryCategoryFact, Key: "location", Value: "Jakarta", Action: "pending", Source: "conversation_explicit", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/operator/customers/cust_1/memory?agent_id=agent_1&status=pending", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list memory status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0]["key"] != "location" {
+		t.Fatalf("memory list = %#v, want location", items)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/customers/cust_1/memory/fact/location/confirm", strings.NewReader(`{"agent_id":"agent_1","operator_id":"op_1"}`))
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("confirm memory status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	updated, err := repo.GetCustomerMemoryItem(context.Background(), "agent_1", "cust_1", customer.MemoryCategoryFact, "location")
+	if err != nil || updated.Status != customer.MemoryStatusActive || !updated.PromptSafe || updated.LastConfirmedAt == nil {
+		t.Fatalf("updated memory = %#v err=%v, want active prompt-safe", updated, err)
+	}
+}
+
 func TestCustomerPreferenceLineageEndpoint(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)

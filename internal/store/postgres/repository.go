@@ -626,10 +626,288 @@ func (c *Client) SaveCustomerPreference(ctx context.Context, pref customer.Prefe
 	if err := c.savePolicyEdgesQuery(ctx, db, edges); err != nil {
 		return err
 	}
+	if err := c.savePreferenceMemoryProjection(ctx, db, pref, event); err != nil {
+		return err
+	}
 	if event.ID != "" {
 		return c.AppendCustomerPreferenceEvent(ctx, event)
 	}
 	return nil
+}
+
+func (c *Client) SaveCustomerMemoryItem(ctx context.Context, item customer.MemoryItem, event customer.MemoryEvent) error {
+	db := c.sessionQuery()
+	if err := c.saveCustomerMemoryItemQuery(ctx, db, item, event); err != nil {
+		return err
+	}
+	if item.Category == customer.MemoryCategoryPreference {
+		return c.saveMemoryPreferenceProjection(ctx, db, item, event)
+	}
+	return nil
+}
+
+func (c *Client) saveCustomerMemoryItemQuery(ctx context.Context, db sessionEventQuerier, item customer.MemoryItem, event customer.MemoryEvent) error {
+	evidence, err := json.Marshal(item.EvidenceRefs)
+	if err != nil {
+		return err
+	}
+	metadata := metadataJSON(item.Metadata, item.ArtifactMeta)
+	_, err = db.Exec(ctx, `
+		INSERT INTO customer_memory_items (id, agent_id, customer_id, category, key, value, source, confidence, status, sensitivity, prompt_safe, evidence_refs_json, metadata_json, valid_from, valid_until, observed_at, last_seen_at, last_confirmed_at, expires_at, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+		ON CONFLICT (agent_id, customer_id, category, key) DO UPDATE
+		SET value = EXCLUDED.value,
+		    source = EXCLUDED.source,
+		    confidence = EXCLUDED.confidence,
+		    status = EXCLUDED.status,
+		    sensitivity = EXCLUDED.sensitivity,
+		    prompt_safe = EXCLUDED.prompt_safe,
+		    evidence_refs_json = EXCLUDED.evidence_refs_json,
+		    metadata_json = EXCLUDED.metadata_json,
+		    valid_from = EXCLUDED.valid_from,
+		    valid_until = EXCLUDED.valid_until,
+		    observed_at = EXCLUDED.observed_at,
+		    last_seen_at = EXCLUDED.last_seen_at,
+		    last_confirmed_at = EXCLUDED.last_confirmed_at,
+		    expires_at = EXCLUDED.expires_at,
+		    updated_at = EXCLUDED.updated_at
+	`, item.ID, item.AgentID, item.CustomerID, item.Category, item.Key, item.Value, item.Source, item.Confidence, item.Status, item.Sensitivity, item.PromptSafe, evidence, metadata, item.ValidFrom, item.ValidUntil, nullTime(item.ObservedAt), nullTime(item.LastSeenAt), item.LastConfirmedAt, item.ExpiresAt, item.CreatedAt, item.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	if event.ID != "" {
+		return c.AppendCustomerMemoryEvent(ctx, event)
+	}
+	return nil
+}
+
+func (c *Client) GetCustomerMemoryItem(ctx context.Context, agentID string, customerID string, category string, key string) (customer.MemoryItem, error) {
+	db := c.sessionQuery()
+	row := db.QueryRow(ctx, `
+		SELECT id, agent_id, customer_id, category, key, value, source, confidence, status, sensitivity, prompt_safe, evidence_refs_json, metadata_json, valid_from, valid_until, COALESCE(observed_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(last_seen_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), last_confirmed_at, expires_at, created_at, updated_at
+		FROM customer_memory_items
+		WHERE agent_id = $1 AND customer_id = $2 AND category = $3 AND key = $4
+	`, agentID, customerID, category, key)
+	var item customer.MemoryItem
+	var evidence, metadata []byte
+	if err := row.Scan(&item.ID, &item.AgentID, &item.CustomerID, &item.Category, &item.Key, &item.Value, &item.Source, &item.Confidence, &item.Status, &item.Sensitivity, &item.PromptSafe, &evidence, &metadata, &item.ValidFrom, &item.ValidUntil, &item.ObservedAt, &item.LastSeenAt, &item.LastConfirmedAt, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return customer.MemoryItem{}, errors.New("customer memory item not found")
+		}
+		return customer.MemoryItem{}, err
+	}
+	_ = json.Unmarshal(evidence, &item.EvidenceRefs)
+	item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
+	return item, nil
+}
+
+func (c *Client) ListCustomerMemoryItems(ctx context.Context, query customer.MemoryQuery) ([]customer.MemoryItem, error) {
+	db := c.sessionQuery()
+	rows, err := db.Query(ctx, `
+		SELECT id, agent_id, customer_id, category, key, value, source, confidence, status, sensitivity, prompt_safe, evidence_refs_json, metadata_json, valid_from, valid_until, COALESCE(observed_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(last_seen_at, TIMESTAMPTZ '0001-01-01 00:00:00+00'), last_confirmed_at, expires_at, created_at, updated_at
+		FROM customer_memory_items
+		WHERE ($1 = '' OR agent_id = $1)
+		  AND ($2 = '' OR customer_id = $2)
+		  AND ($3 = '' OR category = $3)
+		  AND ($4 = '' OR status = $4)
+		  AND ($5 = '' OR key = $5)
+		  AND ($6 = '' OR source = $6)
+		  AND ($7::float8 = 0 OR confidence >= $7)
+		  AND (NOT $8::bool OR prompt_safe)
+		  AND ($9::bool OR ((expires_at IS NULL OR expires_at > NOW()) AND (valid_until IS NULL OR valid_until > NOW())))
+		ORDER BY updated_at DESC
+		LIMIT NULLIF($10, 0)
+	`, query.AgentID, query.CustomerID, query.Category, query.Status, query.Key, query.Source, query.MinConfidence, query.PromptSafeOnly, query.IncludeExpired, query.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []customer.MemoryItem
+	for rows.Next() {
+		var item customer.MemoryItem
+		var evidence, metadata []byte
+		if err := rows.Scan(&item.ID, &item.AgentID, &item.CustomerID, &item.Category, &item.Key, &item.Value, &item.Source, &item.Confidence, &item.Status, &item.Sensitivity, &item.PromptSafe, &evidence, &metadata, &item.ValidFrom, &item.ValidUntil, &item.ObservedAt, &item.LastSeenAt, &item.LastConfirmedAt, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(evidence, &item.EvidenceRefs)
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) AppendCustomerMemoryEvent(ctx context.Context, event customer.MemoryEvent) error {
+	db := c.sessionQuery()
+	evidence, err := json.Marshal(event.EvidenceRefs)
+	if err != nil {
+		return err
+	}
+	metadata := metadataJSON(event.Metadata, event.ArtifactMeta)
+	_, err = db.Exec(ctx, `
+		INSERT INTO customer_memory_events (id, memory_id, agent_id, customer_id, category, key, value, action, source, confidence, evidence_refs_json, metadata_json, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+	`, event.ID, nullString(event.MemoryID), event.AgentID, event.CustomerID, nullString(event.Category), nullString(event.Key), nullString(event.Value), event.Action, event.Source, event.Confidence, evidence, metadata, event.CreatedAt)
+	return err
+}
+
+func (c *Client) ListCustomerMemoryEvents(ctx context.Context, query customer.MemoryQuery) ([]customer.MemoryEvent, error) {
+	db := c.sessionQuery()
+	rows, err := db.Query(ctx, `
+		SELECT id, COALESCE(memory_id,''), agent_id, customer_id, COALESCE(category,''), COALESCE(key,''), COALESCE(value,''), action, source, confidence, evidence_refs_json, metadata_json, created_at
+		FROM customer_memory_events
+		WHERE ($1 = '' OR agent_id = $1)
+		  AND ($2 = '' OR customer_id = $2)
+		  AND ($3 = '' OR category = $3)
+		  AND ($4 = '' OR key = $4)
+		  AND ($5 = '' OR source = $5)
+		ORDER BY created_at DESC
+		LIMIT NULLIF($6, 0)
+	`, query.AgentID, query.CustomerID, query.Category, query.Key, query.Source, query.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []customer.MemoryEvent
+	for rows.Next() {
+		var item customer.MemoryEvent
+		var evidence, metadata []byte
+		if err := rows.Scan(&item.ID, &item.MemoryID, &item.AgentID, &item.CustomerID, &item.Category, &item.Key, &item.Value, &item.Action, &item.Source, &item.Confidence, &evidence, &metadata, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(evidence, &item.EvidenceRefs)
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) savePreferenceMemoryProjection(ctx context.Context, db sessionEventQuerier, pref customer.Preference, prefEvent customer.PreferenceEvent) error {
+	now := pref.UpdatedAt
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	item := customer.MemoryItem{
+		ID:              "cmem_" + pref.ID,
+		AgentID:         pref.AgentID,
+		CustomerID:      pref.CustomerID,
+		Category:        customer.MemoryCategoryPreference,
+		Key:             pref.Key,
+		Value:           pref.Value,
+		Source:          pref.Source,
+		Confidence:      pref.Confidence,
+		Status:          pref.Status,
+		Sensitivity:     customer.MemorySensitivityLow,
+		PromptSafe:      pref.Status == customer.PreferenceStatusActive,
+		EvidenceRefs:    append([]string(nil), pref.EvidenceRefs...),
+		Metadata:        clonePostgresMap(pref.Metadata),
+		ObservedAt:      pref.CreatedAt,
+		LastSeenAt:      now,
+		LastConfirmedAt: pref.LastConfirmedAt,
+		ExpiresAt:       pref.ExpiresAt,
+		CreatedAt:       pref.CreatedAt,
+		UpdatedAt:       pref.UpdatedAt,
+	}
+	event := customer.MemoryEvent{}
+	if prefEvent.ID != "" {
+		event = customer.MemoryEvent{
+			ID:           "cmem_" + prefEvent.ID,
+			MemoryID:     item.ID,
+			AgentID:      prefEvent.AgentID,
+			CustomerID:   prefEvent.CustomerID,
+			Category:     customer.MemoryCategoryPreference,
+			Key:          prefEvent.Key,
+			Value:        prefEvent.Value,
+			Action:       prefEvent.Action,
+			Source:       prefEvent.Source,
+			Confidence:   prefEvent.Confidence,
+			EvidenceRefs: append([]string(nil), prefEvent.EvidenceRefs...),
+			Metadata:     clonePostgresMap(prefEvent.Metadata),
+			CreatedAt:    prefEvent.CreatedAt,
+		}
+	}
+	return c.saveCustomerMemoryItemQuery(ctx, db, item, event)
+}
+
+func (c *Client) saveMemoryPreferenceProjection(ctx context.Context, db sessionEventQuerier, item customer.MemoryItem, event customer.MemoryEvent) error {
+	status := item.Status
+	if status == customer.MemoryStatusBlocked {
+		status = customer.PreferenceStatusRejected
+	}
+	evidence, err := json.Marshal(item.EvidenceRefs)
+	if err != nil {
+		return err
+	}
+	metadata := metadataJSON(item.Metadata, item.ArtifactMeta)
+	_, err = db.Exec(ctx, `
+		INSERT INTO customer_preferences (id, agent_id, customer_id, key, value, source, confidence, status, evidence_refs_json, metadata_json, last_confirmed_at, expires_at, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		ON CONFLICT (agent_id, customer_id, key) DO UPDATE
+		SET value = EXCLUDED.value,
+		    source = EXCLUDED.source,
+		    confidence = EXCLUDED.confidence,
+		    status = EXCLUDED.status,
+		    evidence_refs_json = EXCLUDED.evidence_refs_json,
+		    metadata_json = EXCLUDED.metadata_json,
+		    last_confirmed_at = EXCLUDED.last_confirmed_at,
+		    expires_at = EXCLUDED.expires_at,
+		    updated_at = EXCLUDED.updated_at
+	`, "cpref_"+strings.TrimPrefix(item.ID, "cmem_"), item.AgentID, item.CustomerID, item.Key, item.Value, item.Source, item.Confidence, status, evidence, metadata, item.LastConfirmedAt, item.ExpiresAt, item.CreatedAt, item.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	pref := customer.Preference{
+		ID:              "cpref_" + strings.TrimPrefix(item.ID, "cmem_"),
+		AgentID:         item.AgentID,
+		CustomerID:      item.CustomerID,
+		Key:             item.Key,
+		Value:           item.Value,
+		Source:          item.Source,
+		Confidence:      item.Confidence,
+		Status:          status,
+		EvidenceRefs:    append([]string(nil), item.EvidenceRefs...),
+		Metadata:        clonePostgresMap(item.Metadata),
+		LastConfirmedAt: item.LastConfirmedAt,
+		ExpiresAt:       item.ExpiresAt,
+		CreatedAt:       item.CreatedAt,
+		UpdatedAt:       item.UpdatedAt,
+	}
+	prefEvent := customer.PreferenceEvent{
+		ID:           "cpevt_" + strings.TrimPrefix(event.ID, "cmemt_"),
+		PreferenceID: pref.ID,
+		AgentID:      event.AgentID,
+		CustomerID:   event.CustomerID,
+		Key:          event.Key,
+		Value:        event.Value,
+		Action:       event.Action,
+		Source:       event.Source,
+		Confidence:   event.Confidence,
+		EvidenceRefs: append([]string(nil), event.EvidenceRefs...),
+		Metadata:     clonePostgresMap(event.Metadata),
+		CreatedAt:    event.CreatedAt,
+	}
+	if event.ID == "" {
+		prefEvent = customer.PreferenceEvent{}
+	}
+	artifacts, edges := controlgraph.CustomerPreference(pref, prefEvent)
+	if err := c.savePolicyArtifactsQuery(ctx, db, artifacts); err != nil {
+		return err
+	}
+	if err := c.savePolicyEdgesQuery(ctx, db, edges); err != nil {
+		return err
+	}
+	if event.ID == "" {
+		return nil
+	}
+	evidence, err = json.Marshal(prefEvent.EvidenceRefs)
+	if err != nil {
+		return err
+	}
+	metadata = metadataJSON(prefEvent.Metadata, prefEvent.ArtifactMeta)
+	_, err = db.Exec(ctx, `
+		INSERT INTO customer_preference_events (id, preference_id, agent_id, customer_id, key, value, action, source, confidence, evidence_refs_json, metadata_json, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+	`, prefEvent.ID, nullString(prefEvent.PreferenceID), prefEvent.AgentID, prefEvent.CustomerID, prefEvent.Key, prefEvent.Value, prefEvent.Action, prefEvent.Source, prefEvent.Confidence, evidence, metadata, prefEvent.CreatedAt)
+	return err
 }
 
 func (c *Client) GetCustomerPreference(ctx context.Context, agentID string, customerID string, key string) (customer.Preference, error) {
@@ -3734,6 +4012,17 @@ func decodeMetadata(raw []byte) (artifactmeta.Meta, map[string]any, error) {
 	}
 	meta, metadata := artifactmeta.Extract(metadata)
 	return meta, metadata, nil
+}
+
+func clonePostgresMap(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func executionMetadata(exec execution.TurnExecution) map[string]any {

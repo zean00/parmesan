@@ -468,9 +468,14 @@ This is post-turn extraction that produces durable learning artifacts such as:
 
 - `preferred_name`
 - `contact_channel`
+- prompt-safe customer facts
+- temporary customer state with an expiration
 
-It feeds the learning system and customer preferences. It does not directly run
-tools or verify delegated resources.
+It feeds customer memory and the compatibility preference view. Deterministic
+normalization handles clear low-risk statements first; an optional structured
+model pass can suggest reviewable memory when rules find no clear signal. Only
+active, non-expired, prompt-safe memory is injected into future runtime prompts.
+It does not directly run tools or verify delegated resources.
 
 ### 2. Tool-Argument Extraction
 
@@ -499,7 +504,7 @@ tool argument inference.
 
 The distinction matters:
 
-- learning extraction creates durable memory/proposals
+- learning extraction creates durable customer memory/proposals
 - tool-argument extraction helps run tools
 - delegation-contract extraction helps verify delegated resources
 

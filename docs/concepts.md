@@ -122,6 +122,15 @@ Customer identity and metadata are normalized from ACP `_meta` and can be
 enriched from HTTP, SQL, or static sources. Only configured prompt-safe fields
 are injected into the runtime prompt.
 
+### Customer Memory
+
+Customer memory is learned after turns and stores normalized preferences, facts,
+temporary state, and summaries with lineage and temporal validity. Existing
+customer preference records are the compatibility view for `preference` memory;
+writes through either surface are projected so operator views and policy lineage
+remain consistent. Only active, non-expired, prompt-safe memory can enter
+runtime prompts.
+
 ## One Useful Distinction
 
 It helps to keep these concepts separate:

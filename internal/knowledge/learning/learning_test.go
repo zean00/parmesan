@@ -3,7 +3,10 @@ package learning
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/sahal/parmesan/internal/domain/customer"
+	"github.com/sahal/parmesan/internal/domain/execution"
 	"github.com/sahal/parmesan/internal/domain/feedback"
 	"github.com/sahal/parmesan/internal/domain/session"
 	"github.com/sahal/parmesan/internal/store/memory"
@@ -120,6 +123,58 @@ func TestPreferenceFindingsExtractsContactChannelFromEmailMeUpdates(t *testing.T
 		}
 	}
 	t.Fatalf("contact_channel finding not found in %#v", findings)
+}
+
+func TestLearnFromSessionWritesNormalizedCustomerMemory(t *testing.T) {
+	repo := memory.New()
+	learner := New(repo)
+	now := time.Now().UTC()
+	sess := session.Session{ID: "sess_memory", AgentID: "agent_1", CustomerID: "cust_1", Channel: "acp", CreatedAt: now}
+	events := []session.Event{{
+		ID:        "evt_1",
+		SessionID: sess.ID,
+		Source:    "customer",
+		Kind:      "message",
+		CreatedAt: now,
+		Content:   []session.ContentPart{{Type: "text", Text: "Call me Rina. I live in Jakarta."}},
+	}}
+	if err := learner.LearnFromSession(context.Background(), sess, execution.TurnExecution{ID: "exec_1", TraceID: "trace_1"}, events, nil); err != nil {
+		t.Fatalf("LearnFromSession() error = %v", err)
+	}
+	pref, err := repo.GetCustomerMemoryItem(context.Background(), "agent_1", "cust_1", customer.MemoryCategoryPreference, "preferred_name")
+	if err != nil {
+		t.Fatalf("GetCustomerMemoryItem(preferred_name) error = %v", err)
+	}
+	if pref.Value != "Rina" || pref.Status != customer.MemoryStatusActive || !pref.PromptSafe {
+		t.Fatalf("preferred_name memory = %#v, want active prompt-safe Rina", pref)
+	}
+	fact, err := repo.GetCustomerMemoryItem(context.Background(), "agent_1", "cust_1", customer.MemoryCategoryFact, "location")
+	if err != nil {
+		t.Fatalf("GetCustomerMemoryItem(location) error = %v", err)
+	}
+	if fact.Value != "Jakarta" || fact.Status != customer.MemoryStatusActive || !fact.PromptSafe {
+		t.Fatalf("location memory = %#v, want active prompt-safe Jakarta", fact)
+	}
+}
+
+func TestMemoryFindingsTemporalAndSensitiveDefaults(t *testing.T) {
+	now := time.Now().UTC()
+	findings := memoryFindings("Email me updates this week. My password is swordfish.", now)
+	var temporary, blocked bool
+	for _, finding := range findings {
+		if finding.Category == customer.MemoryCategoryTemporaryState && finding.Key == "contact_channel" && finding.ValidUntil != nil {
+			temporary = true
+		}
+		if finding.Sensitivity == customer.MemorySensitivitySensitive && !finding.PromptSafe {
+			blocked = true
+		}
+	}
+	if !temporary {
+		t.Fatalf("findings = %#v, want temporary contact channel", findings)
+	}
+	if !blocked {
+		t.Fatalf("findings = %#v, want sensitive finding blocked from prompt", findings)
+	}
 }
 
 func proposalPageTitle(payload map[string]any) string {

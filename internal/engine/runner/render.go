@@ -351,6 +351,9 @@ func buildResponseCapabilityPrompt(view resolvedView, events []session.Event, ca
 	if prefs := customerPreferenceText(view.CustomerPreferences); prefs != "" {
 		parts = append(parts, "Customer preferences (soft constraints):\n"+prefs)
 	}
+	if memory := customerMemoryText(view.CustomerMemory); memory != "" {
+		parts = append(parts, "Customer memory:\n"+memory)
+	}
 	if ctx := customerContextPromptText(view.CustomerContext, view.CustomerContextPromptSafeFields); ctx != "" {
 		parts = append(parts, "Customer context:\n"+ctx)
 	}

@@ -128,25 +128,40 @@ This is important operationally:
 - learned artifacts are durable records, not ephemeral prompt memory
 - policy still governs what the runtime may do with those artifacts later
 
-## Current Explicit Preference Extraction
+## Customer Memory Normalization
 
-The current system can deterministically extract some customer preferences from
-conversation history when the signal is explicit enough.
+The current system deterministically extracts explicit low-risk customer memory
+after a turn. Memory has categories for preferences, facts, temporary state, and
+summaries. Existing customer preference APIs remain as a compatibility view over
+preference memory, and preference writes are projected back into customer memory
+so both surfaces stay consistent.
 
 Examples include:
 
 - `preferred_name`
 - `contact_channel`
+- `preferred_language`
+- prompt-safe facts such as `location`
 
-These are treated as customer preference artifacts, not policy mutations.
+These are treated as customer memory artifacts, not policy mutations.
 
 That means:
 
 - `Call me Rina` can produce a durable `preferred_name`
 - `Email me updates` can produce a durable `contact_channel`
+- `I live in Jakarta` can produce a prompt-safe customer fact
+- `Email me updates this week` can produce temporary memory with an expiration
 
-Those preferences are then available for future turns subject to prompt-safety
-and policy boundaries.
+Active, non-expired, prompt-safe memory is available for future turns subject to
+policy boundaries. Repeated matching values refresh lineage and `last_seen_at`;
+new explicit values supersede older active values for the same canonical key.
+Inferred or conflicting values remain pending. Sensitive facts are blocked by
+default and are not prompt-injected.
+
+When a structured model router is available and deterministic rules do not find
+a clear signal, the learner can ask for structured normalization suggestions.
+Those suggestions are schema-checked, treated as reviewable/inferred memory, and
+still follow the same sensitivity and prompt-safety gates.
 
 ## What Learning Does Not Do
 
@@ -154,7 +169,8 @@ The learning path does not:
 
 - silently rewrite active policy
 - override hard business or safety rules
-- turn every conversational hint into durable memory
+- turn every conversational hint into active durable memory
+- store sensitive facts by default
 - bypass operator review for shared knowledge or policy proposals
 
 This keeps the system improvable without making runtime behavior opaque.

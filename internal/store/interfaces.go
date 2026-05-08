@@ -52,6 +52,11 @@ type Repository interface {
 	ListCustomerPreferences(ctx context.Context, query customer.PreferenceQuery) ([]customer.Preference, error)
 	AppendCustomerPreferenceEvent(ctx context.Context, event customer.PreferenceEvent) error
 	ListCustomerPreferenceEvents(ctx context.Context, query customer.PreferenceQuery) ([]customer.PreferenceEvent, error)
+	SaveCustomerMemoryItem(ctx context.Context, item customer.MemoryItem, event customer.MemoryEvent) error
+	GetCustomerMemoryItem(ctx context.Context, agentID string, customerID string, category string, key string) (customer.MemoryItem, error)
+	ListCustomerMemoryItems(ctx context.Context, query customer.MemoryQuery) ([]customer.MemoryItem, error)
+	AppendCustomerMemoryEvent(ctx context.Context, event customer.MemoryEvent) error
+	ListCustomerMemoryEvents(ctx context.Context, query customer.MemoryQuery) ([]customer.MemoryEvent, error)
 	SaveFeedbackRecord(ctx context.Context, record feedback.Record) error
 	GetFeedbackRecord(ctx context.Context, feedbackID string) (feedback.Record, error)
 	ListFeedbackRecords(ctx context.Context, query feedback.Query) ([]feedback.Record, error)

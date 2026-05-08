@@ -274,6 +274,47 @@ func TestSaveCustomerPreferenceProjectsPreferenceEventLineage(t *testing.T) {
 	if len(edges) != 1 || edges[0].SourceID != "pevt_lineage" || edges[0].Kind != "applies_to" {
 		t.Fatalf("edges = %#v, want preference event -> preference lineage", edges)
 	}
+	mem, err := store.GetCustomerMemoryItem(context.Background(), "agent_1", "cust_1", customer.MemoryCategoryPreference, "language")
+	if err != nil {
+		t.Fatalf("GetCustomerMemoryItem() error = %v", err)
+	}
+	if mem.Value != "English" || mem.Status != customer.PreferenceStatusPending {
+		t.Fatalf("memory projection = %#v, want pending English preference memory", mem)
+	}
+	memEvents, err := store.ListCustomerMemoryEvents(context.Background(), customer.MemoryQuery{AgentID: "agent_1", CustomerID: "cust_1", Category: customer.MemoryCategoryPreference, Key: "language"})
+	if err != nil {
+		t.Fatalf("ListCustomerMemoryEvents() error = %v", err)
+	}
+	if len(memEvents) != 1 || memEvents[0].Action != "pending" {
+		t.Fatalf("memory events = %#v, want projected pending event", memEvents)
+	}
+}
+
+func TestSaveCustomerMemoryPreferenceProjectsGraphLineage(t *testing.T) {
+	store := New()
+	now := time.Now().UTC()
+	item := customer.MemoryItem{
+		ID: "cmem_pref", AgentID: "agent_1", CustomerID: "cust_1", Category: customer.MemoryCategoryPreference, Key: "preferred_name", Value: "Rina",
+		Source: "conversation_explicit", Confidence: 1, Status: customer.MemoryStatusActive, Sensitivity: customer.MemorySensitivityLow, PromptSafe: true, CreatedAt: now, UpdatedAt: now,
+	}
+	event := customer.MemoryEvent{
+		ID: "cmemt_pref", MemoryID: item.ID, AgentID: item.AgentID, CustomerID: item.CustomerID, Category: item.Category, Key: item.Key, Value: item.Value,
+		Action: "upsert", Source: "conversation_explicit", Confidence: 1, CreatedAt: now,
+	}
+	if err := store.SaveCustomerMemoryItem(context.Background(), item, event); err != nil {
+		t.Fatalf("SaveCustomerMemoryItem() error = %v", err)
+	}
+	pref, err := store.GetCustomerPreference(context.Background(), "agent_1", "cust_1", "preferred_name")
+	if err != nil {
+		t.Fatalf("GetCustomerPreference() error = %v", err)
+	}
+	edges, err := store.ListPolicyEdges(context.Background(), policy.EdgeQuery{BundleID: "customer:agent_1:cust_1", TargetID: pref.ID})
+	if err != nil {
+		t.Fatalf("ListPolicyEdges() error = %v", err)
+	}
+	if len(edges) != 1 || edges[0].Kind != "applies_to" {
+		t.Fatalf("edges = %#v, want projected preference event lineage", edges)
+	}
 }
 
 func TestSaveKnowledgeSnapshotProjectsProposalLineage(t *testing.T) {

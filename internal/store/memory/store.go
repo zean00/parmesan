@@ -43,6 +43,8 @@ type Store struct {
 	operatorTokens           []operator.APIToken
 	customerPreferences      []customer.Preference
 	customerPreferenceEvents []customer.PreferenceEvent
+	customerMemoryItems      []customer.MemoryItem
+	customerMemoryEvents     []customer.MemoryEvent
 	feedbackRecords          []feedback.Record
 	sessions                 []session.Session
 	sessionWatches           []session.Watch
@@ -388,6 +390,7 @@ func (s *Store) SaveCustomerPreference(_ context.Context, pref customer.Preferen
 		if item.AgentID == pref.AgentID && item.CustomerID == pref.CustomerID && item.Key == pref.Key {
 			pref.CreatedAt = item.CreatedAt
 			s.customerPreferences[i] = pref
+			s.upsertPreferenceMemoryLocked(pref, event)
 			artifacts, edges := controlgraph.CustomerPreference(pref, event)
 			if event.ID != "" {
 				s.customerPreferenceEvents = append(s.customerPreferenceEvents, event)
@@ -398,6 +401,7 @@ func (s *Store) SaveCustomerPreference(_ context.Context, pref customer.Preferen
 		}
 	}
 	s.customerPreferences = append(s.customerPreferences, pref)
+	s.upsertPreferenceMemoryLocked(pref, event)
 	artifacts, edges := controlgraph.CustomerPreference(pref, event)
 	if event.ID != "" {
 		s.customerPreferenceEvents = append(s.customerPreferenceEvents, event)
@@ -405,6 +409,253 @@ func (s *Store) SaveCustomerPreference(_ context.Context, pref customer.Preferen
 	s.savePolicyArtifactsLocked(artifacts)
 	s.savePolicyEdgesLocked(edges)
 	return nil
+}
+
+func (s *Store) SaveCustomerMemoryItem(_ context.Context, item customer.MemoryItem, event customer.MemoryEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.saveCustomerMemoryItemLocked(item, event)
+	if item.Category == customer.MemoryCategoryPreference {
+		s.upsertMemoryPreferenceLocked(item, event)
+	}
+	return nil
+}
+
+func (s *Store) saveCustomerMemoryItemLocked(item customer.MemoryItem, event customer.MemoryEvent) {
+	for i, existing := range s.customerMemoryItems {
+		if existing.AgentID == item.AgentID && existing.CustomerID == item.CustomerID && existing.Category == item.Category && existing.Key == item.Key {
+			item.CreatedAt = existing.CreatedAt
+			s.customerMemoryItems[i] = item
+			if event.ID != "" {
+				s.customerMemoryEvents = append(s.customerMemoryEvents, event)
+			}
+			return
+		}
+	}
+	s.customerMemoryItems = append(s.customerMemoryItems, item)
+	if event.ID != "" {
+		s.customerMemoryEvents = append(s.customerMemoryEvents, event)
+	}
+}
+
+func (s *Store) GetCustomerMemoryItem(_ context.Context, agentID string, customerID string, category string, key string) (customer.MemoryItem, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.customerMemoryItems {
+		if item.AgentID == agentID && item.CustomerID == customerID && item.Category == category && item.Key == key {
+			return item, nil
+		}
+	}
+	return customer.MemoryItem{}, errors.New("customer memory item not found")
+}
+
+func (s *Store) ListCustomerMemoryItems(_ context.Context, query customer.MemoryQuery) ([]customer.MemoryItem, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	now := time.Now().UTC()
+	var out []customer.MemoryItem
+	for _, item := range s.customerMemoryItems {
+		if query.AgentID != "" && item.AgentID != query.AgentID {
+			continue
+		}
+		if query.CustomerID != "" && item.CustomerID != query.CustomerID {
+			continue
+		}
+		if query.Category != "" && item.Category != query.Category {
+			continue
+		}
+		if query.Status != "" && item.Status != query.Status {
+			continue
+		}
+		if query.Key != "" && item.Key != query.Key {
+			continue
+		}
+		if query.Source != "" && item.Source != query.Source {
+			continue
+		}
+		if query.MinConfidence > 0 && item.Confidence < query.MinConfidence {
+			continue
+		}
+		if query.PromptSafeOnly && !item.PromptSafe {
+			continue
+		}
+		if !query.IncludeExpired && memoryItemExpired(item, now) {
+			continue
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	if query.Limit > 0 && len(out) > query.Limit {
+		out = out[:query.Limit]
+	}
+	return out, nil
+}
+
+func (s *Store) AppendCustomerMemoryEvent(_ context.Context, event customer.MemoryEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.customerMemoryEvents = append(s.customerMemoryEvents, event)
+	return nil
+}
+
+func (s *Store) ListCustomerMemoryEvents(_ context.Context, query customer.MemoryQuery) ([]customer.MemoryEvent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []customer.MemoryEvent
+	for _, item := range s.customerMemoryEvents {
+		if query.AgentID != "" && item.AgentID != query.AgentID {
+			continue
+		}
+		if query.CustomerID != "" && item.CustomerID != query.CustomerID {
+			continue
+		}
+		if query.Category != "" && item.Category != query.Category {
+			continue
+		}
+		if query.Key != "" && item.Key != query.Key {
+			continue
+		}
+		if query.Source != "" && item.Source != query.Source {
+			continue
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	if query.Limit > 0 && len(out) > query.Limit {
+		out = out[:query.Limit]
+	}
+	return out, nil
+}
+
+func (s *Store) upsertPreferenceMemoryLocked(pref customer.Preference, prefEvent customer.PreferenceEvent) {
+	now := pref.UpdatedAt
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	item := customer.MemoryItem{
+		ID:              "cmem_" + pref.ID,
+		AgentID:         pref.AgentID,
+		CustomerID:      pref.CustomerID,
+		Category:        customer.MemoryCategoryPreference,
+		Key:             pref.Key,
+		Value:           pref.Value,
+		Source:          pref.Source,
+		Confidence:      pref.Confidence,
+		Status:          pref.Status,
+		Sensitivity:     customer.MemorySensitivityLow,
+		PromptSafe:      pref.Status == customer.PreferenceStatusActive,
+		EvidenceRefs:    append([]string(nil), pref.EvidenceRefs...),
+		Metadata:        cloneStringAnyMap(pref.Metadata),
+		ObservedAt:      pref.CreatedAt,
+		LastSeenAt:      now,
+		LastConfirmedAt: pref.LastConfirmedAt,
+		ExpiresAt:       pref.ExpiresAt,
+		CreatedAt:       pref.CreatedAt,
+		UpdatedAt:       pref.UpdatedAt,
+	}
+	event := customer.MemoryEvent{}
+	if prefEvent.ID != "" {
+		event = customer.MemoryEvent{
+			ID:           "cmem_" + prefEvent.ID,
+			MemoryID:     item.ID,
+			AgentID:      prefEvent.AgentID,
+			CustomerID:   prefEvent.CustomerID,
+			Category:     customer.MemoryCategoryPreference,
+			Key:          prefEvent.Key,
+			Value:        prefEvent.Value,
+			Action:       prefEvent.Action,
+			Source:       prefEvent.Source,
+			Confidence:   prefEvent.Confidence,
+			EvidenceRefs: append([]string(nil), prefEvent.EvidenceRefs...),
+			Metadata:     cloneStringAnyMap(prefEvent.Metadata),
+			CreatedAt:    prefEvent.CreatedAt,
+		}
+	}
+	s.saveCustomerMemoryItemLocked(item, event)
+}
+
+func (s *Store) upsertMemoryPreferenceLocked(item customer.MemoryItem, event customer.MemoryEvent) {
+	pref := customer.Preference{
+		ID:              "cpref_" + strings.TrimPrefix(item.ID, "cmem_"),
+		AgentID:         item.AgentID,
+		CustomerID:      item.CustomerID,
+		Key:             item.Key,
+		Value:           item.Value,
+		Source:          item.Source,
+		Confidence:      item.Confidence,
+		Status:          item.Status,
+		EvidenceRefs:    append([]string(nil), item.EvidenceRefs...),
+		Metadata:        cloneStringAnyMap(item.Metadata),
+		LastConfirmedAt: item.LastConfirmedAt,
+		ExpiresAt:       item.ExpiresAt,
+		CreatedAt:       item.CreatedAt,
+		UpdatedAt:       item.UpdatedAt,
+	}
+	if pref.Status == customer.MemoryStatusBlocked {
+		pref.Status = customer.PreferenceStatusRejected
+	}
+	prefEvent := customer.PreferenceEvent{}
+	if event.ID != "" {
+		prefEvent = customer.PreferenceEvent{
+			ID:           "cpevt_" + strings.TrimPrefix(event.ID, "cmemt_"),
+			PreferenceID: pref.ID,
+			AgentID:      event.AgentID,
+			CustomerID:   event.CustomerID,
+			Key:          event.Key,
+			Value:        event.Value,
+			Action:       event.Action,
+			Source:       event.Source,
+			Confidence:   event.Confidence,
+			EvidenceRefs: append([]string(nil), event.EvidenceRefs...),
+			Metadata:     cloneStringAnyMap(event.Metadata),
+			CreatedAt:    event.CreatedAt,
+		}
+	}
+	for i, existing := range s.customerPreferences {
+		if existing.AgentID == pref.AgentID && existing.CustomerID == pref.CustomerID && existing.Key == pref.Key {
+			pref.CreatedAt = existing.CreatedAt
+			s.customerPreferences[i] = pref
+			if prefEvent.ID != "" {
+				s.customerPreferenceEvents = append(s.customerPreferenceEvents, prefEvent)
+			}
+			artifacts, edges := controlgraph.CustomerPreference(pref, prefEvent)
+			s.savePolicyArtifactsLocked(artifacts)
+			s.savePolicyEdgesLocked(edges)
+			return
+		}
+	}
+	s.customerPreferences = append(s.customerPreferences, pref)
+	if prefEvent.ID != "" {
+		s.customerPreferenceEvents = append(s.customerPreferenceEvents, prefEvent)
+	}
+	artifacts, edges := controlgraph.CustomerPreference(pref, prefEvent)
+	s.savePolicyArtifactsLocked(artifacts)
+	s.savePolicyEdgesLocked(edges)
+}
+
+func memoryItemExpired(item customer.MemoryItem, now time.Time) bool {
+	if item.ExpiresAt != nil && !item.ExpiresAt.After(now) {
+		return true
+	}
+	if item.ValidUntil != nil && !item.ValidUntil.After(now) {
+		return true
+	}
+	return false
+}
+
+func cloneStringAnyMap(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func (s *Store) GetCustomerPreference(_ context.Context, agentID string, customerID string, key string) (customer.Preference, error) {

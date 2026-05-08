@@ -477,6 +477,7 @@ type EngineResult struct {
 	CapabilityIsolation             policy.CapabilityIsolation
 	CompositionMode                 string
 	CustomerPreferences             []customer.Preference
+	CustomerMemory                  []customer.MemoryItem
 	CustomerContext                 map[string]any
 	CustomerContextPromptSafeFields []string
 	NoMatch                         string

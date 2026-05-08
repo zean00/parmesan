@@ -388,6 +388,11 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("POST /v1/operator/customers/{customer_id}/preferences/{key}/reject", s.operatorRejectCustomerPreference)
 	mux.HandleFunc("POST /v1/operator/customers/{customer_id}/preferences/{key}/expire", s.operatorExpireCustomerPreference)
 	mux.HandleFunc("GET /v1/operator/customers/{customer_id}/preference-events", s.operatorListCustomerPreferenceEvents)
+	mux.HandleFunc("GET /v1/operator/customers/{customer_id}/memory", s.operatorListCustomerMemory)
+	mux.HandleFunc("GET /v1/operator/customers/{customer_id}/memory/{category}/{key}/events", s.operatorListCustomerMemoryEvents)
+	mux.HandleFunc("POST /v1/operator/customers/{customer_id}/memory/{category}/{key}/confirm", s.operatorConfirmCustomerMemory)
+	mux.HandleFunc("POST /v1/operator/customers/{customer_id}/memory/{category}/{key}/reject", s.operatorRejectCustomerMemory)
+	mux.HandleFunc("POST /v1/operator/customers/{customer_id}/memory/{category}/{key}/expire", s.operatorExpireCustomerMemory)
 	mux.HandleFunc("POST /v1/operator/agents", s.operatorCreateAgentProfile)
 	mux.HandleFunc("GET /v1/operator/agents", s.operatorListAgentProfiles)
 	mux.HandleFunc("GET /v1/operator/agents/{id}", s.operatorGetAgentProfile)
@@ -2843,7 +2848,7 @@ func (s *Server) operatorCreateFeedback(w http.ResponseWriter, r *http.Request) 
 	}
 	var outputs feedback.Outputs
 	if sess.Status == session.StatusClosed || sess.Status == session.StatusSessionKeep {
-		outputs, err = knowledgelearning.New(s.store).CompileFeedback(r.Context(), record, sess, events, signals)
+		outputs, err = knowledgelearning.NewWithRouter(s.store, s.router).CompileFeedback(r.Context(), record, sess, events, signals)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -4919,6 +4924,141 @@ func (s *Server) operatorListCustomerPreferenceEvents(w http.ResponseWriter, r *
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) operatorListCustomerMemory(w http.ResponseWriter, r *http.Request) {
+	agentID := strings.TrimSpace(r.URL.Query().Get("agent_id"))
+	if agentID == "" {
+		http.Error(w, "agent_id is required", http.StatusBadRequest)
+		return
+	}
+	limit, ok := positiveIntQuery(w, r, "limit")
+	if !ok {
+		return
+	}
+	items, err := s.store.ListCustomerMemoryItems(r.Context(), customer.MemoryQuery{
+		AgentID:        agentID,
+		CustomerID:     r.PathValue("customer_id"),
+		Category:       strings.TrimSpace(r.URL.Query().Get("category")),
+		Status:         strings.TrimSpace(r.URL.Query().Get("status")),
+		Key:            strings.TrimSpace(r.URL.Query().Get("key")),
+		Source:         strings.TrimSpace(r.URL.Query().Get("source")),
+		PromptSafeOnly: strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("prompt_safe_only")), "true"),
+		IncludeExpired: strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_expired")), "true"),
+		Limit:          limit,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, memoryView(item))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) operatorListCustomerMemoryEvents(w http.ResponseWriter, r *http.Request) {
+	agentID := strings.TrimSpace(r.URL.Query().Get("agent_id"))
+	if agentID == "" {
+		http.Error(w, "agent_id is required", http.StatusBadRequest)
+		return
+	}
+	limit, ok := positiveIntQuery(w, r, "limit")
+	if !ok {
+		return
+	}
+	items, err := s.store.ListCustomerMemoryEvents(r.Context(), customer.MemoryQuery{
+		AgentID:    agentID,
+		CustomerID: r.PathValue("customer_id"),
+		Category:   r.PathValue("category"),
+		Key:        r.PathValue("key"),
+		Source:     strings.TrimSpace(r.URL.Query().Get("source")),
+		Limit:      limit,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) operatorConfirmCustomerMemory(w http.ResponseWriter, r *http.Request) {
+	s.operatorTransitionCustomerMemory(w, r, customer.MemoryStatusActive, "confirm")
+}
+
+func (s *Server) operatorRejectCustomerMemory(w http.ResponseWriter, r *http.Request) {
+	s.operatorTransitionCustomerMemory(w, r, customer.MemoryStatusRejected, "reject")
+}
+
+func (s *Server) operatorExpireCustomerMemory(w http.ResponseWriter, r *http.Request) {
+	s.operatorTransitionCustomerMemory(w, r, customer.MemoryStatusExpired, "expire")
+}
+
+func (s *Server) operatorTransitionCustomerMemory(w http.ResponseWriter, r *http.Request, status string, action string) {
+	customerID := r.PathValue("customer_id")
+	category := r.PathValue("category")
+	key := r.PathValue("key")
+	var req struct {
+		AgentID    string         `json:"agent_id"`
+		Value      string         `json:"value"`
+		OperatorID string         `json:"operator_id"`
+		Metadata   map[string]any `json:"metadata"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.AgentID = strings.TrimSpace(req.AgentID)
+	if req.AgentID == "" || strings.TrimSpace(customerID) == "" || strings.TrimSpace(category) == "" || strings.TrimSpace(key) == "" {
+		http.Error(w, "agent_id, customer_id, category, and key are required", http.StatusBadRequest)
+		return
+	}
+	item, err := s.store.GetCustomerMemoryItem(r.Context(), req.AgentID, customerID, category, key)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	now := time.Now().UTC()
+	if strings.TrimSpace(req.Value) != "" {
+		item.Value = strings.TrimSpace(req.Value)
+	}
+	item.Status = status
+	item.UpdatedAt = now
+	item.Metadata = mergeMaps(item.Metadata, req.Metadata)
+	if status == customer.MemoryStatusActive {
+		item.LastConfirmedAt = &now
+		item.ExpiresAt = nil
+		item.PromptSafe = item.Sensitivity != customer.MemorySensitivitySensitive
+		if item.Confidence < 1 {
+			item.Confidence = 1
+		}
+	} else if status == customer.MemoryStatusExpired {
+		item.ExpiresAt = &now
+		item.PromptSafe = false
+	} else {
+		item.PromptSafe = false
+	}
+	event := customer.MemoryEvent{
+		ID:           fmt.Sprintf("cmemt_%d", now.UnixNano()),
+		MemoryID:     item.ID,
+		AgentID:      item.AgentID,
+		CustomerID:   item.CustomerID,
+		Category:     item.Category,
+		Key:          item.Key,
+		Value:        item.Value,
+		Action:       action,
+		Source:       "operator",
+		Confidence:   item.Confidence,
+		EvidenceRefs: append([]string(nil), item.EvidenceRefs...),
+		Metadata:     map[string]any{"operator_id": requestOperatorID(r, req.OperatorID)},
+		CreatedAt:    now,
+	}
+	if err := s.store.SaveCustomerMemoryItem(r.Context(), item, event); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, memoryView(item))
 }
 
 func (s *Server) latestSessionExecution(ctx context.Context, sessionID string) (execution.TurnExecution, bool) {
@@ -10501,6 +10641,37 @@ func preferenceView(item customer.Preference) map[string]any {
 	if item.Status == customer.PreferenceStatusPending {
 		view["review_reason"] = stringMetadata(item.Metadata, "review_reason")
 		view["confirmation_prompt"] = firstNonEmpty(stringMetadata(item.Metadata, "confirmation_prompt"), "Confirm pending preference "+item.Key+" for this customer.")
+	}
+	return view
+}
+
+func memoryView(item customer.MemoryItem) map[string]any {
+	view := map[string]any{
+		"id":                item.ID,
+		"agent_id":          item.AgentID,
+		"customer_id":       item.CustomerID,
+		"category":          item.Category,
+		"key":               item.Key,
+		"value":             item.Value,
+		"source":            item.Source,
+		"confidence":        item.Confidence,
+		"status":            item.Status,
+		"sensitivity":       item.Sensitivity,
+		"prompt_safe":       item.PromptSafe,
+		"evidence_refs":     item.EvidenceRefs,
+		"metadata":          item.Metadata,
+		"valid_from":        item.ValidFrom,
+		"valid_until":       item.ValidUntil,
+		"observed_at":       item.ObservedAt,
+		"last_seen_at":      item.LastSeenAt,
+		"last_confirmed_at": item.LastConfirmedAt,
+		"expires_at":        item.ExpiresAt,
+		"created_at":        item.CreatedAt,
+		"updated_at":        item.UpdatedAt,
+	}
+	if item.Status == customer.MemoryStatusPending {
+		view["review_reason"] = stringMetadata(item.Metadata, "review_reason")
+		view["confirmation_prompt"] = firstNonEmpty(stringMetadata(item.Metadata, "confirmation_prompt"), "Confirm pending memory "+item.Category+"."+item.Key+" for this customer.")
 	}
 	return view
 }

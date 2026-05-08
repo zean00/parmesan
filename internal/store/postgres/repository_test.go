@@ -49,6 +49,38 @@ func expectGraphEdgeExec(mock pgxmock.PgxPoolIface) {
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 }
 
+func expectCustomerMemoryItemExec(mock pgxmock.PgxPoolIface) {
+	mock.ExpectExec(regexp.QuoteMeta(`
+		INSERT INTO customer_memory_items (id, agent_id, customer_id, category, key, value, source, confidence, status, sensitivity, prompt_safe, evidence_refs_json, metadata_json, valid_from, valid_until, observed_at, last_seen_at, last_confirmed_at, expires_at, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+		ON CONFLICT (agent_id, customer_id, category, key) DO UPDATE
+		SET value = EXCLUDED.value,
+		    source = EXCLUDED.source,
+		    confidence = EXCLUDED.confidence,
+		    status = EXCLUDED.status,
+		    sensitivity = EXCLUDED.sensitivity,
+		    prompt_safe = EXCLUDED.prompt_safe,
+		    evidence_refs_json = EXCLUDED.evidence_refs_json,
+		    metadata_json = EXCLUDED.metadata_json,
+		    valid_from = EXCLUDED.valid_from,
+		    valid_until = EXCLUDED.valid_until,
+		    observed_at = EXCLUDED.observed_at,
+		    last_seen_at = EXCLUDED.last_seen_at,
+		    last_confirmed_at = EXCLUDED.last_confirmed_at,
+		    expires_at = EXCLUDED.expires_at,
+		    updated_at = EXCLUDED.updated_at
+	`)).WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+}
+
+func expectCustomerMemoryEventExec(mock pgxmock.PgxPoolIface) {
+	mock.ExpectExec(regexp.QuoteMeta(`
+		INSERT INTO customer_memory_events (id, memory_id, agent_id, customer_id, category, key, value, action, source, confidence, evidence_refs_json, metadata_json, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+	`)).WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+}
+
 func TestCreateSessionPersistsRichFields(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	if err != nil {
@@ -242,6 +274,8 @@ func TestSaveCustomerPreferenceAndFeedbackRecord(t *testing.T) {
 		WithArgs(pref.ID, pref.AgentID, pref.CustomerID, pref.Key, pref.Value, pref.Source, pref.Confidence, pref.Status, pgxmock.AnyArg(), pgxmock.AnyArg(), pref.LastConfirmedAt, pref.ExpiresAt, pref.CreatedAt, pref.UpdatedAt).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	expectGraphArtifactExec(mock)
+	expectCustomerMemoryItemExec(mock)
+	expectCustomerMemoryEventExec(mock)
 	mock.ExpectExec(regexp.QuoteMeta(`
 		INSERT INTO customer_preference_events (id, preference_id, agent_id, customer_id, key, value, action, source, confidence, evidence_refs_json, metadata_json, created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)

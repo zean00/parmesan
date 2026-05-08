@@ -522,7 +522,7 @@ func (r *Runner) processSessionJob(ctx context.Context, job maintainerdomain.Job
 		return nil, err
 	}
 	signals, _ := r.repo.ListDerivedSignals(ctx, sess.ID)
-	_ = knowledgelearning.New(r.repo).LearnFromSession(ctx, sess, execution.TurnExecution{}, events, signals)
+	_ = knowledgelearning.NewWithRouter(r.repo, r.router).LearnFromSession(ctx, sess, execution.TurnExecution{}, events, signals)
 	text := transcriptSummary(events)
 	return r.applyCustomerMemory(ctx, workspace, job, text, "session", run)
 }

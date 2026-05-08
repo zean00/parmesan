@@ -40,6 +40,7 @@ Conversation-edge rules:
 - Operator event listing supports `min_offset`, `limit`, `source`, `trace_id`, and `kind` filters.
 - Operator feedback uses `POST /v1/operator/sessions/{id}/feedback` and can compile into customer preferences, knowledge proposals, or draft policy/SOUL proposals.
 - Operator customer preferences are available under `/v1/operator/customers/{customer_id}/preferences?agent_id=...`; lifecycle actions use `/confirm`, `/reject`, and `/expire` on a preference key.
+- Broader customer memory is available under `/v1/operator/customers/{customer_id}/memory?agent_id=...`; memory entries include preferences, facts, temporary state, summaries, temporal validity, prompt-safety, and event lineage.
 - Trace listing supports `trace_id`, `session_id`, `execution_id`, `kind`, and `limit` filters; `GET /v1/traces/{id}` returns the detailed timeline.
 - `/v1/operator/...` supports single-tenant RBAC with stored operator API tokens, trusted identity headers, and `OPERATOR_API_KEY` as bootstrap admin fallback.
 - Executions can wait durably with persisted retry metadata, block on approval resume signals, and be recovered by operators with `POST /v1/operator/executions/{id}/retry`, `/unblock`, or `/abandon`.

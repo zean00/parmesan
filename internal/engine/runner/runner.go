@@ -984,6 +984,7 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 		return resolvedView{}, nil, err
 	}
 	view.CustomerPreferences = r.customerPreferences(ctx, sess)
+	view.CustomerMemory = r.customerMemory(ctx, sess)
 	view.CustomerContext = customerContextFromSession(sess)
 	view.CustomerContextPromptSafeFields = customerContextPromptSafeFields(sess)
 	resolvedBundleID := selection.BundleID
@@ -1591,6 +1592,23 @@ func (r *Runner) customerPreferences(ctx context.Context, sess session.Session) 
 	return items
 }
 
+func (r *Runner) customerMemory(ctx context.Context, sess session.Session) []customer.MemoryItem {
+	if strings.TrimSpace(sess.AgentID) == "" || strings.TrimSpace(sess.CustomerID) == "" {
+		return nil
+	}
+	items, err := r.repo.ListCustomerMemoryItems(ctx, customer.MemoryQuery{
+		AgentID:        strings.TrimSpace(sess.AgentID),
+		CustomerID:     strings.TrimSpace(sess.CustomerID),
+		Status:         customer.MemoryStatusActive,
+		MinConfidence:  0.5,
+		PromptSafeOnly: true,
+	})
+	if err != nil {
+		return nil
+	}
+	return items
+}
+
 func (r *Runner) derivedSignalText(ctx context.Context, sessionID string) []string {
 	signals, err := r.repo.ListDerivedSignals(ctx, sessionID)
 	if err != nil {
@@ -1904,7 +1922,7 @@ func (r *Runner) learnFromExecution(ctx context.Context, exec execution.TurnExec
 	if err != nil {
 		return err
 	}
-	return knowledgelearning.New(r.repo).LearnFromSession(ctx, sess, exec, events, signals)
+	return knowledgelearning.NewWithRouter(r.repo, r.router).LearnFromSession(ctx, sess, exec, events, signals)
 }
 
 func (r *Runner) maybeRunTool(ctx context.Context, exec execution.TurnExecution, view resolvedView) (map[string]any, error) {
@@ -2976,6 +2994,9 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 	if prefs := customerPreferenceText(view.CustomerPreferences); prefs != "" {
 		parts = append(parts, "Customer preferences (soft constraints):\n"+prefs)
 	}
+	if memory := customerMemoryText(view.CustomerMemory); memory != "" {
+		parts = append(parts, "Customer memory:\n"+memory)
+	}
 	if ctx := customerContextPromptText(view.CustomerContext, view.CustomerContextPromptSafeFields); ctx != "" {
 		parts = append(parts, "Customer context:\n"+ctx)
 	}
@@ -3126,6 +3147,20 @@ func customerPreferenceText(items []customer.Preference) string {
 			continue
 		}
 		parts = append(parts, item.Key+": "+item.Value)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func customerMemoryText(items []customer.MemoryItem) string {
+	var parts []string
+	for _, item := range items {
+		if item.Category == customer.MemoryCategoryPreference {
+			continue
+		}
+		if strings.TrimSpace(item.Key) == "" || strings.TrimSpace(item.Value) == "" {
+			continue
+		}
+		parts = append(parts, strings.TrimSpace(item.Category)+"."+strings.TrimSpace(item.Key)+": "+strings.TrimSpace(item.Value))
 	}
 	return strings.Join(parts, "\n")
 }
