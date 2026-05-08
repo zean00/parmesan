@@ -45,6 +45,9 @@ func ValidateBundle(bundle policy.Bundle) error {
 	if err := validateUnattended(bundle.Unattended); err != nil {
 		return err
 	}
+	if err := validatePromptContext(bundle.PromptContext); err != nil {
+		return err
+	}
 	if err := validateDomainProfile(bundle.DomainProfile); err != nil {
 		return err
 	}
@@ -313,6 +316,25 @@ func validateCapabilityIsolation(item policy.CapabilityIsolation) error {
 			return fmt.Errorf("capability_isolation.allowed_knowledge_scopes contains duplicate %q", key)
 		}
 		seenScopes[key] = struct{}{}
+	}
+	return nil
+}
+
+func validatePromptContext(item policy.PromptContextPolicy) error {
+	mode := strings.ToLower(strings.TrimSpace(item.CurrentTime.Mode))
+	if mode != "" {
+		switch mode {
+		case "utc", "session_timezone", "customer_timezone":
+		default:
+			return fmt.Errorf("prompt_context.current_time.mode %q is not supported", item.CurrentTime.Mode)
+		}
+	}
+	for _, part := range item.CurrentTime.Include {
+		switch strings.ToLower(strings.TrimSpace(part)) {
+		case "timestamp", "date", "time", "weekday", "timezone", "utc_offset":
+		default:
+			return fmt.Errorf("prompt_context.current_time.include contains unsupported value %q", part)
+		}
 	}
 	return nil
 }

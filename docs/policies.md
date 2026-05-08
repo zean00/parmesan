@@ -232,6 +232,26 @@ same selected-history window, so old tool summaries are removed when the turn
 that produced them is trimmed. The operator transcript, audit trail, approvals,
 tool runs, and stored event history remain unchanged.
 
+## Prompt Context
+
+`prompt_context.current_time` can inject a compact current-time section into
+normal and response-capability prompts:
+
+```yaml
+prompt_context:
+  current_time:
+    enabled: true
+    mode: customer_timezone
+    include: [timestamp, date, weekday, timezone, utc_offset]
+```
+
+It is disabled by default. `mode: utc` always renders UTC. The
+`session_timezone` and `customer_timezone` modes use trusted prompt-safe
+customer context or active prompt-safe customer memory timezone facts, falling
+back to UTC when none are available. Trusted values may be IANA timezone names
+or fixed UTC offsets such as `UTC+07:00`. Location-specific questions should
+still use `builtin.get_current_time`.
+
 ## Capability Exposure
 
 A registered tool, MCP provider, or ACP peer agent is not automatically

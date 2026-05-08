@@ -400,9 +400,15 @@ The normal `composePrompt()` path now layers:
 
 1. quality and policy guidance
 2. customer preferences and prompt-safe context
-3. SOUL baseline
-4. active response style profile
-5. retrieval/tool output context
+3. optional current-time context
+4. SOUL baseline
+5. active response style profile
+6. retrieval/tool output context
+
+Current-time context is controlled by `prompt_context.current_time` in the
+policy bundle and is disabled by default. When enabled, it uses UTC unless a
+trusted prompt-safe customer timezone is available. Trusted timezone values can
+be IANA names or fixed UTC offsets such as `UTC+07:00`.
 
 The response-capability render path uses the same style profile after SOUL and
 before normalized facts, capability instructions, and grounded examples.

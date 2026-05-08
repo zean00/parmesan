@@ -145,6 +145,53 @@ tool_policies:
 	}
 }
 
+func TestParseBundleSupportsPromptContextCurrentTime(t *testing.T) {
+	bundle, err := ParseBundle([]byte(`
+id: bundle_time
+version: v1
+prompt_context:
+  current_time:
+    enabled: true
+    mode: customer_timezone
+    include: [timestamp, timezone, utc_offset]
+observations: []
+guidelines: []
+relationships: []
+journeys: []
+templates: []
+tool_policies: []
+`))
+	if err != nil {
+		t.Fatalf("ParseBundle() error = %v", err)
+	}
+	if bundle.PromptContext.CurrentTime.Enabled == nil || !*bundle.PromptContext.CurrentTime.Enabled {
+		t.Fatalf("current_time.enabled = %#v, want true", bundle.PromptContext.CurrentTime.Enabled)
+	}
+	if bundle.PromptContext.CurrentTime.Mode != "customer_timezone" {
+		t.Fatalf("current_time.mode = %q, want customer_timezone", bundle.PromptContext.CurrentTime.Mode)
+	}
+}
+
+func TestParseBundleRejectsInvalidPromptContextCurrentTime(t *testing.T) {
+	_, err := ParseBundle([]byte(`
+id: bundle_time
+version: v1
+prompt_context:
+  current_time:
+    enabled: true
+    mode: browser_timezone
+observations: []
+guidelines: []
+relationships: []
+journeys: []
+templates: []
+tool_policies: []
+`))
+	if err == nil {
+		t.Fatal("ParseBundle() error = nil, want invalid current time mode error")
+	}
+}
+
 func TestParseBundleRejectsInvalidUnattendedValues(t *testing.T) {
 	raw := []byte(`
 id: bundle-1

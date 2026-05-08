@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sahal/parmesan/internal/domain/policy"
 	"github.com/sahal/parmesan/internal/domain/session"
@@ -356,6 +357,9 @@ func buildResponseCapabilityPrompt(view resolvedView, events []session.Event, ca
 	}
 	if ctx := customerContextPromptText(view.CustomerContext, view.CustomerContextPromptSafeFields); ctx != "" {
 		parts = append(parts, "Customer context:\n"+ctx)
+	}
+	if currentTime := currentTimePromptText(view, time.Now().UTC()); currentTime != "" {
+		parts = append(parts, "Current time:\n"+currentTime)
 	}
 	if soul := soulPrompt(bundleSoul(view.Bundle)); soul != "" {
 		parts = append(parts, "Agent SOUL style and brand rules:\n"+soul)

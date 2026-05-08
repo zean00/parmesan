@@ -461,6 +461,7 @@ A minimal useful bundle usually contains:
 - `no_match`
 - `domain_boundary`
 - `context_history`
+- `prompt_context`
 - `soul`
 - `guidelines`
 - `templates`
@@ -488,6 +489,26 @@ signals but drops all promptable content parts from that event, including text,
 structured email context, and artifact references. Tool summaries are retained
 only while their related conversation turn remains in the selected runtime
 history.
+
+`prompt_context` controls optional runtime facts injected directly into the
+model prompt. Current-time injection is disabled by default:
+
+```yaml
+prompt_context:
+  current_time:
+    enabled: false
+    mode: utc # utc | session_timezone | customer_timezone
+    include: [timestamp, date, weekday, timezone]
+```
+
+When enabled, `composePrompt()` adds a compact `Current time` section. UTC is
+used unless `mode` asks for a trusted session/customer timezone. Trusted
+timezone values come from prompt-safe customer context fields named `timezone`
+or `time_zone`, or from active prompt-safe customer memory facts with key
+`time_zone` or `timezone`. Values may be IANA timezone names such as
+`Asia/Jakarta` or fixed UTC offsets such as `UTC+07:00`. Use
+`builtin.get_current_time` when the model needs to answer about a location
+supplied in the current turn.
 
 See:
 

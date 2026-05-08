@@ -3000,6 +3000,9 @@ func composePrompt(view resolvedView, events []session.Event, toolOutput map[str
 	if ctx := customerContextPromptText(view.CustomerContext, view.CustomerContextPromptSafeFields); ctx != "" {
 		parts = append(parts, "Customer context:\n"+ctx)
 	}
+	if currentTime := currentTimePromptText(view, time.Now().UTC()); currentTime != "" {
+		parts = append(parts, "Current time:\n"+currentTime)
+	}
 	if soul := soulPrompt(bundleSoul(view.Bundle)); soul != "" {
 		parts = append(parts, "Agent SOUL style and brand rules:\n"+soul)
 	}
@@ -3212,6 +3215,176 @@ func customerContextPromptText(ctx map[string]any, safeFields []string) string {
 		parts = append(parts, key+": "+text)
 	}
 	return strings.Join(parts, "\n")
+}
+
+func currentTimePromptText(view resolvedView, now time.Time) string {
+	if view.Bundle == nil {
+		return ""
+	}
+	cfg := view.Bundle.PromptContext.CurrentTime
+	if cfg.Enabled == nil || !*cfg.Enabled {
+		return ""
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	loc := time.UTC
+	timezone := "UTC"
+	if mode := strings.ToLower(strings.TrimSpace(cfg.Mode)); mode == "session_timezone" || mode == "customer_timezone" {
+		if found := trustedTimezone(view); found != "" {
+			if loaded, label, ok := loadPromptTimezone(found); ok {
+				loc = loaded
+				timezone = label
+			}
+		}
+	}
+	local := now.In(loc)
+	_, offsetSeconds := local.Zone()
+	included := currentTimeIncludeSet(cfg.Include)
+	lines := make([]string, 0, len(included))
+	if included["timestamp"] {
+		lines = append(lines, "timestamp: "+local.Format(time.RFC3339))
+	}
+	if included["date"] {
+		lines = append(lines, "date: "+local.Format("2006-01-02"))
+	}
+	if included["time"] {
+		lines = append(lines, "time: "+local.Format("15:04:05"))
+	}
+	if included["weekday"] {
+		lines = append(lines, "weekday: "+local.Weekday().String())
+	}
+	if included["timezone"] {
+		lines = append(lines, "timezone: "+timezone)
+	}
+	if included["utc_offset"] {
+		lines = append(lines, "utc_offset: "+formatUTCOffset(offsetSeconds))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func loadPromptTimezone(value string) (*time.Location, string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, "", false
+	}
+	if loc, err := time.LoadLocation(value); err == nil {
+		return loc, loc.String(), true
+	}
+	if loc, ok := parsePromptUTCOffset(value); ok {
+		return loc, loc.String(), true
+	}
+	return nil, "", false
+}
+
+func parsePromptUTCOffset(value string) (*time.Location, bool) {
+	upper := strings.ToUpper(strings.TrimSpace(value))
+	upper = strings.TrimPrefix(upper, "GMT")
+	upper = strings.TrimPrefix(upper, "UTC")
+	if upper == "" || upper == "Z" {
+		return time.UTC, true
+	}
+	sign := 1
+	switch upper[0] {
+	case '+':
+	case '-':
+		sign = -1
+	default:
+		return nil, false
+	}
+	parts := strings.Split(strings.TrimPrefix(strings.TrimPrefix(upper, "+"), "-"), ":")
+	if len(parts) == 0 || len(parts) > 2 {
+		return nil, false
+	}
+	hours, err := parsePromptOffsetInt(parts[0])
+	if err != nil || hours > 14 {
+		return nil, false
+	}
+	minutes := 0
+	if len(parts) == 2 {
+		minutes, err = parsePromptOffsetInt(parts[1])
+		if err != nil || minutes > 59 {
+			return nil, false
+		}
+	}
+	offset := sign * ((hours * 3600) + (minutes * 60))
+	return time.FixedZone(fmt.Sprintf("UTC%s", formatUTCOffset(offset)), offset), true
+}
+
+func parsePromptOffsetInt(value string) (int, error) {
+	if value == "" || len(value) > 2 {
+		return 0, errors.New("invalid integer")
+	}
+	out := 0
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return 0, errors.New("invalid integer")
+		}
+		out = out*10 + int(r-'0')
+	}
+	return out, nil
+}
+
+func currentTimeIncludeSet(raw []string) map[string]bool {
+	out := map[string]bool{}
+	for _, item := range raw {
+		item = strings.ToLower(strings.TrimSpace(item))
+		if item != "" {
+			out[item] = true
+		}
+	}
+	if len(out) == 0 {
+		out["timestamp"] = true
+		out["date"] = true
+		out["weekday"] = true
+		out["timezone"] = true
+	}
+	return out
+}
+
+func trustedTimezone(view resolvedView) string {
+	for _, key := range []string{"timezone", "time_zone"} {
+		if safeContextField(view.CustomerContext, view.CustomerContextPromptSafeFields, key) {
+			if value := strings.TrimSpace(fmt.Sprint(view.CustomerContext[key])); value != "" {
+				return value
+			}
+		}
+	}
+	for _, item := range view.CustomerMemory {
+		if item.Status != customer.MemoryStatusActive || !item.PromptSafe || strings.TrimSpace(item.Value) == "" {
+			continue
+		}
+		if item.Category == customer.MemoryCategoryFact && (item.Key == "time_zone" || item.Key == "timezone") {
+			return strings.TrimSpace(item.Value)
+		}
+	}
+	return ""
+}
+
+func safeContextField(ctx map[string]any, safeFields []string, key string) bool {
+	if len(ctx) == 0 {
+		return false
+	}
+	if _, ok := ctx[key]; !ok {
+		return false
+	}
+	for _, field := range safeFields {
+		if field == key {
+			return true
+		}
+	}
+	return false
+}
+
+func formatUTCOffset(seconds int) string {
+	sign := "+"
+	if seconds < 0 {
+		sign = "-"
+		seconds = -seconds
+	}
+	hours := seconds / 3600
+	minutes := (seconds % 3600) / 60
+	return fmt.Sprintf("%s%02d:%02d", sign, hours, minutes)
 }
 
 func customerContextHash(ctx map[string]any) string {

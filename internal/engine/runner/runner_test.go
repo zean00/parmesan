@@ -1225,6 +1225,102 @@ func TestComposePromptIncludesSoulGuidance(t *testing.T) {
 	}
 }
 
+func TestComposePromptInjectsCurrentTimeWhenEnabled(t *testing.T) {
+	enabled := true
+	prompt := composePrompt(resolvedView{
+		Bundle: &policy.Bundle{
+			PromptContext: policy.PromptContextPolicy{CurrentTime: policy.CurrentTimePromptContext{
+				Enabled: &enabled,
+				Mode:    "utc",
+				Include: []string{"timestamp", "date", "weekday", "timezone", "utc_offset"},
+			}},
+		},
+	}, []session.Event{{
+		Source:  "customer",
+		Kind:    "message",
+		Content: []session.ContentPart{{Type: "text", Text: "What is today?"}},
+	}}, nil, responsedomain.Response{})
+
+	if !strings.Contains(prompt, "Current time:") ||
+		!strings.Contains(prompt, "timezone: UTC") ||
+		!strings.Contains(prompt, "utc_offset: +00:00") {
+		t.Fatalf("prompt = %q, want current time context", prompt)
+	}
+}
+
+func TestCurrentTimePromptUsesTrustedCustomerTimezone(t *testing.T) {
+	enabled := true
+	now := time.Date(2026, 5, 8, 3, 4, 5, 0, time.UTC)
+	got := currentTimePromptText(resolvedView{
+		Bundle: &policy.Bundle{PromptContext: policy.PromptContextPolicy{CurrentTime: policy.CurrentTimePromptContext{
+			Enabled: &enabled,
+			Mode:    "customer_timezone",
+			Include: []string{"timestamp", "timezone", "utc_offset"},
+		}}},
+		CustomerContext:                 map[string]any{"timezone": "Asia/Jakarta"},
+		CustomerContextPromptSafeFields: []string{"timezone"},
+	}, now)
+	if !strings.Contains(got, "timestamp: 2026-05-08T10:04:05+07:00") ||
+		!strings.Contains(got, "timezone: Asia/Jakarta") ||
+		!strings.Contains(got, "utc_offset: +07:00") {
+		t.Fatalf("current time prompt = %q, want Jakarta local time", got)
+	}
+}
+
+func TestCurrentTimePromptUsesMemoryTimezone(t *testing.T) {
+	enabled := true
+	now := time.Date(2026, 5, 8, 3, 4, 5, 0, time.UTC)
+	got := currentTimePromptText(resolvedView{
+		Bundle: &policy.Bundle{PromptContext: policy.PromptContextPolicy{CurrentTime: policy.CurrentTimePromptContext{
+			Enabled: &enabled,
+			Mode:    "customer_timezone",
+			Include: []string{"timezone", "utc_offset"},
+		}}},
+		CustomerMemory: []customer.MemoryItem{{
+			Category:   customer.MemoryCategoryFact,
+			Key:        "time_zone",
+			Value:      "America/New_York",
+			Status:     customer.MemoryStatusActive,
+			PromptSafe: true,
+		}},
+	}, now)
+	if !strings.Contains(got, "timezone: America/New_York") ||
+		!strings.Contains(got, "utc_offset: -04:00") {
+		t.Fatalf("current time prompt = %q, want New York time", got)
+	}
+}
+
+func TestCurrentTimePromptUsesTrustedUTCOffsetTimezone(t *testing.T) {
+	enabled := true
+	now := time.Date(2026, 5, 8, 3, 4, 5, 0, time.UTC)
+	got := currentTimePromptText(resolvedView{
+		Bundle: &policy.Bundle{PromptContext: policy.PromptContextPolicy{CurrentTime: policy.CurrentTimePromptContext{
+			Enabled: &enabled,
+			Mode:    "customer_timezone",
+			Include: []string{"timestamp", "timezone", "utc_offset"},
+		}}},
+		CustomerMemory: []customer.MemoryItem{{
+			Category:   customer.MemoryCategoryFact,
+			Key:        "time_zone",
+			Value:      "UTC+07:00",
+			Status:     customer.MemoryStatusActive,
+			PromptSafe: true,
+		}},
+	}, now)
+	if !strings.Contains(got, "timestamp: 2026-05-08T10:04:05+07:00") ||
+		!strings.Contains(got, "timezone: UTC+07:00") ||
+		!strings.Contains(got, "utc_offset: +07:00") {
+		t.Fatalf("current time prompt = %q, want fixed-offset local time", got)
+	}
+}
+
+func TestCurrentTimePromptDisabledByDefault(t *testing.T) {
+	got := currentTimePromptText(resolvedView{Bundle: &policy.Bundle{}}, time.Date(2026, 5, 8, 3, 4, 5, 0, time.UTC))
+	if got != "" {
+		t.Fatalf("current time prompt = %q, want disabled by default", got)
+	}
+}
+
 func TestComposePromptIncludesTrustedEmailContext(t *testing.T) {
 	events := []session.Event{{
 		Source: "customer",

@@ -25,6 +25,7 @@ type Bundle struct {
 	DomainProfile              string                      `json:"domain_profile,omitempty" yaml:"domain_profile,omitempty"`
 	PerceivedPerformance       PerceivedPerformancePolicy  `json:"perceived_performance,omitempty" yaml:"perceived_performance,omitempty"`
 	ContextHistory             ContextHistoryPolicy        `json:"context_history,omitempty" yaml:"context_history,omitempty"`
+	PromptContext              PromptContextPolicy         `json:"prompt_context,omitempty" yaml:"prompt_context,omitempty"`
 	Unattended                 UnattendedPolicy            `json:"unattended,omitempty" yaml:"unattended,omitempty"`
 	Semantics                  SemanticsPolicy             `json:"semantics,omitempty" yaml:"semantics,omitempty"`
 	WatchCapabilities          []WatchCapability           `json:"watch_capabilities,omitempty" yaml:"watch_capabilities,omitempty"`
@@ -79,6 +80,16 @@ type ContextHistoryPolicy struct {
 	OutOfScope             string `json:"out_of_scope,omitempty" yaml:"out_of_scope,omitempty"`
 	Moderated              string `json:"moderated,omitempty" yaml:"moderated,omitempty"`
 	KeepLatestCustomerTurn *bool  `json:"keep_latest_customer_turn,omitempty" yaml:"keep_latest_customer_turn,omitempty"`
+}
+
+type PromptContextPolicy struct {
+	CurrentTime CurrentTimePromptContext `json:"current_time,omitempty" yaml:"current_time,omitempty"`
+}
+
+type CurrentTimePromptContext struct {
+	Enabled *bool    `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Mode    string   `json:"mode,omitempty" yaml:"mode,omitempty"`
+	Include []string `json:"include,omitempty" yaml:"include,omitempty"`
 }
 
 type SemanticsPolicy struct {
