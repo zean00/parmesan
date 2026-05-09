@@ -292,8 +292,9 @@ gains more tools and external peers.
 ## Delegated Agents And Tools
 
 Parmesan currently chooses one capability kind for a turn. That means a
-delegated ACP peer agent competes with tools rather than acting as an implicit
-sub-workflow behind the scenes.
+delegated peer agent competes with tools rather than acting as an implicit
+sub-workflow behind the scenes. Delegated peers can use ACP or outbound A2A,
+but policy references them the same way by `agent_servers` id.
 
 Typical pattern:
 
@@ -308,13 +309,14 @@ Authoring rule:
 - do not duplicate connection details inside the bundle
 
 The policy bundle still references delegated agents by string id only. External
-ACP invocation defaults such as delegated model selection, delegated MCP
-servers, and delegated prompt prefix/suffix are configured on the corresponding
-`agent_servers.<id>` entry rather than inline in the policy bundle.
+invocation defaults such as ACP model selection, delegated MCP servers, ACP
+prompt prefix/suffix, or A2A endpoint settings are configured on the
+corresponding `agent_servers.<id>` entry rather than inline in the policy
+bundle.
 
 ## Delegation Workflows
 
-`delegation_workflows` are policy-owned execution briefs for delegated ACP
+`delegation_workflows` are policy-owned execution briefs for delegated peer
 turns.
 
 Use them when:

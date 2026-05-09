@@ -53,6 +53,7 @@ acp:
 
 agent_servers:
   # OpenCode:
+  #   protocol: acp
   #   command: opencode
   #   args: ["acp", "--pure"]
   #   startup_timeout_seconds: 10
@@ -73,6 +74,12 @@ agent_servers:
   #         url: "https://docs.example/sse"
   #         headers:
   #           Authorization: "Bearer ${DOCS_TOKEN}"
+  # Pigo:
+  #   protocol: a2a
+  #   request_timeout_seconds: 60
+  #   a2a:
+  #     url: "http://localhost:4388/a2a"
+  #     bearer_token: "${PIGO_A2A_BEARER_TOKEN}"
 
 mcp:
   providers: []

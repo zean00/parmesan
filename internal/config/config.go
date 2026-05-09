@@ -67,12 +67,14 @@ type ToolProviderSecurityConfig struct {
 }
 
 type AgentServerConfig struct {
+	Protocol              string            `yaml:"protocol" json:"protocol,omitempty"`
 	Command               string            `yaml:"command" json:"command"`
 	Args                  []string          `yaml:"args" json:"args,omitempty"`
 	Env                   map[string]string `yaml:"env" json:"env,omitempty"`
 	StartupTimeoutSeconds int               `yaml:"startup_timeout_seconds" json:"startup_timeout_seconds,omitempty"`
 	RequestTimeoutSeconds int               `yaml:"request_timeout_seconds" json:"request_timeout_seconds,omitempty"`
 	ACP                   ACPAgentConfig    `yaml:"acp" json:"acp,omitempty"`
+	A2A                   A2AAgentConfig    `yaml:"a2a" json:"a2a,omitempty"`
 }
 
 type ACPAgentConfig struct {
@@ -91,6 +93,15 @@ type ACPMCPServerConfig struct {
 	URL     string            `yaml:"url" json:"url,omitempty"`
 	Headers map[string]string `yaml:"headers" json:"headers,omitempty"`
 	Meta    map[string]any    `yaml:"_meta" json:"_meta,omitempty"`
+}
+
+type A2AAgentConfig struct {
+	URL              string            `yaml:"url" json:"url,omitempty"`
+	CardURL          string            `yaml:"card_url" json:"card_url,omitempty"`
+	Headers          map[string]string `yaml:"headers" json:"headers,omitempty"`
+	BearerToken      string            `yaml:"bearer_token" json:"bearer_token,omitempty"`
+	MaxResponseBytes int               `yaml:"max_response_bytes" json:"max_response_bytes,omitempty"`
+	PollIntervalMS   int               `yaml:"poll_interval_ms" json:"poll_interval_ms,omitempty"`
 }
 
 type CustomerContextConfig struct {

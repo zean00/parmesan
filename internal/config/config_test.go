@@ -88,6 +88,17 @@ agent_servers:
           url: "https://docs.example/sse"
           headers:
             Authorization: "Bearer ${OPENROUTER_API_KEY}"
+  Pigo:
+    protocol: a2a
+    request_timeout_seconds: 13
+    a2a:
+      url: "https://pigo.example/a2a"
+      card_url: "https://pigo.example/.well-known/agent-card.json"
+      bearer_token: "${OPENROUTER_API_KEY}"
+      max_response_bytes: 1048576
+      poll_interval_ms: 25
+      headers:
+        X-Trace: "trace-${OPENROUTER_API_KEY}"
 `)
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -127,6 +138,22 @@ agent_servers:
 	}
 	if server.ACP.MCPServers[1].Headers["Authorization"] != "Bearer test-key" {
 		t.Fatalf("ACP MCP headers = %#v, want expanded auth header", server.ACP.MCPServers[1].Headers)
+	}
+	a2aServer, ok := cfg.AgentServers["Pigo"]
+	if !ok {
+		t.Fatalf("Pigo agent server missing from config: %#v", cfg.AgentServers)
+	}
+	if a2aServer.Protocol != "a2a" || a2aServer.RequestTimeoutSeconds != 13 {
+		t.Fatalf("A2A server protocol/timeouts = %#v, want a2a/13", a2aServer)
+	}
+	if a2aServer.A2A.URL != "https://pigo.example/a2a" || a2aServer.A2A.CardURL != "https://pigo.example/.well-known/agent-card.json" {
+		t.Fatalf("A2A URLs = %#v, want configured URLs", a2aServer.A2A)
+	}
+	if a2aServer.A2A.BearerToken != "test-key" || a2aServer.A2A.Headers["X-Trace"] != "trace-test-key" {
+		t.Fatalf("A2A auth/header expansion = %#v, want expanded values", a2aServer.A2A)
+	}
+	if a2aServer.A2A.MaxResponseBytes != 1048576 || a2aServer.A2A.PollIntervalMS != 25 {
+		t.Fatalf("A2A limits = %#v, want configured values", a2aServer.A2A)
 	}
 }
 

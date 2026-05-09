@@ -2104,6 +2104,119 @@ func TestRunnerDelegatesToExternalAgentPeer(t *testing.T) {
 	}
 }
 
+func TestRunnerDelegatesToA2AAgentPeer(t *testing.T) {
+	var sawSend bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/a2a" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req struct {
+			ID     any             `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode A2A request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.Method != "message/send" {
+			t.Errorf("A2A method = %q, want message/send", req.Method)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		sawSend = true
+		raw, err := json.Marshal(map[string]any{
+			"kind":      "task",
+			"id":        "task_1",
+			"contextId": "delegate_context",
+			"status":    map[string]any{"state": "completed"},
+			"artifacts": []map[string]any{{
+				"artifactId": "artifact_1",
+				"parts": []map[string]any{{
+					"kind": "text",
+					"text": "Delegated A2A runner answer",
+				}},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("marshal A2A task: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result":  json.RawMessage(raw),
+		})
+	}))
+	defer server.Close()
+
+	repo := memory.New()
+	r := New(repo, nil, nil, nil, "test-runner").WithAgentPeers(acppeer.NewManager(map[string]config.AgentServerConfig{
+		"Pigo": {
+			Protocol:              "a2a",
+			RequestTimeoutSeconds: 2,
+			A2A:                   config.A2AAgentConfig{URL: server.URL + "/a2a"},
+		},
+	}))
+
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID:        "sess_delegate_a2a",
+		Channel:   "acp",
+		AgentID:   "parent_agent",
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	if err := repo.AppendEvent(context.Background(), session.Event{
+		ID:        "evt_a2a_1",
+		SessionID: "sess_delegate_a2a",
+		Source:    "customer",
+		Kind:      "message",
+		TraceID:   "trace_a2a_1",
+		CreatedAt: now,
+		Content:   []session.ContentPart{{Type: "text", Text: "Please ask the remote agent."}},
+	}); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	output, err := r.maybeRunCapability(context.Background(), execution.TurnExecution{
+		ID:        "exec_delegate_a2a",
+		SessionID: "sess_delegate_a2a",
+		TraceID:   "trace_a2a_1",
+	}, resolvedView{
+		AgentDecisionStage: policyruntime.AgentDecisionStageResult{
+			Decision: policyruntime.AgentDecision{
+				SelectedAgent: "Pigo",
+				CanRun:        true,
+				Rationale:     "delegate",
+				Grounded:      true,
+			},
+		},
+		CapabilityDecisionStage: policyruntime.CapabilityDecisionStageResult{
+			Decision: policyruntime.CapabilityDecision{
+				Kind:     "agent",
+				TargetID: "Pigo",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("maybeRunCapability() error = %v", err)
+	}
+	if !sawSend {
+		t.Fatal("A2A server did not receive message/send")
+	}
+	delegated, ok := output["delegated_agent"].(map[string]any)
+	if !ok {
+		t.Fatalf("output = %#v, want delegated_agent payload", output)
+	}
+	if delegated["protocol"] != "a2a" || delegated["result_text"] != "Delegated A2A runner answer" {
+		t.Fatalf("delegated output = %#v, want A2A delegated answer", delegated)
+	}
+}
+
 func TestDelegatedAgentPromptIncludesWorkflowBrief(t *testing.T) {
 	prompt := delegatedAgentPrompt(execution.TurnExecution{ID: "exec_1"}, resolvedView{
 		Bundle: &policy.Bundle{

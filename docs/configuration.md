@@ -119,7 +119,7 @@ bootstrap:
 | `bootstrap` | where agent files are loaded from |
 | `acp` | inbound coalescing and delegated-agent timeout |
 | `mcp.providers` | globally registered MCP catalog |
-| `agent_servers` | external ACP peer agents available for delegation |
+| `agent_servers` | external ACP or A2A peer agents available for delegation |
 | `customer_context.enrichment` | session-creation enrichment hook |
 | `moderation.alerts` | operator moderation notification rules |
 | `observability` | metrics and telemetry |
@@ -672,13 +672,16 @@ before invocation.
 
 ### Delegated ACP Peer Agents
 
-ACP peer agents are configured under `agent_servers`.
+Delegated agent servers are configured under `agent_servers`. Parmesan supports
+ACP stdio peers and outbound A2A JSON-RPC peers. Existing entries without an
+explicit `protocol` are treated as ACP.
 
-Example:
+ACP example:
 
 ```yaml
 agent_servers:
   OpenCode:
+    protocol: acp
     command: opencode
     args: ["acp", "--pure"]
     startup_timeout_seconds: 10
@@ -701,13 +704,14 @@ agent_servers:
             Authorization: "Bearer ${DOCS_TOKEN}"
 ```
 
-This section defines how Parmesan starts or connects to the peer agent process.
+This section defines how Parmesan starts or connects to the peer agent.
 The policy bundle only refers to the peer by id.
 
 These peers are available for policy-driven delegation. They are not implicitly
 used by the runtime. Policy must expose them.
 
-The nested `acp` block controls how Parmesan opens the delegated ACP session:
+For ACP peers, the nested `acp` block controls how Parmesan opens the delegated
+session:
 
 - `model`: sent through ACP `session/set_config_option` when the peer agent
   advertises a compatible model config option; otherwise Parmesan skips the
@@ -727,6 +731,35 @@ Operationally, think of this as a delegation profile for that peer server:
 - which model Parmesan should try to request
 - which MCP servers Parmesan should attach for that delegated session
 - what framing text Parmesan should wrap around the delegated task
+
+A2A example, compatible with a Pigo A2A server:
+
+```yaml
+agent_servers:
+  Pigo:
+    protocol: a2a
+    request_timeout_seconds: 60
+    a2a:
+      url: "http://localhost:4388/a2a"
+      # card_url is optional when url is set; otherwise point it at
+      # "/.well-known/agent-card.json".
+      bearer_token: "${PIGO_A2A_BEARER_TOKEN}"
+      poll_interval_ms: 500
+      max_response_bytes: 2097152
+      headers:
+        X-Trace-Source: parmesan
+```
+
+For A2A peers, Parmesan sends the delegated prompt as a text `message/send`
+request with blocking mode enabled. If the remote task returns `submitted` or
+`working`, Parmesan polls `tasks/get` until the task reaches a terminal state
+or the request timeout expires. Final text is read from the latest text
+artifact first, then the task status message or history. This change is
+outbound-only; it does not expose Parmesan itself as an A2A server.
+
+A2A URLs use the same remote URL security posture as tool providers: HTTPS is
+required for non-local hosts, and local HTTP endpoints require
+`tool_providers.allow_local_dev: true` when URL security is enabled.
 
 ### Customer Context Enrichment
 

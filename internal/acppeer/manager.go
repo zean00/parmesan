@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sahal/parmesan/internal/config"
+	"github.com/sahal/parmesan/internal/toolsecurity"
 )
 
 type Request struct {
@@ -30,6 +31,7 @@ type Result struct {
 	Status              string
 	Text                string
 	Error               string
+	Protocol            string
 	Model               string
 	MCPServerNames      []string
 	PromptPrefixApplied bool
@@ -37,9 +39,11 @@ type Result struct {
 }
 
 type Manager struct {
-	configs map[string]config.AgentServerConfig
-	mu      sync.Mutex
-	peers   map[string]*peer
+	configs        map[string]config.AgentServerConfig
+	providerPolicy toolsecurity.ProviderURLPolicy
+	mu             sync.Mutex
+	peers          map[string]*peer
+	a2aPeers       map[string]*a2aPeer
 }
 
 func NewManager(configs map[string]config.AgentServerConfig) *Manager {
@@ -48,9 +52,15 @@ func NewManager(configs map[string]config.AgentServerConfig) *Manager {
 		cloned[key] = value
 	}
 	return &Manager{
-		configs: cloned,
-		peers:   map[string]*peer{},
+		configs:  cloned,
+		peers:    map[string]*peer{},
+		a2aPeers: map[string]*a2aPeer{},
 	}
+}
+
+func (m *Manager) WithProviderURLPolicy(policy toolsecurity.ProviderURLPolicy) *Manager {
+	m.providerPolicy = policy
+	return m
 }
 
 func (m *Manager) Has(serverID string) bool {
@@ -62,18 +72,44 @@ func (m *Manager) Has(serverID string) bool {
 
 func (m *Manager) Delegate(ctx context.Context, serverID string, req Request) (Result, error) {
 	serverID = strings.TrimSpace(serverID)
+	cfg, ok := m.config(serverID)
+	if !ok {
+		err := fmt.Errorf("unknown agent server %q", serverID)
+		return Result{ServerID: serverID, SessionID: req.SessionID, Status: "failed", Error: err.Error()}, err
+	}
+	if agentServerProtocol(cfg) == "a2a" {
+		p, err := m.a2aPeer(serverID, cfg)
+		if err != nil {
+			return Result{ServerID: serverID, SessionID: req.SessionID, Status: "failed", Error: err.Error(), Protocol: "a2a"}, err
+		}
+		result, err := p.delegate(ctx, req)
+		if err != nil {
+			if result.Status != "" {
+				return result, err
+			}
+			return Result{ServerID: serverID, SessionID: req.SessionID, Status: "failed", Error: err.Error(), Protocol: "a2a"}, err
+		}
+		return result, nil
+	}
 	p, err := m.peer(serverID)
 	if err != nil {
-		return Result{ServerID: serverID, SessionID: req.SessionID, Status: "failed", Error: err.Error()}, err
+		return Result{ServerID: serverID, SessionID: req.SessionID, Status: "failed", Error: err.Error(), Protocol: "acp"}, err
 	}
 	result, err := p.delegate(ctx, req)
 	if err != nil {
 		if result.Status != "" {
 			return result, err
 		}
-		return Result{ServerID: serverID, SessionID: req.SessionID, Status: "failed", Error: err.Error()}, err
+		return Result{ServerID: serverID, SessionID: req.SessionID, Status: "failed", Error: err.Error(), Protocol: "acp"}, err
 	}
 	return result, nil
+}
+
+func (m *Manager) config(serverID string) (config.AgentServerConfig, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cfg, ok := m.configs[serverID]
+	return cfg, ok
 }
 
 func (m *Manager) peer(serverID string) (*peer, error) {
@@ -86,6 +122,9 @@ func (m *Manager) peer(serverID string) (*peer, error) {
 	if !ok {
 		return nil, fmt.Errorf("unknown agent server %q", serverID)
 	}
+	if protocol := agentServerProtocol(cfg); protocol != "acp" {
+		return nil, fmt.Errorf("agent server %q uses unsupported ACP peer protocol %q", serverID, protocol)
+	}
 	p := &peer{
 		serverID:    serverID,
 		config:      cfg,
@@ -97,6 +136,32 @@ func (m *Manager) peer(serverID string) (*peer, error) {
 	}
 	m.peers[serverID] = p
 	return p, nil
+}
+
+func (m *Manager) a2aPeer(serverID string, cfg config.AgentServerConfig) (*a2aPeer, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p := m.a2aPeers[serverID]; p != nil {
+		return p, nil
+	}
+	p := &a2aPeer{
+		serverID:       serverID,
+		config:         cfg,
+		providerPolicy: m.providerPolicy,
+	}
+	if err := p.validate(); err != nil {
+		return nil, err
+	}
+	m.a2aPeers[serverID] = p
+	return p, nil
+}
+
+func agentServerProtocol(cfg config.AgentServerConfig) string {
+	protocol := strings.ToLower(strings.TrimSpace(cfg.Protocol))
+	if protocol == "" {
+		return "acp"
+	}
+	return protocol
 }
 
 type peer struct {
@@ -244,7 +309,7 @@ func (p *peer) delegate(ctx context.Context, req Request) (Result, error) {
 		req.CWD = "."
 	}
 	if err := p.validateMCPServers(); err != nil {
-		return Result{ServerID: p.serverID, SessionID: sessionID, Status: "failed", Error: err.Error()}, err
+		return Result{ServerID: p.serverID, SessionID: sessionID, Status: "failed", Error: err.Error(), Protocol: "acp"}, err
 	}
 	updates := make(chan updateNotification, 32)
 	p.subscribe(sessionID, updates)
@@ -282,7 +347,7 @@ func (p *peer) delegate(ctx context.Context, req Request) (Result, error) {
 				"configId":  configID,
 				"value":     valueID,
 			}, &configResp); err != nil {
-				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "failed", Error: err.Error(), Model: modelName, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, err
+				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "failed", Error: err.Error(), Protocol: "acp", Model: modelName, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, err
 			}
 			appliedModel = modelName
 		}
@@ -350,9 +415,9 @@ func (p *peer) delegate(ctx context.Context, req Request) (Result, error) {
 		select {
 		case <-waitCtx.Done():
 			if text := strings.TrimSpace(strings.Join(chunks, "")); text != "" && promptCallCompleted(promptResp) {
-				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text, Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, nil
+				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text, Protocol: "acp", Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, nil
 			}
-			return Result{ServerID: p.serverID, SessionID: sessionID, Status: "timeout", Error: waitCtx.Err().Error(), Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, waitCtx.Err()
+			return Result{ServerID: p.serverID, SessionID: sessionID, Status: "timeout", Error: waitCtx.Err().Error(), Protocol: "acp", Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, waitCtx.Err()
 		case outcome := <-promptDone:
 			if outcome.err != nil {
 				return Result{}, outcome.err
@@ -360,11 +425,11 @@ func (p *peer) delegate(ctx context.Context, req Request) (Result, error) {
 			promptResp = outcome.resp
 			if turnCompleted {
 				if text := strings.TrimSpace(strings.Join(chunks, "")); text != "" {
-					return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text, Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, nil
+					return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text, Protocol: "acp", Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, nil
 				}
 			}
 			if text := promptResponseText(promptResp); text != "" {
-				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text, Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, nil
+				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text, Protocol: "acp", Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, nil
 			}
 			resetCompletionTimer()
 		case item := <-updates:
@@ -383,18 +448,18 @@ func (p *peer) delegate(ctx context.Context, req Request) (Result, error) {
 					text = updateText(item.Update)
 				}
 				if text == "" {
-					return Result{ServerID: p.serverID, SessionID: sessionID, Status: "failed", Error: "delegated agent produced no message", Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, errors.New("delegated agent produced no message")
+					return Result{ServerID: p.serverID, SessionID: sessionID, Status: "failed", Error: "delegated agent produced no message", Protocol: "acp", Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, errors.New("delegated agent produced no message")
 				}
-				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text, Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, nil
+				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text, Protocol: "acp", Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, nil
 			case "error", "agent_turn_error":
 				stopCompletionTimer()
 				msg := firstNonEmpty(stringField(item.Update, "message"), stringField(item.Update, "error"), updateText(item.Update), "delegated agent failed")
-				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "failed", Error: msg, Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, errors.New(msg)
+				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "failed", Error: msg, Protocol: "acp", Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, errors.New(msg)
 			}
 		case <-completionTimerC:
 			stopCompletionTimer()
 			if text := strings.TrimSpace(strings.Join(chunks, "")); text != "" && promptCallCompleted(promptResp) {
-				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text, Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, nil
+				return Result{ServerID: p.serverID, SessionID: sessionID, Status: "completed", Text: text, Protocol: "acp", Model: appliedModel, MCPServerNames: p.sessionMCPServerNames(), PromptPrefixApplied: strings.TrimSpace(p.config.ACP.PromptPrefix) != "", PromptSuffixApplied: strings.TrimSpace(p.config.ACP.PromptSuffix) != ""}, nil
 			}
 		}
 	}

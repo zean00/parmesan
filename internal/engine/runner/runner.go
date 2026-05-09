@@ -2067,6 +2067,9 @@ func (r *Runner) maybeDelegateAgent(ctx context.Context, exec execution.TurnExec
 		"status":     status,
 		"error":      result.Error,
 	}
+	if strings.TrimSpace(result.Protocol) != "" {
+		fields["protocol"] = result.Protocol
+	}
 	if strings.TrimSpace(result.Model) != "" {
 		fields["model"] = result.Model
 	}
@@ -2081,7 +2084,7 @@ func (r *Runner) maybeDelegateAgent(ctx context.Context, exec execution.TurnExec
 	}
 	for key, value := range delegatedAgentOutput(result.Text) {
 		switch key {
-		case "server_id", "session_id", "status", "error", "model", "mcp_servers", "prompt_prefix_applied", "prompt_suffix_applied":
+		case "server_id", "session_id", "status", "error", "protocol", "model", "mcp_servers", "prompt_prefix_applied", "prompt_suffix_applied":
 			if key == "status" {
 				fields["result_status"] = value
 			}

@@ -141,12 +141,12 @@ func RunWorker(ctx context.Context) error {
 	if err := builtintools.Ensure(ctx, repo); err != nil {
 		return err
 	}
-	peerManager := acppeer.NewManager(cfg.AgentServers)
 	providerPolicy := toolsecurity.ProviderURLPolicy{
 		AllowedHosts:   cfg.ToolProviderSecurity.AllowedHosts,
 		AllowLocalDev:  cfg.ToolProviderSecurity.AllowLocalDev,
 		RequestTimeout: cfg.RequestTimeout,
 	}
+	peerManager := acppeer.NewManager(cfg.AgentServers).WithProviderURLPolicy(providerPolicy)
 	runner.New(repo, writes, broker, router, "worker-"+hostname()).
 		WithExecutionConcurrency(cfg.ExecutionConcurrency).
 		WithDefaultOrgID(cfg.Observability.OrgID).
