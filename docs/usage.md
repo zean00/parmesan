@@ -98,3 +98,11 @@ where applicable.
 
 Operator `GET` usage routes require `operator.view`; mutating policy routes
 require `operator.manage`.
+
+## Database Upgrade Note
+
+Usage quota storage uses `window_key` internally because `window` is a SQL
+keyword. Fresh databases get that shape from migration 019. Databases that
+already applied the earlier migration 019 shape are upgraded by migration 021,
+which renames existing `window` columns on usage quota policies, buckets, and
+events, then rebuilds the bucket summary index.

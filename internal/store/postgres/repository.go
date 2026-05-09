@@ -4150,13 +4150,13 @@ func (c *Client) SaveUsageQuotaPolicy(ctx context.Context, policy usagedomain.Qu
 		policy.Enforcement = usagedomain.EnforcementBlock
 	}
 	_, err := c.sessionQuery().Exec(ctx, `
-		INSERT INTO usage_quota_policies (id, scope_kind, scope_id, metric, window, limit_value, enforcement, status, metadata_json, created_at, updated_at)
+		INSERT INTO usage_quota_policies (id, scope_kind, scope_id, metric, window_key, limit_value, enforcement, status, metadata_json, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		ON CONFLICT (id) DO UPDATE SET
 			scope_kind = EXCLUDED.scope_kind,
 			scope_id = EXCLUDED.scope_id,
 			metric = EXCLUDED.metric,
-			window = EXCLUDED.window,
+			window_key = EXCLUDED.window_key,
 			limit_value = EXCLUDED.limit_value,
 			enforcement = EXCLUDED.enforcement,
 			status = EXCLUDED.status,
@@ -4183,7 +4183,7 @@ func (c *Client) ListUsageQuotaPolicies(ctx context.Context, query usagedomain.P
 		limit = 1000
 	}
 	rows, err := c.sessionQuery().Query(ctx, `
-		SELECT id, scope_kind, COALESCE(scope_id,''), metric, window, limit_value, enforcement, status, metadata_json, created_at, updated_at
+		SELECT id, scope_kind, COALESCE(scope_id,''), metric, window_key, limit_value, enforcement, status, metadata_json, created_at, updated_at
 		FROM usage_quota_policies
 		WHERE ($1 = '' OR id = $1)
 		  AND ($2 = '' OR scope_kind = $2)
@@ -4218,7 +4218,7 @@ func (c *Client) AppendUsageEvent(ctx context.Context, event usagedomain.UsageEv
 		event.OccurredAt = event.RecordedAt
 	}
 	_, err := c.sessionQuery().Exec(ctx, `
-		INSERT INTO usage_events (id, policy_id, decision, scope_kind, scope_id, metric, quantity, window, window_start, window_end, used_before, used_after, limit_value, resource, provider, model, tool_id, session_id, execution_id, response_id, trace_id, estimated, status, error, latency_ms, metadata_json, occurred_at, recorded_at)
+		INSERT INTO usage_events (id, policy_id, decision, scope_kind, scope_id, metric, quantity, window_key, window_start, window_end, used_before, used_after, limit_value, resource, provider, model, tool_id, session_id, execution_id, response_id, trace_id, estimated, status, error, latency_ms, metadata_json, occurred_at, recorded_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9, TIMESTAMPTZ '0001-01-01 00:00:00+00'),NULLIF($10, TIMESTAMPTZ '0001-01-01 00:00:00+00'),$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
 		ON CONFLICT (id) DO NOTHING
 	`, event.ID, nullString(event.PolicyID), nullString(event.Decision), event.ScopeKind, event.ScopeID, event.Metric, event.Quantity, nullString(event.Window), event.WindowStart, event.WindowEnd, event.UsedBefore, event.UsedAfter, event.Limit, nullString(event.Resource), nullString(event.Provider), nullString(event.Model), nullString(event.ToolID), nullString(event.SessionID), nullString(event.ExecutionID), nullString(event.ResponseID), nullString(event.TraceID), event.Estimated, nullString(event.Status), nullString(event.Error), event.LatencyMS, metadataJSON(event.Metadata, event.ArtifactMeta), event.OccurredAt, event.RecordedAt)
@@ -4231,7 +4231,7 @@ func (c *Client) ListUsageEvents(ctx context.Context, query usagedomain.EventQue
 		limit = 100
 	}
 	rows, err := c.sessionQuery().Query(ctx, `
-		SELECT id, COALESCE(policy_id,''), COALESCE(decision,''), scope_kind, scope_id, metric, quantity, COALESCE(window,''), COALESCE(window_start, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(window_end, TIMESTAMPTZ '0001-01-01 00:00:00+00'), used_before, used_after, limit_value, COALESCE(resource,''), COALESCE(provider,''), COALESCE(model,''), COALESCE(tool_id,''), COALESCE(session_id,''), COALESCE(execution_id,''), COALESCE(response_id,''), COALESCE(trace_id,''), estimated, COALESCE(status,''), COALESCE(error,''), latency_ms, metadata_json, occurred_at, recorded_at
+		SELECT id, COALESCE(policy_id,''), COALESCE(decision,''), scope_kind, scope_id, metric, quantity, COALESCE(window_key,''), COALESCE(window_start, TIMESTAMPTZ '0001-01-01 00:00:00+00'), COALESCE(window_end, TIMESTAMPTZ '0001-01-01 00:00:00+00'), used_before, used_after, limit_value, COALESCE(resource,''), COALESCE(provider,''), COALESCE(model,''), COALESCE(tool_id,''), COALESCE(session_id,''), COALESCE(execution_id,''), COALESCE(response_id,''), COALESCE(trace_id,''), estimated, COALESCE(status,''), COALESCE(error,''), latency_ms, metadata_json, occurred_at, recorded_at
 		FROM usage_events
 		WHERE ($1 = '' OR scope_kind = $1)
 		  AND ($2 = '' OR scope_id = $2)
@@ -4298,7 +4298,7 @@ func (c *Client) CheckAndReserveUsageBatch(ctx context.Context, reservations []u
 			scopeID = strings.TrimSpace(reservation.Policy.ScopeID)
 		}
 		_, err = tx.Exec(ctx, `
-			INSERT INTO usage_buckets (policy_id, scope_kind, scope_id, metric, window, window_start, window_end, quantity, limit_value, updated_at)
+			INSERT INTO usage_buckets (policy_id, scope_kind, scope_id, metric, window_key, window_start, window_end, quantity, limit_value, updated_at)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,0,$8,$9)
 			ON CONFLICT (policy_id, scope_id, window_start) DO NOTHING
 		`, reservation.Policy.ID, reservation.Policy.ScopeKind, scopeID, reservation.Policy.Metric, reservation.Policy.Window, start, end, reservation.Policy.Limit, reservation.Now)
@@ -4368,12 +4368,12 @@ func (c *Client) ListUsageBuckets(ctx context.Context, query usagedomain.Summary
 		limit = 100
 	}
 	rows, err := c.sessionQuery().Query(ctx, `
-		SELECT policy_id, scope_kind, scope_id, metric, window, window_start, window_end, quantity, limit_value, updated_at
+		SELECT policy_id, scope_kind, scope_id, metric, window_key, window_start, window_end, quantity, limit_value, updated_at
 		FROM usage_buckets
 		WHERE ($1 = '' OR scope_kind = $1)
 		  AND ($2 = '' OR scope_id = $2)
 		  AND ($3 = '' OR metric = $3)
-		  AND ($4 = '' OR window = $4)
+		  AND ($4 = '' OR window_key = $4)
 		  AND ($5 = TIMESTAMPTZ '0001-01-01 00:00:00+00' OR window_end >= $5)
 		  AND ($6 = TIMESTAMPTZ '0001-01-01 00:00:00+00' OR window_start <= $6)
 		ORDER BY window_start DESC

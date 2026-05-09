@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS usage_quota_policies (
     scope_kind TEXT NOT NULL,
     scope_id TEXT,
     metric TEXT NOT NULL,
-    window TEXT NOT NULL,
+    window_key TEXT NOT NULL,
     limit_value BIGINT NOT NULL,
     enforcement TEXT NOT NULL,
     status TEXT NOT NULL,
@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS usage_buckets (
     scope_kind TEXT NOT NULL,
     scope_id TEXT NOT NULL,
     metric TEXT NOT NULL,
-    window TEXT NOT NULL,
+    window_key TEXT NOT NULL,
     window_start TIMESTAMPTZ NOT NULL,
     window_end TIMESTAMPTZ NOT NULL,
     quantity BIGINT NOT NULL DEFAULT 0,
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS usage_buckets (
 );
 
 CREATE INDEX IF NOT EXISTS usage_buckets_summary_idx
-ON usage_buckets(scope_kind, scope_id, metric, window, window_start DESC);
+ON usage_buckets(scope_kind, scope_id, metric, window_key, window_start DESC);
 
 CREATE TABLE IF NOT EXISTS usage_events (
     id TEXT PRIMARY KEY,
@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
     scope_id TEXT NOT NULL,
     metric TEXT NOT NULL,
     quantity BIGINT NOT NULL,
-    window TEXT,
+    window_key TEXT,
     window_start TIMESTAMPTZ,
     window_end TIMESTAMPTZ,
     used_before BIGINT NOT NULL DEFAULT 0,
