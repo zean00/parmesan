@@ -751,11 +751,12 @@ agent_servers:
 ```
 
 For A2A peers, Parmesan sends the delegated prompt as a text `message/send`
-request with blocking mode enabled. If the remote task returns `submitted` or
-`working`, Parmesan polls `tasks/get` until the task reaches a terminal state
-or the request timeout expires. Final text is read from the latest text
-artifact first, then the task status message or history. This change is
-outbound-only; it does not expose Parmesan itself as an A2A server.
+request with blocking mode enabled. The response may be either a completed A2A
+`Message` or a `Task`. If the remote task returns `submitted` or `working`,
+Parmesan polls `tasks/get` until the task reaches a terminal state or the
+request timeout expires. Final text is read from the latest text artifact
+first, then the task status message or history. This change is outbound-only;
+it does not expose Parmesan itself as an A2A server.
 
 A2A URLs use the same remote URL security posture as tool providers: HTTPS is
 required for non-local hosts, and local HTTP endpoints require

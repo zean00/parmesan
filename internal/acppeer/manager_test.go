@@ -221,6 +221,50 @@ func TestManagerDelegateA2AFailedTask(t *testing.T) {
 	}
 }
 
+func TestManagerDelegateA2ADirectMessageResult(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var rpcReq a2aRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&rpcReq); err != nil {
+			t.Errorf("decode rpc request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if rpcReq.Method != "message/send" {
+			t.Errorf("method = %q, want message/send", rpcReq.Method)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		writeA2AResult(t, w, rpcReq.ID, a2aMessage{
+			Kind:      "message",
+			MessageID: "msg_direct",
+			Role:      "agent",
+			ContextID: "sess_delegate_test",
+			Parts:     []a2aPart{{Kind: "text", Text: "Direct A2A message answer"}},
+		})
+	}))
+	defer server.Close()
+
+	manager := NewManager(map[string]config.AgentServerConfig{
+		"Pigo": {
+			Protocol:              "a2a",
+			RequestTimeoutSeconds: 2,
+			A2A:                   config.A2AAgentConfig{URL: server.URL},
+		},
+	}).WithProviderURLPolicy(toolsecurity.ProviderURLPolicy{AllowLocalDev: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	result, err := manager.Delegate(ctx, "Pigo", Request{
+		SessionID: "sess_delegate_test",
+		Prompt:    "help with this task",
+	})
+	if err != nil {
+		t.Fatalf("Delegate() error = %v", err)
+	}
+	if result.Status != "completed" || result.Text != "Direct A2A message answer" || result.Protocol != "a2a" {
+		t.Fatalf("result = %#v, want completed direct A2A message answer", result)
+	}
+}
+
 func writeA2AResult(t *testing.T, w http.ResponseWriter, id any, result any) {
 	t.Helper()
 	raw, err := json.Marshal(result)

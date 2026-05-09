@@ -157,11 +157,15 @@ func (p *a2aPeer) delegate(ctx context.Context, req Request) (Result, error) {
 		},
 		Metadata: cloneAnyMap(req.Metadata),
 	}
-	var task a2aTask
-	if err := p.call(waitCtx, "message/send", params, &task); err != nil {
+	raw, err := p.callRaw(waitCtx, "message/send", params)
+	if err != nil {
 		return Result{ServerID: p.serverID, SessionID: sessionID, Protocol: "a2a", Status: "failed", Error: err.Error()}, err
 	}
-	task, err := p.waitForTerminalTask(waitCtx, task)
+	task, err := a2aTaskFromSendResult(raw)
+	if err != nil {
+		return Result{ServerID: p.serverID, SessionID: sessionID, Protocol: "a2a", Status: "failed", Error: err.Error()}, err
+	}
+	task, err = p.waitForTerminalTask(waitCtx, task)
 	if err != nil {
 		status := strings.TrimSpace(task.Status.State)
 		if status == "" {
@@ -216,16 +220,29 @@ func (p *a2aPeer) waitForTerminalTask(ctx context.Context, task a2aTask) (a2aTas
 }
 
 func (p *a2aPeer) call(ctx context.Context, method string, params any, out any) error {
-	endpoint, err := p.endpoint(ctx)
+	raw, err := p.callRaw(ctx, method, params)
 	if err != nil {
 		return err
 	}
+	if out != nil && len(raw) > 0 {
+		if err := json.Unmarshal(raw, out); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *a2aPeer) callRaw(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	endpoint, err := p.endpoint(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if err := p.providerPolicy.Validate(endpoint); err != nil {
-		return err
+		return nil, err
 	}
 	rawParams, err := json.Marshal(params)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	body, err := json.Marshal(a2aRPCRequest{
 		JSONRPC: "2.0",
@@ -234,36 +251,31 @@ func (p *a2aPeer) call(ctx context.Context, method string, params any, out any) 
 		Params:  rawParams,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 	p.applyHeaders(httpReq)
 	resp, err := p.httpClient().Do(httpReq)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("%s: HTTP %d", method, resp.StatusCode)
+		return nil, fmt.Errorf("%s: HTTP %d", method, resp.StatusCode)
 	}
 	var rpcResp a2aRPCResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, p.maxBytes())).Decode(&rpcResp); err != nil {
-		return err
+		return nil, err
 	}
 	if rpcResp.Error != nil {
-		return fmt.Errorf("a2a error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+		return nil, fmt.Errorf("a2a error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
 	}
-	if out != nil && len(rpcResp.Result) > 0 {
-		if err := json.Unmarshal(rpcResp.Result, out); err != nil {
-			return err
-		}
-	}
-	return nil
+	return rpcResp.Result, nil
 }
 
 func (p *a2aPeer) endpoint(ctx context.Context) (string, error) {
@@ -351,6 +363,61 @@ func a2aTaskText(task a2aTask) string {
 		}
 	}
 	return ""
+}
+
+func a2aTaskFromSendResult(raw json.RawMessage) (a2aTask, error) {
+	var discriminator struct {
+		Kind      string          `json:"kind"`
+		MessageID string          `json:"messageId"`
+		Role      string          `json:"role"`
+		Status    json.RawMessage `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &discriminator); err != nil {
+		return a2aTask{}, err
+	}
+	switch strings.ToLower(strings.TrimSpace(discriminator.Kind)) {
+	case "message":
+		var message a2aMessage
+		if err := json.Unmarshal(raw, &message); err != nil {
+			return a2aTask{}, err
+		}
+		return a2aTaskFromMessage(message), nil
+	case "task", "":
+		if strings.TrimSpace(discriminator.MessageID) != "" || strings.TrimSpace(discriminator.Role) != "" {
+			var message a2aMessage
+			if err := json.Unmarshal(raw, &message); err != nil {
+				return a2aTask{}, err
+			}
+			return a2aTaskFromMessage(message), nil
+		}
+		var task a2aTask
+		if err := json.Unmarshal(raw, &task); err != nil {
+			return a2aTask{}, err
+		}
+		return task, nil
+	default:
+		var task a2aTask
+		if err := json.Unmarshal(raw, &task); err != nil {
+			return a2aTask{}, err
+		}
+		if len(discriminator.Status) > 0 {
+			return task, nil
+		}
+		return a2aTask{}, fmt.Errorf("unsupported A2A message/send result kind %q", discriminator.Kind)
+	}
+}
+
+func a2aTaskFromMessage(message a2aMessage) a2aTask {
+	return a2aTask{
+		Kind:      "task",
+		ID:        strings.TrimSpace(message.TaskID),
+		ContextID: strings.TrimSpace(message.ContextID),
+		Status: a2aTaskStatus{
+			State:   a2aTaskStateCompleted,
+			Message: &message,
+		},
+		History: []a2aMessage{message},
+	}
 }
 
 func a2aTextFromParts(parts []a2aPart) string {
