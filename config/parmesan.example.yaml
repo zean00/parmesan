@@ -88,6 +88,7 @@ runtime:
   request_timeout_seconds: 15
   tool_name_aliases:
     builtin.get_current_time: get_current_time
+    builtin.ask_user: ask_user
   retry_model_profiles:
     - id: structured_safe
       name: Structured-safe fallback

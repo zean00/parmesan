@@ -76,8 +76,12 @@ func TestSyncNativeProviderReturnsBuiltInCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SyncProvider() error = %v", err)
 	}
-	if len(entries) != 1 || entries[0].Name != "get_current_time" || entries[0].RuntimeProtocol != "native" {
-		t.Fatalf("entries = %#v, want built-in current time tool", entries)
+	names := map[string]bool{}
+	for _, entry := range entries {
+		names[entry.Name] = entry.RuntimeProtocol == "native"
+	}
+	if !names["get_current_time"] || !names["ask_user"] {
+		t.Fatalf("entries = %#v, want built-in current time and ask_user tools", entries)
 	}
 }
 

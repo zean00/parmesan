@@ -35,3 +35,24 @@ func TestCurrentTimeRejectsUnknownLocation(t *testing.T) {
 		t.Fatal("Invoke() error = nil, want unknown location error")
 	}
 }
+
+func TestAskUserReturnsAwaitingCustomerPayload(t *testing.T) {
+	out, err := Invoke(tool.CatalogEntry{Name: AskUserName}, map[string]any{
+		"question":          "What order number should I check?",
+		"reason":            "missing order number",
+		"expected_response": "order number",
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("Invoke() error = %v", err)
+	}
+	if out["tool_id"] != "builtin.ask_user" || out["status"] != "awaiting_customer" || out["question"] != "What order number should I check?" {
+		t.Fatalf("output = %#v, want ask_user awaiting payload", out)
+	}
+}
+
+func TestAskUserRequiresQuestion(t *testing.T) {
+	_, err := Invoke(tool.CatalogEntry{Name: AskUserName}, map[string]any{"reason": "missing order number"}, time.Now().UTC())
+	if err == nil {
+		t.Fatal("Invoke() error = nil, want missing question error")
+	}
+}

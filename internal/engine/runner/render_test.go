@@ -109,6 +109,28 @@ func TestRenderResponsePrefersDelegatedAgentResultOverPolicyText(t *testing.T) {
 	}
 }
 
+func TestRenderResponsePrefersAskUserQuestionOverPolicyText(t *testing.T) {
+	view := resolvedView{
+		CompositionMode: "guided",
+		MatchFinalizeStage: policyruntime.FinalizeStageResult{
+			MatchedGuidelines: []policy.Guideline{{
+				ID:   "need_order_number",
+				Then: "ask for the missing order number",
+			}},
+		},
+	}
+
+	got := renderResponseMessages(view, map[string]any{
+		"tool_id":  "builtin.ask_user",
+		"status":   "awaiting_customer",
+		"question": "What order number should I check?",
+	})
+	want := []string{"What order number should I check?"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("messages = %#v, want ask_user question", got)
+	}
+}
+
 func TestRenderResponseUsesDelegatedTicketLifecycleStatusAsUsable(t *testing.T) {
 	view := resolvedView{
 		CompositionMode: "guided",

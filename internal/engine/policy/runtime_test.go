@@ -172,6 +172,35 @@ func TestResolveAutoExposesBuiltInTimeTool(t *testing.T) {
 	}
 }
 
+func TestBuildToolPlanInfersAskUserQuestion(t *testing.T) {
+	catalog := builtintools.CatalogEntries(time.Now().UTC())
+	guidelines := []policy.Guideline{{
+		ID:   "ask_order_number",
+		Then: "ask the customer for the order number",
+	}}
+	plan, decision := buildToolPlan(
+		context.Background(),
+		nil,
+		MatchingContext{SessionID: "sess_1", LatestCustomerText: "I need help with my return"},
+		nil,
+		nil,
+		JourneyDecision{},
+		guidelines,
+		[]string{builtintools.AskUserName},
+		map[string]string{"builtin.ask_user": "auto"},
+		nil,
+		catalog,
+		BuildToolModelNameMap(catalog, nil),
+		nil,
+	)
+	if plan.SelectedTool != "builtin.ask_user" || decision.SelectedTool != "builtin.ask_user" || !decision.CanRun {
+		t.Fatalf("plan=%#v decision=%#v, want runnable ask_user selection", plan, decision)
+	}
+	if decision.Arguments["question"] != "Could you please provide the order number?" {
+		t.Fatalf("arguments = %#v, want inferred question", decision.Arguments)
+	}
+}
+
 func TestResolveUnattendedHidesIneligibleRequiredToolByDefault(t *testing.T) {
 	now := time.Now().UTC()
 	view, err := ResolveWithOptions(

@@ -637,25 +637,37 @@ catalog is only generated for the `builtin` provider; other native provider
 registrations are accepted as local placeholders and do not receive the built-in
 tool catalog during provider sync.
 
-The first built-in utility is:
+The built-in utilities are:
 
 - `builtin.get_current_time`
+- `builtin.ask_user`
 
-It accepts optional `timezone`, `location`, and `locale` arguments. `timezone`
+`builtin.get_current_time` accepts optional `timezone`, `location`, and `locale` arguments. `timezone`
 should be an IANA timezone such as `Asia/Jakarta` or `America/New_York`; UTC
 offsets such as `UTC+07:00` are also accepted. `location` uses a small embedded
 alias table for common cities and regions. Unknown locations return a tool
 error asking the model to provide an explicit timezone.
 
-Built-in time is read-only, non-consequential, and auto-exposed by default so
-customer-facing agents can answer timezone and local-date questions without
-policy authors adding a business-specific tool policy. Capability isolation can
-still remove it by restricting allowed tool ids.
+`builtin.ask_user` accepts a required `question` plus optional `reason` and
+`expected_response`. It sends the question as the assistant response and marks
+the session `awaiting_customer` until the customer replies. Use it when a tool
+or journey needs customer-provided information before work can continue. When
+policy or journey instructions expose `ask_user` without explicit arguments,
+the planner derives the question from the active journey instruction or matched
+guideline, for example `ask the customer for the order number` becomes a
+customer-facing order-number question.
 
-The canonical tool id remains `builtin.get_current_time` in policy, approval,
-usage, audit, and tool-run records. If a model has trouble returning names with
-`.` characters, configure `runtime.tool_name_aliases` to expose a model-facing
-name such as `get_current_time`; Parmesan maps it back to the canonical id
+Built-in utility tools are read-only, non-consequential, and auto-exposed by
+default so customer-facing agents can answer timezone/local-date questions and
+ask for missing customer information without policy authors adding a
+business-specific tool policy. Capability isolation can still remove them by
+restricting allowed tool ids.
+
+Canonical tool ids such as `builtin.get_current_time` and `builtin.ask_user`
+remain stable in policy, approval, usage, audit, and tool-run records. If a
+model has trouble returning names with `.` characters, configure
+`runtime.tool_name_aliases` to expose model-facing names such as
+`get_current_time` or `ask_user`; Parmesan maps them back to canonical ids
 before invocation.
 
 ### Delegated ACP Peer Agents

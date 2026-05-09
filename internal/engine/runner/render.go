@@ -27,6 +27,9 @@ func renderResponseMessages(view resolvedView, toolOutput map[string]any) []stri
 	if view.DisambiguationPrompt != "" {
 		return []string{view.DisambiguationPrompt}
 	}
+	if text := askUserResultText(toolOutput); text != "" {
+		return []string{text}
+	}
 	if text := delegatedAgentResultText(toolOutput); text != "" {
 		return []string{text}
 	}
@@ -75,6 +78,45 @@ func delegatedAgentResultText(toolOutput map[string]any) string {
 		return ""
 	}
 	return strings.TrimSpace(fmt.Sprint(delegated["result_text"]))
+}
+
+func askUserResultText(toolOutput map[string]any) string {
+	if len(toolOutput) == 0 {
+		return ""
+	}
+	if question := askUserQuestionFromOutput(toolOutput); question != "" {
+		return question
+	}
+	if tools := toolOutputs(toolOutput); len(tools) > 0 {
+		for key, raw := range tools {
+			if !isAskUserToolID(key) {
+				continue
+			}
+			output, _ := raw.(map[string]any)
+			if question := strings.TrimSpace(stringValue(output["question"])); question != "" {
+				return question
+			}
+		}
+	}
+	return ""
+}
+
+func askUserQuestionFromOutput(output map[string]any) string {
+	if len(output) == 0 {
+		return ""
+	}
+	if !isAskUserToolID(stringValue(output["tool_id"])) {
+		return ""
+	}
+	return strings.TrimSpace(stringValue(output["question"]))
+}
+
+func isAskUserToolID(value string) bool {
+	value = strings.TrimSpace(value)
+	if cut := strings.Index(value, "#"); cut >= 0 {
+		value = value[:cut]
+	}
+	return value == "builtin.ask_user" || value == "ask_user" || value == "builtin_ask_user"
 }
 
 func renderTemplate(templates []policy.Template, toolOutput map[string]any) string {

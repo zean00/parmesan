@@ -1316,6 +1316,42 @@ func TestCurrentTimePromptUsesTrustedCustomerTimezone(t *testing.T) {
 	}
 }
 
+func TestAskUserToolOutputMarksSessionAwaitingCustomer(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.New()
+	if err := repo.CreateSession(ctx, session.Session{
+		ID:        "sess_ask_user",
+		Status:    session.StatusActive,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := New(repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), "test")
+	exec := execution.TurnExecution{ID: "exec_ask_user", SessionID: "sess_ask_user", TraceID: "trace_ask_user"}
+	err := r.maybeMarkSessionAwaitingCustomer(ctx, exec, map[string]any{
+		"tool_id":  "builtin.ask_user",
+		"status":   "awaiting_customer",
+		"question": "What order number should I check?",
+	})
+	if err != nil {
+		t.Fatalf("maybeMarkSessionAwaitingCustomer() error = %v", err)
+	}
+	sess, err := repo.GetSession(ctx, "sess_ask_user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Status != session.StatusAwaitingCustomer || sess.AwaitingCustomerSince.IsZero() {
+		t.Fatalf("session = %#v, want awaiting customer", sess)
+	}
+	events, err := repo.ListEvents(ctx, "sess_ask_user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Kind != "status" || events[0].Data["code"] != "session.awaiting_customer" {
+		t.Fatalf("events = %#v, want awaiting status event", events)
+	}
+}
+
 func TestCurrentTimePromptUsesMemoryTimezone(t *testing.T) {
 	enabled := true
 	now := time.Date(2026, 5, 8, 3, 4, 5, 0, time.UTC)

@@ -260,10 +260,12 @@ available to the runtime.
 Policy must expose it first.
 
 The exception is the safe built-in utility provider. `builtin.get_current_time`
-is read-only, non-consequential, and auto-exposed by default so agents can
-answer current-time, local-date, weekday, UTC-offset, and timezone-aware
-scheduling questions. Use `capability_isolation.allowed_tool_ids` when an agent
-must not see even built-in utilities.
+and `builtin.ask_user` are read-only, non-consequential, and auto-exposed by
+default so agents can answer current-time, local-date, weekday, UTC-offset, and
+timezone-aware scheduling questions, or ask the customer for missing
+information and pause the session as `awaiting_customer`. Use
+`capability_isolation.allowed_tool_ids` when an agent must not see even built-in
+utilities.
 
 Only the native provider with id `builtin` receives Parmesan's built-in utility
 catalog. Other native provider registrations do not inherit built-in tools.

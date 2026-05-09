@@ -784,6 +784,9 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 		if err != nil {
 			return err
 		}
+		if err := r.maybeMarkSessionAwaitingCustomer(ctx, *exec, toolOutput); err != nil {
+			return err
+		}
 		eventIDs := eventIDs(assistantEvents)
 		if err := r.updateResponseState(ctx, responseRecord, responsedomain.StatusProcessing, "", func(record *responsedomain.Response) {
 			record.MessageEventIDs = append([]string(nil), eventIDs...)
@@ -3880,6 +3883,34 @@ func (r *Runner) createAssistantMessageSequence(ctx context.Context, exec execut
 		out = append(out, event)
 	}
 	return out, nil
+}
+
+func (r *Runner) maybeMarkSessionAwaitingCustomer(ctx context.Context, exec execution.TurnExecution, toolOutput map[string]any) error {
+	if askUserResultText(toolOutput) == "" {
+		return nil
+	}
+	sess, err := r.repo.GetSession(ctx, exec.SessionID)
+	if err != nil {
+		return err
+	}
+	if sess.Status == session.StatusClosed {
+		return nil
+	}
+	now := time.Now().UTC()
+	sess.Status = session.StatusAwaitingCustomer
+	sess.AwaitingCustomerSince = now
+	sess.LastActivityAt = now
+	sess.IdleCheckedAt = time.Time{}
+	sess.KeepReason = ""
+	sess.CloseReason = ""
+	sess.ClosedAt = time.Time{}
+	if err := r.repo.UpdateSession(ctx, sess); err != nil {
+		return err
+	}
+	_, _ = r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "session.awaiting_customer", "waiting", exec.ID, exec.TraceID, map[string]any{
+		"reason": "ask_user",
+	}, map[string]any{"internal_only": true}, false)
+	return nil
 }
 
 type responseEnvelope struct {

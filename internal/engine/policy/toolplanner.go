@@ -137,7 +137,9 @@ func buildToolPlan(ctx context.Context, router *model.Router, matchCtx MatchingC
 	}
 	if entry, ok := findToolCatalogEntry(catalog, decision.SelectedTool); ok {
 		specs := extractToolRequirements(entry)
-		decision.Arguments = mergeArguments(decision.Arguments, inferToolArgumentsFromContext(matchCtx, ToolIdentityForEntry(entry), specs, argumentResolver))
+		identity := ToolIdentityForEntry(entry)
+		decision.Arguments = mergeArguments(decision.Arguments, inferToolArgumentsFromContext(matchCtx, identity, specs, argumentResolver))
+		decision.Arguments = mergeArguments(decision.Arguments, inferAskUserArguments(matchCtx, activeState, guidelines, identity, decision.Arguments))
 		decision.MissingIssues, decision.InvalidIssues = evaluateToolArguments(specs, decision.Arguments)
 		decision.CanRun = len(decision.MissingIssues) == 0 && len(decision.InvalidIssues) == 0
 	}
@@ -341,6 +343,7 @@ func buildToolCandidates(matchCtx MatchingContext, activeJourney *policy.Journey
 		args := mergeArguments(nil, baseArgs)
 		specs := extractToolRequirements(entry)
 		args = mergeArguments(args, inferToolArgumentsFromContext(matchCtx, identity, specs, argumentResolver))
+		args = mergeArguments(args, inferAskUserArguments(matchCtx, activeState, guidelines, identity, args))
 		missing, invalid := evaluateToolArguments(specs, args)
 		alreadySatisfied := toolCandidateAlreadySatisfied(matchCtx, entry, args, specs)
 		approvalMode := ""
@@ -931,6 +934,89 @@ func inferToolArgumentsFromContext(matchCtx MatchingContext, identity ToolIdenti
 		}
 	}
 	return inferToolArgumentsFromText(text, identity.ToolName, specs)
+}
+
+func inferAskUserArguments(matchCtx MatchingContext, activeState *policy.JourneyNode, guidelines []policy.Guideline, identity ToolIdentity, args map[string]any) map[string]any {
+	if !strings.EqualFold(strings.TrimSpace(identity.ToolName), "ask_user") {
+		return nil
+	}
+	if !isEmptyArgumentValue(args["question"]) {
+		return nil
+	}
+	question := askUserQuestionFromContext(matchCtx, activeState, guidelines)
+	if question == "" {
+		return nil
+	}
+	out := map[string]any{"question": question}
+	if isEmptyArgumentValue(args["reason"]) {
+		out["reason"] = "missing customer information"
+	}
+	return out
+}
+
+func askUserQuestionFromContext(matchCtx MatchingContext, activeState *policy.JourneyNode, guidelines []policy.Guideline) string {
+	if activeState != nil {
+		if question := normalizeAskUserQuestion(activeState.Instruction); question != "" {
+			return question
+		}
+	}
+	for _, guideline := range guidelines {
+		if question := normalizeAskUserQuestion(guideline.Then); question != "" {
+			return question
+		}
+	}
+	if text := strings.TrimSpace(matchCtx.LatestCustomerText); text != "" {
+		return "Could you please provide the missing information so I can continue?"
+	}
+	return "Could you please provide the missing information?"
+}
+
+func normalizeAskUserQuestion(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	text = strings.Trim(text, "\"'")
+	lower := strings.ToLower(text)
+	if strings.Contains(text, "?") {
+		return strings.TrimSpace(text)
+	}
+	for _, prefix := range []string{
+		"ask the customer to ",
+		"ask customer to ",
+		"ask the user to ",
+		"ask user to ",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return ensureQuestion("Could you please " + strings.TrimSpace(text[len(prefix):]))
+		}
+	}
+	for _, prefix := range []string{
+		"ask the customer for ",
+		"ask customer for ",
+		"ask the user for ",
+		"ask user for ",
+		"ask for ",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return ensureQuestion("Could you please provide " + strings.TrimSpace(text[len(prefix):]))
+		}
+	}
+	if strings.HasPrefix(lower, "please ") || strings.HasPrefix(lower, "could you ") || strings.HasPrefix(lower, "can you ") {
+		return ensureQuestion(text)
+	}
+	return ensureQuestion(text)
+}
+
+func ensureQuestion(text string) string {
+	text = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(text), "."))
+	if text == "" {
+		return ""
+	}
+	if strings.HasSuffix(text, "?") {
+		return text
+	}
+	return text + "?"
 }
 
 func toolArgumentFields(specs map[string]toolArgumentSpec) []string {

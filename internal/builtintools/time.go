@@ -15,6 +15,8 @@ const (
 	ProviderID        = "builtin"
 	CurrentTimeToolID = "builtin_current_time"
 	CurrentTimeName   = "get_current_time"
+	AskUserToolID     = "builtin_ask_user"
+	AskUserName       = "ask_user"
 )
 
 type Repository interface {
@@ -53,6 +55,21 @@ func CatalogEntries(now time.Time) []tool.CatalogEntry {
 			"consequential": false,
 		}),
 		ImportedAt: now,
+	}, {
+		ID:              AskUserToolID,
+		ProviderID:      ProviderID,
+		Name:            AskUserName,
+		Description:     "Ask the customer a concise clarification or follow-up question and pause the session until the customer replies. Use this when the next correct step depends on missing customer-provided information.",
+		Schema:          askUserSchema(),
+		RuntimeProtocol: "native",
+		MetadataJSON: mustJSON(map[string]any{
+			"source":        "builtin",
+			"builtin":       true,
+			"auto_expose":   true,
+			"consequential": false,
+			"interaction":   "await_customer",
+		}),
+		ImportedAt: now,
 	}}
 }
 
@@ -71,9 +88,38 @@ func Invoke(entry tool.CatalogEntry, input map[string]any, now time.Time) (map[s
 	switch strings.TrimSpace(entry.Name) {
 	case CurrentTimeName:
 		return currentTime(input, now)
+	case AskUserName:
+		return askUser(input)
 	default:
 		return nil, fmt.Errorf("unsupported built-in tool %q", entry.Name)
 	}
+}
+
+func askUser(input map[string]any) (map[string]any, error) {
+	question := strings.TrimSpace(firstNonEmptyString(
+		stringArg(input, "question"),
+		stringArg(input, "message"),
+		stringArg(input, "prompt"),
+	))
+	if question == "" {
+		return nil, errors.New("question is required")
+	}
+	out := map[string]any{
+		"tool_id":  "builtin." + AskUserName,
+		"status":   "awaiting_customer",
+		"question": question,
+		"content": []map[string]any{{
+			"type": "text",
+			"text": question,
+		}},
+	}
+	if reason := strings.TrimSpace(stringArg(input, "reason")); reason != "" {
+		out["reason"] = reason
+	}
+	if expected := strings.TrimSpace(stringArg(input, "expected_response")); expected != "" {
+		out["expected_response"] = expected
+	}
+	return out, nil
 }
 
 func currentTime(input map[string]any, now time.Time) (map[string]any, error) {
@@ -277,6 +323,37 @@ func stringArg(input map[string]any, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func askUserSchema() string {
+	return mustJSON(map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []string{"question"},
+		"properties": map[string]any{
+			"question": map[string]any{
+				"type":        "string",
+				"description": "Concise question to send to the customer. Ask for only the missing information needed to continue.",
+			},
+			"reason": map[string]any{
+				"type":        "string",
+				"description": "Optional internal reason for why customer input is needed.",
+			},
+			"expected_response": map[string]any{
+				"type":        "string",
+				"description": "Optional short description of the expected customer answer, such as order number, email address, or pickup time.",
+			},
+		},
+	})
 }
 
 func currentTimeSchema() string {
