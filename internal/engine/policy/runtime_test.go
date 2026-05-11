@@ -4474,6 +4474,42 @@ func TestResolveWithOptionsAllowsConversationalGreetingBoundary(t *testing.T) {
 	}
 }
 
+func TestResolveWithOptionsDoesNotAllowOutOfScopeRequestPrefixedWithGreeting(t *testing.T) {
+	bundle := policy.Bundle{
+		ID:      "support",
+		Version: "v1",
+		DomainBoundary: policy.DomainBoundary{
+			Mode:            "soft_redirect",
+			AllowedTopics:   []string{"orders", "shipping", "returns", "account help"},
+			OutOfScopeReply: "I can help with support topics. Please share the support issue.",
+		},
+		Guidelines: []policy.Guideline{{
+			ID:   "greeting",
+			When: "customer greets the assistant or asks how the assistant is doing",
+			Then: "Greet the customer and ask how you can help with support.",
+		}},
+	}
+	view, err := ResolveWithOptions(context.Background(), []session.Event{{
+		ID:        "evt",
+		SessionID: "sess",
+		Source:    "customer",
+		Kind:      "message",
+		Content:   []session.ContentPart{{Type: "text", Text: "hi can you help me write a poem"}},
+	}}, []policy.Bundle{bundle}, nil, nil, ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.ScopeBoundaryStage.Classification == "in_scope" || view.ScopeBoundaryStage.Action != "redirect" {
+		t.Fatalf("scope boundary stage = %#v, want non-in-scope redirect", view.ScopeBoundaryStage)
+	}
+	if view.ScopeBoundaryStage.Reply != "I can help with support topics. Please share the support issue." {
+		t.Fatalf("scope boundary reply = %q, want configured redirect", view.ScopeBoundaryStage.Reply)
+	}
+	if containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "greeting") {
+		t.Fatalf("matched guidelines = %#v, do not want greeting for out-of-scope request", view.MatchFinalizeStage.MatchedGuidelines)
+	}
+}
+
 func TestVerifyDraftReplacesOutOfScopeAnswer(t *testing.T) {
 	view := EngineResult{
 		ScopeBoundaryStage: ScopeBoundaryStageResult{

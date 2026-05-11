@@ -1501,26 +1501,29 @@ func isConversationalGreeting(text string) bool {
 		return false
 	}
 	switch normalized {
-	case "hi", "hello", "hey", "halo", "hallo", "hai", "apa kabar", "selamat pagi", "selamat siang", "selamat sore", "selamat malam":
+	case "hi", "hello", "hey", "halo", "hallo", "hai", "apa kabar", "selamat pagi", "selamat siang", "selamat sore", "selamat malam",
+		"hi there", "hello there", "hey there", "halo there", "hallo there", "hai there",
+		"how are you", "how are you doing", "how's it going", "how is it going":
 		return true
 	}
 	if len([]rune(normalized)) > 80 {
 		return false
 	}
-	greetingPrefixes := []string{
-		"hi ",
-		"hello ",
-		"hey ",
-		"halo ",
-		"hallo ",
-		"hai ",
-		"apa kabar ",
-		"selamat pagi ",
-		"selamat siang ",
-		"selamat sore ",
-		"selamat malam ",
+	smallTalkPrefixes := []string{
+		"hi, how are you",
+		"hello, how are you",
+		"hey, how are you",
+		"hi how are you",
+		"hello how are you",
+		"hey how are you",
+		"hi, apa kabar",
+		"halo, apa kabar",
+		"hai, apa kabar",
+		"hi apa kabar",
+		"halo apa kabar",
+		"hai apa kabar",
 	}
-	for _, prefix := range greetingPrefixes {
+	for _, prefix := range smallTalkPrefixes {
 		if strings.HasPrefix(normalized, prefix) {
 			return true
 		}
