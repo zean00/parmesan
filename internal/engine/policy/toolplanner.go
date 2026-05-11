@@ -940,10 +940,18 @@ func inferAskUserArguments(matchCtx MatchingContext, activeState *policy.Journey
 	if !strings.EqualFold(strings.TrimSpace(identity.ToolName), "ask_user") {
 		return nil
 	}
-	if !isEmptyArgumentValue(args["question"]) {
+	resolvedQuestion := firstNonEmpty(
+		normalizeAskUserArgumentQuestion(args, "key"),
+		normalizeAskUserArgumentQuestion(args, "expected_response"),
+	)
+	existingQuestion := normalizeAskUserArgumentQuestion(args, "question")
+	if existingQuestion != "" && resolvedQuestion == "" {
 		return nil
 	}
-	question := askUserQuestionFromContext(matchCtx, activeState, guidelines)
+	question := firstNonEmpty(
+		resolvedQuestion,
+		askUserQuestionFromContext(matchCtx, activeState, guidelines),
+	)
 	if question == "" {
 		return nil
 	}
@@ -952,6 +960,14 @@ func inferAskUserArguments(matchCtx MatchingContext, activeState *policy.Journey
 		out["reason"] = "missing customer information"
 	}
 	return out
+}
+
+func normalizeAskUserArgumentQuestion(args map[string]any, key string) string {
+	value, ok := args[key]
+	if !ok || value == nil {
+		return ""
+	}
+	return normalizeAskUserQuestion(fmt.Sprint(value))
 }
 
 func askUserQuestionFromContext(matchCtx MatchingContext, activeState *policy.JourneyNode, guidelines []policy.Guideline) string {

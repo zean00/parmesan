@@ -50,6 +50,18 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	}
 	state.historySelectionStage = historySelection
 	state.scopeBoundaryStage = scopeBoundary
+	if scopeBoundary.Classification == "in_scope" && (containsString(scopeBoundary.Reasons, "matched_conversational_greeting") || containsString(scopeBoundary.MatchedTopics, "greeting")) {
+		if guideline, ok := greetingGuideline(bundle.Guidelines); ok && !guidelineIDInList(state.matchFinalizeStage.MatchedGuidelines, guideline.ID) {
+			state.matchFinalizeStage.GuidelineMatches = append(state.matchFinalizeStage.GuidelineMatches, Match{
+				ID:        guideline.ID,
+				Kind:      "guideline",
+				Score:     1,
+				Rationale: "matched conversational greeting",
+			})
+			state.matchFinalizeStage.MatchedGuidelines = append(state.matchFinalizeStage.MatchedGuidelines, guideline)
+			syncFinalizeStageToState(state)
+		}
+	}
 	// Journey-node projected guidelines only become active once the active state is known.
 	if state.activeJourney != nil && state.activeJourneyState != nil {
 		projected := projectedNodeGuideline(*state.activeJourney, *state.activeJourneyState)
@@ -1394,6 +1406,14 @@ func evaluateScopeBoundary(ctx context.Context, router *model.Router, boundary p
 	if len(blocked) > 0 {
 		return newScopeBoundaryResult("out_of_scope", "refuse", blocked, append([]string{"matched_blocked_topic"}, blocked...), boundary, "matched blocked topic")
 	}
+	if isConversationalGreeting(latest) {
+		return ScopeBoundaryStageResult{
+			Classification: "in_scope",
+			Action:         "allow",
+			MatchedTopics:  []string{"greeting"},
+			Reasons:        []string{"matched_conversational_greeting"},
+		}
+	}
 	allowed := matchedBoundaryTopics(latest, boundary.AllowedTopics)
 	if len(allowed) > 0 {
 		return ScopeBoundaryStageResult{
@@ -1473,6 +1493,68 @@ func matchedBoundaryTopics(text string, topics []string) []string {
 		}
 	}
 	return dedupe(out)
+}
+
+func isConversationalGreeting(text string) bool {
+	normalized := strings.Trim(strings.ToLower(strings.TrimSpace(text)), " \t\r\n.!?,;:")
+	if normalized == "" {
+		return false
+	}
+	switch normalized {
+	case "hi", "hello", "hey", "halo", "hallo", "hai", "apa kabar", "selamat pagi", "selamat siang", "selamat sore", "selamat malam":
+		return true
+	}
+	if len([]rune(normalized)) > 80 {
+		return false
+	}
+	greetingPrefixes := []string{
+		"hi ",
+		"hello ",
+		"hey ",
+		"halo ",
+		"hallo ",
+		"hai ",
+		"apa kabar ",
+		"selamat pagi ",
+		"selamat siang ",
+		"selamat sore ",
+		"selamat malam ",
+	}
+	for _, prefix := range greetingPrefixes {
+		if strings.HasPrefix(normalized, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func greetingGuideline(guidelines []policy.Guideline) (policy.Guideline, bool) {
+	for _, guideline := range guidelines {
+		id := strings.ToLower(strings.TrimSpace(guideline.ID))
+		when := strings.ToLower(strings.TrimSpace(guideline.When))
+		if id == "greeting" || strings.Contains(id, "greeting") || strings.Contains(when, "greets") || strings.Contains(when, "small talk") || strings.Contains(when, "apa kabar") {
+			return guideline, true
+		}
+	}
+	return policy.Guideline{}, false
+}
+
+func containsString(items []string, target string) bool {
+	for _, item := range items {
+		if item == target {
+			return true
+		}
+	}
+	return false
+}
+
+func guidelineIDInList(items []policy.Guideline, id string) bool {
+	for _, item := range items {
+		if item.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func buildScopeBoundaryPrompt(boundary policy.DomainBoundary, ctx MatchingContext) string {

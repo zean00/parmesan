@@ -201,6 +201,31 @@ func TestBuildToolPlanInfersAskUserQuestion(t *testing.T) {
 	}
 }
 
+func TestBuildToolPlanPromotesResolvedAskUserKey(t *testing.T) {
+	catalog := builtintools.CatalogEntries(time.Now().UTC())
+	plan, decision := buildToolPlan(
+		context.Background(),
+		nil,
+		MatchingContext{SessionID: "sess_1", LatestCustomerText: "I need help with my account"},
+		nil,
+		nil,
+		JourneyDecision{},
+		nil,
+		[]string{builtintools.AskUserName},
+		map[string]string{"builtin.ask_user": "auto"},
+		nil,
+		catalog,
+		BuildToolModelNameMap(catalog, nil),
+		staticToolArgumentResolver{"key": "Could you please specify what kind of help you need with your account?"},
+	)
+	if plan.SelectedTool != "builtin.ask_user" || decision.SelectedTool != "builtin.ask_user" || !decision.CanRun {
+		t.Fatalf("plan=%#v decision=%#v, want runnable ask_user selection", plan, decision)
+	}
+	if decision.Arguments["question"] != "Could you please specify what kind of help you need with your account?" {
+		t.Fatalf("arguments = %#v, want resolved key promoted to question", decision.Arguments)
+	}
+}
+
 func TestResolveUnattendedHidesIneligibleRequiredToolByDefault(t *testing.T) {
 	now := time.Now().UTC()
 	view, err := ResolveWithOptions(
@@ -4410,6 +4435,42 @@ func TestResolveWithOptionsClassifiesOutOfScopeBoundary(t *testing.T) {
 	}
 	if reply := view.ScopeBoundaryStage.Reply; reply == "" {
 		t.Fatalf("scope boundary reply = %q, want configured response", reply)
+	}
+}
+
+func TestResolveWithOptionsAllowsConversationalGreetingBoundary(t *testing.T) {
+	bundle := policy.Bundle{
+		ID:      "support",
+		Version: "v1",
+		DomainBoundary: policy.DomainBoundary{
+			Mode:            "soft_redirect",
+			AllowedTopics:   []string{"orders", "shipping", "returns", "account help"},
+			OutOfScopeReply: "I can help with support topics. Please share the support issue.",
+		},
+		Guidelines: []policy.Guideline{{
+			ID:   "greeting",
+			When: "customer greets the assistant or asks how the assistant is doing",
+			Then: "Greet the customer and ask how you can help with support.",
+		}},
+	}
+	view, err := ResolveWithOptions(context.Background(), []session.Event{{
+		ID:        "evt",
+		SessionID: "sess",
+		Source:    "customer",
+		Kind:      "message",
+		Content:   []session.ContentPart{{Type: "text", Text: "Apa kabar"}},
+	}}, []policy.Bundle{bundle}, nil, nil, ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.ScopeBoundaryStage.Classification != "in_scope" || view.ScopeBoundaryStage.Action != "allow" {
+		t.Fatalf("scope boundary stage = %#v, want greeting in_scope allow", view.ScopeBoundaryStage)
+	}
+	if view.ScopeBoundaryStage.Reply != "" {
+		t.Fatalf("scope boundary reply = %q, want no redirect reply", view.ScopeBoundaryStage.Reply)
+	}
+	if !containsGuidelineID(view.MatchFinalizeStage.MatchedGuidelines, "greeting") {
+		t.Fatalf("matched guidelines = %#v, want greeting", view.MatchFinalizeStage.MatchedGuidelines)
 	}
 }
 
