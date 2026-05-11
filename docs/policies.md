@@ -87,6 +87,10 @@ templates:
     text: Hi, I can help with that. Please tell me the issue and any relevant order or account detail.
 ```
 
+`soul.identity` is the primary customer-facing agent name. When it is omitted,
+the runtime falls back to the selected agent profile `name`, so a customer asking
+for the assistant's name can still receive the configured profile name.
+
 ## Domain Profiles
 
 `domain_profile` controls which implicit defaults are added when a bundle does

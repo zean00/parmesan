@@ -1130,12 +1130,80 @@ func TestResolveViewUsesAgentProfileDefaultBundle(t *testing.T) {
 	if view.Bundle.ID != "bundle_default" {
 		t.Fatalf("bundle id = %q, want profile default bundle", view.Bundle.ID)
 	}
+	if view.Bundle.Soul.Identity != "Support" {
+		t.Fatalf("bundle soul identity = %q, want profile name fallback", view.Bundle.Soul.Identity)
+	}
 	updated, _, err := repo.GetExecution(ctx, "exec_1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if updated.PolicyBundleID != "bundle_default" {
 		t.Fatalf("execution policy bundle = %q, want persisted profile default bundle", updated.PolicyBundleID)
+	}
+}
+
+func TestResolveViewKeepsExplicitSoulIdentityOverAgentProfileName(t *testing.T) {
+	repo := memory.New()
+	r := New(repo, nil, nil, nil, "test-runner")
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if err := repo.SaveBundle(ctx, policy.Bundle{
+		ID:      "bundle_identity",
+		Version: "v1",
+		Soul:    policy.Soul{Identity: "Public Identity"},
+		Guidelines: []policy.Guideline{{
+			ID:   "g_identity",
+			When: "hello",
+			Then: "reply helpfully",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveAgentProfile(ctx, agent.Profile{
+		ID:                    "agent_identity",
+		Name:                  "Operator Display Name",
+		Status:                "active",
+		DefaultPolicyBundleID: "bundle_identity",
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateSession(ctx, session.Session{
+		ID: "sess_identity", Channel: "acp", AgentID: "agent_identity", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.AppendEvent(ctx, session.Event{
+		ID:        "evt_identity",
+		SessionID: "sess_identity",
+		Source:    "customer",
+		Kind:      "message",
+		CreatedAt: now,
+		Content:   []session.ContentPart{{Type: "text", Text: "hello"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	exec := execution.TurnExecution{
+		ID:             "exec_identity",
+		SessionID:      "sess_identity",
+		TriggerEventID: "evt_identity",
+		TraceID:        "trace_identity",
+		Status:         execution.StatusRunning,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := repo.CreateExecution(ctx, exec, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	view, _, err := r.resolveView(ctx, exec)
+	if err != nil {
+		t.Fatalf("resolveView() error = %v", err)
+	}
+	if view.Bundle.Soul.Identity != "Public Identity" {
+		t.Fatalf("bundle soul identity = %q, want explicit SOUL identity", view.Bundle.Soul.Identity)
 	}
 }
 

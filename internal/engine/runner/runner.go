@@ -990,6 +990,7 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 	view.CustomerMemory = r.customerMemory(ctx, sess)
 	view.CustomerContext = customerContextFromSession(sess)
 	view.CustomerContextPromptSafeFields = customerContextPromptSafeFields(sess)
+	applyAgentProfileIdentityFallback(&view, profile)
 	resolvedBundleID := selection.BundleID
 	if resolvedBundleID == "" && len(selectedBundles) > 0 {
 		resolvedBundleID = selectedBundles[0].ID
@@ -1022,6 +1023,18 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 	}
 	selectedEvents, _ := policyruntime.SelectHistoryEvents(events, selectedBundles[0], exec.ID)
 	return view, selectedEvents, nil
+}
+
+func applyAgentProfileIdentityFallback(view *resolvedView, profile agent.Profile) {
+	if view == nil || view.Bundle == nil {
+		return
+	}
+	if strings.TrimSpace(view.Bundle.Soul.Identity) != "" {
+		return
+	}
+	if name := strings.TrimSpace(profile.Name); name != "" {
+		view.Bundle.Soul.Identity = name
+	}
 }
 
 func (r *Runner) prepareResponse(ctx context.Context, exec execution.TurnExecution, record responsedomain.Response) (resolvedView, []session.Event, map[string]any, responsedomain.Response, error) {

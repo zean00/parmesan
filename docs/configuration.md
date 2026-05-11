@@ -421,6 +421,8 @@ metadata:
 
 `name`
 - operator-facing display name
+- also used as the customer-facing SOUL identity fallback when the selected
+  policy bundle does not define `soul.identity`
 
 `description`
 - operator-facing description
