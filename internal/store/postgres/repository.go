@@ -3224,6 +3224,14 @@ func (c *Client) SaveCatalogEntries(ctx context.Context, entries []tool.CatalogE
 		_, err = tx.Exec(ctx, `
 		INSERT INTO tool_catalog (id, provider_id, name, description, schema_json, runtime_protocol, metadata_json, imported_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		ON CONFLICT (id) DO UPDATE SET
+			provider_id = EXCLUDED.provider_id,
+			name = EXCLUDED.name,
+			description = EXCLUDED.description,
+			schema_json = EXCLUDED.schema_json,
+			runtime_protocol = EXCLUDED.runtime_protocol,
+			metadata_json = EXCLUDED.metadata_json,
+			imported_at = EXCLUDED.imported_at
 	`, entry.ID, entry.ProviderID, entry.Name, entry.Description, schemaJSON, entry.RuntimeProtocol, mustJSON(entry.MetadataJSON), entry.ImportedAt)
 		if err != nil {
 			return err
