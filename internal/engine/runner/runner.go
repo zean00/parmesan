@@ -787,6 +787,9 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 		if err := r.maybeMarkSessionAwaitingCustomer(ctx, *exec, toolOutput); err != nil {
 			return err
 		}
+		if err := r.maybeRequestOperatorTakeover(ctx, *exec, toolOutput); err != nil {
+			return err
+		}
 		eventIDs := eventIDs(assistantEvents)
 		if err := r.updateResponseState(ctx, responseRecord, responsedomain.StatusProcessing, "", func(record *responsedomain.Response) {
 			record.MessageEventIDs = append([]string(nil), eventIDs...)
@@ -3927,6 +3930,76 @@ func (r *Runner) maybeMarkSessionAwaitingCustomer(ctx context.Context, exec exec
 		"reason": "ask_user",
 	}, map[string]any{"internal_only": true}, false)
 	return nil
+}
+
+func (r *Runner) maybeRequestOperatorTakeover(ctx context.Context, exec execution.TurnExecution, toolOutput map[string]any) error {
+	if operatorRequestResultText(toolOutput) == "" {
+		return nil
+	}
+	sess, err := r.repo.GetSession(ctx, exec.SessionID)
+	if err != nil {
+		return err
+	}
+	if sess.Status == session.StatusClosed {
+		return nil
+	}
+	mode := strings.ToLower(strings.TrimSpace(sess.Mode))
+	if mode == "" {
+		mode = "auto"
+	}
+	if mode != "auto" {
+		return nil
+	}
+	now := time.Now().UTC()
+	if sess.Metadata == nil {
+		sess.Metadata = map[string]any{}
+	}
+	reason := operatorRequestReasonFromOutput(toolOutput)
+	if reason == "" {
+		reason = "customer requested an operator"
+	}
+	sess.Mode = "manual"
+	sess.Status = session.StatusActive
+	sess.LastActivityAt = now
+	sess.IdleCheckedAt = time.Time{}
+	sess.KeepReason = ""
+	sess.CloseReason = ""
+	sess.ClosedAt = time.Time{}
+	sess.Metadata["handoff_reason"] = reason
+	sess.Metadata["takeover_started_at"] = now.Format(time.RFC3339)
+	sess.Metadata["takeover_source"] = "builtin.request_operator"
+	if err := r.repo.UpdateSession(ctx, sess); err != nil {
+		return err
+	}
+	_, _ = r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "session.operator_takeover_requested", "manual", exec.ID, exec.TraceID, map[string]any{
+		"reason": reason,
+	}, map[string]any{"internal_only": true}, false)
+	return nil
+}
+
+func operatorRequestReasonFromOutput(toolOutput map[string]any) string {
+	if len(toolOutput) == 0 {
+		return ""
+	}
+	if isOperatorRequestToolID(stringValue(toolOutput["tool_id"])) {
+		return strings.TrimSpace(firstNonEmptyString(
+			stringValue(toolOutput["handoff_reason"]),
+			stringValue(toolOutput["reason"]),
+		))
+	}
+	if tools := toolOutputs(toolOutput); len(tools) > 0 {
+		for key, raw := range tools {
+			if !isOperatorRequestToolID(key) {
+				continue
+			}
+			output, _ := raw.(map[string]any)
+			return strings.TrimSpace(firstNonEmptyString(
+				stringValue(output["handoff_reason"]),
+				stringValue(output["reason"]),
+			))
+		}
+	}
+	return ""
 }
 
 type responseEnvelope struct {

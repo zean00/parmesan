@@ -643,6 +643,7 @@ The built-in utilities are:
 
 - `builtin.get_current_time`
 - `builtin.ask_user`
+- `builtin.request_operator`
 
 `builtin.get_current_time` accepts optional `timezone`, `location`, and `locale` arguments. `timezone`
 should be an IANA timezone such as `Asia/Jakarta` or `America/New_York`; UTC
@@ -659,18 +660,26 @@ the planner derives the question from the active journey instruction or matched
 guideline, for example `ask the customer for the order number` becomes a
 customer-facing order-number question.
 
-Built-in utility tools are read-only, non-consequential, and auto-exposed by
-default so customer-facing agents can answer timezone/local-date questions and
-ask for missing customer information without policy authors adding a
-business-specific tool policy. Capability isolation can still remove them by
+`builtin.request_operator` accepts optional `reason`, `message`, and `urgency`
+arguments. It sends the handoff message as the assistant response, switches an
+`auto` session to `manual`, and records takeover metadata for the operator
+queue. The tool is auto-exposed only while the session mode is `auto`; it is not
+exposed in `manual` or `unattended` sessions.
+
+Built-in utility tools are auto-exposed by default so customer-facing agents can
+answer timezone/local-date questions, ask for missing customer information, and
+honor explicit operator-handoff requests without policy authors adding a
+business-specific tool policy. `get_current_time` and `ask_user` are
+non-consequential; `request_operator` is consequential because it changes
+session handling mode. Capability isolation can still remove them by
 restricting allowed tool ids.
 
-Canonical tool ids such as `builtin.get_current_time` and `builtin.ask_user`
-remain stable in policy, approval, usage, audit, and tool-run records. If a
-model has trouble returning names with `.` characters, configure
+Canonical tool ids such as `builtin.get_current_time`, `builtin.ask_user`, and
+`builtin.request_operator` remain stable in policy, approval, usage, audit, and
+tool-run records. If a model has trouble returning names with `.` characters, configure
 `runtime.tool_name_aliases` to expose model-facing names such as
-`get_current_time` or `ask_user`; Parmesan maps them back to canonical ids
-before invocation.
+`get_current_time`, `ask_user`, or `request_operator`; Parmesan maps them back
+to canonical ids before invocation.
 
 ### Delegated ACP Peer Agents
 

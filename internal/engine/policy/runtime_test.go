@@ -172,6 +172,40 @@ func TestResolveAutoExposesBuiltInTimeTool(t *testing.T) {
 	}
 }
 
+func TestResolveExposesOperatorRequestOnlyInAutoMode(t *testing.T) {
+	now := time.Now().UTC()
+	events := []session.Event{{
+		ID:        "evt_1",
+		SessionID: "sess_1",
+		Source:    "customer",
+		Kind:      "message",
+		CreatedAt: now,
+		Content:   []session.ContentPart{{Type: "text", Text: "I want to talk to a human operator"}},
+	}}
+	catalog := builtintools.CatalogEntries(now)
+	autoView, err := ResolveWithOptions(context.Background(), events, []policy.Bundle{{ID: "bundle_1", Version: "v1"}}, nil, catalog, ResolveOptions{SessionMode: "auto"})
+	if err != nil {
+		t.Fatalf("ResolveWithOptions(auto) error = %v", err)
+	}
+	if !slices.Contains(autoView.ToolExposureStage.ExposedTools, builtintools.RequestOperatorName) {
+		t.Fatalf("auto exposed tools = %#v, want request_operator", autoView.ToolExposureStage.ExposedTools)
+	}
+	manualView, err := ResolveWithOptions(context.Background(), events, []policy.Bundle{{ID: "bundle_1", Version: "v1"}}, nil, catalog, ResolveOptions{SessionMode: "manual"})
+	if err != nil {
+		t.Fatalf("ResolveWithOptions(manual) error = %v", err)
+	}
+	if slices.Contains(manualView.ToolExposureStage.ExposedTools, builtintools.RequestOperatorName) {
+		t.Fatalf("manual exposed tools = %#v, want no request_operator", manualView.ToolExposureStage.ExposedTools)
+	}
+	unattendedView, err := ResolveWithOptions(context.Background(), events, []policy.Bundle{{ID: "bundle_1", Version: "v1"}}, nil, catalog, ResolveOptions{SessionMode: "unattended"})
+	if err != nil {
+		t.Fatalf("ResolveWithOptions(unattended) error = %v", err)
+	}
+	if slices.Contains(unattendedView.ToolExposureStage.ExposedTools, builtintools.RequestOperatorName) {
+		t.Fatalf("unattended exposed tools = %#v, want no request_operator", unattendedView.ToolExposureStage.ExposedTools)
+	}
+}
+
 func TestBuildToolPlanInfersAskUserQuestion(t *testing.T) {
 	catalog := builtintools.CatalogEntries(time.Now().UTC())
 	guidelines := []policy.Guideline{{

@@ -2579,6 +2579,9 @@ func resolveToolExposure(associations []policy.GuidelineToolAssociation, observa
 	var out []string
 	for _, entry := range catalog {
 		if _, ok := allowed[entry.ID]; ok {
+			if !toolAllowedForSessionMode(entry, sessionMode) {
+				continue
+			}
 			if unattendedMode {
 				addUnattendedAliases(unattendedApprovals, entry, toolUnattendedValue(entry, unattendedEligibility))
 			}
@@ -2593,6 +2596,9 @@ func resolveToolExposure(associations []policy.GuidelineToolAssociation, observa
 			continue
 		}
 		if _, ok := allowed[entry.Name]; ok {
+			if !toolAllowedForSessionMode(entry, sessionMode) {
+				continue
+			}
 			if unattendedMode {
 				addUnattendedAliases(unattendedApprovals, entry, toolUnattendedValue(entry, unattendedEligibility))
 			}
@@ -2607,6 +2613,9 @@ func resolveToolExposure(associations []policy.GuidelineToolAssociation, observa
 			continue
 		}
 		if _, ok := allowed[entry.ProviderID+"."+entry.Name]; ok {
+			if !toolAllowedForSessionMode(entry, sessionMode) {
+				continue
+			}
 			if unattendedMode {
 				addUnattendedAliases(unattendedApprovals, entry, toolUnattendedValue(entry, unattendedEligibility))
 			}
@@ -2620,12 +2629,15 @@ func resolveToolExposure(associations []policy.GuidelineToolAssociation, observa
 			addApprovalAliases(entry, approvals[entry.ProviderID+"."+entry.Name])
 			continue
 		}
-		if toolBuiltinAutoExposed(entry) {
+		if toolBuiltinAutoExposed(entry) && toolAllowedForSessionMode(entry, sessionMode) {
 			out = append(out, entry.Name)
 			addApprovalAliases(entry, "auto")
 			continue
 		}
 		if _, ok := serverAllowed[entry.ProviderID]; ok {
+			if !toolAllowedForSessionMode(entry, sessionMode) {
+				continue
+			}
 			if unattendedMode {
 				addUnattendedAliases(unattendedApprovals, entry, toolUnattendedValue(entry, unattendedEligibility))
 			}
@@ -2645,6 +2657,24 @@ func resolveToolExposure(associations []policy.GuidelineToolAssociation, observa
 func toolBuiltinAutoExposed(entry tool.CatalogEntry) bool {
 	meta := decodeToolMetadata(entry)
 	return strings.EqualFold(entry.ProviderID, "builtin") && truthyValue(meta["builtin"]) && truthyValue(meta["auto_expose"])
+}
+
+func toolAllowedForSessionMode(entry tool.CatalogEntry, sessionMode string) bool {
+	meta := decodeToolMetadata(entry)
+	raw, ok := meta["session_modes"]
+	if !ok || raw == nil {
+		return true
+	}
+	mode := strings.ToLower(strings.TrimSpace(sessionMode))
+	if mode == "" {
+		mode = "auto"
+	}
+	for _, allowed := range stringSliceValue(raw) {
+		if strings.EqualFold(strings.TrimSpace(allowed), mode) {
+			return true
+		}
+	}
+	return false
 }
 
 func unattendedIneligibleRequiredToolBehavior(unattended policy.UnattendedPolicy) string {

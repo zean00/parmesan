@@ -131,6 +131,19 @@ func TestRenderResponsePrefersAskUserQuestionOverPolicyText(t *testing.T) {
 	}
 }
 
+func TestRenderResponseUsesOperatorRequestMessage(t *testing.T) {
+	view := resolvedView{CompositionMode: "guided"}
+	got := renderResponseMessages(view, map[string]any{
+		"tool_id": "builtin.request_operator",
+		"status":  "operator_requested",
+		"message": "I'll bring in an operator to help.",
+	})
+	want := []string{"I'll bring in an operator to help."}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("messages = %#v, want operator handoff message", got)
+	}
+}
+
 func TestRenderResponseUsesDelegatedTicketLifecycleStatusAsUsable(t *testing.T) {
 	view := resolvedView{
 		CompositionMode: "guided",

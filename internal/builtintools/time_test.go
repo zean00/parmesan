@@ -56,3 +56,19 @@ func TestAskUserRequiresQuestion(t *testing.T) {
 		t.Fatal("Invoke() error = nil, want missing question error")
 	}
 }
+
+func TestRequestOperatorReturnsTakeoverPayload(t *testing.T) {
+	out, err := Invoke(tool.CatalogEntry{Name: RequestOperatorName}, map[string]any{
+		"reason":  "customer requested a human",
+		"urgency": "high",
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("Invoke() error = %v", err)
+	}
+	if out["tool_id"] != "builtin.request_operator" || out["status"] != "operator_requested" || out["handoff_reason"] != "customer requested a human" {
+		t.Fatalf("output = %#v, want operator request payload", out)
+	}
+	if out["message"] == "" {
+		t.Fatalf("output = %#v, want default customer message", out)
+	}
+}

@@ -30,6 +30,9 @@ func renderResponseMessages(view resolvedView, toolOutput map[string]any) []stri
 	if text := askUserResultText(toolOutput); text != "" {
 		return []string{text}
 	}
+	if text := operatorRequestResultText(toolOutput); text != "" {
+		return []string{text}
+	}
 	if text := delegatedAgentResultText(toolOutput); text != "" {
 		return []string{text}
 	}
@@ -99,6 +102,45 @@ func askUserResultText(toolOutput map[string]any) string {
 		}
 	}
 	return ""
+}
+
+func operatorRequestResultText(toolOutput map[string]any) string {
+	if len(toolOutput) == 0 {
+		return ""
+	}
+	if message := operatorRequestMessageFromOutput(toolOutput); message != "" {
+		return message
+	}
+	if tools := toolOutputs(toolOutput); len(tools) > 0 {
+		for key, raw := range tools {
+			if !isOperatorRequestToolID(key) {
+				continue
+			}
+			output, _ := raw.(map[string]any)
+			if message := strings.TrimSpace(stringValue(output["message"])); message != "" {
+				return message
+			}
+		}
+	}
+	return ""
+}
+
+func operatorRequestMessageFromOutput(output map[string]any) string {
+	if len(output) == 0 {
+		return ""
+	}
+	if !isOperatorRequestToolID(stringValue(output["tool_id"])) {
+		return ""
+	}
+	return strings.TrimSpace(stringValue(output["message"]))
+}
+
+func isOperatorRequestToolID(value string) bool {
+	value = strings.TrimSpace(value)
+	if cut := strings.Index(value, "#"); cut >= 0 {
+		value = value[:cut]
+	}
+	return value == "builtin.request_operator" || value == "request_operator" || value == "builtin_request_operator"
 }
 
 func askUserQuestionFromOutput(output map[string]any) string {

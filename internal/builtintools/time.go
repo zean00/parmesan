@@ -12,11 +12,13 @@ import (
 )
 
 const (
-	ProviderID        = "builtin"
-	CurrentTimeToolID = "builtin_current_time"
-	CurrentTimeName   = "get_current_time"
-	AskUserToolID     = "builtin_ask_user"
-	AskUserName       = "ask_user"
+	ProviderID            = "builtin"
+	CurrentTimeToolID     = "builtin_current_time"
+	CurrentTimeName       = "get_current_time"
+	AskUserToolID         = "builtin_ask_user"
+	AskUserName           = "ask_user"
+	RequestOperatorToolID = "builtin_request_operator"
+	RequestOperatorName   = "request_operator"
 )
 
 type Repository interface {
@@ -70,6 +72,22 @@ func CatalogEntries(now time.Time) []tool.CatalogEntry {
 			"interaction":   "await_customer",
 		}),
 		ImportedAt: now,
+	}, {
+		ID:              RequestOperatorToolID,
+		ProviderID:      ProviderID,
+		Name:            RequestOperatorName,
+		Description:     "Request an operator takeover and move the session to manual handling. Use this when the customer asks for a human, operator, representative, or says they do not want to continue with the automated agent.",
+		Schema:          requestOperatorSchema(),
+		RuntimeProtocol: "native",
+		MetadataJSON: mustJSON(map[string]any{
+			"source":        "builtin",
+			"builtin":       true,
+			"auto_expose":   true,
+			"consequential": true,
+			"interaction":   "operator_takeover",
+			"session_modes": []string{"auto"},
+		}),
+		ImportedAt: now,
 	}}
 }
 
@@ -90,9 +108,38 @@ func Invoke(entry tool.CatalogEntry, input map[string]any, now time.Time) (map[s
 		return currentTime(input, now)
 	case AskUserName:
 		return askUser(input)
+	case RequestOperatorName:
+		return requestOperator(input)
 	default:
 		return nil, fmt.Errorf("unsupported built-in tool %q", entry.Name)
 	}
+}
+
+func requestOperator(input map[string]any) (map[string]any, error) {
+	message := strings.TrimSpace(firstNonEmptyString(
+		stringArg(input, "message"),
+		stringArg(input, "customer_message"),
+		"I'll bring in an operator to help.",
+	))
+	reason := strings.TrimSpace(firstNonEmptyString(
+		stringArg(input, "reason"),
+		stringArg(input, "handoff_reason"),
+		"customer requested an operator",
+	))
+	out := map[string]any{
+		"tool_id":        "builtin." + RequestOperatorName,
+		"status":         "operator_requested",
+		"message":        message,
+		"handoff_reason": reason,
+		"content": []map[string]any{{
+			"type": "text",
+			"text": message,
+		}},
+	}
+	if urgency := strings.TrimSpace(stringArg(input, "urgency")); urgency != "" {
+		out["urgency"] = urgency
+	}
+	return out, nil
 }
 
 func askUser(input map[string]any) (map[string]any, error) {
@@ -351,6 +398,28 @@ func askUserSchema() string {
 			"expected_response": map[string]any{
 				"type":        "string",
 				"description": "Optional short description of the expected customer answer, such as order number, email address, or pickup time.",
+			},
+		},
+	})
+}
+
+func requestOperatorSchema() string {
+	return mustJSON(map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"reason": map[string]any{
+				"type":        "string",
+				"description": "Optional internal reason for the handoff, such as customer requested a human or customer is frustrated.",
+			},
+			"message": map[string]any{
+				"type":        "string",
+				"description": "Optional concise customer-facing handoff message. Defaults to a short operator handoff acknowledgement.",
+			},
+			"urgency": map[string]any{
+				"type":        "string",
+				"description": "Optional urgency label for the operator queue.",
+				"enum":        []string{"normal", "high"},
 			},
 		},
 	})
