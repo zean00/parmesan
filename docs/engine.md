@@ -61,6 +61,8 @@ approve the generated response, edit and forward it, or replace it with a
 manual message through the existing response review endpoints. The
 `allow_first_message_response` flag is not required in supervised mode because
 the first customer message already follows the normal draft-generation path.
+Held draft message events are internal-only until the review action releases or
+replaces them.
 
 If the session is in unattended mode, automated execution still starts. The
 only behavior change is tool approval handling: required approvals can be

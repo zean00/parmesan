@@ -1620,6 +1620,10 @@ func (s *Server) operatorApproveForwardResponse(w http.ResponseWriter, r *http.R
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if err := s.releaseHeldMessageEvents(r.Context(), item); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	s.appendTrace(r.Context(), audit.Record{
 		ID:          fmt.Sprintf("trace_%d", now.UnixNano()),
 		Kind:        "response.review.approved",
@@ -8487,6 +8491,35 @@ func (s *Server) resolveHeldResponseAction(ctx context.Context, responseID strin
 		return responsedomain.Response{}, errors.New("response is not awaiting operator review")
 	}
 	return item, nil
+}
+
+func (s *Server) releaseHeldMessageEvents(ctx context.Context, item responsedomain.Response) error {
+	eventIDs := item.HeldMessageEventIDs
+	if len(eventIDs) == 0 {
+		eventIDs = item.MessageEventIDs
+	}
+	for _, eventID := range eventIDs {
+		eventID = strings.TrimSpace(eventID)
+		if eventID == "" {
+			continue
+		}
+		event, err := s.store.ReadEvent(ctx, item.SessionID, eventID)
+		if err != nil {
+			return err
+		}
+		if event.Metadata == nil {
+			event.Metadata = map[string]any{}
+		}
+		delete(event.Metadata, "internal_only")
+		event.Metadata["held_for_operator_review"] = false
+		event.Metadata["response_review_approved"] = true
+		event.Metadata["response_id"] = item.ID
+		if err := s.store.UpdateEvent(ctx, event); err != nil {
+			return err
+		}
+		s.publishSessionEvent(item.SessionID, event, item.ExecutionID, item.TraceID, event.CreatedAt)
+	}
+	return nil
 }
 
 func hasLabel(labels []string, target string) bool {

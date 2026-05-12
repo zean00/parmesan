@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sahal/parmesan/internal/acp"
 	"github.com/sahal/parmesan/internal/acppeer"
 	"github.com/sahal/parmesan/internal/api/sse"
 	"github.com/sahal/parmesan/internal/config"
@@ -28,6 +29,7 @@ import (
 	policyruntime "github.com/sahal/parmesan/internal/engine/policy"
 	knowledgeretriever "github.com/sahal/parmesan/internal/knowledge/retriever"
 	"github.com/sahal/parmesan/internal/model"
+	"github.com/sahal/parmesan/internal/sessionsvc"
 	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/store/memory"
@@ -1553,6 +1555,22 @@ func TestSupervisedSessionHoldsGeneratedResponseForReview(t *testing.T) {
 	}
 	if len(responses[0].HeldMessageEventIDs) != 1 {
 		t.Fatalf("held message ids = %#v, want generated draft held", responses[0].HeldMessageEventIDs)
+	}
+	event, err := repo.ReadEvent(ctx, "sess_supervised", responses[0].HeldMessageEventIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Metadata["internal_only"] != true || event.Metadata["held_for_operator_review"] != true {
+		t.Fatalf("held event metadata = %#v, want internal review hold", event.Metadata)
+	}
+	acpEvents, err := acp.NewService(sessionsvc.New(repo, nil)).ListEvents(ctx, "sess_supervised", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range acpEvents {
+		if item.Kind == "message" && item.Source == "ai_agent" {
+			t.Fatalf("acp events = %#v, want held draft message hidden from ACP", acpEvents)
+		}
 	}
 }
 

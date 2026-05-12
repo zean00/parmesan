@@ -854,6 +854,9 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 					return err
 				}
 				now := time.Now().UTC()
+				if err := r.markHeldMessageEventsInternal(ctx, exec.SessionID, eventIDs, r.responseIDForExecution(ctx, exec.ID), reviewReason); err != nil {
+					return err
+				}
 				if err := r.updateResponseState(ctx, record, responsedomain.StatusReviewRequired, reviewReason, func(item *responsedomain.Response) {
 					if len(item.HeldMessageEventIDs) == 0 {
 						item.HeldMessageEventIDs = append([]string(nil), eventIDs...)
@@ -3779,6 +3782,30 @@ func runnerManualTakeoverAllowsExecutionDelivery(sess session.Session, execution
 	}
 	value, _ := sess.Metadata["takeover_response_execution_id"].(string)
 	return strings.TrimSpace(value) == executionID
+}
+
+func (r *Runner) markHeldMessageEventsInternal(ctx context.Context, sessionID string, eventIDs []string, responseID string, reason string) error {
+	for _, eventID := range eventIDs {
+		eventID = strings.TrimSpace(eventID)
+		if eventID == "" {
+			continue
+		}
+		event, err := r.repo.ReadEvent(ctx, sessionID, eventID)
+		if err != nil {
+			return err
+		}
+		if event.Metadata == nil {
+			event.Metadata = map[string]any{}
+		}
+		event.Metadata["internal_only"] = true
+		event.Metadata["held_for_operator_review"] = true
+		event.Metadata["response_id"] = responseID
+		event.Metadata["review_reason"] = reason
+		if err := r.repo.UpdateEvent(ctx, event); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *Runner) publish(sessionID, executionID, typ string, payload any) {

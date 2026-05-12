@@ -37,6 +37,7 @@ import (
 	usagedomain "github.com/sahal/parmesan/internal/domain/usage"
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/quality"
+	"github.com/sahal/parmesan/internal/sessionsvc"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/store/memory"
 )
@@ -4339,6 +4340,67 @@ func TestACPMessageIngressSupervisedModeCreatesExecution(t *testing.T) {
 			events[0].ExecutionID == execs[0].ID &&
 			events[0].Metadata["automation_skipped"] != true
 	})
+}
+
+func TestOperatorApproveForwardReleasesHeldDraftToACP(t *testing.T) {
+	repo := memory.New()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := repo.CreateSession(ctx, session.Session{ID: "sess_review_release", Channel: "acp", Mode: "supervised", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	svc := sessionsvc.New(repo, nil)
+	event, err := svc.CreateMessageEvent(ctx, "sess_review_release", "ai_agent", "Draft for approval.", "exec_review_release", "trace_review_release", map[string]any{
+		"internal_only":            true,
+		"held_for_operator_review": true,
+		"response_id":              "resp_review_release",
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveResponse(ctx, responsedomain.Response{
+		ID:                  "resp_review_release",
+		SessionID:           "sess_review_release",
+		ExecutionID:         "exec_review_release",
+		TraceID:             "trace_review_release",
+		Status:              responsedomain.StatusReviewRequired,
+		Reason:              "supervised_review",
+		MessageEventIDs:     []string{event.ID},
+		HeldMessageEventIDs: []string{event.ID},
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/acp/sessions/sess_review_release/events", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pre-approve ACP events status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "Draft for approval.") {
+		t.Fatalf("pre-approve ACP events = %s, want held draft hidden", rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/responses/resp_review_release/approve-forward", strings.NewReader(`{"operator_id":"op_1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve status = %d want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/acp/sessions/sess_review_release/events", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("post-approve ACP events status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Draft for approval.") {
+		t.Fatalf("post-approve ACP events = %s, want approved draft visible", rec.Body.String())
+	}
 }
 
 func TestACPCreateSessionAllowGreetingQueuesTriggeredResponseForAllModes(t *testing.T) {
