@@ -45,9 +45,9 @@ ACP is the primary conversation edge. A customer message enters through:
 
 Session creation can also opt into an immediate greeting with
 `allow_greeting: true`. The greeting is queued as a system-triggered response
-and applies in `auto`, `manual`, and `unattended` sessions. Greeting trigger
-instructions are scoped to the greeting execution and do not affect later
-customer-message turns.
+and applies in `auto`, `manual`, `supervised`, and `unattended` sessions.
+Greeting trigger instructions are scoped to the greeting execution and do not
+affect later customer-message turns.
 
 If the session is in manual mode, the message is persisted but no automated
 execution is started. A manual session can opt into one automated first-message
@@ -63,6 +63,12 @@ manual message through the existing response review endpoints. The
 the first customer message already follows the normal draft-generation path.
 Held draft message events are internal-only until the review action releases or
 replaces them.
+
+Live validation for this path can be run with:
+
+```bash
+PARMESAN_LIVE_OPENROUTER=1 OPENROUTER_API_KEY=... go test ./internal/engine/runner -run TestLiveOpenRouterSupervisedModeGeneratesHeldDraft -count=1
+```
 
 If the session is in unattended mode, automated execution still starts. The
 only behavior change is tool approval handling: required approvals can be

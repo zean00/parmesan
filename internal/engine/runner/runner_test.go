@@ -1574,6 +1574,115 @@ func TestSupervisedSessionHoldsGeneratedResponseForReview(t *testing.T) {
 	}
 }
 
+func TestLiveOpenRouterSupervisedModeGeneratesHeldDraft(t *testing.T) {
+	if os.Getenv("PARMESAN_LIVE_OPENROUTER") != "1" {
+		t.Skip("set PARMESAN_LIVE_OPENROUTER=1 and OPENROUTER_API_KEY to run live OpenRouter validation")
+	}
+	apiKey := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
+	if apiKey == "" {
+		t.Skip("OPENROUTER_API_KEY is required for live OpenRouter validation")
+	}
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	router := model.NewRouter(config.ProviderConfig{
+		OpenRouterAPIKey:  apiKey,
+		OpenRouterBase:    "https://openrouter.ai/api/v1",
+		DefaultReasoning:  "openrouter",
+		DefaultStructured: "openrouter",
+	})
+	r := New(repo, writes, sse.NewBroker(), router, "live-supervised")
+	now := time.Now().UTC()
+	if err := repo.SaveBundle(ctx, policy.Bundle{
+		ID:         "bundle_live_supervised",
+		Version:    "v1",
+		ImportedAt: now,
+		Soul:       policy.Soul{Identity: "Parmesan validation agent"},
+		Guidelines: []policy.Guideline{{
+			ID:   "answer_validation_question",
+			When: "customer asks a validation question",
+			Then: "answer briefly and mention that the response is a supervised draft",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateSession(ctx, session.Session{
+		ID:        "sess_live_supervised",
+		Channel:   "acp",
+		Mode:      "supervised",
+		Status:    session.StatusActive,
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writes.AppendEvent(ctx, session.Event{
+		ID:        "evt_live_supervised",
+		SessionID: "sess_live_supervised",
+		Source:    "customer",
+		Kind:      "message",
+		CreatedAt: now,
+		Content:   []session.ContentPart{{Type: "text", Text: "Please confirm supervised mode is working in one short sentence."}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writes.CreateExecution(ctx, execution.TurnExecution{
+		ID:             "exec_live_supervised",
+		SessionID:      "sess_live_supervised",
+		TriggerEventID: "evt_live_supervised",
+		TraceID:        "trace_live_supervised",
+		Status:         execution.StatusRunning,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}, []execution.ExecutionStep{
+		step("exec_live_supervised", "ingest", false),
+		step("exec_live_supervised", "resolve_policy", true),
+		step("exec_live_supervised", "match_and_plan", true),
+		step("exec_live_supervised", "compose_response", true),
+		step("exec_live_supervised", "deliver_response", false),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if err := r.processExecution(ctx, "exec_live_supervised"); err != nil {
+		t.Fatalf("processExecution() error = %v", err)
+	}
+	responses, err := repo.ListResponses(ctx, responsedomain.Query{ExecutionID: "exec_live_supervised", Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(responses) != 1 || responses[0].Status != responsedomain.StatusReviewRequired || responses[0].Reason != "supervised_review" {
+		t.Fatalf("responses = %#v, want supervised held draft", responses)
+	}
+	if len(responses[0].HeldMessageEventIDs) == 0 {
+		t.Fatalf("response = %#v, want held draft message ids", responses[0])
+	}
+	event, err := repo.ReadEvent(ctx, "sess_live_supervised", responses[0].HeldMessageEventIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.TrimSpace(eventText(event))
+	if text == "" || strings.HasPrefix(text, "provider stub:") {
+		t.Fatalf("draft text = %q, want live provider-generated draft", text)
+	}
+	if event.Metadata["internal_only"] != true {
+		t.Fatalf("held draft metadata = %#v, want internal_only", event.Metadata)
+	}
+	acpEvents, err := acp.NewService(sessionsvc.New(repo, nil)).ListEvents(ctx, "sess_live_supervised", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range acpEvents {
+		if item.Kind == "message" && item.Source == "ai_agent" {
+			t.Fatalf("acp events = %#v, want generated draft hidden before approval", acpEvents)
+		}
+	}
+}
+
 func TestRequestOperatorToolOutputDoesNotMoveUnattendedSessionToManual(t *testing.T) {
 	ctx := context.Background()
 	repo := memory.New()
