@@ -848,7 +848,7 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			if err != nil {
 				return err
 			}
-			if runnerSessionUnderManualTakeover(sess) {
+			if runnerSessionUnderManualTakeover(sess) && !runnerManualTakeoverAllowsExecutionDelivery(sess, exec.ID) {
 				record, err := r.ensureResponseRecord(ctx, *exec)
 				if err != nil {
 					return err
@@ -3758,6 +3758,14 @@ func runnerSessionUnderManualTakeover(sess session.Session) bool {
 	return false
 }
 
+func runnerManualTakeoverAllowsExecutionDelivery(sess session.Session, executionID string) bool {
+	if strings.TrimSpace(executionID) == "" || sess.Metadata == nil {
+		return false
+	}
+	value, _ := sess.Metadata["takeover_response_execution_id"].(string)
+	return strings.TrimSpace(value) == executionID
+}
+
 func (r *Runner) publish(sessionID, executionID, typ string, payload any) {
 	if r.broker == nil {
 		return
@@ -3968,6 +3976,7 @@ func (r *Runner) maybeRequestOperatorTakeover(ctx context.Context, exec executio
 	sess.Metadata["handoff_reason"] = reason
 	sess.Metadata["takeover_started_at"] = now.Format(time.RFC3339)
 	sess.Metadata["takeover_source"] = "builtin.request_operator"
+	sess.Metadata["takeover_response_execution_id"] = exec.ID
 	if err := r.repo.UpdateSession(ctx, sess); err != nil {
 		return err
 	}

@@ -1449,12 +1449,72 @@ func TestRequestOperatorToolOutputMovesAutoSessionToManual(t *testing.T) {
 	if sess.Mode != "manual" || sess.Metadata["handoff_reason"] != "customer requested a human" || sess.Metadata["takeover_source"] != "builtin.request_operator" {
 		t.Fatalf("session = %#v, want manual operator takeover metadata", sess)
 	}
+	if sess.Metadata["takeover_response_execution_id"] != "exec_operator_request" {
+		t.Fatalf("session metadata = %#v, want takeover response execution id", sess.Metadata)
+	}
 	events, err := repo.ListEvents(ctx, "sess_operator_request")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(events) != 1 || events[0].Kind != "status" || events[0].Data["code"] != "session.operator_takeover_requested" {
 		t.Fatalf("events = %#v, want operator takeover status event", events)
+	}
+}
+
+func TestRequestOperatorHandoffResponseIsDeliveredBeforeManualReview(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.New()
+	if err := repo.CreateSession(ctx, session.Session{
+		ID:        "sess_operator_delivery",
+		Mode:      "auto",
+		Status:    session.StatusActive,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := New(repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), "test")
+	exec := execution.TurnExecution{ID: "exec_operator_delivery", SessionID: "sess_operator_delivery", TraceID: "trace_operator_delivery"}
+	if err := repo.CreateExecution(ctx, exec, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ensureResponseRecord(ctx, exec); err != nil {
+		t.Fatalf("ensureResponseRecord() error = %v", err)
+	}
+	if _, err := r.createAssistantMessageSequence(ctx, exec, []string{"I'll bring in an operator to help."}); err != nil {
+		t.Fatalf("createAssistantMessageSequence() error = %v", err)
+	}
+	if err := r.maybeRequestOperatorTakeover(ctx, exec, map[string]any{
+		"tool_id":        "builtin.request_operator",
+		"status":         "operator_requested",
+		"message":        "I'll bring in an operator to help.",
+		"handoff_reason": "customer requested a human",
+	}); err != nil {
+		t.Fatalf("maybeRequestOperatorTakeover() error = %v", err)
+	}
+	step := execution.ExecutionStep{ID: "step_operator_delivery", ExecutionID: exec.ID, Name: "deliver_response"}
+	if err := r.executeStep(ctx, &exec, &step); err != nil {
+		t.Fatalf("executeStep(deliver_response) error = %v", err)
+	}
+	responses, err := repo.ListResponses(ctx, responsedomain.Query{ExecutionID: exec.ID, Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(responses) != 1 || responses[0].Status == responsedomain.StatusReviewRequired {
+		t.Fatalf("responses = %#v, want handoff response delivered without manual review hold", responses)
+	}
+	events, err := repo.ListEvents(ctx, "sess_operator_delivery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var delivered bool
+	for _, event := range events {
+		if event.Kind == "status" && event.Data["code"] == "response.delivered" {
+			delivered = true
+			break
+		}
+	}
+	if !delivered {
+		t.Fatalf("events = %#v, want response.delivered status", events)
 	}
 }
 
