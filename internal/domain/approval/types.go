@@ -19,9 +19,12 @@ const (
 type Session struct {
 	ID           string            `json:"id"`
 	ArtifactMeta artifactmeta.Meta `json:"artifact_meta,omitempty"`
+	Metadata     map[string]any    `json:"metadata,omitempty"`
 	SessionID    string            `json:"session_id"`
 	ExecutionID  string            `json:"execution_id"`
 	ToolID       string            `json:"tool_id"`
+	ToolName     string            `json:"tool_name,omitempty"`
+	Arguments    map[string]any    `json:"arguments,omitempty"`
 	Status       Status            `json:"status"`
 	RequestText  string            `json:"request_text"`
 	Decision     string            `json:"decision,omitempty"`

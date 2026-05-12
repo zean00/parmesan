@@ -3501,7 +3501,7 @@ func (c *Client) SaveApprovalSession(ctx context.Context, session approval.Sessi
 		    expires_at = EXCLUDED.expires_at,
 		    updated_at = EXCLUDED.updated_at,
 		    metadata_json = EXCLUDED.metadata_json
-	`, session.ID, session.SessionID, session.ExecutionID, session.ToolID, session.Status, session.RequestText, nullString(session.Decision), nullTime(session.ExpiresAt), session.CreatedAt, session.UpdatedAt, metadataJSON(nil, session.ArtifactMeta))
+	`, session.ID, session.SessionID, session.ExecutionID, session.ToolID, session.Status, session.RequestText, nullString(session.Decision), nullTime(session.ExpiresAt), session.CreatedAt, session.UpdatedAt, approvalSessionMetadataJSON(session))
 	return err
 }
 
@@ -3518,7 +3518,8 @@ func (c *Client) GetApprovalSession(ctx context.Context, approvalID string) (app
 		}
 		return approval.Session{}, err
 	}
-	item.ArtifactMeta, _, _ = decodeMetadata(metadata)
+	item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
+	hydrateApprovalSessionMetadata(&item)
 	return item, nil
 }
 
@@ -3538,10 +3539,41 @@ func (c *Client) ListApprovalSessions(ctx context.Context, sessionID string) ([]
 		if err := rows.Scan(&item.ID, &item.SessionID, &item.ExecutionID, &item.ToolID, &item.Status, &item.RequestText, &item.Decision, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt, &metadata); err != nil {
 			return nil, err
 		}
-		item.ArtifactMeta, _, _ = decodeMetadata(metadata)
+		item.ArtifactMeta, item.Metadata, _ = decodeMetadata(metadata)
+		hydrateApprovalSessionMetadata(&item)
 		out = append(out, item)
 	}
 	return out, rows.Err()
+}
+
+func approvalSessionMetadataJSON(session approval.Session) []byte {
+	metadata := clonePostgresMap(session.Metadata)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	if session.ToolName != "" {
+		metadata["tool_name"] = session.ToolName
+	}
+	if len(session.Arguments) > 0 {
+		metadata["arguments"] = session.Arguments
+	}
+	return metadataJSON(metadata, session.ArtifactMeta)
+}
+
+func hydrateApprovalSessionMetadata(session *approval.Session) {
+	if session == nil || len(session.Metadata) == 0 {
+		return
+	}
+	if session.ToolName == "" {
+		if value, ok := session.Metadata["tool_name"].(string); ok {
+			session.ToolName = value
+		}
+	}
+	if session.Arguments == nil {
+		if values, ok := session.Metadata["arguments"].(map[string]any); ok {
+			session.Arguments = values
+		}
+	}
 }
 
 func (c *Client) SaveToolRun(ctx context.Context, run toolrun.Run) error {

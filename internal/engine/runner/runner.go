@@ -2842,6 +2842,8 @@ func (r *Runner) approvalStatus(ctx context.Context, exec execution.TurnExecutio
 		SessionID:   exec.SessionID,
 		ExecutionID: exec.ID,
 		ToolID:      toolID,
+		ToolName:    entry.Name,
+		Arguments:   cloneAnyMap(decisionForTool(view, entry.Name).Arguments),
 		Status:      approval.StatusPending,
 		RequestText: "Approval required before running " + entry.Name,
 		ExpiresAt:   now.Add(15 * time.Minute),
@@ -2858,13 +2860,14 @@ func (r *Runner) approvalStatus(ctx context.Context, exec execution.TurnExecutio
 		ExecutionID: exec.ID,
 		TraceID:     exec.TraceID,
 		Message:     item.RequestText,
-		Fields:      map[string]any{"approval_id": item.ID, "tool": entry.Name},
+		Fields:      map[string]any{"approval_id": item.ID, "tool": entry.Name, "arguments": cloneAnyMap(item.Arguments)},
 		CreatedAt:   time.Now().UTC(),
 	})
 	_, _ = r.sessions.CreateApprovalRequestedEvent(ctx, exec.SessionID, "runtime", exec.ID, exec.TraceID, item.ID, toolID, item.RequestText, item.ExpiresAt, map[string]any{
 		"tool_name":        entry.Name,
 		"provider_id":      entry.ProviderID,
 		"catalog_entry_id": entry.ID,
+		"arguments":        cloneAnyMap(item.Arguments),
 	}, false)
 	r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
 		ResponseID:  responseID,
