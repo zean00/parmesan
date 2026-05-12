@@ -664,7 +664,7 @@ customer-facing order-number question.
 arguments. It sends the handoff message as the assistant response, switches an
 `auto` session to `manual`, and records takeover metadata for the operator
 queue. The tool is auto-exposed only while the session mode is `auto`; it is not
-exposed in `manual` or `unattended` sessions.
+exposed in `manual`, `supervised`, or `unattended` sessions.
 
 Built-in utility tools are auto-exposed by default so customer-facing agents can
 answer timezone/local-date questions, ask for missing customer information, and

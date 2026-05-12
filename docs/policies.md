@@ -270,8 +270,9 @@ scheduling questions, or ask the customer for missing information and pause the
 session as `awaiting_customer`. `builtin.request_operator` is also auto-exposed
 while the session mode is `auto`; when called, it sends a handoff message and
 moves the session to `manual` for operator takeover. It is not exposed in
-`manual` or `unattended` sessions. Use `capability_isolation.allowed_tool_ids`
-when an agent must not see even built-in utilities.
+`manual`, `supervised`, or `unattended` sessions. Use
+`capability_isolation.allowed_tool_ids` when an agent must not see even built-in
+utilities.
 
 Only the native provider with id `builtin` receives Parmesan's built-in utility
 catalog. Other native provider registrations do not inherit built-in tools.

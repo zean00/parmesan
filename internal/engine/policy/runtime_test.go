@@ -197,6 +197,13 @@ func TestResolveExposesOperatorRequestOnlyInAutoMode(t *testing.T) {
 	if slices.Contains(manualView.ToolExposureStage.ExposedTools, builtintools.RequestOperatorName) {
 		t.Fatalf("manual exposed tools = %#v, want no request_operator", manualView.ToolExposureStage.ExposedTools)
 	}
+	supervisedView, err := ResolveWithOptions(context.Background(), events, []policy.Bundle{{ID: "bundle_1", Version: "v1"}}, nil, catalog, ResolveOptions{SessionMode: "supervised"})
+	if err != nil {
+		t.Fatalf("ResolveWithOptions(supervised) error = %v", err)
+	}
+	if slices.Contains(supervisedView.ToolExposureStage.ExposedTools, builtintools.RequestOperatorName) {
+		t.Fatalf("supervised exposed tools = %#v, want no request_operator", supervisedView.ToolExposureStage.ExposedTools)
+	}
 	unattendedView, err := ResolveWithOptions(context.Background(), events, []policy.Bundle{{ID: "bundle_1", Version: "v1"}}, nil, catalog, ResolveOptions{SessionMode: "unattended"})
 	if err != nil {
 		t.Fatalf("ResolveWithOptions(unattended) error = %v", err)

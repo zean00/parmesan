@@ -2326,7 +2326,7 @@ func (s *Server) operatorListSessions(w http.ResponseWriter, r *http.Request) {
 		if unassignedOnly && assigned != "" {
 			continue
 		}
-		if activeOnly && !(sessionMode(sess) == "manual" || assigned != "") {
+		if activeOnly && !(sessionMode(sess) == "manual" || sessionMode(sess) == "supervised" || assigned != "") {
 			continue
 		}
 		view := sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess))
@@ -2388,6 +2388,7 @@ func (s *Server) operatorQueueSummary(w http.ResponseWriter, r *http.Request) {
 		"mine":                      0,
 		"unassigned":                0,
 		"manual_takeover":           0,
+		"supervised":                0,
 		"pending_approval":          0,
 		"failed_media":              0,
 		"pending_preference_review": 0,
@@ -2414,6 +2415,9 @@ func (s *Server) operatorQueueSummary(w http.ResponseWriter, r *http.Request) {
 		}
 		if sessionMode(sess) == "manual" || view.AssignedOperatorID != "" {
 			summary["manual_takeover"]++
+		}
+		if sessionMode(sess) == "supervised" {
+			summary["supervised"]++
 		}
 		if view.PendingApprovalCount > 0 {
 			summary["pending_approval"]++

@@ -55,6 +55,13 @@ response with `allow_first_message_response: true`; only the first customer
 message gets an execution, and later manual messages remain persist-only unless
 an operator explicitly processes them.
 
+If the session is in supervised mode, automated execution still starts for
+customer turns, but delivery is held as a review-required draft. Operators can
+approve the generated response, edit and forward it, or replace it with a
+manual message through the existing response review endpoints. The
+`allow_first_message_response` flag is not required in supervised mode because
+the first customer message already follows the normal draft-generation path.
+
 If the session is in unattended mode, automated execution still starts. The
 only behavior change is tool approval handling: required approvals can be
 auto-approved for tool policies that explicitly allow unattended operation.

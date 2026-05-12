@@ -848,13 +848,13 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			if err != nil {
 				return err
 			}
-			if runnerSessionUnderManualTakeover(sess) && !runnerManualTakeoverAllowsExecutionDelivery(sess, exec.ID) {
+			if reviewRequired, reviewReason := runnerResponseReviewRequirement(sess, exec.ID); reviewRequired {
 				record, err := r.ensureResponseRecord(ctx, *exec)
 				if err != nil {
 					return err
 				}
 				now := time.Now().UTC()
-				if err := r.updateResponseState(ctx, record, responsedomain.StatusReviewRequired, "manual_takeover_review", func(item *responsedomain.Response) {
+				if err := r.updateResponseState(ctx, record, responsedomain.StatusReviewRequired, reviewReason, func(item *responsedomain.Response) {
 					if len(item.HeldMessageEventIDs) == 0 {
 						item.HeldMessageEventIDs = append([]string(nil), eventIDs...)
 					}
@@ -883,17 +883,18 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 					SessionID:   exec.SessionID,
 					ExecutionID: exec.ID,
 					TraceID:     exec.TraceID,
-					Message:     "response held for operator review during manual takeover",
-					Fields:      map[string]any{"response_id": r.responseIDForExecution(ctx, exec.ID), "event_ids": eventIDs},
+					Message:     "response held for operator review",
+					Fields:      map[string]any{"response_id": r.responseIDForExecution(ctx, exec.ID), "event_ids": eventIDs, "reason": reviewReason},
 					CreatedAt:   now,
 				})
 				if _, err := r.sessions.CreateACPStatusEvent(ctx, exec.SessionID, "runtime", "response.review_required", "blocked", exec.ID, exec.TraceID, map[string]any{
 					"response_id": r.responseIDForExecution(ctx, exec.ID),
 					"event_ids":   eventIDs,
+					"reason":      reviewReason,
 				}, nil, false); err != nil {
 					return err
 				}
-				r.publish(exec.SessionID, exec.ID, "runtime.response.review_required", map[string]any{"response_id": r.responseIDForExecution(ctx, exec.ID), "event_ids": eventIDs})
+				r.publish(exec.SessionID, exec.ID, "runtime.response.review_required", map[string]any{"response_id": r.responseIDForExecution(ctx, exec.ID), "event_ids": eventIDs, "reason": reviewReason})
 				return nil
 			}
 			r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
@@ -3756,6 +3757,20 @@ func runnerSessionUnderManualTakeover(sess session.Session) bool {
 		return true
 	}
 	return false
+}
+
+func runnerSessionSupervised(sess session.Session) bool {
+	return strings.EqualFold(strings.TrimSpace(sess.Mode), "supervised")
+}
+
+func runnerResponseReviewRequirement(sess session.Session, executionID string) (bool, string) {
+	if runnerSessionSupervised(sess) {
+		return true, "supervised_review"
+	}
+	if runnerSessionUnderManualTakeover(sess) && !runnerManualTakeoverAllowsExecutionDelivery(sess, executionID) {
+		return true, "manual_takeover_review"
+	}
+	return false, ""
 }
 
 func runnerManualTakeoverAllowsExecutionDelivery(sess session.Session, executionID string) bool {

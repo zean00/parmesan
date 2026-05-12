@@ -4304,8 +4304,45 @@ func TestACPMessageIngressManualModeStoresEventWithoutExecution(t *testing.T) {
 	}
 }
 
+func TestACPMessageIngressSupervisedModeCreatesExecution(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes.Start(ctx, 1)
+	defer writes.Stop()
+
+	if err := repo.CreateSession(context.Background(), session.Session{
+		ID: "sess_supervised", Channel: "acp", Mode: "supervised", Metadata: map[string]any{"allow_first_message_response": true}, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/sessions/sess_supervised/messages", strings.NewReader(`{"id":"evt_supervised","text":"please draft a response"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	waitFor(t, time.Second, func() bool {
+		execs, err := repo.ListExecutions(context.Background())
+		if err != nil || len(execs) != 1 {
+			return false
+		}
+		events, err := repo.ListEvents(context.Background(), "sess_supervised")
+		return err == nil &&
+			len(events) == 1 &&
+			events[0].ID == "evt_supervised" &&
+			events[0].ExecutionID == execs[0].ID &&
+			events[0].Metadata["automation_skipped"] != true
+	})
+}
+
 func TestACPCreateSessionAllowGreetingQueuesTriggeredResponseForAllModes(t *testing.T) {
-	for _, mode := range []string{"auto", "manual", "unattended"} {
+	for _, mode := range []string{"auto", "manual", "supervised", "unattended"} {
 		t.Run(mode, func(t *testing.T) {
 			repo := memory.New()
 			writes := asyncwrite.New(repo, 32)

@@ -1518,6 +1518,44 @@ func TestRequestOperatorHandoffResponseIsDeliveredBeforeManualReview(t *testing.
 	}
 }
 
+func TestSupervisedSessionHoldsGeneratedResponseForReview(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.New()
+	if err := repo.CreateSession(ctx, session.Session{
+		ID:        "sess_supervised",
+		Mode:      "supervised",
+		Status:    session.StatusActive,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := New(repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), "test")
+	exec := execution.TurnExecution{ID: "exec_supervised", SessionID: "sess_supervised", TraceID: "trace_supervised"}
+	if err := repo.CreateExecution(ctx, exec, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ensureResponseRecord(ctx, exec); err != nil {
+		t.Fatalf("ensureResponseRecord() error = %v", err)
+	}
+	if _, err := r.createAssistantMessageSequence(ctx, exec, []string{"Draft response for review."}); err != nil {
+		t.Fatalf("createAssistantMessageSequence() error = %v", err)
+	}
+	step := execution.ExecutionStep{ID: "step_supervised_delivery", ExecutionID: exec.ID, Name: "deliver_response"}
+	if err := r.executeStep(ctx, &exec, &step); err != nil {
+		t.Fatalf("executeStep(deliver_response) error = %v", err)
+	}
+	responses, err := repo.ListResponses(ctx, responsedomain.Query{ExecutionID: exec.ID, Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(responses) != 1 || responses[0].Status != responsedomain.StatusReviewRequired || responses[0].Reason != "supervised_review" {
+		t.Fatalf("responses = %#v, want supervised review-required draft", responses)
+	}
+	if len(responses[0].HeldMessageEventIDs) != 1 {
+		t.Fatalf("held message ids = %#v, want generated draft held", responses[0].HeldMessageEventIDs)
+	}
+}
+
 func TestRequestOperatorToolOutputDoesNotMoveUnattendedSessionToManual(t *testing.T) {
 	ctx := context.Background()
 	repo := memory.New()
