@@ -2166,6 +2166,13 @@ func (s *Server) acpStrictCreateRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	if existing, ok, err := s.acpStrictFindRunByIdempotencyKey(r.Context(), sessionID, req.IdempotencyKey); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	} else if ok {
+		writeJSON(w, http.StatusOK, existing)
+		return
+	}
 	if agentName := strings.TrimSpace(req.AgentName); agentName != "" && strings.TrimSpace(sess.AgentID) == "" {
 		sess.AgentID = agentName
 		_ = s.store.UpdateSession(r.Context(), sess)
@@ -2216,6 +2223,7 @@ func (s *Server) acpStrictGetRun(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) acpStrictListSessionRuns(w http.ResponseWriter, r *http.Request) {
 	sessionID := strings.TrimSpace(r.PathValue("id"))
+	idempotencyKey := strings.TrimSpace(r.URL.Query().Get("idempotency_key"))
 	execs, err := s.store.ListExecutions(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2223,12 +2231,19 @@ func (s *Server) acpStrictListSessionRuns(w http.ResponseWriter, r *http.Request
 	}
 	out := make([]acpStrictRunResponse, 0)
 	for _, exec := range execs {
-		if exec.SessionID == sessionID {
-			out = append(out, s.acpStrictRunFromExecution(r.Context(), exec, ""))
+		if exec.SessionID != sessionID {
+			continue
 		}
+		item := s.acpStrictRunFromExecution(r.Context(), exec, "")
+		if idempotencyKey != "" && item.IdempotencyKey != idempotencyKey {
+			continue
+		}
+		out = append(out, item)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		return out[i].Metadata["created_at"].(string) > out[j].Metadata["created_at"].(string)
+		left, _ := out[i].Metadata["created_at"].(string)
+		right, _ := out[j].Metadata["created_at"].(string)
+		return left > right
 	})
 	writeJSON(w, http.StatusOK, out)
 }
@@ -2317,14 +2332,24 @@ func (s *Server) acpStrictStreamRunEvents(w http.ResponseWriter, r *http.Request
 func (s *Server) acpStrictRunFromExecution(ctx context.Context, exec execution.TurnExecution, idempotencyKey string) acpStrictRunResponse {
 	status := acpStrictStatusFromExecution(exec.Status)
 	output := s.acpStrictOutputForExecution(ctx, exec)
+	triggerMetadata := s.acpStrictTriggerMetadata(ctx, exec)
+	if idempotencyKey == "" {
+		idempotencyKey = stringMetadata(triggerMetadata, "idempotency_key")
+	}
 	metadata := map[string]any{
 		"trace_id":    exec.TraceID,
 		"created_at":  exec.CreatedAt.Format(time.RFC3339Nano),
 		"updated_at":  exec.UpdatedAt.Format(time.RFC3339Nano),
 		"parmesan_id": exec.ID,
 	}
+	if triggerEventID := firstNonEmpty(exec.TriggerEventID, firstString(exec.TriggerEventIDs)); triggerEventID != "" {
+		metadata["trigger_event_id"] = triggerEventID
+	}
 	if idempotencyKey != "" {
 		metadata["idempotency_key"] = idempotencyKey
+	}
+	if agentName := stringMetadata(triggerMetadata, "agent_name"); agentName != "" {
+		metadata["agent_name"] = agentName
 	}
 	return acpStrictRunResponse{
 		ID:             exec.ID,
@@ -2336,6 +2361,55 @@ func (s *Server) acpStrictRunFromExecution(ctx context.Context, exec execution.T
 		IdempotencyKey: idempotencyKey,
 		Metadata:       metadata,
 	}
+}
+
+func (s *Server) acpStrictFindRunByIdempotencyKey(ctx context.Context, sessionID, idempotencyKey string) (acpStrictRunResponse, bool, error) {
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if idempotencyKey == "" {
+		return acpStrictRunResponse{}, false, nil
+	}
+	execs, err := s.store.ListExecutions(ctx)
+	if err != nil {
+		return acpStrictRunResponse{}, false, err
+	}
+	var found acpStrictRunResponse
+	var foundAt string
+	for _, exec := range execs {
+		if exec.SessionID != sessionID {
+			continue
+		}
+		item := s.acpStrictRunFromExecution(ctx, exec, "")
+		if item.IdempotencyKey != idempotencyKey {
+			continue
+		}
+		createdAt, _ := item.Metadata["created_at"].(string)
+		if found.ID == "" || createdAt > foundAt {
+			found = item
+			foundAt = createdAt
+		}
+	}
+	return found, found.ID != "", nil
+}
+
+func (s *Server) acpStrictTriggerMetadata(ctx context.Context, exec execution.TurnExecution) map[string]any {
+	eventID := firstNonEmpty(exec.TriggerEventID, firstString(exec.TriggerEventIDs))
+	if eventID == "" {
+		return nil
+	}
+	event, err := s.store.ReadEvent(ctx, exec.SessionID, eventID)
+	if err != nil {
+		return nil
+	}
+	return event.Metadata
+}
+
+func firstString(values []string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func acpStrictStatusFromExecution(status execution.Status) string {

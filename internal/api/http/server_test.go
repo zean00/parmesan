@@ -4099,6 +4099,41 @@ func TestACPStrictNexusSSEControlPlane(t *testing.T) {
 	if run.ID == "" || run.SessionID != "acp_session_1" || run.Status != "running" || run.IdempotencyKey != "queue_1" {
 		t.Fatalf("run = %#v, want Nexus strict run response", run)
 	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/acp/sessions/acp_session_1/runs?limit=50", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /sessions/runs status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var runs []acpStrictRunResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &runs); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].ID != run.ID || runs[0].IdempotencyKey != "queue_1" {
+		t.Fatalf("runs = %#v, want idempotent run projection", runs)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/acp/runs", strings.NewReader(`{"session_id":"acp_session_1","agent_name":"support","idempotency_key":"queue_1","text":"hello again"}`))
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("duplicate POST /runs status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var duplicate acpStrictRunResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &duplicate); err != nil {
+		t.Fatal(err)
+	}
+	if duplicate.ID != run.ID {
+		t.Fatalf("duplicate run = %#v, want existing run %q", duplicate, run.ID)
+	}
+	execs, err := repo.ListExecutions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(execs) != 1 {
+		t.Fatalf("executions = %#v, want duplicate idempotency key to reuse existing execution", execs)
+	}
 }
 
 func TestACPStrictNexusRunEventsStreamShape(t *testing.T) {
