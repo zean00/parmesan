@@ -8177,15 +8177,35 @@ func (s *Server) queueSessionGreeting(ctx context.Context, sessionID string) err
 }
 
 func (s *Server) markResponseTrigger(ctx context.Context, executionID, source, reason, dedupeKey string) error {
+	now := time.Now().UTC()
 	items, err := s.store.ListResponses(ctx, responsedomain.Query{ExecutionID: executionID, Limit: 1})
-	if err != nil || len(items) == 0 {
+	if err != nil {
 		return err
 	}
-	record := items[0]
+	var record responsedomain.Response
+	if len(items) > 0 {
+		record = items[0]
+	} else {
+		exec, _, err := s.store.GetExecution(ctx, executionID)
+		if err != nil {
+			return err
+		}
+		record = responsedomain.Response{
+			ID:               fmt.Sprintf("resp_%d", now.UnixNano()),
+			SessionID:        exec.SessionID,
+			ExecutionID:      exec.ID,
+			PolicySnapshotID: exec.PolicySnapshotID,
+			TraceID:          exec.TraceID,
+			TriggerEventIDs:  append([]string(nil), exec.TriggerEventIDs...),
+			Status:           responsedomain.StatusPreparing,
+			MaxIterations:    4,
+			CreatedAt:        now,
+		}
+	}
 	record.TriggerSource = source
 	record.TriggerReason = reason
 	record.DedupeKey = dedupeKey
-	record.UpdatedAt = time.Now().UTC()
+	record.UpdatedAt = now
 	return s.store.SaveResponse(ctx, record)
 }
 

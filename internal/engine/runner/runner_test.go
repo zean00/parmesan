@@ -1574,6 +1574,17 @@ func TestSupervisedSessionHoldsGeneratedResponseForReview(t *testing.T) {
 	}
 }
 
+func TestSupervisedFirstMessageResponseSkipsReviewHold(t *testing.T) {
+	reviewRequired, reason := runnerResponseReviewRequirement(
+		session.Session{Mode: "supervised"},
+		responsedomain.Response{TriggerReason: "first_message_response"},
+		"exec_first_message",
+	)
+	if reviewRequired || reason != "" {
+		t.Fatalf("reviewRequired = %v, reason = %q, want first-message response delivered", reviewRequired, reason)
+	}
+}
+
 func TestLiveOpenRouterSupervisedModeGeneratesHeldDraft(t *testing.T) {
 	if os.Getenv("PARMESAN_LIVE_OPENROUTER") != "1" {
 		t.Skip("set PARMESAN_LIVE_OPENROUTER=1 and OPENROUTER_API_KEY to run live OpenRouter validation")

@@ -4553,6 +4553,41 @@ func TestACPMessageIngressManualFirstMessageResponseCreatesOnlyOneExecution(t *t
 	}
 }
 
+func TestMarkResponseTriggerCreatesMissingResponseRecord(t *testing.T) {
+	repo := memory.New()
+	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := repo.CreateSession(ctx, session.Session{ID: "sess_trigger_missing_response", Mode: "supervised", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateExecution(ctx, execution.TurnExecution{
+		ID:              "exec_trigger_missing_response",
+		SessionID:       "sess_trigger_missing_response",
+		TriggerEventID:  "evt_trigger_missing_response",
+		TriggerEventIDs: []string{"evt_trigger_missing_response"},
+		TraceID:         "trace_trigger_missing_response",
+		Status:          execution.StatusRunning,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.markResponseTrigger(ctx, "exec_trigger_missing_response", "customer", "first_message_response", "session:sess_trigger_missing_response:first_customer_message"); err != nil {
+		t.Fatalf("markResponseTrigger() error = %v", err)
+	}
+	responses, err := repo.ListResponses(ctx, responsedomain.Query{ExecutionID: "exec_trigger_missing_response", Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(responses) != 1 || responses[0].TriggerReason != "first_message_response" || responses[0].TriggerSource != "customer" {
+		t.Fatalf("responses = %#v, want persisted first message trigger", responses)
+	}
+	if responses[0].DedupeKey != "session:sess_trigger_missing_response:first_customer_message" {
+		t.Fatalf("response dedupe key = %q, want first-message key", responses[0].DedupeKey)
+	}
+}
+
 func TestACPMessageIngressReturnsQuotaExceeded(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
