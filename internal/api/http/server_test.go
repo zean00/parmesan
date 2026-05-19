@@ -4043,6 +4043,14 @@ func TestACPAndSessionStreamsIncludeResponseDelta(t *testing.T) {
 		if !strings.Contains(body, "event: response.delta") || !strings.Contains(body, `"text":"hello"`) {
 			t.Fatalf("%s body = %q, want streamed response delta", path, body)
 		}
+		if strings.Contains(path, "/v1/acp/") {
+			if strings.Contains(body, `"payload"`) || strings.Contains(body, `"type":"runtime.response.delta"`) {
+				t.Fatalf("%s body = %q, want strict ACP event data without raw runtime envelope", path, body)
+			}
+			if !strings.Contains(body, `"kind":"response.delta"`) || !strings.Contains(body, `"source":"runtime"`) {
+				t.Fatalf("%s body = %q, want normalized ACP response delta event", path, body)
+			}
+		}
 	}
 }
 

@@ -20,6 +20,14 @@ Supported routes:
 - `GET /v1/acp/sessions/{id}/approvals`
 - `POST /v1/acp/sessions/{id}/approvals/{approval_id}`
 
+Strict ACP SSE:
+- `/v1/acp/.../events/stream` is the canonical ACP-over-SSE event feed. Commands remain HTTP because SSE is server-to-client only.
+- Every SSE frame uses the normalized ACP event object as `data`; runtime live response frames are projected into ACP events instead of exposing Parmesan runtime envelopes.
+- Persisted events replay with their durable `offset` and resume from `?min_offset=...`.
+- Live response deltas use `event: response.delta` and `data.kind: "response.delta"`.
+- Live response completion uses `event: response.completed` and `data.kind: "response.completed"`.
+- Internal events, operator notes, and held supervised drafts are excluded from ACP list and stream responses.
+
 Conversation-edge rules:
 - Agent-scoped routes are the preferred multi-profile ACP surface. The path `{agent_id}` is authoritative; a mismatched body `agent_id` is rejected, and existing session reads/writes return not found if the persisted session belongs to another agent.
 - Session creation accepts ACP extension metadata through `_meta`. Parmesan preserves `_meta` in session metadata and normalizes `_meta.parmesan.customer`, `_meta.customer`, and related `customer_id` fields into `metadata.customer_context`.

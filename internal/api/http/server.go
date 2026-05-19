@@ -2216,7 +2216,7 @@ func (s *Server) acpStreamEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		flusher.Flush()
-		if s.forwardLiveSessionEvents(w, flusher, live) {
+		if s.forwardLiveACPEvents(w, flusher, live) {
 			return
 		}
 		env, gotLive, done := s.waitForSessionActivity(ctx, sessionID, lastOffset, live)
@@ -2224,7 +2224,7 @@ func (s *Server) acpStreamEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if gotLive {
-			if s.writeLiveEnvelope(w, flusher, env) {
+			if s.writeLiveACPEnvelope(w, flusher, env) {
 				return
 			}
 		}
@@ -9478,6 +9478,30 @@ func (s *Server) forwardLiveSessionEvents(w http.ResponseWriter, flusher http.Fl
 	}
 }
 
+func (s *Server) forwardLiveACPEvents(w http.ResponseWriter, flusher http.Flusher, ch chan sse.Envelope) bool {
+	if ch == nil {
+		return false
+	}
+	wrote := false
+	for {
+		select {
+		case env, ok := <-ch:
+			if !ok {
+				return true
+			}
+			if s.writeLiveACPEnvelope(w, flusher, env) {
+				return true
+			}
+			wrote = true
+		default:
+			if wrote {
+				flusher.Flush()
+			}
+			return false
+		}
+	}
+}
+
 func (s *Server) waitForSessionActivity(ctx context.Context, sessionID string, lastOffset int64, live chan sse.Envelope) (sse.Envelope, bool, bool) {
 	ready := make(chan struct{}, 1)
 	go func() {
@@ -9523,6 +9547,57 @@ func (s *Server) writeLiveEnvelope(w http.ResponseWriter, flusher http.Flusher, 
 	}
 	flusher.Flush()
 	return false
+}
+
+func (s *Server) writeLiveACPEnvelope(w http.ResponseWriter, flusher http.Flusher, env sse.Envelope) bool {
+	event, ok := acpEventFromLiveEnvelope(env)
+	if !ok {
+		return false
+	}
+	raw, err := json.Marshal(event)
+	if err != nil {
+		return false
+	}
+	if _, err := fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", event.ID, event.Kind, raw); err != nil {
+		return true
+	}
+	flusher.Flush()
+	return false
+}
+
+func acpEventFromLiveEnvelope(env sse.Envelope) (acp.Event, bool) {
+	kind := ""
+	switch env.Type {
+	case "runtime.response.delta":
+		kind = "response.delta"
+	case "runtime.response.completed":
+		kind = "response.completed"
+	default:
+		return acp.Event{}, false
+	}
+	id := strings.TrimSpace(env.EventID)
+	if id == "" {
+		sum := sha1.Sum([]byte(strings.Join([]string{"acp_live", env.SessionID, env.ExecutionID, env.TraceID, env.Type, fmt.Sprint(env.CreatedAt.UnixNano())}, ":")))
+		id = "acp_live_" + hex.EncodeToString(sum[:8])
+	}
+	createdAt := env.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	data, ok := env.Payload.(map[string]any)
+	if !ok {
+		data = map[string]any{"payload": env.Payload}
+	}
+	return acp.Event{
+		ID:          id,
+		SessionID:   env.SessionID,
+		Source:      "runtime",
+		Kind:        kind,
+		TraceID:     env.TraceID,
+		ExecutionID: env.ExecutionID,
+		CreatedAt:   createdAt,
+		Data:        data,
+	}, true
 }
 
 func (s *Server) buildTraceTimeline(ctx context.Context, traceID string) (traceTimelineResponse, error) {
