@@ -1879,7 +1879,7 @@ func (s *Server) acpCreateMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	if sessionMode(sess) == "manual" {
 		metadata = cloneMap(metadata)
-		if s.manualFirstMessageResponseAllowed(r.Context(), sess, req.Source) {
+		if s.firstMessageResponseAllowed(r.Context(), sess, req.Source) {
 			metadata["automation_allowed"] = true
 			metadata["automation_allow_reason"] = "manual_first_message_response"
 			event, execID, _, err := s.enqueueSessionTurn(r.Context(), sessionID, req.ID, req.Source, acp.EventKindMessage, content, nil, metadata)
@@ -1913,10 +1913,19 @@ func (s *Server) acpCreateMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	event, _, _, err := s.enqueueSessionTurn(r.Context(), sessionID, req.ID, req.Source, acp.EventKindMessage, content, nil, metadata)
+	firstMessageResponse := sessionMode(sess) == "supervised" && s.firstMessageResponseAllowed(r.Context(), sess, req.Source)
+	if firstMessageResponse {
+		metadata = cloneMap(metadata)
+		metadata["automation_allowed"] = true
+		metadata["automation_allow_reason"] = "supervised_first_message_response"
+	}
+	event, execID, _, err := s.enqueueSessionTurn(r.Context(), sessionID, req.ID, req.Source, acp.EventKindMessage, content, nil, metadata)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if firstMessageResponse {
+		_ = s.markResponseTrigger(r.Context(), execID, "customer", "first_message_response", "session:"+sessionID+":first_customer_message")
 	}
 	s.maybeAppendModerationAlert(r.Context(), sess, event, moderationPayload)
 	writeJSON(w, http.StatusCreated, acp.NormalizeEvent(event))
@@ -8180,8 +8189,9 @@ func (s *Server) markResponseTrigger(ctx context.Context, executionID, source, r
 	return s.store.SaveResponse(ctx, record)
 }
 
-func (s *Server) manualFirstMessageResponseAllowed(ctx context.Context, sess session.Session, source string) bool {
-	if sessionMode(sess) != "manual" || !boolMetadata(sess.Metadata, "allow_first_message_response") {
+func (s *Server) firstMessageResponseAllowed(ctx context.Context, sess session.Session, source string) bool {
+	mode := sessionMode(sess)
+	if (mode != "manual" && mode != "supervised") || !boolMetadata(sess.Metadata, "allow_first_message_response") {
 		return false
 	}
 	if !strings.EqualFold(strings.TrimSpace(source), "customer") {

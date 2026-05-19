@@ -848,11 +848,11 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 			if err != nil {
 				return err
 			}
-			if reviewRequired, reviewReason := runnerResponseReviewRequirement(sess, exec.ID); reviewRequired {
-				record, err := r.ensureResponseRecord(ctx, *exec)
-				if err != nil {
-					return err
-				}
+			record, err := r.ensureResponseRecord(ctx, *exec)
+			if err != nil {
+				return err
+			}
+			if reviewRequired, reviewReason := runnerResponseReviewRequirement(sess, record, exec.ID); reviewRequired {
 				now := time.Now().UTC()
 				if err := r.markHeldMessageEventsInternal(ctx, exec.SessionID, eventIDs, r.responseIDForExecution(ctx, exec.ID), reviewReason); err != nil {
 					return err
@@ -3769,7 +3769,10 @@ func runnerSessionSupervised(sess session.Session) bool {
 	return strings.EqualFold(strings.TrimSpace(sess.Mode), "supervised")
 }
 
-func runnerResponseReviewRequirement(sess session.Session, executionID string) (bool, string) {
+func runnerResponseReviewRequirement(sess session.Session, record responsedomain.Response, executionID string) (bool, string) {
+	if record.TriggerReason == "first_message_response" {
+		return false, ""
+	}
 	if runnerSessionSupervised(sess) {
 		return true, "supervised_review"
 	}
