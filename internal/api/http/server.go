@@ -2360,9 +2360,23 @@ func (s *Server) acpStrictStreamRunEvents(w http.ResponseWriter, r *http.Request
 			if err != nil {
 				return
 			}
-			if latest.Status == execution.StatusBlocked || latest.Status == execution.StatusWaiting || latest.Status == execution.StatusSucceeded || latest.Status == execution.StatusFailed || latest.Status == execution.StatusAbandoned {
+			if latest.Status == execution.StatusSucceeded || latest.Status == execution.StatusFailed || latest.Status == execution.StatusAbandoned {
 				_ = emit(s.acpStrictRunFromExecution(r.Context(), latest, ""))
 				return
+			}
+			if latest.Status == execution.StatusBlocked {
+				item := s.acpStrictRunFromExecution(r.Context(), latest, "")
+				if item.Status == "awaiting" {
+					_ = emit(item)
+					return
+				}
+			}
+			if latest.Status == execution.StatusWaiting {
+				item := s.acpStrictRunFromExecution(r.Context(), latest, "")
+				if item.Status == "awaiting" {
+					_ = emit(item)
+					return
+				}
 			}
 		}
 	}
