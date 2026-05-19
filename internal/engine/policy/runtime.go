@@ -92,6 +92,21 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	ToolExposureStageResult{ExposedTools: exposedTools, ToolApprovals: toolApprovals, UnattendedApprovals: unattendedApprovals, UnattendedIneligibleRequired: unattendedIneligible, UnattendedIneligibleToolBehavior: unattendedBehavior}.Apply(state)
 	exposedAgents, exposedBindings := resolveAgentExposure(bundle.GuidelineAgentAssociations, state.matchFinalizeStage.MatchedGuidelines, state.activeJourneyState, bundle.CapabilityIsolation)
 	AgentExposureStageResult{ExposedAgents: exposedAgents, ExposedBindings: exposedBindings}.Apply(state)
+	if canUseTemplateOnlyFastPath(bundle, state) {
+		templates := collectTemplates(bundle, state.activeJourney, state.activeJourneyState, state.context)
+		responseAnalysisResult := buildResponseAnalysisStageResult(ctx, nil, state.context, bundle, state.activeJourneyState, state.matchFinalizeStage.MatchedGuidelines, templates, state.responseAnalysisStage.Evaluation.Coverage)
+		responseAnalysisResult.Apply(state)
+		mode := strings.ToLower(strings.TrimSpace(bundle.CompositionMode))
+		if mode == "" {
+			mode = inferCompositionMode(state.responseAnalysisStage.CandidateTemplates)
+		}
+		if state.responseAnalysisStage.Analysis.NeedsStrictMode {
+			mode = "strict"
+		}
+		view := resolvedViewFromState(bundle, state, mode, arqsFromState(state), nil)
+		view.HistorySelectionStage = historySelection
+		return view, nil
+	}
 	toolModelNames := BuildToolModelNameMap(catalog, options.ToolNameAliases)
 	toolPlanResult, toolDecisionResult := buildToolStageResults(ctx, options.Router, state.context, state, bundle.Relationships, catalog, toolModelNames, options.ArgumentResolver)
 	toolPlanResult.Apply(state)
@@ -154,6 +169,25 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 	view := resolvedViewFromState(bundle, state, mode, arqs, updateIntents)
 	view.HistorySelectionStage = historySelection
 	return view, nil
+}
+
+func canUseTemplateOnlyFastPath(bundle policy.Bundle, state *matchingState) bool {
+	if state == nil || len(state.matchFinalizeStage.MatchedGuidelines) > 0 {
+		return false
+	}
+	if state.activeJourneyState != nil {
+		if strings.TrimSpace(state.activeJourneyState.Tool) != "" ||
+			strings.TrimSpace(state.activeJourneyState.Agent) != "" ||
+			strings.TrimSpace(state.activeJourneyState.ResponseCapabilityID) != "" {
+			return false
+		}
+	}
+	templates := collectTemplates(bundle, state.activeJourney, state.activeJourneyState, state.context)
+	if len(templates) == 0 {
+		return false
+	}
+	return templateScore(templates[0], state.context.LatestCustomerText) > 0 ||
+		(state.scopeBoundaryStage.Classification == "in_scope" && len(state.scopeBoundaryStage.MatchedTopics) > 0)
 }
 
 func signalKeys(values map[string]struct{}) []string {
@@ -1843,13 +1877,27 @@ func runObservationARQ(ctx context.Context, router *model.Router, matchCtx Match
 	return matches, out
 }
 
-func runActionableARQ(ctx context.Context, router *model.Router, matchCtx MatchingContext, items []policy.Guideline) ([]Match, []policy.Guideline) {
+func runActionableARQ(ctx context.Context, router *model.Router, bundle policy.Bundle, matchCtx MatchingContext, items []policy.Guideline) ([]Match, []policy.Guideline) {
 	var matches []Match
 	var out []policy.Guideline
-	if router != nil && len(items) > 0 {
+	deterministicMatches, deterministicGuidelines := strongDeterministicGuidelineMatches(bundle, matchCtx, items)
+	matches = append(matches, deterministicMatches...)
+	out = append(out, deterministicGuidelines...)
+	deterministicIDs := map[string]struct{}{}
+	for _, item := range deterministicGuidelines {
+		deterministicIDs[item.ID] = struct{}{}
+	}
+	remaining := make([]policy.Guideline, 0, len(items))
+	for _, item := range items {
+		if _, ok := deterministicIDs[item.ID]; ok {
+			continue
+		}
+		remaining = append(remaining, item)
+	}
+	if router != nil && len(remaining) > 0 {
 		index := map[string]policy.Guideline{}
-		adapted := make([]policy.Guideline, 0, len(items))
-		for _, item := range items {
+		adapted := make([]policy.Guideline, 0, len(remaining))
+		for _, item := range remaining {
 			index[item.ID] = item
 			adapted = append(adapted, item)
 		}
@@ -1890,15 +1938,12 @@ func runActionableARQ(ctx context.Context, router *model.Router, matchCtx Matchi
 				matches = append(matches, result.Matches...)
 				out = append(out, result.Items...)
 			}
-		} else {
-			matches = nil
-			out = nil
 		}
 		seen := map[string]struct{}{}
 		for _, item := range out {
 			seen[item.ID] = struct{}{}
 		}
-		for _, item := range items {
+		for _, item := range remaining {
 			if _, ok := seen[item.ID]; ok {
 				continue
 			}
@@ -1924,7 +1969,7 @@ func runActionableARQ(ctx context.Context, router *model.Router, matchCtx Matchi
 			return matches, dedupeGuidelines(out)
 		}
 	}
-	for _, item := range items {
+	for _, item := range remaining {
 		evidence := cachedEvaluateConditionAcrossTexts(matchCtx, item.When, matchingSource(matchCtx), matchCtx.ConversationText)
 		if evidence.Score <= 0 || !evidence.Applies {
 			continue
@@ -1944,6 +1989,57 @@ func runActionableARQ(ctx context.Context, router *model.Router, matchCtx Matchi
 	sortMatches(matches)
 	sortGuidelines(out, matches)
 	return matches, out
+}
+
+func strongDeterministicGuidelineMatches(bundle policy.Bundle, matchCtx MatchingContext, items []policy.Guideline) ([]Match, []policy.Guideline) {
+	var matches []Match
+	var out []policy.Guideline
+	associated := guidelineCapabilityAssociations(bundle)
+	for _, item := range items {
+		if guidelineRequiresRuntimeCapability(item, associated) {
+			continue
+		}
+		evidence := cachedEvaluateConditionAcrossTexts(matchCtx, item.When, matchingSource(matchCtx), matchCtx.ConversationText)
+		if evidence.Score < 3 || !evidence.Applies {
+			continue
+		}
+		kind := "guideline"
+		if strings.HasPrefix(item.ID, "journey_node:") {
+			kind = "journey_node"
+		}
+		matches = append(matches, Match{
+			ID:        item.ID,
+			Kind:      kind,
+			Score:     float64(evidence.Score) + float64(item.Priority),
+			Rationale: firstNonEmpty(evidence.Rationale, "deterministic condition evidence is strong enough to select this actionable match"),
+		})
+		out = append(out, item)
+	}
+	sortMatches(matches)
+	sortGuidelines(out, matches)
+	return matches, dedupeGuidelines(out)
+}
+
+func guidelineCapabilityAssociations(bundle policy.Bundle) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, assoc := range bundle.GuidelineToolAssociations {
+		out[strings.TrimSpace(assoc.GuidelineID)] = struct{}{}
+	}
+	for _, assoc := range bundle.GuidelineAgentAssociations {
+		out[strings.TrimSpace(assoc.GuidelineID)] = struct{}{}
+	}
+	return out
+}
+
+func guidelineRequiresRuntimeCapability(item policy.Guideline, associated map[string]struct{}) bool {
+	if _, ok := associated[strings.TrimSpace(item.ID)]; ok {
+		return true
+	}
+	return len(item.Tools) > 0 ||
+		len(item.Agents) > 0 ||
+		len(item.AgentBindings) > 0 ||
+		item.MCP != nil ||
+		strings.TrimSpace(item.ResponseCapabilityID) != ""
 }
 
 func runPreviouslyAppliedARQ(bundle policy.Bundle, ctx MatchingContext, items []policy.Guideline, matches []Match) ([]ReapplyDecision, []policy.Guideline) {

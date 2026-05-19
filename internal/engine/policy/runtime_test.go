@@ -3516,6 +3516,60 @@ func TestResolveWithRouterRetriesStructuredARQ(t *testing.T) {
 	}
 }
 
+func TestResolveWithRouterMergesDeterministicAndStructuredActionableMatches(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"checks\":[{\"id\":\"coverage_tool\",\"applies\":true,\"rationale\":\"structured coverage match\"}]}"}}]}`))
+	}))
+	defer server.Close()
+
+	router := model.NewRouter(config.ProviderConfig{
+		DefaultStructured: "openrouter",
+		OpenRouterBase:    server.URL,
+		OpenRouterAPIKey:  "test-key",
+	})
+
+	view, err := ResolveWithRouter(
+		context.Background(),
+		router,
+		[]session.Event{{
+			ID:        "evt_1",
+			SessionID: "sess_1",
+			Source:    "customer",
+			Kind:      "message",
+			CreatedAt: time.Now().UTC(),
+			Content:   []session.ContentPart{{Type: "text", Text: "I need a refund for a damaged order and also want warranty coverage checked."}},
+		}},
+		[]policy.Bundle{{
+			ID:      "bundle_1",
+			Version: "v1",
+			Guidelines: []policy.Guideline{
+				{ID: "refund_simple", When: "damaged order refund", Then: "Help with the damaged-order refund."},
+				{ID: "coverage_tool", When: "warranty coverage", Then: "Check the warranty coverage."},
+			},
+			GuidelineToolAssociations: []policy.GuidelineToolAssociation{
+				{GuidelineID: "coverage_tool", ToolID: "commerce.check_coverage"},
+			},
+		}},
+		nil,
+		[]tool.CatalogEntry{{ID: "commerce_check_coverage", ProviderID: "commerce", Name: "check_coverage"}},
+	)
+	if err != nil {
+		t.Fatalf("ResolveWithRouter() error = %v", err)
+	}
+	if calls == 0 {
+		t.Fatalf("structured provider was not called for remaining actionable guideline")
+	}
+	if !containsGuideline(view.MatchFinalizeStage.MatchedGuidelines, "refund_simple") {
+		t.Fatalf("matched guidelines = %#v, matches = %#v, want deterministic refund_simple", view.MatchFinalizeStage.MatchedGuidelines, view.MatchFinalizeStage.GuidelineMatches)
+	}
+	if !containsGuideline(view.MatchFinalizeStage.MatchedGuidelines, "coverage_tool") {
+		t.Fatalf("matched guidelines = %#v, matches = %#v, want structured coverage_tool", view.MatchFinalizeStage.MatchedGuidelines, view.MatchFinalizeStage.GuidelineMatches)
+	}
+}
+
 func TestResolveWithRouterRetainsStagedToolAgeGuidelineWhenStructuredActionableMisses(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

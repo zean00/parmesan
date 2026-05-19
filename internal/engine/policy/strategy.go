@@ -523,7 +523,7 @@ func (genericStrategy) CreateMatchingBatches(_ matchingSnapshot, items []policy.
 			return buildJourneyProgressStageResult(ctx, snapshot.router, snapshot.context, snapshot.activeJourney, snapshot.activeJourneyState, snapshot.journeyInstance, snapshot.journeyBacktrackStage.Decision), nil
 		}),
 		makeBatch("actionable_match", "generic", promptVersion("actionable_match"), func(ctx context.Context, snapshot matchingSnapshot) (StageResult, error) {
-			matches, guidelines := runActionableARQ(ctx, snapshot.router, snapshot.context, regular)
+			matches, guidelines := runActionableARQ(ctx, snapshot.router, snapshot.bundle, snapshot.context, regular)
 			return GuidelineMatchStageResult{Matches: matches, Guidelines: guidelines}, nil
 		}),
 		makeBatch("low_criticality_match", "generic", promptVersion("low_criticality_match"), func(ctx context.Context, snapshot matchingSnapshot) (StageResult, error) {
@@ -560,7 +560,7 @@ func (genericStrategy) CreateResponseAnalysisBatches(_ matchingSnapshot) []respo
 func (customStrategy) CreateMatchingBatches(_ matchingSnapshot, items []policy.Guideline) []guidelineMatchingBatch {
 	return []guidelineMatchingBatch{
 		makeBatch("custom_actionable_match", "custom", promptVersion("custom_actionable_match"), func(ctx context.Context, snapshot matchingSnapshot) (StageResult, error) {
-			matches, guidelines := runActionableARQ(ctx, snapshot.router, snapshot.context, items)
+			matches, guidelines := runActionableARQ(ctx, snapshot.router, snapshot.bundle, snapshot.context, items)
 			return GuidelineMatchStageResult{
 				Matches:    matches,
 				Guidelines: guidelines,

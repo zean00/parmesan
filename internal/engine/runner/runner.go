@@ -60,6 +60,8 @@ type Runner struct {
 	interval         time.Duration
 	responseMu       sync.Mutex
 	responses        map[string]responsedomain.Response
+	viewMu           sync.Mutex
+	viewCache        map[string]cachedPolicyView
 	workMu           sync.Mutex
 	workQueue        chan string
 	inFlight         map[string]struct{}
@@ -87,6 +89,7 @@ func New(repo store.Repository, writes *asyncwrite.Queue, broker *sse.Broker, ro
 		leaseTTL:   10 * time.Second,
 		interval:   500 * time.Millisecond,
 		responses:  map[string]responsedomain.Response{},
+		viewCache:  map[string]cachedPolicyView{},
 		inFlight:   map[string]struct{}{},
 		workers:    1,
 		queueSize:  16,
@@ -134,6 +137,11 @@ func (r *Runner) WithDefaultOrgID(orgID string) *Runner {
 }
 
 type resolvedView = policyruntime.EngineResult
+
+type cachedPolicyView struct {
+	view   resolvedView
+	events []session.Event
+}
 
 const maxResponsePreparationIterations = 4
 
@@ -291,6 +299,7 @@ func (r *Runner) withLeaseRenewal(ctx context.Context, executionID string, stepI
 func (r *Runner) processExecution(ctx context.Context, executionID string) error {
 	ctx, done := observability.Current().StartSpan(ctx, "runner", "process_execution")
 	defer done("ok")
+	defer r.clearPolicyView(executionID)
 	current, _, err := r.repo.GetExecution(ctx, executionID)
 	if err != nil {
 		done("error")
@@ -938,6 +947,30 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 }
 
 func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) (resolvedView, []session.Event, error) {
+	if strings.TrimSpace(exec.ID) != "" {
+		r.viewMu.Lock()
+		cached, ok := r.viewCache[exec.ID]
+		r.viewMu.Unlock()
+		if ok {
+			return cached.view, append([]session.Event(nil), cached.events...), nil
+		}
+	}
+	view, events, err := r.resolveViewUncached(ctx, exec)
+	if err != nil {
+		return resolvedView{}, nil, err
+	}
+	if strings.TrimSpace(exec.ID) != "" {
+		r.viewMu.Lock()
+		r.viewCache[exec.ID] = cachedPolicyView{
+			view:   view,
+			events: append([]session.Event(nil), events...),
+		}
+		r.viewMu.Unlock()
+	}
+	return view, events, nil
+}
+
+func (r *Runner) resolveViewUncached(ctx context.Context, exec execution.TurnExecution) (resolvedView, []session.Event, error) {
 	events, err := r.repo.ListEvents(ctx, exec.SessionID)
 	if err != nil {
 		return resolvedView{}, nil, err
@@ -1030,6 +1063,15 @@ func (r *Runner) resolveView(ctx context.Context, exec execution.TurnExecution) 
 	}
 	selectedEvents, _ := policyruntime.SelectHistoryEvents(events, selectedBundles[0], exec.ID)
 	return view, selectedEvents, nil
+}
+
+func (r *Runner) clearPolicyView(execID string) {
+	if strings.TrimSpace(execID) == "" {
+		return
+	}
+	r.viewMu.Lock()
+	delete(r.viewCache, execID)
+	r.viewMu.Unlock()
 }
 
 func applyAgentProfileIdentityFallback(view *resolvedView, profile agent.Profile) {
