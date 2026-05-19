@@ -240,6 +240,11 @@ type acpStrictSessionResponse struct {
 	GreetingSkipped string `json:"greeting_skipped,omitempty"`
 }
 
+type acpStrictAwait struct {
+	Schema []byte `json:"schema,omitempty"`
+	Prompt []byte `json:"prompt,omitempty"`
+}
+
 type acpStrictRunRequest struct {
 	SessionID      string                `json:"session_id"`
 	AgentName      string                `json:"agent_name"`
@@ -267,6 +272,7 @@ type acpStrictRunResponse struct {
 	IdempotencyKey string           `json:"idempotency_key,omitempty"`
 	Metadata       map[string]any   `json:"metadata,omitempty"`
 	Artifacts      []map[string]any `json:"artifacts,omitempty"`
+	Await          *acpStrictAwait  `json:"await,omitempty"`
 }
 
 type traceSpanView struct {
@@ -2249,7 +2255,39 @@ func (s *Server) acpStrictListSessionRuns(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) acpStrictResumeRun(w http.ResponseWriter, r *http.Request) {
-	s.acpStrictGetRun(w, r)
+	runID := strings.TrimSpace(r.PathValue("id"))
+	exec, _, err := s.store.GetExecution(r.Context(), runID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	pending, ok := s.acpStrictPendingApproval(r.Context(), exec)
+	if !ok {
+		writeJSON(w, http.StatusOK, s.acpStrictRunFromExecution(r.Context(), exec, ""))
+		return
+	}
+	var req struct {
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	decision := acpStrictResumeDecision(req.Payload)
+	if decision == "" {
+		http.Error(w, "resume payload must select approve or reject", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.resolveSessionApproval(r.Context(), exec.SessionID, pending.ID, decision, "acp_strict"); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	updated, _, err := s.store.GetExecution(r.Context(), runID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.acpStrictRunFromExecution(r.Context(), updated, ""))
 }
 
 func (s *Server) acpStrictCancelRun(w http.ResponseWriter, r *http.Request) {
@@ -2295,7 +2333,8 @@ func (s *Server) acpStrictStreamRunEvents(w http.ResponseWriter, r *http.Request
 		flusher.Flush()
 		return false
 	}
-	if emit(s.acpStrictRunFromExecution(r.Context(), exec, "")) {
+	initial := s.acpStrictRunFromExecution(r.Context(), exec, "")
+	if emit(initial) || initial.Status == "awaiting" || initial.Status == "completed" || initial.Status == "failed" || initial.Status == "canceled" {
 		return
 	}
 	ticker := time.NewTicker(250 * time.Millisecond)
@@ -2312,7 +2351,7 @@ func (s *Server) acpStrictStreamRunEvents(w http.ResponseWriter, r *http.Request
 				continue
 			}
 			if item, ok := acpStrictRunFromLiveEnvelope(env); ok {
-				if emit(item) || item.Status == "completed" || item.Status == "failed" || item.Status == "canceled" {
+				if emit(item) || item.Status == "awaiting" || item.Status == "completed" || item.Status == "failed" || item.Status == "canceled" {
 					return
 				}
 			}
@@ -2321,7 +2360,7 @@ func (s *Server) acpStrictStreamRunEvents(w http.ResponseWriter, r *http.Request
 			if err != nil {
 				return
 			}
-			if latest.Status == execution.StatusSucceeded || latest.Status == execution.StatusFailed || latest.Status == execution.StatusAbandoned {
+			if latest.Status == execution.StatusBlocked || latest.Status == execution.StatusWaiting || latest.Status == execution.StatusSucceeded || latest.Status == execution.StatusFailed || latest.Status == execution.StatusAbandoned {
 				_ = emit(s.acpStrictRunFromExecution(r.Context(), latest, ""))
 				return
 			}
@@ -2330,7 +2369,8 @@ func (s *Server) acpStrictStreamRunEvents(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) acpStrictRunFromExecution(ctx context.Context, exec execution.TurnExecution, idempotencyKey string) acpStrictRunResponse {
-	status := acpStrictStatusFromExecution(exec.Status)
+	pendingApproval, hasPendingApproval := s.acpStrictPendingApproval(ctx, exec)
+	status := acpStrictStatusFromExecution(exec.Status, hasPendingApproval)
 	output := s.acpStrictOutputForExecution(ctx, exec)
 	triggerMetadata := s.acpStrictTriggerMetadata(ctx, exec)
 	if idempotencyKey == "" {
@@ -2351,7 +2391,7 @@ func (s *Server) acpStrictRunFromExecution(ctx context.Context, exec execution.T
 	if agentName := stringMetadata(triggerMetadata, "agent_name"); agentName != "" {
 		metadata["agent_name"] = agentName
 	}
-	return acpStrictRunResponse{
+	out := acpStrictRunResponse{
 		ID:             exec.ID,
 		SessionID:      exec.SessionID,
 		State:          status,
@@ -2361,6 +2401,10 @@ func (s *Server) acpStrictRunFromExecution(ctx context.Context, exec execution.T
 		IdempotencyKey: idempotencyKey,
 		Metadata:       metadata,
 	}
+	if hasPendingApproval {
+		out.Await = acpStrictAwaitForApproval(pendingApproval)
+	}
+	return out
 }
 
 func (s *Server) acpStrictFindRunByIdempotencyKey(ctx context.Context, sessionID, idempotencyKey string) (acpStrictRunResponse, bool, error) {
@@ -2412,7 +2456,10 @@ func firstString(values []string) string {
 	return ""
 }
 
-func acpStrictStatusFromExecution(status execution.Status) string {
+func acpStrictStatusFromExecution(status execution.Status, hasPendingApproval bool) string {
+	if hasPendingApproval {
+		return "awaiting"
+	}
 	switch status {
 	case execution.StatusSucceeded:
 		return "completed"
@@ -2424,6 +2471,75 @@ func acpStrictStatusFromExecution(status execution.Status) string {
 		return "running"
 	default:
 		return "running"
+	}
+}
+
+func (s *Server) acpStrictPendingApproval(ctx context.Context, exec execution.TurnExecution) (approval.Session, bool) {
+	items, err := s.store.ListApprovalSessions(ctx, exec.SessionID)
+	if err != nil {
+		return approval.Session{}, false
+	}
+	for _, item := range items {
+		if item.ExecutionID == exec.ID && item.Status == approval.StatusPending {
+			return item, true
+		}
+	}
+	return approval.Session{}, false
+}
+
+func acpStrictAwaitForApproval(item approval.Session) *acpStrictAwait {
+	body := strings.TrimSpace(item.RequestText)
+	if body == "" {
+		body = "The agent needs approval before it can continue."
+	}
+	schema, _ := json.Marshal(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"choice": map[string]any{
+				"type": "string",
+				"enum": []string{"approve", "reject"},
+			},
+		},
+		"required": []string{"choice"},
+	})
+	prompt, _ := json.Marshal(map[string]any{
+		"title": "Approval required",
+		"body":  body,
+		"choices": []map[string]string{
+			{"id": "approve", "label": "Approve"},
+			{"id": "reject", "label": "Reject"},
+		},
+	})
+	return &acpStrictAwait{Schema: schema, Prompt: prompt}
+}
+
+func acpStrictResumeDecision(payload json.RawMessage) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	var raw any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return ""
+	}
+	var value string
+	switch typed := raw.(type) {
+	case string:
+		value = typed
+	case map[string]any:
+		for _, key := range []string{"choice", "decision", "action", "value"} {
+			if text, _ := typed[key].(string); strings.TrimSpace(text) != "" {
+				value = text
+				break
+			}
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "approve", "approved", "yes", "allow", "allowed":
+		return "approve"
+	case "reject", "rejected", "no", "deny", "denied":
+		return "reject"
+	default:
+		return ""
 	}
 }
 

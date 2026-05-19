@@ -4195,6 +4195,74 @@ func TestACPStrictNexusRunEventsStreamShape(t *testing.T) {
 	}
 }
 
+func TestACPStrictNexusRunAwaitAndResume(t *testing.T) {
+	repo := memory.New()
+	srv := New(":0", repo, asyncwrite.New(repo, 32), sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{ID: "sess_await", Channel: "acp", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateExecution(context.Background(), execution.TurnExecution{
+		ID:            "exec_await",
+		SessionID:     "sess_await",
+		TraceID:       "trace_await",
+		Status:        execution.StatusBlocked,
+		BlockedReason: execution.BlockedReasonApprovalRequired,
+		ResumeSignal:  execution.ResumeSignalApproval,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveApprovalSession(context.Background(), approval.Session{
+		ID:          "approval_await",
+		SessionID:   "sess_await",
+		ExecutionID: "exec_await",
+		ToolID:      "tool_await",
+		Status:      approval.StatusPending,
+		RequestText: "Approve the tool call?",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/acp/runs/exec_await", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /runs status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var run acpStrictRunResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &run); err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != "awaiting" || run.Await == nil || !strings.Contains(string(run.Await.Prompt), "Approve the tool call?") {
+		t.Fatalf("run = %#v, want Nexus awaiting run with prompt", run)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/acp/runs/exec_await/resume", strings.NewReader(`{"payload":{"choice":"approve"}}`))
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /resume status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	item, err := repo.GetApprovalSession(context.Background(), "approval_await")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.Status != approval.StatusApproved {
+		t.Fatalf("approval status = %q, want approved", item.Status)
+	}
+	exec, _, err := repo.GetExecution(context.Background(), "exec_await")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exec.Status != execution.StatusPending || exec.BlockedReason != "" || exec.ResumeSignal != "" {
+		t.Fatalf("execution = %#v, want unblocked pending execution", exec)
+	}
+}
+
 func TestACPMessageIngressCreatesExecutionAndTriggerEvent(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)
