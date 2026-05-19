@@ -4054,6 +4054,112 @@ func TestACPAndSessionStreamsIncludeResponseDelta(t *testing.T) {
 	}
 }
 
+func TestACPStrictNexusSSEControlPlane(t *testing.T) {
+	repo := memory.New()
+	writes := asyncwrite.New(repo, 32)
+	srv := New(":0", repo, writes, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.SaveAgentProfile(context.Background(), agent.Profile{ID: "support", Name: "Support", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/acp/agents", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /agents status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"name":"support"`) || !strings.Contains(rec.Body.String(), `"supports_streaming":true`) {
+		t.Fatalf("agents body = %s, want Nexus strict manifest", rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/v1/acp/sessions/acp_session_1", strings.NewReader(`{"gateway_session_id":"gw_1"}`))
+	req.Header.Set("X-Agent-Instance-ID", "support")
+	req.Header.Set("X-Customer-ID", "tenant_default")
+	req.Header.Set("X-Channel-Type", "webchat")
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /sessions status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"id":"acp_session_1"`) {
+		t.Fatalf("session body = %s, want strict session id", rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/acp/runs", strings.NewReader(`{"session_id":"acp_session_1","agent_name":"support","idempotency_key":"queue_1","text":"hello"}`))
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /runs status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var run acpStrictRunResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &run); err != nil {
+		t.Fatal(err)
+	}
+	if run.ID == "" || run.SessionID != "acp_session_1" || run.Status != "running" || run.IdempotencyKey != "queue_1" {
+		t.Fatalf("run = %#v, want Nexus strict run response", run)
+	}
+}
+
+func TestACPStrictNexusRunEventsStreamShape(t *testing.T) {
+	repo := memory.New()
+	broker := sse.NewBroker()
+	srv := New(":0", repo, asyncwrite.New(repo, 32), broker, model.NewRouter(config.ProviderConfig{}), nil)
+	now := time.Now().UTC()
+	if err := repo.CreateSession(context.Background(), session.Session{ID: "sess_sse", Channel: "acp", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateExecution(context.Background(), execution.TurnExecution{
+		ID:        "exec_sse",
+		SessionID: "sess_sse",
+		TraceID:   "trace_sse",
+		Status:    execution.StatusRunning,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	reqCtx, reqCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer reqCancel()
+	req := httptest.NewRequest(http.MethodGet, "/v1/acp/runs/exec_sse/events", nil).WithContext(reqCtx)
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		broker.Publish("sess_sse", sse.Envelope{
+			EventID:     "stream_1",
+			SessionID:   "sess_sse",
+			ExecutionID: "exec_sse",
+			TraceID:     "trace_sse",
+			Type:        "runtime.response.delta",
+			Payload:     map[string]any{"text": "hel"},
+			CreatedAt:   time.Now().UTC(),
+		})
+		time.Sleep(20 * time.Millisecond)
+		broker.Publish("sess_sse", sse.Envelope{
+			EventID:     "stream_2",
+			SessionID:   "sess_sse",
+			ExecutionID: "exec_sse",
+			TraceID:     "trace_sse",
+			Type:        "runtime.response.completed",
+			Payload:     map[string]any{"text": "hello"},
+			CreatedAt:   time.Now().UTC(),
+		})
+	}()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: running") || !strings.Contains(body, `"text":"hel"`) || !strings.Contains(body, `"partial":true`) {
+		t.Fatalf("stream body = %q, want running partial strict run event", body)
+	}
+	if !strings.Contains(body, "event: completed") || !strings.Contains(body, `"output":"hello"`) {
+		t.Fatalf("stream body = %q, want completed strict run event", body)
+	}
+	if strings.Contains(body, `"kind":"response.delta"`) || strings.Contains(body, `"source":"runtime"`) {
+		t.Fatalf("stream body = %q, want Nexus run-shaped events, not session ACP events", body)
+	}
+}
+
 func TestACPMessageIngressCreatesExecutionAndTriggerEvent(t *testing.T) {
 	repo := memory.New()
 	writes := asyncwrite.New(repo, 32)

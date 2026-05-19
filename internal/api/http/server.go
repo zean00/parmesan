@@ -218,6 +218,57 @@ type responseView struct {
 	TraceSpans          []traceSpanView   `json:"trace_spans,omitempty"`
 }
 
+type acpStrictManifest struct {
+	Name                    string   `json:"name"`
+	Description             string   `json:"description,omitempty"`
+	Capabilities            []string `json:"capabilities,omitempty"`
+	InputContentTypes       []string `json:"input_content_types,omitempty"`
+	OutputContentTypes      []string `json:"output_content_types,omitempty"`
+	SupportsAwaitResume     bool     `json:"supports_await_resume"`
+	SupportsStructuredAwait bool     `json:"supports_structured_await"`
+	SupportsSessionReload   bool     `json:"supports_session_reload"`
+	SupportsStreaming       bool     `json:"supports_streaming"`
+	SupportsArtifacts       bool     `json:"supports_artifacts"`
+	Healthy                 bool     `json:"healthy"`
+}
+
+type acpStrictSessionResponse struct {
+	ID              string `json:"id"`
+	SessionID       string `json:"session_id,omitempty"`
+	GreetingRunID   string `json:"greeting_run_id,omitempty"`
+	GreetingState   string `json:"greeting_state,omitempty"`
+	GreetingSkipped string `json:"greeting_skipped,omitempty"`
+}
+
+type acpStrictRunRequest struct {
+	SessionID      string                `json:"session_id"`
+	AgentName      string                `json:"agent_name"`
+	IdempotencyKey string                `json:"idempotency_key"`
+	Text           string                `json:"text"`
+	Parts          []session.ContentPart `json:"parts"`
+	Message        struct {
+		Text      string                `json:"text"`
+		Parts     []session.ContentPart `json:"parts"`
+		Artifacts []map[string]any      `json:"artifacts"`
+	} `json:"message"`
+	Artifacts []map[string]any `json:"artifacts"`
+	ReplyTo   map[string]any   `json:"reply_to"`
+}
+
+type acpStrictRunResponse struct {
+	ID             string           `json:"id"`
+	SessionID      string           `json:"session_id"`
+	State          string           `json:"state,omitempty"`
+	Status         string           `json:"status"`
+	Output         string           `json:"output,omitempty"`
+	Text           string           `json:"text,omitempty"`
+	Partial        bool             `json:"partial,omitempty"`
+	IsPartial      bool             `json:"is_partial,omitempty"`
+	IdempotencyKey string           `json:"idempotency_key,omitempty"`
+	Metadata       map[string]any   `json:"metadata,omitempty"`
+	Artifacts      []map[string]any `json:"artifacts,omitempty"`
+}
+
 type traceSpanView struct {
 	ID           string            `json:"id"`
 	ArtifactMeta artifactmeta.Meta `json:"artifact_meta,omitempty"`
@@ -327,6 +378,15 @@ func New(addr string, repo store.Repository, writes *asyncwrite.Queue, broker *s
 	mux.HandleFunc("GET /v1/acp/agents/{agent_id}/sessions/{id}/events/stream", s.acpStreamEvents)
 	mux.HandleFunc("GET /v1/acp/agents/{agent_id}/sessions/{id}/approvals", s.acpListApprovals)
 	mux.HandleFunc("POST /v1/acp/agents/{agent_id}/sessions/{id}/approvals/{approval_id}", s.acpRespondApproval)
+	mux.HandleFunc("GET /v1/acp/agents", s.acpStrictListAgents)
+	mux.HandleFunc("GET /v1/acp/agents/", s.acpStrictListAgents)
+	mux.HandleFunc("PUT /v1/acp/sessions/{id}", s.acpStrictPutSession)
+	mux.HandleFunc("POST /v1/acp/runs", s.acpStrictCreateRun)
+	mux.HandleFunc("GET /v1/acp/runs/{id}", s.acpStrictGetRun)
+	mux.HandleFunc("GET /v1/acp/runs/{id}/events", s.acpStrictStreamRunEvents)
+	mux.HandleFunc("POST /v1/acp/runs/{id}/resume", s.acpStrictResumeRun)
+	mux.HandleFunc("POST /v1/acp/runs/{id}/cancel", s.acpStrictCancelRun)
+	mux.HandleFunc("GET /v1/acp/sessions/{id}/runs", s.acpStrictListSessionRuns)
 	mux.HandleFunc("POST /v1/acp/sessions", s.acpCreateSession)
 	mux.HandleFunc("GET /v1/acp/sessions/{id}", s.acpGetSession)
 	mux.HandleFunc("POST /v1/acp/sessions/{id}/messages", s.acpCreateMessage)
@@ -1981,6 +2041,385 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+func (s *Server) acpStrictListAgents(w http.ResponseWriter, r *http.Request) {
+	profiles, err := s.store.ListAgentProfiles(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out := make([]acpStrictManifest, 0, len(profiles)+1)
+	for _, profile := range profiles {
+		name := strings.TrimSpace(profile.ID)
+		if name == "" {
+			continue
+		}
+		description := strings.TrimSpace(profile.Description)
+		if description == "" {
+			description = strings.TrimSpace(profile.Name)
+		}
+		out = append(out, acpStrictManifest{
+			Name:                    name,
+			Description:             description,
+			Capabilities:            []string{"runs", "events", "resume", "artifacts"},
+			InputContentTypes:       []string{"text/plain", "application/vnd.nexus.structured-data+json", "application/vnd.nexus.location+json"},
+			OutputContentTypes:      []string{"text/plain"},
+			SupportsAwaitResume:     true,
+			SupportsStructuredAwait: true,
+			SupportsSessionReload:   true,
+			SupportsStreaming:       true,
+			SupportsArtifacts:       true,
+			Healthy:                 true,
+		})
+	}
+	if len(out) == 0 {
+		out = append(out, acpStrictManifest{
+			Name:                    "default-agent",
+			Description:             "Parmesan default agent",
+			Capabilities:            []string{"runs", "events", "resume", "artifacts"},
+			InputContentTypes:       []string{"text/plain", "application/vnd.nexus.structured-data+json", "application/vnd.nexus.location+json"},
+			OutputContentTypes:      []string{"text/plain"},
+			SupportsAwaitResume:     true,
+			SupportsStructuredAwait: true,
+			SupportsSessionReload:   true,
+			SupportsStreaming:       true,
+			SupportsArtifacts:       true,
+			Healthy:                 true,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) acpStrictPutSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.PathValue("id"))
+	var req struct {
+		SessionID        string         `json:"session_id"`
+		GatewaySessionID string         `json:"gateway_session_id"`
+		SendGreeting     bool           `json:"send_greeting"`
+		Nickname         string         `json:"nickname"`
+		Metadata         map[string]any `json:"metadata"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if strings.TrimSpace(req.SessionID) != "" {
+		sessionID = strings.TrimSpace(req.SessionID)
+	}
+	if sessionID == "" {
+		http.Error(w, "session id is required", http.StatusBadRequest)
+		return
+	}
+	sess, err := s.store.GetSession(r.Context(), sessionID)
+	if err != nil {
+		now := time.Now().UTC()
+		agentID := strings.TrimSpace(r.Header.Get("X-Agent-Instance-ID"))
+		channel := strings.TrimSpace(r.Header.Get("X-Channel-Type"))
+		if channel == "" {
+			channel = "acp"
+		}
+		customerID := strings.TrimSpace(r.Header.Get("X-Customer-ID"))
+		if customerID == "" {
+			customerID = anonymousACPCustomerID(sessionID)
+		}
+		sess = session.Session{
+			ID:         sessionID,
+			Channel:    channel,
+			CustomerID: customerID,
+			AgentID:    agentID,
+			Mode:       "auto",
+			Status:     session.StatusActive,
+			Metadata:   cloneMap(req.Metadata),
+			CreatedAt:  now,
+		}
+		if err := s.store.CreateSession(r.Context(), sess); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	out := acpStrictSessionResponse{ID: sess.ID, SessionID: sess.ID}
+	if req.SendGreeting {
+		if err := s.queueSessionGreeting(r.Context(), sess.ID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		out.GreetingState = "queued"
+		out.GreetingRunID = "greeting_" + sess.ID
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) acpStrictCreateRun(w http.ResponseWriter, r *http.Request) {
+	var req acpStrictRunRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	sessionID := strings.TrimSpace(req.SessionID)
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(r.Header.Get("X-Session-ID"))
+	}
+	if sessionID == "" {
+		http.Error(w, "session_id is required", http.StatusBadRequest)
+		return
+	}
+	sess, err := s.store.GetSession(r.Context(), sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if agentName := strings.TrimSpace(req.AgentName); agentName != "" && strings.TrimSpace(sess.AgentID) == "" {
+		sess.AgentID = agentName
+		_ = s.store.UpdateSession(r.Context(), sess)
+	}
+	text := req.Text
+	if strings.TrimSpace(text) == "" {
+		text = req.Message.Text
+	}
+	parts := req.Parts
+	if len(parts) == 0 {
+		parts = req.Message.Parts
+	}
+	content, err := normalizeACPMessageContent(text, parts)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	metadata := map[string]any{"acp_strict_run": true}
+	if req.IdempotencyKey != "" {
+		metadata["idempotency_key"] = req.IdempotencyKey
+	}
+	if req.AgentName != "" {
+		metadata["agent_name"] = req.AgentName
+	}
+	event, execID, _, err := s.enqueueSessionTurn(r.Context(), sessionID, "", "customer", acp.EventKindMessage, content, nil, metadata)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	exec, _, err := s.store.GetExecution(r.Context(), execID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	resp := s.acpStrictRunFromExecution(r.Context(), exec, req.IdempotencyKey)
+	resp.Metadata["trigger_event_id"] = event.ID
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) acpStrictGetRun(w http.ResponseWriter, r *http.Request) {
+	exec, _, err := s.store.GetExecution(r.Context(), strings.TrimSpace(r.PathValue("id")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.acpStrictRunFromExecution(r.Context(), exec, ""))
+}
+
+func (s *Server) acpStrictListSessionRuns(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.PathValue("id"))
+	execs, err := s.store.ListExecutions(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out := make([]acpStrictRunResponse, 0)
+	for _, exec := range execs {
+		if exec.SessionID == sessionID {
+			out = append(out, s.acpStrictRunFromExecution(r.Context(), exec, ""))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Metadata["created_at"].(string) > out[j].Metadata["created_at"].(string)
+	})
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) acpStrictResumeRun(w http.ResponseWriter, r *http.Request) {
+	s.acpStrictGetRun(w, r)
+}
+
+func (s *Server) acpStrictCancelRun(w http.ResponseWriter, r *http.Request) {
+	exec, _, err := s.store.GetExecution(r.Context(), strings.TrimSpace(r.PathValue("id")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	exec.Status = execution.StatusAbandoned
+	exec.UpdatedAt = time.Now().UTC()
+	if err := s.store.UpdateExecution(r.Context(), exec); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.acpStrictRunFromExecution(r.Context(), exec, ""))
+}
+
+func (s *Server) acpStrictStreamRunEvents(w http.ResponseWriter, r *http.Request) {
+	runID := strings.TrimSpace(r.PathValue("id"))
+	exec, _, err := s.store.GetExecution(r.Context(), runID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	live, cancel := s.liveSessionFeed(exec.SessionID)
+	defer cancel()
+	emit := func(item acpStrictRunResponse) bool {
+		raw, err := json.Marshal(item)
+		if err != nil {
+			return false
+		}
+		if _, err := fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", item.ID, item.Status, raw); err != nil {
+			return true
+		}
+		flusher.Flush()
+		return false
+	}
+	if emit(s.acpStrictRunFromExecution(r.Context(), exec, "")) {
+		return
+	}
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case env, ok := <-live:
+			if !ok {
+				return
+			}
+			if strings.TrimSpace(env.ExecutionID) != runID {
+				continue
+			}
+			if item, ok := acpStrictRunFromLiveEnvelope(env); ok {
+				if emit(item) || item.Status == "completed" || item.Status == "failed" || item.Status == "canceled" {
+					return
+				}
+			}
+		case <-ticker.C:
+			latest, _, err := s.store.GetExecution(r.Context(), runID)
+			if err != nil {
+				return
+			}
+			if latest.Status == execution.StatusSucceeded || latest.Status == execution.StatusFailed || latest.Status == execution.StatusAbandoned {
+				_ = emit(s.acpStrictRunFromExecution(r.Context(), latest, ""))
+				return
+			}
+		}
+	}
+}
+
+func (s *Server) acpStrictRunFromExecution(ctx context.Context, exec execution.TurnExecution, idempotencyKey string) acpStrictRunResponse {
+	status := acpStrictStatusFromExecution(exec.Status)
+	output := s.acpStrictOutputForExecution(ctx, exec)
+	metadata := map[string]any{
+		"trace_id":    exec.TraceID,
+		"created_at":  exec.CreatedAt.Format(time.RFC3339Nano),
+		"updated_at":  exec.UpdatedAt.Format(time.RFC3339Nano),
+		"parmesan_id": exec.ID,
+	}
+	if idempotencyKey != "" {
+		metadata["idempotency_key"] = idempotencyKey
+	}
+	return acpStrictRunResponse{
+		ID:             exec.ID,
+		SessionID:      exec.SessionID,
+		State:          status,
+		Status:         status,
+		Output:         output,
+		Text:           output,
+		IdempotencyKey: idempotencyKey,
+		Metadata:       metadata,
+	}
+}
+
+func acpStrictStatusFromExecution(status execution.Status) string {
+	switch status {
+	case execution.StatusSucceeded:
+		return "completed"
+	case execution.StatusFailed:
+		return "failed"
+	case execution.StatusAbandoned:
+		return "canceled"
+	case execution.StatusBlocked, execution.StatusWaiting:
+		return "running"
+	default:
+		return "running"
+	}
+}
+
+func (s *Server) acpStrictOutputForExecution(ctx context.Context, exec execution.TurnExecution) string {
+	responses, err := s.store.ListResponses(ctx, responsedomain.Query{ExecutionID: exec.ID, Limit: 1})
+	if err == nil && len(responses) > 0 {
+		ids := append([]string(nil), responses[0].MessageEventIDs...)
+		if len(ids) == 0 {
+			ids = append(ids, responses[0].HeldMessageEventIDs...)
+		}
+		parts := make([]string, 0, len(ids))
+		for _, eventID := range ids {
+			event, err := s.store.ReadEvent(ctx, exec.SessionID, eventID)
+			if err == nil {
+				if text := strings.TrimSpace(extractTextParts(event.Content)); text != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n")
+		}
+	}
+	events, err := s.store.ListEventsFiltered(ctx, session.EventQuery{SessionID: exec.SessionID})
+	if err != nil {
+		return ""
+	}
+	parts := make([]string, 0)
+	for _, event := range events {
+		if event.ExecutionID == exec.ID && event.Source == "ai_agent" && event.Kind == acp.EventKindMessage && !acp.IsInternalEvent(event) {
+			if text := strings.TrimSpace(extractTextParts(event.Content)); text != "" {
+				parts = append(parts, text)
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func acpStrictRunFromLiveEnvelope(env sse.Envelope) (acpStrictRunResponse, bool) {
+	if env.Type != "runtime.response.delta" && env.Type != "runtime.response.completed" {
+		return acpStrictRunResponse{}, false
+	}
+	status := "running"
+	if env.Type == "runtime.response.completed" {
+		status = "completed"
+	}
+	output := ""
+	if data, ok := env.Payload.(map[string]any); ok {
+		if text, _ := data["text"].(string); strings.TrimSpace(text) != "" {
+			output = text
+		} else if text, _ := data["output"].(string); strings.TrimSpace(text) != "" {
+			output = text
+		}
+	}
+	return acpStrictRunResponse{
+		ID:        env.ExecutionID,
+		SessionID: env.SessionID,
+		State:     status,
+		Status:    status,
+		Output:    output,
+		Text:      output,
+		Partial:   status == "running",
+		IsPartial: status == "running",
+		Metadata: map[string]any{
+			"trace_id":   env.TraceID,
+			"event_id":   env.EventID,
+			"partial":    status == "running",
+			"created_at": env.CreatedAt.Format(time.RFC3339Nano),
+		},
+	}, true
 }
 
 func (s *Server) acpCreateSession(w http.ResponseWriter, r *http.Request) {

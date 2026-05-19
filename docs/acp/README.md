@@ -3,6 +3,14 @@
 ACP is exposed as a path-versioned public contract under `/v1/acp/...`.
 
 Supported routes:
+- `GET /v1/acp/agents`
+- `PUT /v1/acp/sessions/{id}`
+- `POST /v1/acp/runs`
+- `GET /v1/acp/runs/{id}`
+- `GET /v1/acp/runs/{id}/events`
+- `POST /v1/acp/runs/{id}/resume`
+- `POST /v1/acp/runs/{id}/cancel`
+- `GET /v1/acp/sessions/{id}/runs`
 - `POST /v1/acp/agents/{agent_id}/sessions`
 - `GET /v1/acp/agents/{agent_id}/sessions/{id}`
 - `POST /v1/acp/agents/{agent_id}/sessions/{id}/messages`
@@ -21,7 +29,12 @@ Supported routes:
 - `POST /v1/acp/sessions/{id}/approvals/{approval_id}`
 
 Strict ACP SSE:
-- `/v1/acp/.../events/stream` is the canonical ACP-over-SSE event feed. Commands remain HTTP because SSE is server-to-client only.
+- Nexus-compatible strict ACP-over-SSE is exposed as an HTTP control plane plus `GET /v1/acp/runs/{run_id}/events`.
+- `GET /v1/acp/agents` returns strict manifests with `runs`, `events`, `resume`, and `artifacts` capabilities.
+- `PUT /v1/acp/sessions/{id}` creates or reloads a session and accepts Nexus routing headers such as `X-Agent-Instance-ID`, `X-Customer-ID`, `X-Channel-Type`, `X-Channel-User-ID`, and `X-Channel-Conversation-ID`.
+- `POST /v1/acp/runs` accepts Nexus strict run bodies: `session_id`, `agent_name`, `idempotency_key`, top-level `text`/`parts`, and nested `message.text`/`message.parts`. It creates a normal Parmesan customer turn and returns the execution ID as the strict run ID.
+- `GET /v1/acp/runs/{run_id}/events` emits `text/event-stream` frames whose `data:` payload is the strict run shape expected by Nexus: `id`, `session_id`, `status` or `state`, `output` or `text`, optional `partial`/`is_partial`, optional `metadata`, and optional artifacts. Live partial deltas use `status: "running"` with top-level partial flags; terminal events use `completed`, `failed`, or `canceled`.
+- `/v1/acp/.../events/stream` remains the canonical ACP session-event feed. Commands remain HTTP because SSE is server-to-client only.
 - Every SSE frame uses the normalized ACP event object as `data`; runtime live response frames are projected into ACP events instead of exposing Parmesan runtime envelopes.
 - Persisted events replay with their durable `offset` and resume from `?min_offset=...`.
 - Live response deltas use `event: response.delta` and `data.kind: "response.delta"`.
