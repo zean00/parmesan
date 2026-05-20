@@ -36,10 +36,10 @@ func renderResponseMessages(view resolvedView, toolOutput map[string]any) []stri
 	if text := delegatedAgentResultText(toolOutput); text != "" {
 		return []string{text}
 	}
-	if rendered := renderRecommendedTemplateMessages(analysis.RecommendedTemplate, view.ResponseAnalysisStage.CandidateTemplates, toolOutput); len(rendered) > 0 {
-		return rendered
-	}
 	if strings.EqualFold(view.CompositionMode, "strict") {
+		if rendered := renderRecommendedTemplateMessages(analysis.RecommendedTemplate, view.ResponseAnalysisStage.CandidateTemplates, toolOutput); len(rendered) > 0 {
+			return rendered
+		}
 		if rendered := renderTemplateMessages(view.ResponseAnalysisStage.CandidateTemplates, toolOutput); len(rendered) > 0 {
 			return rendered
 		}
@@ -47,9 +47,6 @@ func renderResponseMessages(view resolvedView, toolOutput map[string]any) []stri
 			return []string{view.ActiveJourneyState.Instruction}
 		}
 		return []string{strictNoMatchText(view.NoMatch)}
-	}
-	if rendered := renderTemplateMessages(view.ResponseAnalysisStage.CandidateTemplates, toolOutput); len(rendered) > 0 {
-		return rendered
 	}
 	if view.RetrieverStage.Outcome.GroundingRequired {
 		return nil

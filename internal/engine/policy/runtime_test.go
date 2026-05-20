@@ -3570,6 +3570,57 @@ func TestResolveWithRouterMergesDeterministicAndStructuredActionableMatches(t *t
 	}
 }
 
+func TestResolveWithRouterMergesDeterministicAndOrdinaryStructuredActionableMatches(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"checks\":[{\"id\":\"tone_followup\",\"applies\":true,\"rationale\":\"structured ordinary match\"}]}"}}]}`))
+	}))
+	defer server.Close()
+
+	router := model.NewRouter(config.ProviderConfig{
+		DefaultStructured: "openrouter",
+		OpenRouterBase:    server.URL,
+		OpenRouterAPIKey:  "test-key",
+	})
+
+	view, err := ResolveWithRouter(
+		context.Background(),
+		router,
+		[]session.Event{{
+			ID:        "evt_1",
+			SessionID: "sess_1",
+			Source:    "customer",
+			Kind:      "message",
+			CreatedAt: time.Now().UTC(),
+			Content:   []session.ContentPart{{Type: "text", Text: "I need a refund for a damaged order, and please keep the explanation formal."}},
+		}},
+		[]policy.Bundle{{
+			ID:      "bundle_1",
+			Version: "v1",
+			Guidelines: []policy.Guideline{
+				{ID: "refund_simple", When: "damaged order refund", Then: "Help with the damaged-order refund."},
+				{ID: "tone_followup", When: "customer requests a formal explanation", Then: "Use a formal support tone."},
+			},
+		}},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("ResolveWithRouter() error = %v", err)
+	}
+	if calls == 0 {
+		t.Fatalf("structured provider was not called for remaining ordinary guideline")
+	}
+	if !containsGuideline(view.MatchFinalizeStage.MatchedGuidelines, "refund_simple") {
+		t.Fatalf("matched guidelines = %#v, matches = %#v, want deterministic refund_simple", view.MatchFinalizeStage.MatchedGuidelines, view.MatchFinalizeStage.GuidelineMatches)
+	}
+	if !containsGuideline(view.MatchFinalizeStage.MatchedGuidelines, "tone_followup") {
+		t.Fatalf("matched guidelines = %#v, matches = %#v, want structured tone_followup", view.MatchFinalizeStage.MatchedGuidelines, view.MatchFinalizeStage.GuidelineMatches)
+	}
+}
+
 func TestResolveWithRouterRetainsStagedToolAgeGuidelineWhenStructuredActionableMisses(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -4458,7 +4509,13 @@ func TestVerifyDraftEnforcesStrictTemplate(t *testing.T) {
 
 func TestVerifyDraftUsesResponseAnalysisTemplate(t *testing.T) {
 	view := EngineResult{
+		CompositionMode: "strict",
 		ResponseAnalysisStage: ResponseAnalysisStageResult{
+			CandidateTemplates: []policy.Template{{
+				ID:   "approved",
+				Mode: "strict",
+				Text: "Use this approved answer.",
+			}},
 			Analysis: ResponseAnalysis{
 				RecommendedTemplate: "Use this approved answer.",
 			},

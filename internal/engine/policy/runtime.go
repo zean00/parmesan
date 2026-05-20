@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sahal/parmesan/internal/domain/journey"
@@ -108,10 +109,22 @@ func ResolveWithOptions(ctx context.Context, events []session.Event, bundles []p
 		return view, nil
 	}
 	toolModelNames := BuildToolModelNameMap(catalog, options.ToolNameAliases)
-	toolPlanResult, toolDecisionResult := buildToolStageResults(ctx, options.Router, state.context, state, bundle.Relationships, catalog, toolModelNames, options.ArgumentResolver)
+	var toolPlanResult ToolPlanStageResult
+	var toolDecisionResult ToolDecisionStageResult
+	var agentDecisionResult AgentDecisionStageResult
+	var stageWG sync.WaitGroup
+	stageWG.Add(2)
+	go func() {
+		defer stageWG.Done()
+		toolPlanResult, toolDecisionResult = buildToolStageResults(ctx, options.Router, state.context, state, bundle.Relationships, catalog, toolModelNames, options.ArgumentResolver)
+	}()
+	go func() {
+		defer stageWG.Done()
+		agentDecisionResult = buildAgentStageResults(ctx, options.Router, state.context, state)
+	}()
+	stageWG.Wait()
 	toolPlanResult.Apply(state)
 	toolDecisionResult.Apply(state)
-	agentDecisionResult := buildAgentStageResults(ctx, options.Router, state.context, state)
 	agentDecisionResult.Apply(state)
 	capabilityDecisionResult := buildCapabilityDecisionStageResult(ctx, options.Router, state.context, state)
 	capabilityDecisionResult.Apply(state)
@@ -726,7 +739,7 @@ func VerifyDraft(view EngineResult, draft string, toolOutput map[string]any) Ver
 		if !item.RequiresTemplate {
 			continue
 		}
-		if strings.TrimSpace(analysis.RecommendedTemplate) != "" && normalizeText(draft) != normalizeText(analysis.RecommendedTemplate) {
+		if strings.EqualFold(view.CompositionMode, "strict") && strings.TrimSpace(analysis.RecommendedTemplate) != "" && normalizeText(draft) != normalizeText(analysis.RecommendedTemplate) {
 			return VerificationResult{
 				Status:      "revise",
 				Reasons:     []string{"response_analysis_template_required"},
@@ -751,7 +764,7 @@ func VerifyDraft(view EngineResult, draft string, toolOutput map[string]any) Ver
 			Reasons: []string{"response_analysis_requires_strict_mode"},
 		}
 	}
-	if analysis.RecommendedTemplate != "" && normalizeText(draft) != normalizeText(analysis.RecommendedTemplate) {
+	if strings.EqualFold(view.CompositionMode, "strict") && analysis.RecommendedTemplate != "" && normalizeText(draft) != normalizeText(analysis.RecommendedTemplate) {
 		return VerificationResult{
 			Status:      "revise",
 			Reasons:     []string{"response_analysis_template_mismatch"},
@@ -1056,7 +1069,7 @@ func analyzeResponsePlan(ctx context.Context, router *model.Router, matchCtx Mat
 		analysis.RecommendedTemplate = templates[0].Text
 		analysis.Rationale = "strict mode prefers the highest-ranked approved template"
 	}
-	if router != nil && len(guidelines) > 0 && (len(templates) > 0 || strings.EqualFold(mode, "strict") || len(matchCtx.AssistantHistory) > 0) {
+	if router != nil && len(guidelines) > 0 && (strings.EqualFold(mode, "strict") || hasStrictTemplate(templates)) && (len(templates) > 0 || len(matchCtx.AssistantHistory) > 0) {
 		type structuredResponseAnalysisBatch struct {
 			NeedsRevision       bool                `json:"needs_revision"`
 			NeedsStrictMode     bool                `json:"needs_strict_mode"`
@@ -3567,6 +3580,15 @@ func inferCompositionMode(templates []policy.Template) string {
 		}
 	}
 	return "fluid"
+}
+
+func hasStrictTemplate(templates []policy.Template) bool {
+	for _, tmpl := range templates {
+		if strings.EqualFold(tmpl.Mode, "strict") {
+			return true
+		}
+	}
+	return false
 }
 
 func templateScore(tmpl policy.Template, text string) int {

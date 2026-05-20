@@ -79,7 +79,7 @@ func TestRenderResponseEmitsTemplateMessageSequence(t *testing.T) {
 
 func TestRenderResponseTreatsRecommendedTemplateIDAsTemplateReference(t *testing.T) {
 	view := resolvedView{
-		CompositionMode: "guided",
+		CompositionMode: "strict",
 		ResponseAnalysisStage: policyruntime.ResponseAnalysisStageResult{
 			Analysis: policyruntime.ResponseAnalysis{
 				RecommendedTemplate: "login_issue_followup",
@@ -101,7 +101,7 @@ func TestRenderResponseTreatsRecommendedTemplateIDAsTemplateReference(t *testing
 
 func TestRenderResponsePreservesRecommendedTemplateMessageSequence(t *testing.T) {
 	view := resolvedView{
-		CompositionMode: "guided",
+		CompositionMode: "strict",
 		ResponseAnalysisStage: policyruntime.ResponseAnalysisStageResult{
 			Analysis: policyruntime.ResponseAnalysis{
 				RecommendedTemplate: "login_sequence",
@@ -129,6 +129,23 @@ func TestRenderResponsePreservesRecommendedTemplateMessageSequence(t *testing.T)
 		if got[i] != want[i] {
 			t.Fatalf("message[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestRenderResponseDoesNotEmitGuidedTemplateBeforeComposition(t *testing.T) {
+	view := resolvedView{
+		CompositionMode: "guided",
+		ResponseAnalysisStage: policyruntime.ResponseAnalysisStageResult{
+			CandidateTemplates: []policy.Template{{
+				ID:   "login_issue_followup",
+				Mode: "guided",
+				Text: "Please share the account email and the exact login error.",
+			}},
+		},
+	}
+
+	if got := renderResponseMessages(view, nil); len(got) != 0 {
+		t.Fatalf("messages = %#v, want no pre-rendered guided template", got)
 	}
 }
 
