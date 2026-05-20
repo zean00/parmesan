@@ -77,6 +77,61 @@ func TestRenderResponseEmitsTemplateMessageSequence(t *testing.T) {
 	}
 }
 
+func TestRenderResponseTreatsRecommendedTemplateIDAsTemplateReference(t *testing.T) {
+	view := resolvedView{
+		CompositionMode: "guided",
+		ResponseAnalysisStage: policyruntime.ResponseAnalysisStageResult{
+			Analysis: policyruntime.ResponseAnalysis{
+				RecommendedTemplate: "login_issue_followup",
+			},
+			CandidateTemplates: []policy.Template{{
+				ID:   "login_issue_followup",
+				Mode: "guided",
+				Text: "Please share the account email and the exact login error.",
+			}},
+		},
+	}
+
+	got := renderResponseMessages(view, nil)
+	want := []string{"Please share the account email and the exact login error."}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("messages = %#v, want template text", got)
+	}
+}
+
+func TestRenderResponsePreservesRecommendedTemplateMessageSequence(t *testing.T) {
+	view := resolvedView{
+		CompositionMode: "guided",
+		ResponseAnalysisStage: policyruntime.ResponseAnalysisStageResult{
+			Analysis: policyruntime.ResponseAnalysis{
+				RecommendedTemplate: "login_sequence",
+			},
+			CandidateTemplates: []policy.Template{{
+				ID:   "login_sequence",
+				Mode: "guided",
+				Messages: []string{
+					"I can help troubleshoot the login issue.",
+					"Please share the account email and the exact error.",
+				},
+			}},
+		},
+	}
+
+	got := renderResponseMessages(view, nil)
+	want := []string{
+		"I can help troubleshoot the login issue.",
+		"Please share the account email and the exact error.",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("messages len = %d, want %d (%#v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("message[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestRenderResponsePrefersDelegatedAgentResultOverPolicyText(t *testing.T) {
 	view := resolvedView{
 		CompositionMode: "guided",

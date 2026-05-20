@@ -36,8 +36,8 @@ func renderResponseMessages(view resolvedView, toolOutput map[string]any) []stri
 	if text := delegatedAgentResultText(toolOutput); text != "" {
 		return []string{text}
 	}
-	if rendered := renderTemplateText(analysis.RecommendedTemplate, toolOutput); rendered != "" {
-		return []string{rendered}
+	if rendered := renderRecommendedTemplateMessages(analysis.RecommendedTemplate, view.ResponseAnalysisStage.CandidateTemplates, toolOutput); len(rendered) > 0 {
+		return rendered
 	}
 	if strings.EqualFold(view.CompositionMode, "strict") {
 		if rendered := renderTemplateMessages(view.ResponseAnalysisStage.CandidateTemplates, toolOutput); len(rendered) > 0 {
@@ -163,6 +163,28 @@ func isAskUserToolID(value string) bool {
 
 func renderTemplate(templates []policy.Template, toolOutput map[string]any) string {
 	return strings.Join(renderTemplateMessages(templates, toolOutput), "\n\n")
+}
+
+func renderRecommendedTemplate(recommended string, templates []policy.Template, toolOutput map[string]any) string {
+	return strings.Join(renderRecommendedTemplateMessages(recommended, templates, toolOutput), "\n\n")
+}
+
+func renderRecommendedTemplateMessages(recommended string, templates []policy.Template, toolOutput map[string]any) []string {
+	recommended = strings.TrimSpace(recommended)
+	if recommended == "" {
+		return nil
+	}
+	for _, template := range templates {
+		if strings.EqualFold(strings.TrimSpace(template.ID), recommended) {
+			if rendered := renderTemplateMessages([]policy.Template{template}, toolOutput); len(rendered) > 0 {
+				return rendered
+			}
+		}
+	}
+	if rendered := renderTemplateText(recommended, toolOutput); rendered != "" {
+		return []string{rendered}
+	}
+	return nil
 }
 
 func renderTemplateMessages(templates []policy.Template, toolOutput map[string]any) []string {
