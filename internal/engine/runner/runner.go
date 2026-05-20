@@ -909,6 +909,9 @@ func (r *Runner) executeStep(ctx context.Context, exec *execution.TurnExecution,
 				r.publish(exec.SessionID, exec.ID, "runtime.response.review_required", map[string]any{"response_id": r.responseIDForExecution(ctx, exec.ID), "event_ids": eventIDs, "reason": reviewReason})
 				return nil
 			}
+			if err := r.markApprovedMessageEventsInternal(ctx, exec.SessionID, eventIDs, r.responseIDForExecution(ctx, exec.ID)); err != nil {
+				return err
+			}
 			r.appendResponseTraceSpan(ctx, responsedomain.TraceSpan{
 				ResponseID:  r.responseIDForExecution(ctx, exec.ID),
 				SessionID:   exec.SessionID,
@@ -3849,6 +3852,29 @@ func (r *Runner) markHeldMessageEventsInternal(ctx context.Context, sessionID st
 		event.Metadata["held_for_operator_review"] = true
 		event.Metadata["response_id"] = responseID
 		event.Metadata["review_reason"] = reason
+		if err := r.repo.UpdateEvent(ctx, event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Runner) markApprovedMessageEventsInternal(ctx context.Context, sessionID string, eventIDs []string, responseID string) error {
+	for _, eventID := range eventIDs {
+		eventID = strings.TrimSpace(eventID)
+		if eventID == "" {
+			continue
+		}
+		event, err := r.repo.ReadEvent(ctx, sessionID, eventID)
+		if err != nil {
+			return err
+		}
+		if event.Metadata == nil {
+			event.Metadata = map[string]any{}
+		}
+		event.Metadata["held_for_operator_review"] = false
+		event.Metadata["response_review_approved"] = true
+		event.Metadata["response_id"] = responseID
 		if err := r.repo.UpdateEvent(ctx, event); err != nil {
 			return err
 		}

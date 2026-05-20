@@ -1948,12 +1948,11 @@ func (s *Server) acpCreateMessage(w http.ResponseWriter, r *http.Request) {
 		if s.firstMessageResponseAllowed(r.Context(), sess, req.Source) {
 			metadata["automation_allowed"] = true
 			metadata["automation_allow_reason"] = "manual_first_message_response"
-			event, execID, _, err := s.enqueueSessionTurn(r.Context(), sessionID, req.ID, req.Source, acp.EventKindMessage, content, nil, metadata)
+			event, _, _, err := s.enqueueSessionTurn(r.Context(), sessionID, req.ID, req.Source, acp.EventKindMessage, content, nil, metadata)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			_ = s.markResponseTrigger(r.Context(), execID, "customer", "first_message_response", "session:"+sessionID+":first_customer_message")
 			s.maybeAppendModerationAlert(r.Context(), sess, event, moderationPayload)
 			writeJSON(w, http.StatusCreated, acp.NormalizeEvent(event))
 			return
@@ -1985,13 +1984,10 @@ func (s *Server) acpCreateMessage(w http.ResponseWriter, r *http.Request) {
 		metadata["automation_allowed"] = true
 		metadata["automation_allow_reason"] = "supervised_first_message_response"
 	}
-	event, execID, _, err := s.enqueueSessionTurn(r.Context(), sessionID, req.ID, req.Source, acp.EventKindMessage, content, nil, metadata)
+	event, _, _, err := s.enqueueSessionTurn(r.Context(), sessionID, req.ID, req.Source, acp.EventKindMessage, content, nil, metadata)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
-	}
-	if firstMessageResponse {
-		_ = s.markResponseTrigger(r.Context(), execID, "customer", "first_message_response", "session:"+sessionID+":first_customer_message")
 	}
 	s.maybeAppendModerationAlert(r.Context(), sess, event, moderationPayload)
 	writeJSON(w, http.StatusCreated, acp.NormalizeEvent(event))
@@ -2131,7 +2127,7 @@ func (s *Server) acpStrictPutSession(w http.ResponseWriter, r *http.Request) {
 			Channel:    channel,
 			CustomerID: customerID,
 			AgentID:    agentID,
-			Mode:       "auto",
+			Mode:       acpStrictRequestedMode(req.Metadata, "auto"),
 			Status:     session.StatusActive,
 			Metadata:   cloneMap(req.Metadata),
 			CreatedAt:  now,
@@ -2139,6 +2135,27 @@ func (s *Server) acpStrictPutSession(w http.ResponseWriter, r *http.Request) {
 		if err := s.store.CreateSession(r.Context(), sess); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+	} else {
+		updated := false
+		if mode := acpStrictRequestedMode(req.Metadata, ""); mode != "" && sessionMode(sess) != mode {
+			sess.Mode = mode
+			updated = true
+		}
+		if len(req.Metadata) > 0 {
+			if sess.Metadata == nil {
+				sess.Metadata = map[string]any{}
+			}
+			for key, value := range req.Metadata {
+				sess.Metadata[key] = value
+				updated = true
+			}
+		}
+		if updated {
+			if err := s.store.UpdateSession(r.Context(), sess); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 	}
 	out := acpStrictSessionResponse{ID: sess.ID, SessionID: sess.ID}
@@ -2151,6 +2168,22 @@ func (s *Server) acpStrictPutSession(w http.ResponseWriter, r *http.Request) {
 		out.GreetingRunID = "greeting_" + sess.ID
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func acpStrictRequestedMode(metadata map[string]any, fallback string) string {
+	mode := strings.ToLower(strings.TrimSpace(firstNonEmpty(
+		stringMetadata(metadata, "runtime_mode"),
+		stringMetadata(metadata, "runtimeMode"),
+		stringMetadata(metadata, "agent_mode"),
+		stringMetadata(metadata, "agentMode"),
+		stringMetadata(metadata, "mode"),
+	)))
+	switch mode {
+	case "manual", "supervised", "auto", "unattended":
+		return mode
+	default:
+		return fallback
+	}
 }
 
 func (s *Server) acpStrictCreateRun(w http.ResponseWriter, r *http.Request) {
@@ -2181,7 +2214,10 @@ func (s *Server) acpStrictCreateRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if agentName := strings.TrimSpace(req.AgentName); agentName != "" && strings.TrimSpace(sess.AgentID) == "" {
 		sess.AgentID = agentName
-		_ = s.store.UpdateSession(r.Context(), sess)
+		if err := s.store.UpdateSession(r.Context(), sess); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	text := req.Text
 	if strings.TrimSpace(text) == "" {
@@ -2202,6 +2238,10 @@ func (s *Server) acpStrictCreateRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.AgentName != "" {
 		metadata["agent_name"] = req.AgentName
+	}
+	if s.firstMessageResponseAllowed(r.Context(), sess, "customer") {
+		metadata["automation_allowed"] = true
+		metadata["automation_allow_reason"] = "supervised_first_message_response"
 	}
 	event, execID, _, err := s.enqueueSessionTurn(r.Context(), sessionID, "", "customer", acp.EventKindMessage, content, nil, metadata)
 	if err != nil {
@@ -8769,6 +8809,11 @@ func (s *Server) enqueueSessionTurn(ctx context.Context, sessionID, eventID, sou
 		return session.Event{}, "", "", err
 	}
 	traceID = exec.TraceID
+	if firstMessageAutomationAllowed(metadata) {
+		if err := s.markResponseTrigger(ctx, exec.ID, "customer", "first_message_response", "session:"+sessionID+":first_customer_message"); err != nil {
+			return session.Event{}, "", "", err
+		}
+	}
 	event, err := s.sessions.CreateEvent(ctx, sessionsvc.CreateEventParams{
 		ID:          eventID,
 		SessionID:   sessionID,
@@ -8790,6 +8835,17 @@ func (s *Server) enqueueSessionTurn(ctx context.Context, sessionID, eventID, sou
 	}
 	s.publishSessionEvent(sessionID, event, exec.ID, traceID, now)
 	return event, exec.ID, traceID, nil
+}
+
+func firstMessageAutomationAllowed(metadata map[string]any) bool {
+	if metadata == nil {
+		return false
+	}
+	if allowed, _ := metadata["automation_allowed"].(bool); !allowed {
+		return false
+	}
+	reason, _ := metadata["automation_allow_reason"].(string)
+	return reason == "manual_first_message_response" || reason == "supervised_first_message_response"
 }
 
 func normalizeTriggerSource(value string) string {

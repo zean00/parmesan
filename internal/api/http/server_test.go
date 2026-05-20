@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -38,9 +39,26 @@ import (
 	"github.com/sahal/parmesan/internal/model"
 	"github.com/sahal/parmesan/internal/quality"
 	"github.com/sahal/parmesan/internal/sessionsvc"
+	"github.com/sahal/parmesan/internal/store"
 	"github.com/sahal/parmesan/internal/store/asyncwrite"
 	"github.com/sahal/parmesan/internal/store/memory"
 )
+
+type failingUpdateSessionRepo struct {
+	store.Repository
+}
+
+func (r failingUpdateSessionRepo) UpdateSession(context.Context, session.Session) error {
+	return errors.New("update session failed")
+}
+
+type failingSaveResponseRepo struct {
+	store.Repository
+}
+
+func (r failingSaveResponseRepo) SaveResponse(context.Context, responsedomain.Response) error {
+	return errors.New("save response failed")
+}
 
 func TestEnqueueSessionTurnCoalescesQuickCustomerMessages(t *testing.T) {
 	t.Setenv("ACP_RESPONSE_COALESCE_MS", "5000")
@@ -4085,6 +4103,27 @@ func TestACPStrictNexusSSEControlPlane(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"id":"acp_session_1"`) {
 		t.Fatalf("session body = %s, want strict session id", rec.Body.String())
 	}
+	createdSession, err := repo.GetSession(context.Background(), "acp_session_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if createdSession.Mode != "auto" {
+		t.Fatalf("session mode = %q, want auto fallback", createdSession.Mode)
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/v1/acp/sessions/acp_session_1", strings.NewReader(`{"metadata":{"runtime_mode":"supervised","allow_first_message_response":true,"source":"nexus"}}`))
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /sessions supervised status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	createdSession, err = repo.GetSession(context.Background(), "acp_session_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if createdSession.Mode != "supervised" || createdSession.Metadata["source"] != "nexus" {
+		t.Fatalf("session = %#v, want strict PUT to honor runtime mode metadata", createdSession)
+	}
 
 	req = httptest.NewRequest(http.MethodPost, "/v1/acp/runs", strings.NewReader(`{"session_id":"acp_session_1","agent_name":"support","idempotency_key":"queue_1","text":"hello"}`))
 	rec = httptest.NewRecorder()
@@ -4098,6 +4137,13 @@ func TestACPStrictNexusSSEControlPlane(t *testing.T) {
 	}
 	if run.ID == "" || run.SessionID != "acp_session_1" || run.Status != "running" || run.IdempotencyKey != "queue_1" {
 		t.Fatalf("run = %#v, want Nexus strict run response", run)
+	}
+	responses, err := repo.ListResponses(context.Background(), responsedomain.Query{ExecutionID: run.ID, Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(responses) != 1 || responses[0].TriggerReason != "first_message_response" {
+		t.Fatalf("responses = %#v, want strict first run to be marked as first-message response", responses)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/v1/acp/sessions/acp_session_1/runs?limit=50", nil)
@@ -4133,6 +4179,33 @@ func TestACPStrictNexusSSEControlPlane(t *testing.T) {
 	}
 	if len(execs) != 1 {
 		t.Fatalf("executions = %#v, want duplicate idempotency key to reuse existing execution", execs)
+	}
+}
+
+func TestACPStrictSessionUpdateFailureReturnsError(t *testing.T) {
+	backing := memory.New()
+	repo := failingUpdateSessionRepo{Repository: backing}
+	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	if err := backing.CreateSession(context.Background(), session.Session{
+		ID:        "acp_session_update_fail",
+		Channel:   "acp",
+		Mode:      "auto",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/v1/acp/sessions/acp_session_update_fail", strings.NewReader(`{"metadata":{"runtime_mode":"supervised","source":"nexus"}}`))
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	got, err := backing.GetSession(context.Background(), "acp_session_update_fail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Mode != "auto" {
+		t.Fatalf("session mode = %q, want original auto after failed update", got.Mode)
 	}
 }
 
@@ -4551,11 +4624,14 @@ func TestACPMessageIngressSupervisedModeCreatesExecution(t *testing.T) {
 			return false
 		}
 		events, err := repo.ListEvents(context.Background(), "sess_supervised")
-		return err == nil &&
+		responses, respErr := repo.ListResponses(context.Background(), responsedomain.Query{SessionID: "sess_supervised", Limit: 1})
+		return err == nil && respErr == nil &&
 			len(events) == 1 &&
 			events[0].ID == "evt_supervised" &&
 			events[0].ExecutionID == execs[0].ID &&
-			events[0].Metadata["automation_skipped"] != true
+			events[0].Metadata["automation_skipped"] != true &&
+			len(responses) == 1 &&
+			responses[0].TriggerReason == "first_message_response"
 	})
 }
 
@@ -4759,6 +4835,35 @@ func TestACPMessageIngressManualFirstMessageResponseCreatesOnlyOneExecution(t *t
 	}
 	if events[1].Metadata["automation_skipped"] != true {
 		t.Fatalf("second event metadata = %#v, want manual skip", events[1].Metadata)
+	}
+}
+
+func TestACPMessageIngressFirstMessageTriggerFailureReturnsError(t *testing.T) {
+	backing := memory.New()
+	repo := failingSaveResponseRepo{Repository: backing}
+	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+	if err := backing.CreateSession(context.Background(), session.Session{
+		ID:        "sess_trigger_fail",
+		Channel:   "acp",
+		Mode:      "manual",
+		Metadata:  map[string]any{"allow_first_message_response": true},
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/acp/sessions/sess_trigger_fail/messages", strings.NewReader(`{"id":"evt_trigger_fail","text":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	events, err := backing.ListEvents(context.Background(), "sess_trigger_fail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("events = %#v, want trigger failure before event persistence", events)
 	}
 }
 

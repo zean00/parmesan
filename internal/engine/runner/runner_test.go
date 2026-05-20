@@ -1585,6 +1585,48 @@ func TestSupervisedFirstMessageResponseSkipsReviewHold(t *testing.T) {
 	}
 }
 
+func TestDeliveredFirstMessageResponseMarksApproved(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.New()
+	if err := repo.CreateSession(ctx, session.Session{
+		ID:        "sess_first_response",
+		Mode:      "supervised",
+		Status:    session.StatusActive,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := New(repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), "test")
+	exec := execution.TurnExecution{ID: "exec_first_response", SessionID: "sess_first_response", TraceID: "trace_first_response"}
+	if err := repo.CreateExecution(ctx, exec, nil); err != nil {
+		t.Fatal(err)
+	}
+	record, err := r.ensureResponseRecord(ctx, exec)
+	if err != nil {
+		t.Fatalf("ensureResponseRecord() error = %v", err)
+	}
+	if err := r.updateResponseState(ctx, record, responsedomain.StatusProcessing, "", func(item *responsedomain.Response) {
+		item.TriggerReason = "first_message_response"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assistantEvents, err := r.createAssistantMessageSequence(ctx, exec, []string{"First response."})
+	if err != nil {
+		t.Fatalf("createAssistantMessageSequence() error = %v", err)
+	}
+	step := execution.ExecutionStep{ID: "step_first_response_delivery", ExecutionID: exec.ID, Name: "deliver_response"}
+	if err := r.executeStep(ctx, &exec, &step); err != nil {
+		t.Fatalf("executeStep(deliver_response) error = %v", err)
+	}
+	event, err := repo.ReadEvent(ctx, "sess_first_response", assistantEvents[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Metadata["held_for_operator_review"] != false || event.Metadata["response_review_approved"] != true {
+		t.Fatalf("event metadata = %#v, want delivered response approved for ACP visibility", event.Metadata)
+	}
+}
+
 func TestLiveOpenRouterSupervisedModeGeneratesHeldDraft(t *testing.T) {
 	if os.Getenv("PARMESAN_LIVE_OPENROUTER") != "1" {
 		t.Skip("set PARMESAN_LIVE_OPENROUTER=1 and OPENROUTER_API_KEY to run live OpenRouter validation")
