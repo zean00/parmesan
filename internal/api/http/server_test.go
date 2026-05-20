@@ -4121,8 +4121,22 @@ func TestACPStrictNexusSSEControlPlane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if createdSession.Mode != "supervised" || createdSession.Metadata["source"] != "nexus" {
-		t.Fatalf("session = %#v, want strict PUT to honor runtime mode metadata", createdSession)
+	if createdSession.Mode != "auto" || createdSession.Metadata["source"] != "nexus" {
+		t.Fatalf("session = %#v, want strict PUT from gateway to preserve existing mode", createdSession)
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/v1/acp/sessions/acp_session_1", strings.NewReader(`{"metadata":{"runtime_mode":"supervised","source":"laju"}}`))
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /sessions Laju supervised status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	createdSession, err = repo.GetSession(context.Background(), "acp_session_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if createdSession.Mode != "supervised" || createdSession.Metadata["source"] != "laju" {
+		t.Fatalf("session = %#v, want strict PUT from Laju to update runtime mode", createdSession)
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/v1/acp/runs", strings.NewReader(`{"session_id":"acp_session_1","agent_name":"support","idempotency_key":"queue_1","text":"hello"}`))
@@ -5922,7 +5936,7 @@ func TestOperatorTakeoverResumeAndExplicitProcess(t *testing.T) {
 		return err == nil && len(execs) == 1 && execs[0].TriggerEventID == "evt_1"
 	})
 
-	req = httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_1/resume", strings.NewReader(`{"operator_id":"op_1"}`))
+	req = httptest.NewRequest(http.MethodPost, "/v1/operator/sessions/sess_1/resume", strings.NewReader(`{"operator_id":"op_1","mode":"supervised"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	srv.httpServer.Handler.ServeHTTP(rec, req)
@@ -5933,8 +5947,8 @@ func TestOperatorTakeoverResumeAndExplicitProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSession() error = %v", err)
 	}
-	if sess.Mode != "auto" || sess.Metadata["assigned_operator_id"] != nil {
-		t.Fatalf("session after resume = %#v, want auto without assignment", sess)
+	if sess.Mode != "supervised" || sess.Metadata["assigned_operator_id"] != nil {
+		t.Fatalf("session after resume = %#v, want supervised without assignment", sess)
 	}
 }
 

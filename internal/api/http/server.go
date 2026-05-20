@@ -2138,7 +2138,7 @@ func (s *Server) acpStrictPutSession(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		updated := false
-		if mode := acpStrictRequestedMode(req.Metadata, ""); mode != "" && sessionMode(sess) != mode {
+		if mode := acpStrictRequestedMode(req.Metadata, ""); mode != "" && sessionMode(sess) != mode && acpStrictModeUpdateAuthoritative(req.Metadata) {
 			sess.Mode = mode
 			updated = true
 		}
@@ -2168,6 +2168,11 @@ func (s *Server) acpStrictPutSession(w http.ResponseWriter, r *http.Request) {
 		out.GreetingRunID = "greeting_" + sess.ID
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func acpStrictModeUpdateAuthoritative(metadata map[string]any) bool {
+	source := strings.ToLower(strings.TrimSpace(stringMetadata(metadata, "source")))
+	return source == "laju"
 }
 
 func acpStrictRequestedMode(metadata map[string]any, fallback string) string {
@@ -3305,6 +3310,7 @@ func (s *Server) operatorTakeover(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		OperatorID string `json:"operator_id"`
 		Reason     string `json:"reason"`
+		Mode       string `json:"mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -3339,6 +3345,7 @@ func (s *Server) operatorResume(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		OperatorID string `json:"operator_id"`
 		Reason     string `json:"reason"`
+		Mode       string `json:"mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -3350,7 +3357,7 @@ func (s *Server) operatorResume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	sess.Mode = "auto"
+	sess.Mode = normalizeOperatorResumeMode(req.Mode)
 	if sess.Metadata == nil {
 		sess.Metadata = map[string]any{}
 	}
@@ -3374,6 +3381,15 @@ func (s *Server) operatorResume(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now().UTC(),
 	})
 	writeJSON(w, http.StatusOK, sessionViewFromDomain(sess, s.sessionSummaryFor(r.Context(), sess)))
+}
+
+func normalizeOperatorResumeMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "supervised", "auto", "unattended":
+		return strings.ToLower(strings.TrimSpace(mode))
+	default:
+		return "auto"
+	}
 }
 
 func (s *Server) operatorCreateMessage(w http.ResponseWriter, r *http.Request) {
