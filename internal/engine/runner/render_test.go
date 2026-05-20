@@ -261,6 +261,48 @@ func TestRenderResponseDefersToComposerWhenToolOutputExists(t *testing.T) {
 	}
 }
 
+func TestRenderResponseDoesNotLeakHandoverInstruction(t *testing.T) {
+	view := resolvedView{
+		CompositionMode: "guided",
+		MatchFinalizeStage: policyruntime.FinalizeStageResult{
+			MatchedGuidelines: []policy.Guideline{{
+				ID:   "handover_when_stuck",
+				Then: "offer to involve a human operator and summarize the issue for handover.",
+			}},
+		},
+	}
+
+	got := renderResponseMessages(view, nil)
+	if len(got) != 1 {
+		t.Fatalf("messages = %#v, want one customer-facing handover message", got)
+	}
+	lower := strings.ToLower(got[0])
+	if strings.Contains(lower, "offer to involve") || strings.Contains(lower, "summarize the issue") {
+		t.Fatalf("message = %q, leaked internal handover instruction", got[0])
+	}
+	if !strings.Contains(lower, "human operator") {
+		t.Fatalf("message = %q, want customer-facing human operator handover", got[0])
+	}
+}
+
+func TestRenderResponsePreservesNonLegacyHandoverInstruction(t *testing.T) {
+	view := resolvedView{
+		CompositionMode: "guided",
+		MatchFinalizeStage: policyruntime.FinalizeStageResult{
+			MatchedGuidelines: []policy.Guideline{{
+				ID:   "do_not_handover_until_confirmed",
+				Then: "Do not hand over until the customer confirms that they want a human operator.",
+			}},
+		},
+	}
+
+	got := renderResponseMessages(view, nil)
+	want := "Do not hand over until the customer confirms that they want a human operator."
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("messages = %#v, want original policy instruction", got)
+	}
+}
+
 func TestRenderResponseDefersToComposerWhenRetrievedKnowledgeExists(t *testing.T) {
 	view := resolvedView{
 		CompositionMode: "guided",

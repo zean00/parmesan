@@ -58,8 +58,8 @@ func renderResponseMessages(view resolvedView, toolOutput map[string]any) []stri
 	if len(guidelines) > 0 {
 		parts := make([]string, 0, len(guidelines))
 		for _, item := range guidelines {
-			if strings.TrimSpace(item.Then) != "" {
-				parts = append(parts, item.Then)
+			if text := customerSafeGuidelineFallback(item); text != "" {
+				parts = append(parts, text)
 			}
 		}
 		if len(parts) > 0 {
@@ -70,6 +70,19 @@ func renderResponseMessages(view resolvedView, toolOutput map[string]any) []stri
 		return []string{view.ActiveJourneyState.Instruction}
 	}
 	return nil
+}
+
+func customerSafeGuidelineFallback(item policy.Guideline) string {
+	text := strings.TrimSpace(item.Then)
+	if text == "" {
+		return ""
+	}
+	lowerID := strings.ToLower(strings.TrimSpace(item.ID))
+	lowerText := strings.ToLower(text)
+	if lowerID == "handover_when_stuck" && lowerText == "offer to involve a human operator and summarize the issue for handover." {
+		return "I can involve a human operator to review this conversation and continue helping. Would you like me to hand this over?"
+	}
+	return text
 }
 
 func delegatedAgentResultText(toolOutput map[string]any) string {

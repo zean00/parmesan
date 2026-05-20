@@ -63,7 +63,7 @@ guidelines:
     then: ask for the account email or membership identifier if missing, then offer to check the membership record.
   - id: handover_when_stuck
     when: the issue needs human approval, sensitive account action, refund approval, or the customer is frustrated after repeated clarification
-    then: offer to involve a human operator and summarize the issue for handover.
+    then: Tell the customer that a human operator can review the conversation, and ask whether they want you to hand it over.
 templates:
   - id: track_order_clarify
     mode: guided
