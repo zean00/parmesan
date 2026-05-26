@@ -4710,6 +4710,58 @@ func TestOperatorApproveForwardReleasesHeldDraftToACP(t *testing.T) {
 	}
 }
 
+func TestOperatorEditForwardKeepsEditedDraftHiddenWhenSaveFails(t *testing.T) {
+	backing := memory.New()
+	repo := failingSaveResponseRepo{Repository: backing}
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := backing.CreateSession(ctx, session.Session{ID: "sess_edit_save_fail", Channel: "acp", Mode: "supervised", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	svc := sessionsvc.New(backing, nil)
+	event, err := svc.CreateMessageEvent(ctx, "sess_edit_save_fail", "ai_agent", "Draft for approval.", "exec_edit_save_fail", "trace_edit_save_fail", map[string]any{
+		"internal_only":            true,
+		"held_for_operator_review": true,
+		"response_id":              "resp_edit_save_fail",
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.SaveResponse(ctx, responsedomain.Response{
+		ID:                  "resp_edit_save_fail",
+		SessionID:           "sess_edit_save_fail",
+		ExecutionID:         "exec_edit_save_fail",
+		TraceID:             "trace_edit_save_fail",
+		Status:              responsedomain.StatusReviewRequired,
+		Reason:              "supervised_review",
+		MessageEventIDs:     []string{event.ID},
+		HeldMessageEventIDs: []string{event.ID},
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(":0", repo, nil, sse.NewBroker(), model.NewRouter(config.ProviderConfig{}), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/operator/responses/resp_edit_save_fail/edit-forward", strings.NewReader(`{"operator_id":"op_1","text":"Edited draft for customer."}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("edit-forward status = %d want %d body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/acp/sessions/sess_edit_save_fail/events", nil)
+	rec = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ACP events status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "Edited draft for customer.") {
+		t.Fatalf("ACP events = %s, want edited draft hidden until response save succeeds", rec.Body.String())
+	}
+}
+
 func TestACPCreateSessionAllowGreetingQueuesTriggeredResponseForAllModes(t *testing.T) {
 	for _, mode := range []string{"auto", "manual", "supervised", "unattended"} {
 		t.Run(mode, func(t *testing.T) {

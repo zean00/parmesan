@@ -1741,7 +1741,6 @@ func (s *Server) operatorReplaceResponse(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.publishSessionEvent(item.SessionID, event, item.ExecutionID, item.TraceID, event.CreatedAt)
 	if len(item.HeldMessageEventIDs) == 0 {
 		item.HeldMessageEventIDs = append([]string(nil), item.MessageEventIDs...)
 	}
@@ -1759,6 +1758,7 @@ func (s *Server) operatorReplaceResponse(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.publishSessionEvent(item.SessionID, event, item.ExecutionID, item.TraceID, event.CreatedAt)
 	s.appendTrace(r.Context(), audit.Record{
 		ID:          fmt.Sprintf("trace_%d", now.UnixNano()),
 		Kind:        "response.review.replaced",
@@ -1821,6 +1821,7 @@ func (s *Server) operatorEditForwardResponse(w http.ResponseWriter, r *http.Requ
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.publishSessionEvent(item.SessionID, event, item.ExecutionID, item.TraceID, event.CreatedAt)
 	s.appendTrace(r.Context(), audit.Record{
 		ID:          fmt.Sprintf("trace_%d", now.UnixNano()),
 		Kind:        "response.review.edited",
@@ -2841,7 +2842,6 @@ func (s *Server) acpListEvents(w http.ResponseWriter, r *http.Request) {
 	if !s.allowACPScopedSessionID(w, r, r.PathValue("id")) {
 		return
 	}
-	service := acp.NewService(s.sessions)
 	minOffset := int64(0)
 	if raw := strings.TrimSpace(r.URL.Query().Get("min_offset")); raw != "" {
 		if _, err := fmt.Sscan(raw, &minOffset); err != nil {
@@ -2849,7 +2849,7 @@ func (s *Server) acpListEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	events, err := service.ListEvents(r.Context(), r.PathValue("id"), minOffset)
+	events, _, err := s.listVisibleACPEventsPage(r.Context(), r.PathValue("id"), minOffset)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -2880,11 +2880,10 @@ func (s *Server) acpStreamEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	service := acp.NewService(s.sessions)
 	live, cancelLive := s.liveSessionFeed(sessionID)
 	defer cancelLive()
 	for {
-		events, scannedOffset, err := service.ListEventsPage(ctx, sessionID, lastOffset+1)
+		events, scannedOffset, err := s.listVisibleACPEventsPage(ctx, sessionID, lastOffset+1)
 		if err != nil {
 			return
 		}
@@ -2904,7 +2903,7 @@ func (s *Server) acpStreamEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		flusher.Flush()
-		if s.forwardLiveACPEvents(w, flusher, live) {
+		if s.forwardLiveACPEvents(ctx, w, flusher, live) {
 			return
 		}
 		env, gotLive, done := s.waitForSessionActivity(ctx, sessionID, lastOffset, live)
@@ -2912,11 +2911,52 @@ func (s *Server) acpStreamEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if gotLive {
-			if s.writeLiveACPEnvelope(w, flusher, env) {
+			if s.writeLiveACPEnvelope(ctx, w, flusher, env) {
 				return
 			}
 		}
 	}
+}
+
+func (s *Server) listVisibleACPEventsPage(ctx context.Context, sessionID string, minOffset int64) ([]acp.Event, int64, error) {
+	items, err := s.sessions.ListEvents(ctx, session.EventQuery{
+		SessionID:      sessionID,
+		MinOffset:      minOffset,
+		ExcludeDeleted: true,
+	})
+	if err != nil {
+		return nil, minOffset - 1, err
+	}
+	out := make([]acp.Event, 0, len(items))
+	lastOffset := minOffset - 1
+	for _, item := range items {
+		if item.Offset > lastOffset {
+			lastOffset = item.Offset
+		}
+		if !s.acpCustomerVisibleEvent(ctx, item) {
+			continue
+		}
+		out = append(out, acp.NormalizeEvent(item))
+	}
+	return out, lastOffset, nil
+}
+
+func (s *Server) acpCustomerVisibleEvent(ctx context.Context, event session.Event) bool {
+	if acp.IsInternalEvent(event) {
+		return false
+	}
+	responseID := strings.TrimSpace(stringMetadata(event.Metadata, "response_id"))
+	if responseID == "" || event.Kind != acp.EventKindMessage {
+		return true
+	}
+	if boolMetadata(event.Metadata, "response_review_approved") {
+		return true
+	}
+	item, err := s.store.GetResponse(ctx, responseID)
+	if err != nil {
+		return false
+	}
+	return item.Status == responsedomain.StatusReady
 }
 
 func (s *Server) acpListApprovals(w http.ResponseWriter, r *http.Request) {
@@ -10213,7 +10253,7 @@ func (s *Server) forwardLiveSessionEvents(w http.ResponseWriter, flusher http.Fl
 	}
 }
 
-func (s *Server) forwardLiveACPEvents(w http.ResponseWriter, flusher http.Flusher, ch chan sse.Envelope) bool {
+func (s *Server) forwardLiveACPEvents(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, ch chan sse.Envelope) bool {
 	if ch == nil {
 		return false
 	}
@@ -10224,7 +10264,7 @@ func (s *Server) forwardLiveACPEvents(w http.ResponseWriter, flusher http.Flushe
 			if !ok {
 				return true
 			}
-			if s.writeLiveACPEnvelope(w, flusher, env) {
+			if s.writeLiveACPEnvelope(ctx, w, flusher, env) {
 				return true
 			}
 			wrote = true
@@ -10284,9 +10324,12 @@ func (s *Server) writeLiveEnvelope(w http.ResponseWriter, flusher http.Flusher, 
 	return false
 }
 
-func (s *Server) writeLiveACPEnvelope(w http.ResponseWriter, flusher http.Flusher, env sse.Envelope) bool {
+func (s *Server) writeLiveACPEnvelope(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, env sse.Envelope) bool {
 	event, ok := acpEventFromLiveEnvelope(env)
 	if !ok {
+		return false
+	}
+	if !s.acpCustomerVisibleEvent(ctx, acp.EventToDomain(event)) {
 		return false
 	}
 	raw, err := json.Marshal(event)
